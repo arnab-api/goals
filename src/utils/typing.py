@@ -29,6 +29,7 @@ Model = (
     | transformers.Olmo2ForCausalLM
     | transformers.OlmoForCausalLM
     | transformers.Qwen3ForCausalLM
+    | transformers.Qwen3MoeForCausalLM
     | transformers.GptOssForCausalLM
     | transformers.Olmo3ForCausalLM
 )

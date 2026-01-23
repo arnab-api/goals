@@ -4,9 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Research codebase for the paper "LLMs Process Lists With General Filter Heads" (arXiv:2510.26784). Investigates how LLMs perform filtering operations over lists using specialized "filter heads" - attention heads whose query states encode compact representations of filtering predicates.
+Research codebase investigating whether LLMs have consistent intermediate goals during code generation. The central question: when an LM writes code (like control-flow logic `if b&1 == 0`), does it know ahead of time what it's going to write, or is it figuring it out token by token?
 
-Project website: https://filter.baulab.info/
+**Research Questions:**
+1. **Goals**: Do Code-LLMs pursue consistent intermediate goals during generation?
+2. **Mining Goals**: Can we replicate the goal-mining recipe from Schut et al.?
+3. **Superhuman Knowledge**: Does RLVR training allow models to explore non-conventional approaches?
+
+## Experimental Setup
+
+The core methodology uses **prefill probing**:
+- Simple code completion tasks with a unique correct solution (single goal)
+- Insert different "prefills" before generation and check if the LM adapts while still achieving the goal
+- Example: `def is_odd(n: int) -> bool: return True if ` with prefills like `1+`, `n &`, `not`, etc.
+- If the model adapts to different prefills while solving the task correctly, it suggests consistent goal pursuit
 
 ## Setup
 
@@ -17,20 +28,10 @@ pip install git+https://github.com/davidbau/baukit  # Required, not installed by
 
 Create `env.yml` in root (see `env_demo.yml` for template) with API keys and directory paths.
 
-## Key Commands
+## Key Files
 
-```bash
-# Locate filter heads in a model
-python -m scripts.locate_selection_heads --model="meta-llama/Llama-3.1-8B"
-
-# Run finetuning pipeline
-python run_finetuning.py
-
-# GPU memory monitor for job queuing
-python run_monitor.py
-```
-
-SLURM job scripts are in `run_jobs/delta/` (A100/H200) and `run_jobs/baulab/`.
+- `notebooks/00_goals.ipynb` - Main experimentation notebook
+- `sample_eval.json` - Evaluation dataset with code completion tasks, unit tests, and prefills
 
 ## Architecture
 
@@ -39,38 +40,29 @@ SLURM job scripts are in `run_jobs/delta/` (A100/H200) and `run_jobs/baulab/`.
 - Supports GPT-J, LLaMA, Gemma, Qwen, OLMo, Pythia architectures
 - Parses model config to provide unified interface (`n_layer`, `n_embd`, `layer_name_format`, etc.)
 
-**Operators** (`src/operators/`):
-- `BasisOperator` - Projects activations onto concept subspaces
-- `CornerOperator` - Maps subjects to objects via corner representation
-- Used for extracting and manipulating filter head representations
+**Generation & Analysis** (`src/functional.py`):
+- `generate_with_patch()` - Generation with optional activation patching
+- `predict_next_token()` - Next token prediction with top-k analysis
+- `get_hs()` - Extract hidden states at specific layers/positions
 
-**Activation Patching** (`src/trace.py`):
-- `patched_run()` - Forward pass with patched activations
-- Core mechanism for testing predicate transfer across contexts
+**Tokenization** (`src/tokens.py`):
+- `prepare_input()` - Prepare batched inputs for models
 
-**Data Structures** (`src/dataset.py`):
-- `Relation` - Subject-object relation datasets
-- `RelationSample` - Individual subject-object pairs
-- `ActivationPatchingSamples` - Patching experiment data
-
-**ROME Module** (`src/rome/`):
-- Rank-One Model Editing implementation
-- `compute_u.py`, `compute_v.py` - Core ROME computations
-- `layer_stats.py` - KK^T statistics caching
+**Evaluation** (in notebook):
+- `evaluate_generated_code()` - Run unit tests on generated code completions
+- `print_eval_results_table()` - Display results across prefills
 
 ## Configuration
 
 - `globals.yml` - Directory paths (RESULTS_DIR, DATA_DIR, STATS_DIR, etc.)
 - `env.yml` - API keys (OPENAI_KEY, CLAUDE_KEY, HF_WRITE, WANDB_KEY) and cache directories
-- `hparams/` - Hyperparameter YAML files for experiments
 
 ## Key Dependencies
 
 - torch>=2.7, transformers>=4.55, nnsight>=0.5
 - baukit (activation patching, install separately)
-- pytorch-lightning (training), wandb (experiment tracking)
-- circuitsvis (interpretability visualization)
+- rich (table display)
 
 ## GPU Requirements
 
-Requires CUDA. Tested with A100/A6000 GPUs. Large models need significant VRAM. Use `--use_8bit` flag for quantization when available.
+Requires CUDA. Tested with A100 GPUs. Large models need significant VRAM.

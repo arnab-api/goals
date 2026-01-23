@@ -53,7 +53,9 @@ class ModelandTokenizer(LanguageModel):
             self.name = model_key
 
         self._model.eval()
-        self.tokenizer = tokenizer if tokenizer is not None else self.tokenizer
+        self.tokenizer: transformers.AutoTokenizer = (
+            tokenizer if tokenizer is not None else self.tokenizer
+        )
         self.tokenizer.pad_token = self.tokenizer.eos_token  # for generation
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         if (
@@ -332,6 +334,8 @@ def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
     if isinstance(mt, transformers.Qwen2ForCausalLM):
+        return True
+    if isinstance(mt, transformers.Qwen3MoeForCausalLM):
         return True
     if hasattr(mt, "config"):
         config = mt.config
