@@ -378,6 +378,7 @@ def generate_with_patch(
     patch_strategy: Literal["replace", "add"] = "replace",
     patch_at_all_generations: bool = False,
     remove_prefix: bool = False,
+    skip_special_tokens: bool = True,
     **kwargs,
 ) -> list[str]:
     if isinstance(inputs, TokenizerOutput):
@@ -430,7 +431,7 @@ def generate_with_patch(
     if remove_prefix:
         start = inputs.input_ids.shape[1]
     return mt.tokenizer.batch_decode(
-        gen_out.sequences[:, start:], skip_special_tokens=True
+        gen_out.sequences[:, start:], skip_special_tokens=skip_special_tokens
     )
 
 
