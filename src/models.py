@@ -96,6 +96,8 @@ class ModelandTokenizer(LanguageModel):
             or is_qwen_variant(self)
             or is_olmo_variant(self)
             or is_gpt_oss_variant(self)
+            or is_deepseek_variant(self)
+            or is_starcoder_variant(self)
         ) is False:
             logger.error(
                 f"Unknown model type: {type(unwrap_model(self)).__name__}. Parsing may fail."
@@ -116,6 +118,8 @@ class ModelandTokenizer(LanguageModel):
             or is_qwen_variant(self)
             or is_olmo_variant(self)
             or is_gpt_oss_variant(self)
+            or is_deepseek_variant(self)
+            or is_starcoder_variant(self)
         ):
             fields["mlp_module_name_format"] = "model.layers.{}.mlp"
             fields["attn_module_name_format"] = "model.layers.{}.self_attn"
@@ -199,14 +203,15 @@ class LMHead(torch.nn.Module):
 def get_model_size(
     model: torch.nn.Module, unit: Literal["B", "KB", "MB", "GB"] = "MB"
 ) -> float:
-    param_size = 0
-    for param in model.parameters():
-        param_size += param.nelement() * param.element_size()
-    buffer_size = 0
-    for buffer in model.buffers():
-        buffer_size += buffer.nelement() * buffer.element_size()
+    # param_size = 0
+    # for param in model.parameters():
+    #     param_size += param.nelement() * param.element_size()
+    # buffer_size = 0
+    # for buffer in model.buffers():
+    #     buffer_size += buffer.nelement() * buffer.element_size()
 
-    size_all = param_size + buffer_size
+    # size_all = param_size + buffer_size
+    size_all = model.get_memory_footprint()
 
     return bytes_to_human_readable(size_all, unit)
 
@@ -363,6 +368,41 @@ def is_olmo_variant(mt: Model | ModelandTokenizer) -> bool:
     return False
 
 
+def is_deepseek_variant(mt: Model | ModelandTokenizer) -> bool:
+    """Determine if model/tokenizer is deepseek variant."""
+    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
+        mt = unwrap_model(mt)
+    # Check for DeepSeek-specific model classes if available
+    if hasattr(transformers, "DeepseekV2ForCausalLM") and isinstance(
+        mt, transformers.DeepseekV2ForCausalLM
+    ):
+        return True
+    if hasattr(transformers, "DeepseekV3ForCausalLM") and isinstance(
+        mt, transformers.DeepseekV3ForCausalLM
+    ):
+        return True
+    if hasattr(mt, "config"):
+        config = mt.config
+        if hasattr(config, "_name_or_path"):
+            name = config._name_or_path
+            return "deepseek" in name.lower()
+    return False
+
+
+def is_starcoder_variant(mt: Model | ModelandTokenizer) -> bool:
+    """Determine if model/tokenizer is starcoder variant."""
+    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
+        mt = unwrap_model(mt)
+    if isinstance(mt, transformers.Starcoder2ForCausalLM):
+        return True
+    if hasattr(mt, "config"):
+        config = mt.config
+        if hasattr(config, "_name_or_path"):
+            name = config._name_or_path
+            return "starcoder" in name.lower()
+    return False
+
+
 def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None:
     """Get any example parameter for the model."""
     model = unwrap_model(model)
@@ -379,6 +419,8 @@ def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
         or is_qwen_variant(model)
         or is_olmo_variant(model)
         or is_gpt_oss_variant(model)
+        or is_deepseek_variant(model)
+        or is_starcoder_variant(model)
     ):
         return "model.embed_tokens"
     elif is_pythia_variant(model):
@@ -397,6 +439,8 @@ def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
         or is_qwen_variant(model)
         or is_olmo_variant(model)
         or is_gpt_oss_variant(model)
+        or is_deepseek_variant(model)
+        or is_starcoder_variant(model)
     ):
         return "model.norm"
     elif is_pythia_variant(model):
@@ -415,6 +459,8 @@ def determine_lm_head_path(model: ModelandTokenizer | Model) -> str:
         or is_qwen_variant(model)
         or is_olmo_variant(model)
         or is_gpt_oss_variant(model)
+        or is_deepseek_variant(model)
+        or is_starcoder_variant(model)
     ):
         return "lm_head"
     elif is_pythia_variant(model):
@@ -435,6 +481,8 @@ def determine_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
         or is_qwen_variant(model)
         or is_olmo_variant(model)
         or is_gpt_oss_variant(model)
+        or is_deepseek_variant(model)
+        or is_starcoder_variant(model)
     ):
         n_layer = model.config.num_hidden_layers
     else:
@@ -459,6 +507,8 @@ def determine_layer_name_format(
         or is_qwen_variant(model)
         or is_olmo_variant(model)
         or is_gpt_oss_variant(model)
+        or is_deepseek_variant(model)
+        or is_starcoder_variant(model)
     ):
         return "model.layers.{}"
     elif is_pythia_variant(model):
