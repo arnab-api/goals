@@ -8,9 +8,8 @@ from copy import deepcopy
 from typing import List
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
-from src import models
 from src.functional import find_token_range
 from src.models import ModelandTokenizer
 from src.rome_utils import nethook
@@ -52,9 +51,9 @@ def get_words_idxs_in_templates(
     template, computes the post-tokenization index of their last tokens.
     """
 
-    assert all(
-        tmp.count("{}") == 1 for tmp in context_templates
-    ), "We currently do not support multiple fill-ins for context"
+    assert all(tmp.count("{}") == 1 for tmp in context_templates), (
+        "We currently do not support multiple fill-ins for context"
+    )
 
     if (
         "llama" in type(tok).__name__.lower()
@@ -87,9 +86,10 @@ def get_words_idxs_in_templates(
 
     # Compute prefixes and suffixes of the tokenized context
     fill_idxs = [tmp.index("{}") for tmp in context_templates]
-    prefixes, suffixes = [
-        tmp[: fill_idxs[i]] for i, tmp in enumerate(context_templates)
-    ], [tmp[fill_idxs[i] + 2 :] for i, tmp in enumerate(context_templates)]
+    prefixes, suffixes = (
+        [tmp[: fill_idxs[i]] for i, tmp in enumerate(context_templates)],
+        [tmp[fill_idxs[i] + 2 :] for i, tmp in enumerate(context_templates)],
+    )
     words = deepcopy(words)
 
     # Pre-process tokens
@@ -169,7 +169,7 @@ def get_reprs_at_idxs(
         ).to(mt.device)
         print(f"{batch_idxs=}")
         print(
-            f'{[f"{token_id}[{mt.tokenizer.decode(token_id)}]" for token_id in contexts_tok["input_ids"][0]]}'
+            f"{[f'{token_id}[{mt.tokenizer.decode(token_id)}]' for token_id in contexts_tok['input_ids'][0]]}"
         )
         logger.debug(
             f"==> {[(idx, mt.tokenizer.decode(tokenized[idx[0]])) for idx, tokenized in zip(batch_idxs, contexts_tok['input_ids'])]}"

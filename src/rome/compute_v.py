@@ -4,8 +4,7 @@ from typing import Dict, List, Tuple
 import baukit as nethook
 import numpy as np
 import torch
-from matplotlib.style import context
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from src import functional
 from src.models import ModelandTokenizer, determine_hidden_size
@@ -28,9 +27,9 @@ def compute_v(
     Computes the value (right) vector for the rank-1 update.
     Runs a simple optimization procedure.
     """
-    assert (
-        hparams.mamba_block_non_ssm + hparams.mamba_block_ssm <= 1
-    ), "Can't calculate v for both SSM and non-SSM dataflow. Please select only one (or none)"
+    assert hparams.mamba_block_non_ssm + hparams.mamba_block_ssm <= 1, (
+        "Can't calculate v for both SSM and non-SSM dataflow. Please select only one (or none)"
+    )
     # if hparams.mamba_block_non_ssm or hparams.mamba_block_ssm:
     #     assert is_mamba_variant(
     #         mt.model
@@ -49,10 +48,13 @@ def compute_v(
     ).to("cuda")["input_ids"][0]
 
     # Compile list of rewriting and KL x/y pairs
-    rewriting_prompts, kl_prompts = [
-        context.format(request["prompt"]) + tok.decode(target_ids[:-1])
-        for context in context_templates
-    ], ["{} is a"]
+    rewriting_prompts, kl_prompts = (
+        [
+            context.format(request["prompt"]) + tok.decode(target_ids[:-1])
+            for context in context_templates
+        ],
+        ["{} is a"],
+    )
     all_prompts = rewriting_prompts + kl_prompts
 
     import json

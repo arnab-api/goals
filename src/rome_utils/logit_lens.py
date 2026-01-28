@@ -64,9 +64,9 @@ class LogitLens:
         with torch.no_grad():
             for layer, (_, t) in enumerate(self.td.items()):
                 cur_out = t.output[0]
-                assert (
-                    cur_out.size(0) == 1
-                ), "Make sure you're only running LogitLens on single generations only."
+                assert cur_out.size(0) == 1, (
+                    "Make sure you're only running LogitLens on single generations only."
+                )
 
                 self.output[layer] = torch.softmax(
                     self.lm_head(self.ln_f(cur_out[:, -1, :])), dim=1

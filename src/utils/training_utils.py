@@ -364,9 +364,9 @@ class TrainableLM(Trainable):
             if any(sig in name for sig in tunable_module_signatures):
                 param.requires_grad = True
                 module_name = ".".join(name.split(".")[:-1])
-                assert (
-                    module_name not in tunable_param_dict
-                ), f"Module {module_name} already exists in tunable_param_dict"
+                assert module_name not in tunable_param_dict, (
+                    f"Module {module_name} already exists in tunable_param_dict"
+                )
                 tunable_param_dict[module_name] = ParameterDelta(
                     module=get_module_nnsight(self.mt, module_name),
                     module_name=module_name,
@@ -614,9 +614,9 @@ class TrainableLM_delta(TrainableLM):
                 param_delta = self.accelerator.prepare(param_delta)
                 module_name = block_name + "." + ".".join(name.split(".")[:-1])
                 logger.debug(f"{module_name=}")
-                assert (
-                    module_name not in tunable_param_dict
-                ), f"Module {module_name} already exists in tunable_param_dict"
+                assert module_name not in tunable_param_dict, (
+                    f"Module {module_name} already exists in tunable_param_dict"
+                )
                 tunable_param_dict[module_name] = ParameterDelta(
                     module=get_module_nnsight(self.mt, module_name),
                     module_name=module_name,
@@ -750,9 +750,9 @@ class ParameterLoRA(torch.nn.Module):
         self.module = module
         self.module_name = module_name
         if W_left is not None or W_right is not None:
-            assert (
-                W_left is not None and W_right is not None
-            ), "Both W_left and W_right should be provided for LORA"
+            assert W_left is not None and W_right is not None, (
+                "Both W_left and W_right should be provided for LORA"
+            )
             self.W_left = W_left
             self.W_right = W_right
         else:

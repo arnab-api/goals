@@ -111,7 +111,9 @@ def scaled_dot_product_attention(
             assert (
                 attn_weight[:, head_idx, :, :].shape
                 == freeze_attn_matrices[head_idx].shape
-            ), f"Mismatch expected shape {attn_weight[:, head_idx, :, :].shape}, but found shape {freeze_attn_matrices[head_idx].shape}"
+            ), (
+                f"Mismatch expected shape {attn_weight[:, head_idx, :, :].shape}, but found shape {freeze_attn_matrices[head_idx].shape}"
+            )
             attn_weight[:, head_idx, :, :] = freeze_attn_matrices[head_idx]
     # ---------------------------------------------------------------------
 
@@ -294,7 +296,9 @@ def LlamaAttentionPatcher(
     if save_attn_for is not None:
         assert (
             store_attn_matrices is not None or store_head_contributions is not None
-        ), "with save_attn_weights = True you need to provide attn_matrices or attn_contribution"
+        ), (
+            "with save_attn_weights = True you need to provide attn_matrices or attn_contribution"
+        )
         if store_attn_matrices is not None:
             assert (
                 isinstance(store_attn_matrices, dict) and len(store_attn_matrices) == 0
@@ -391,9 +395,9 @@ def LlamaAttentionPatcher(
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-        assert (
-            self.config._attn_implementation == "sdpa"
-        ), "NotImplementedError: LlamaAttentionPatcher only supports 'sdpa' implementation"
+        assert self.config._attn_implementation == "sdpa", (
+            "NotImplementedError: LlamaAttentionPatcher only supports 'sdpa' implementation"
+        )
         attention_interface = sdpa_attention_forward
 
         kwargs.update(

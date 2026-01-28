@@ -5,7 +5,6 @@ from pathlib import Path
 import torch
 from datasets import load_dataset
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src import models
 from src.globals import *
@@ -79,7 +78,7 @@ def main():
     for layer_num in args.layers:
         print(
             f"Computing stats for layer {layer_num} of {args.model_name} "
-            f'over {args.sample_size or "all"} samples of {args.dataset}. '
+            f"over {args.sample_size or 'all'} samples of {args.dataset}. "
             "Note, the statistics are collected over the inputs to the second MLP layer, "
             "or equivalently the outputs of the first MLP layer."
         )
@@ -169,7 +168,7 @@ def layer_stats(
     logger.info(f"searching for cached stats in => {filename}")
 
     if not filename.exists() and download:
-        logger.info(f"stats not found locally.")
+        logger.info("stats not found locally.")
         remote_url = f"{REMOTE_ROOT_URL}/data/stats/{file_extension}"
         try:
             logger.info(f"Attempting to download {file_extension} from {remote_url}.")

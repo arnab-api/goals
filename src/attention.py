@@ -11,7 +11,6 @@ from IPython.display import display
 from src.functional import (
     PatchSpec,
     patch_with_baukit,
-    patch_with_nnsight,
     prepare_input,
 )
 from src.models import ModelandTokenizer
@@ -30,15 +29,15 @@ class AttentionInformation(DataClassJsonMixin):
     def _init__(
         self, prompt: str, tokenized_prompt: list[str], attention_matrices: torch.tensor
     ):
-        assert (
-            len(tokenized_prompt) == attention_matrices.shape[-1]
-        ), "Tokenized prompt and attention matrices must have the same length"
-        assert (
-            len(attention_matrices.shape) == 4
-        ), "Attention matrices must be of shape (layers, heads, tokens, tokens)"
-        assert (
-            attention_matrices.shape[-1] == attention_matrices.shape[-2]
-        ), "Attention matrices must be square"
+        assert len(tokenized_prompt) == attention_matrices.shape[-1], (
+            "Tokenized prompt and attention matrices must have the same length"
+        )
+        assert len(attention_matrices.shape) == 4, (
+            "Attention matrices must be of shape (layers, heads, tokens, tokens)"
+        )
+        assert attention_matrices.shape[-1] == attention_matrices.shape[-2], (
+            "Attention matrices must be square"
+        )
 
         self.prompt = prompt
         self.tokenized_prompt = tokenized_prompt
@@ -85,9 +84,9 @@ def get_attention_matrices(
     if isinstance(input, str):
         input = prepare_input(prompts=input, tokenizer=mt)
     else:
-        assert isinstance(
-            input, TokenizerOutput
-        ), "input must be either a string or a TokenizerOutput object"
+        assert isinstance(input, TokenizerOutput), (
+            "input must be either a string or a TokenizerOutput object"
+        )
 
     if patches is not None and isinstance(patches, PatchSpec):
         patches = [patches]
@@ -160,9 +159,9 @@ def visualize_attn_matrix(
         else attn_matrix.squeeze()[q_index][start_from:end_at]
     )
     tokens = tokens[start_from:] if end_at is None else tokens[start_from:end_at]
-    assert (
-        len(tokens) == attn_matrix.shape[0]
-    ), f"Shape mismatch: {len(tokens)=} | {attn_matrix.shape=}"
+    assert len(tokens) == attn_matrix.shape[0], (
+        f"Shape mismatch: {len(tokens)=} | {attn_matrix.shape=}"
+    )
     display(colored_tokens(tokens=tokens, values=attn_matrix, **vis_args))
 
 

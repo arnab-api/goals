@@ -1,9 +1,6 @@
-import os
-from pathlib import Path
 from typing import Dict, List
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.globals import *
 from src.models import ModelandTokenizer

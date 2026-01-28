@@ -536,13 +536,11 @@ def evaluate_on_atomic_knowledge(
 
 from typing import Literal
 
-from src.functional import get_tick_marker, predict_next_token
+from src.functional import predict_next_token
 from src.probing.prompt import BiAssociationPrefix, prepare_probing_input
 from src.probing.utils import get_lm_generated_answer
 
 #################################### CONNECTION EVALUATION ####################################
-from src.utils.experiment_utils import set_seed
-from src.utils.oracle_llms import ASK_ORACLE_MODEL
 
 
 def verify_connection_with_oracle(
@@ -551,7 +549,6 @@ def verify_connection_with_oracle(
     oracle_model: Literal["claude", "gpt"] = "claude",
     expected_answer: str = None,
 ) -> str:
-
     instruction = f"""Check the following profiles of 2 people
 ```
 profile_1: {json.dumps(entity_profiles[0], indent=2)}

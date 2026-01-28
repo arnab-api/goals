@@ -4,7 +4,8 @@ from pathlib import Path
 import yaml
 
 YAML_PATH = os.path.join(
-    Path(__file__).parent.parent, "globals.yml"  # two levels up to the project root
+    Path(__file__).parent.parent,
+    "globals.yml",  # two levels up to the project root
 )
 
 with open(YAML_PATH, "r") as stream:

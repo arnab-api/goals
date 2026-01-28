@@ -11,7 +11,6 @@ from src.functional import (
     get_all_module_states,
     get_module_nnsight,
     interpret_logits,
-    predict_next_token,
 )
 from src.models import ModelandTokenizer
 from src.tokens import align_patching_positions
@@ -111,7 +110,10 @@ def calculate_indirect_effects(
     for loc in tqdm(locations):
         layer_names = get_window(layer_name_format, loc[0], window_size, mt.n_layer)
         token_idx = loc[1]
-        states = {(l, token_idx): patch_states[(l, token_idx)] for l in layer_names}
+        states = {
+            (layer, token_idx): patch_states[(layer, token_idx)]
+            for layer in layer_names
+        }
         affected_logits = patched_run(
             mt=mt,
             inputs=clean_input,
@@ -229,9 +231,9 @@ def trace_important_states(
 
         logger.debug(f"{clean_answer=}")
         logger.debug(f"{track_ans=}")
-        assert (
-            answer.token != clean_answer.token
-        ), "Answers in the clean and corrupt runs are the same"
+        assert answer.token != clean_answer.token, (
+            "Answers in the clean and corrupt runs are the same"
+        )
 
         low_score = get_score(
             logits=clean_logits, token_id=answer.token_id, metric=metric
@@ -242,7 +244,7 @@ def trace_important_states(
     else:
         ans_tokens = [ans_tokens] if isinstance(ans_tokens, int) else ans_tokens
         logger.debug(
-            f'traching answer for {[f"{t}({mt.tokenizer.decode(t)})" for t in ans_tokens]}'
+            f"traching answer for {[f'{t}({mt.tokenizer.decode(t)})' for t in ans_tokens]}"
         )
         base_score, base_indv_scores = get_score(
             logits=patched_run(
@@ -281,9 +283,9 @@ def trace_important_states(
         )
         logger.debug(f"{low_score=} | {low_indv_scores=}")
 
-    assert (
-        low_score < base_score
-    ), f"{low_score=} | {base_score=} >> low_score must be less than base_score"
+    assert low_score < base_score, (
+        f"{low_score=} | {base_score=} >> low_score must be less than base_score"
+    )
     logger.debug(f"{base_score=} | {low_score=}")
 
     layer_name_format = None

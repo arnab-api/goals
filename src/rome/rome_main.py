@@ -5,10 +5,9 @@ from typing import Dict, List, Optional, Tuple
 import random
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.functional import free_gpu_cache
-from src.models import ModelandTokenizer, determine_hidden_size
+from src.models import ModelandTokenizer
 from src.rome_utils import nethook
 from src.functional import generate_with_patch
 
@@ -227,7 +226,7 @@ def get_kv_deltas(
                 ),
             )
         )
-        logger.debug(f"Right vector shape: { right_vector.shape}")
+        logger.debug(f"Right vector shape: {right_vector.shape}")
 
         # Cache vectors for future use
         if cache_fname is not None and require_recompute:
