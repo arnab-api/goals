@@ -98,6 +98,7 @@ class ModelandTokenizer(LanguageModel):
             or is_gpt_oss_variant(self)
             or is_deepseek_variant(self)
             or is_starcoder_variant(self)
+            or is_glm_variant(self)
         ) is False:
             logger.error(
                 f"Unknown model type: {type(unwrap_model(self)).__name__}. Parsing may fail."
@@ -120,6 +121,7 @@ class ModelandTokenizer(LanguageModel):
             or is_gpt_oss_variant(self)
             or is_deepseek_variant(self)
             or is_starcoder_variant(self)
+            or is_glm_variant(self)
         ):
             fields["mlp_module_name_format"] = "model.layers.{}.mlp"
             fields["attn_module_name_format"] = "model.layers.{}.self_attn"
@@ -403,6 +405,23 @@ def is_starcoder_variant(mt: Model | ModelandTokenizer) -> bool:
     return False
 
 
+def is_glm_variant(mt: Model | ModelandTokenizer) -> bool:
+    """Determine if model/tokenizer is GLM variant."""
+    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
+        mt = unwrap_model(mt)
+    if hasattr(transformers, "Glm4MoeLiteForCausalLM") and isinstance(
+        mt, transformers.Glm4MoeLiteForCausalLM
+    ):
+        return True
+    if hasattr(mt, "config"):
+        config = mt.config
+        if hasattr(config, "_name_or_path"):
+            name = config._name_or_path
+            lowered = name.lower()
+            return "glm" in lowered or "glm4" in lowered
+    return False
+
+
 def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None:
     """Get any example parameter for the model."""
     model = unwrap_model(model)
@@ -421,6 +440,7 @@ def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
         or is_gpt_oss_variant(model)
         or is_deepseek_variant(model)
         or is_starcoder_variant(model)
+        or is_glm_variant(model)
     ):
         return "model.embed_tokens"
     elif is_pythia_variant(model):
@@ -441,6 +461,7 @@ def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
         or is_gpt_oss_variant(model)
         or is_deepseek_variant(model)
         or is_starcoder_variant(model)
+        or is_glm_variant(model)
     ):
         return "model.norm"
     elif is_pythia_variant(model):
@@ -461,6 +482,7 @@ def determine_lm_head_path(model: ModelandTokenizer | Model) -> str:
         or is_gpt_oss_variant(model)
         or is_deepseek_variant(model)
         or is_starcoder_variant(model)
+        or is_glm_variant(model)
     ):
         return "lm_head"
     elif is_pythia_variant(model):
@@ -483,6 +505,7 @@ def determine_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
         or is_gpt_oss_variant(model)
         or is_deepseek_variant(model)
         or is_starcoder_variant(model)
+        or is_glm_variant(model)
     ):
         n_layer = model.config.num_hidden_layers
     else:
@@ -509,6 +532,7 @@ def determine_layer_name_format(
         or is_gpt_oss_variant(model)
         or is_deepseek_variant(model)
         or is_starcoder_variant(model)
+        or is_glm_variant(model)
     ):
         return "model.layers.{}"
     elif is_pythia_variant(model):

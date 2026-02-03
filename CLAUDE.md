@@ -30,27 +30,46 @@ Create `env.yml` in root (see `env_demo.yml` for template) with API keys and dir
 
 ## Key Files
 
-- `notebooks/00_goals.ipynb` - Main experimentation notebook
-- `sample_eval.json` - Evaluation dataset with code completion tasks, unit tests, and prefills
+- `notebooks/01_goal_consistency.ipynb` - Main experimentation notebook for prefill probing
+- `data/incomplete_code.json` - Evaluation dataset with code completion tasks, unit tests, and categorized prefills (aligned/adversarial/inconsequential)
 
 ## Architecture
 
-**Core Abstraction - `ModelandTokenizer`** (`src/models.py`):
+### Core Model Abstraction (`src/models.py`)
+
+**`ModelandTokenizer`**:
 - Extends `nnsight.LanguageModel` for interpretability operations
 - Supports GPT-J, LLaMA, Gemma, Qwen, OLMo, Pythia architectures
 - Parses model config to provide unified interface (`n_layer`, `n_embd`, `layer_name_format`, etc.)
 
-**Generation & Analysis** (`src/functional.py`):
+### Generation & Analysis (`src/functional.py`)
+
 - `generate_with_patch()` - Generation with optional activation patching
 - `predict_next_token()` - Next token prediction with top-k analysis
 - `get_hs()` - Extract hidden states at specific layers/positions
 
-**Tokenization** (`src/tokens.py`):
+### Tokenization (`src/tokens.py`)
+
 - `prepare_input()` - Prepare batched inputs for models
 
-**Evaluation** (in notebook):
-- `evaluate_generated_code()` - Run unit tests on generated code completions
-- `print_eval_results_table()` - Display results across prefills
+### Goals Module (`src/goals/`)
+
+**Data Types** (`src/goals/data.py`):
+- `IncompleteCodeSample` - Single code completion task (instruction, code, unit_tests, prefills, function_name)
+- `IncompleteCodeDataset` - Collection of samples with `load_dataset()` classmethod
+- `Code` - A generation with prefill info, prompt, lm_generation, source_code, eval result
+- `CodeGenerations` - All generations for a sample with evaluation summary
+- `SingleCodeEval` - Evaluation result (verdict, unit_test_results, warnings, errors)
+- `UnitTestResult` - Individual test result (input, expected, actual, passed, error)
+
+**Evaluation** (`src/goals/eval.py`):
+- `evaluate_single_code()` - Execute code and run unit tests, return `SingleCodeEval`
+- `run_evaluation()` - Evaluate all generations in a `CodeGenerations` object
+- `pretty_print_eval_results()` - Rich table output of evaluation results
+
+**Functional Helpers** (`src/goals/functional.py`):
+- `apply_chat_template()` - Format prompts for instruction-tuned models with `<code>` tags
+- `supports_chat_template()` - Heuristic to detect if model supports chat templates (checks for "instruct", "it", "chat" in model name)
 
 ## Configuration
 
@@ -66,3 +85,7 @@ Create `env.yml` in root (see `env_demo.yml` for template) with API keys and dir
 ## GPU Requirements
 
 Requires CUDA. Tested with A100 GPUs. Large models need significant VRAM.
+
+## Reports
+
+When generating analysis or reports, ask the user if they want to save it. If yes, save as `.log` or `.md` file in `claude_reports/` with an appropriate descriptive filename.

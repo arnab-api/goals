@@ -1,0 +1,148 @@
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from typing import Any
+
+from dataclasses_json import DataClassJsonMixin
+
+from src.utils.env_utils import DEFAULT_DATA_DIR
+from src.utils.typing import PathLike
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class IncompleteCodeSample(DataClassJsonMixin):
+    instruction: str
+    code: str
+    unit_tests: list[tuple[Any, Any]] = field(default_factory=list)
+    prefills: dict[str, list[str]] = field(default_factory=dict)
+    function_name: str | None = None
+
+    def __str__(self) -> str:
+        return f"""Instruction: {self.instruction}
+{self.code}
+Unit Tests: {self.unit_tests}
+Prefills: {json.dumps(self.prefills, indent=2)}"""
+
+    def __post_init__(self) -> None:
+        # ensure unit tests are stored as tuples for consistency
+        self.unit_tests = [
+            test if isinstance(test, tuple) else tuple(test) for test in self.unit_tests
+        ]
+
+
+@dataclass
+class IncompleteCodeDataset(DataClassJsonMixin):
+    samples: list[IncompleteCodeSample] = field(default_factory=list)
+
+    @staticmethod
+    def load_dataset(
+        path: PathLike = os.path.join(DEFAULT_DATA_DIR, "incomplete_code.json"),
+    ) -> "IncompleteCodeDataset":
+        with open(path, "r") as f:
+            data = json.load(f)
+        samples = [IncompleteCodeSample.from_dict(sample_dict) for sample_dict in data]
+
+        logger.info(f"Loaded {len(samples)} samples from {path}")
+        return IncompleteCodeDataset(samples=samples)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> IncompleteCodeSample:
+        return self.samples[idx]
+
+
+@dataclass
+class UnitTestResult(DataClassJsonMixin):
+    input: Any
+    expected: Any
+    actual: Any | None = None
+    passed: bool = False
+    error: str | None = None
+
+
+@dataclass
+class SingleCodeEval(DataClassJsonMixin):
+    code: str
+    verdict: str
+    unit_test_results: list[UnitTestResult] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    error_message: str | None = None
+    prefill: tuple[str, str] | None = None
+    output: str = ""
+
+
+@dataclass
+class EvaluationSummary(DataClassJsonMixin):
+    pass_count: int = 0
+    fail_count: int = 0
+    total: int = 0
+
+
+@dataclass
+class Code(DataClassJsonMixin):
+    prefill: str | None = None
+    prefill_type: str | None = None
+    full_prompt: str = ""  # full prompt sent to the LM
+    lm_generation: str = ""  # completion by the LM
+    source_code: str | None = None  # code to execute
+    function_name: str | None = None
+    eval: SingleCodeEval | None = None  # None means not evaluated yet
+
+
+@dataclass
+class CodeGenerations(DataClassJsonMixin):
+    sample: IncompleteCodeSample
+    generations: list[Code] = field(default_factory=list)
+    summary: EvaluationSummary | None = None
+    function_name: str | None = None
+
+    def __str__(self) -> str:
+        return f"""{self.sample.code}
+Generations:
+{chr(10).join([f'({code.prefill_type or ""}) "{code.prefill or ""}" => "{code.lm_generation}"' for code in self.generations])}"""
+
+    def __post_init__(self) -> None:
+        # Normalize generations to Code objects (legacy tuples or dicts -> Code)
+        normalized: list[Code] = []
+        for entry in self.generations:
+            if isinstance(entry, Code):
+                normalized.append(entry)
+                continue
+            if isinstance(entry, dict):
+                normalized.append(Code.from_dict(entry))
+                continue
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                prefill_info, generation_text = entry
+                prefill_value = None
+                prefill_type = None
+                if isinstance(prefill_info, (list, tuple)) and len(prefill_info) == 2:
+                    prefill_value, prefill_type = prefill_info
+                elif isinstance(prefill_info, str):
+                    prefill_value = prefill_info
+                normalized.append(
+                    Code(
+                        prefill=prefill_value,
+                        prefill_type=prefill_type,
+                        lm_generation=generation_text
+                        if isinstance(generation_text, str)
+                        else str(generation_text),
+                    )
+                )
+                continue
+            normalized.append(Code(lm_generation=str(entry)))
+
+        self.generations = normalized
+
+        if self.function_name is None:
+            self.function_name = self.sample.function_name
+
+        if self.summary is None:
+            self.summary = EvaluationSummary(total=len(self.generations))
+
+
+# # Backwards compatibility alias for older imports
+# CodeGenerationResult = CodeGenerations
