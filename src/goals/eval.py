@@ -1,6 +1,6 @@
 import logging
 import warnings
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from rich.console import Console
 from rich.table import Table
@@ -11,6 +11,9 @@ from src.goals.data import (
     SingleCodeEval,
     UnitTestResult,
 )
+
+if TYPE_CHECKING:
+    from src.goals.sampling import MCTSNode
 
 logger = logging.getLogger(__name__)
 
@@ -421,3 +424,140 @@ def pretty_print_mcts_eval(
     if output_file:
         with open(output_file, "w") as f:
             f.write(console.export_text())
+
+
+def evaluate_mcts_tree(
+    root: "MCTSNode",
+    prefix: str,
+    unit_tests: list[tuple[Any, Any]],
+    function_name: str = "func",
+    code_stop_tag: str = "</code>",
+    terminal_only: bool = False,
+) -> dict[str, int]:
+    """
+    Evaluate all leaf nodes in an MCTS tree and backpropagate colors.
+
+    This function:
+    1. Finds all leaf nodes (or terminal-only if specified)
+    2. Evaluates each leaf by constructing full code from prefix + path
+    3. Assigns colors based on evaluation result:
+       - green: all unit tests passed
+       - orange: valid code but some tests failed
+       - red: code has errors (syntax, runtime, function not found)
+    4. Backpropagates colors up the tree with priority: green > orange > red
+
+    Args:
+        root: The root node of the MCTS tree (from MCTSSearch.root)
+        prefix: The code prefix that the MCTS expanded from
+                (e.g., sample.code + prefill)
+        unit_tests: List of (input, expected_output) tuples for testing
+        function_name: The function name to test (default: "func")
+        code_stop_tag: String used to truncate generations (default: "</code>")
+        terminal_only: If True, only evaluate terminal nodes.
+                      If False (default), evaluate all leaf nodes.
+
+    Returns:
+        Dictionary with counts: {"green": N, "orange": N, "red": N, "total": N}
+    """
+    # Collect leaf nodes to evaluate
+    leaves: list["MCTSNode"] = []
+    _collect_leaves(root, leaves, terminal_only)
+
+    # Evaluate each leaf
+    counts = {"green": 0, "orange": 0, "red": 0, "total": len(leaves)}
+
+    for leaf in leaves:
+        path_text = leaf.get_path_text()
+
+        # Clean up the path text
+        if code_stop_tag and code_stop_tag in path_text:
+            path_text = path_text.split(code_stop_tag)[0].rstrip()
+
+        full_code = f"{prefix}{path_text}"
+
+        # Evaluate the code
+        eval_result = evaluate_single_code(full_code, unit_tests, function_name)
+        leaf.eval_result = eval_result
+
+        # Assign color based on verdict
+        verdict = eval_result.verdict
+        if verdict == "PASSED":
+            leaf.color = "green"
+            counts["green"] += 1
+        elif verdict == "FAILED":
+            # Valid code but tests failed
+            leaf.color = "orange"
+            counts["orange"] += 1
+        else:
+            # SYNTAX_ERROR, ERROR, or other issues
+            leaf.color = "red"
+            counts["red"] += 1
+
+    # Backpropagate colors up the tree
+    _backpropagate_colors(root)
+
+    return counts
+
+
+def _collect_leaves(
+    node: "MCTSNode", leaves: list["MCTSNode"], terminal_only: bool
+) -> None:
+    """Recursively collect leaf nodes for evaluation."""
+    if terminal_only:
+        # Only collect terminal nodes
+        if node.is_terminal:
+            leaves.append(node)
+    else:
+        # Collect all leaves (nodes with no children)
+        if node.is_leaf():
+            leaves.append(node)
+
+    for child in node.children:
+        _collect_leaves(child, leaves, terminal_only)
+
+
+def _backpropagate_colors(node: "MCTSNode") -> str | None:
+    """
+    Recursively backpropagate colors from leaves to root.
+
+    Priority: green > orange > red > None
+
+    Returns the color assigned to this node.
+    """
+    # If this is a leaf, return its color (already set during evaluation)
+    if node.is_leaf():
+        return node.color
+
+    # Collect colors from all children
+    child_colors = []
+    for child in node.children:
+        child_color = _backpropagate_colors(child)
+        if child_color:
+            child_colors.append(child_color)
+
+    # Determine this node's color based on children (priority: green > orange > red)
+    if "green" in child_colors:
+        node.color = "green"
+    elif "orange" in child_colors:
+        node.color = "orange"
+    elif "red" in child_colors:
+        node.color = "red"
+    else:
+        node.color = None
+
+    return node.color
+
+
+def clear_mcts_colors(root: "MCTSNode") -> None:
+    """
+    Clear all colors and eval_results from an MCTS tree.
+
+    Useful for re-evaluating with different parameters.
+
+    Args:
+        root: The root node of the MCTS tree
+    """
+    root.color = None
+    root.eval_result = None
+    for child in root.children:
+        clear_mcts_colors(child)

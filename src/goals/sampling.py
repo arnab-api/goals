@@ -12,9 +12,21 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from rich.console import Console
 
 from src.models import ModelandTokenizer
 from src.utils.typing import TokenizerOutput
+
+# Rich console for colored output (no highlighting, wide width to prevent wrapping)
+_console = Console(highlight=False, width=300)
+
+# Color mapping for evaluation results (bright/bold for evaluated nodes)
+COLOR_STYLES = {
+    "green": "bold bright_green",
+    "orange": "bold bright_yellow",  # bright_yellow is more visible than orange1
+    "red": "bold bright_red",
+    None: "white",  # unevaluated nodes: plain white (not bold)
+}
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +46,8 @@ class MCTSNode:
         is_terminal: Whether this node ends a completion (</code>, EOS, newline, or max depth)
         terminal_reason: Why the node is terminal (if applicable)
         depth: Depth in the tree (root = 0)
+        color: Evaluation color (green=passed, orange=valid but failed, red=error, None=unevaluated)
+        eval_result: Evaluation result for leaf nodes (SingleCodeEval or None)
     """
 
     token_id: int | None = None
@@ -45,6 +59,8 @@ class MCTSNode:
     is_terminal: bool = False
     terminal_reason: str | None = None
     depth: int = 0
+    color: str | None = None
+    eval_result: Any = None
 
     def is_leaf(self) -> bool:
         """A leaf node has no children (not yet expanded)."""
@@ -635,14 +651,17 @@ class MCTSSearch:
         scores.sort(key=lambda x: x[1], reverse=True)
         return scores
 
-    def print_tree(self, max_depth: int | None = None) -> None:
+    def print_tree(
+        self, max_depth: int | None = None, show_colors: bool = True
+    ) -> None:
         """
         Print a text representation of the tree.
 
         Args:
             max_depth: Maximum depth to print (None for full tree)
+            show_colors: If True, use rich to show evaluation colors (default True)
         """
-        self._print_node(self.root, "", True, max_depth)
+        self._print_node(self.root, "", True, max_depth, show_colors)
 
     def _print_node(
         self,
@@ -650,23 +669,53 @@ class MCTSSearch:
         prefix: str,
         is_last: bool,
         max_depth: int | None,
+        show_colors: bool = True,
     ) -> None:
         """Recursively print a node and its children."""
         if max_depth is not None and node.depth > max_depth:
             return
 
         connector = "└── " if is_last else "├── "
-        if node.is_root():
-            print(f"[ROOT] visits={node.visits}")
+        terminal_marker = " [TERMINAL]" if node.is_terminal else ""
+        color_style = COLOR_STYLES.get(node.color, "white")
+
+        if not show_colors:
+            # No colors - use regular Python print (no width limits)
+            if node.is_root():
+                print(f"[ROOT] visits={node.visits}")
+            else:
+                print(
+                    f"{prefix}{connector}{node.token_str!r} "
+                    f"(p={node.prior:.3f}, v={node.visits}){terminal_marker}"
+                )
         else:
-            terminal_marker = " [TERMINAL]" if node.is_terminal else ""
-            print(
-                f"{prefix}{connector}{node.token_str!r} "
-                f"(p={node.prior:.3f}, v={node.visits}){terminal_marker}"
-            )
+            # Use rich for colors
+            if node.is_root():
+                if node.color:
+                    _console.print(
+                        f"[{color_style}]\\[ROOT][/{color_style}] "
+                        f"[dim]visits={node.visits}[/dim]"
+                    )
+                else:
+                    _console.print(f"\\[ROOT] [dim]visits={node.visits}[/dim]")
+            else:
+                if node.color:
+                    # Evaluated node: bold bright color for token, dim/gray for info
+                    _console.print(
+                        f"{prefix}{connector}[{color_style}]{node.token_str!r}[/{color_style}] "
+                        f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
+                    )
+                else:
+                    # Unevaluated node: plain text for token, dim for info
+                    _console.print(
+                        f"{prefix}{connector}{node.token_str!r} "
+                        f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
+                    )
 
         if node.children:
             child_prefix = prefix + ("    " if is_last else "│   ")
             for i, child in enumerate(node.children):
                 is_last_child = i == len(node.children) - 1
-                self._print_node(child, child_prefix, is_last_child, max_depth)
+                self._print_node(
+                    child, child_prefix, is_last_child, max_depth, show_colors
+                )

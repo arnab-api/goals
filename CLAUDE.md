@@ -89,3 +89,32 @@ Requires CUDA. Tested with A100 GPUs. Large models need significant VRAM.
 ## Reports
 
 When generating analysis or reports, ask the user if they want to save it. If yes, save as `.log` or `.md` file in `claude_reports/` with an appropriate descriptive filename.
+
+## Testing Guidelines
+
+When implementing new features (evals, utils, classes, etc.):
+
+1. **Ask about tests**: After implementing a feature, ask the user if they want a test script created.
+
+2. **Test location**: Place test scripts in the `test/` directory with descriptive names (e.g., `test_mcts_sampling.py`, `test_eval.py`).
+
+3. **Test model**: Use a smaller LM for testing to save resources:
+   - Default test model: `Qwen/Qwen2.5-Coder-14B-Instruct`
+   - Initialize with: `ModelandTokenizer(model_key="Qwen/Qwen2.5-Coder-14B-Instruct", dtype=torch.bfloat16, device_map="auto", attn_implementation="eager")`
+
+4. **Conda environment**: Always run tests in the `goals` conda environment:
+   ```bash
+   conda run -n goals python test/test_<feature>.py
+   ```
+
+5. **Validate your work**: After creating tests, run them to verify the implementation works correctly.
+
+6. **Test structure**: Follow the pattern from `notebooks/02_sampling.ipynb` for LM initialization and data loading:
+   ```python
+   import sys
+   sys.path.append(".")  # or appropriate path
+
+   from src.models import ModelandTokenizer
+   from src.goals.data import IncompleteCodeDataset
+   # ... etc
+   ```
