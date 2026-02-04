@@ -340,10 +340,14 @@ def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
     """Determine if model/tokenizer is qwen variant."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
-    if isinstance(mt, transformers.Qwen2ForCausalLM):
+    if (
+        isinstance(mt, transformers.Qwen2ForCausalLM)
+        or isinstance(mt, transformers.Qwen3ForCausalLM)
+        or isinstance(mt, transformers.Qwen3MoeForCausalLM)
+        or isinstance(mt, transformers.Qwen3NextForCausalLM)
+    ):
         return True
-    if isinstance(mt, transformers.Qwen3MoeForCausalLM):
-        return True
+
     if hasattr(mt, "config"):
         config = mt.config
         if hasattr(config, "_name_or_path"):

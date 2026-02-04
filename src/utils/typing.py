@@ -35,6 +35,7 @@ Model = (
     | transformers.DeepseekV2ForCausalLM
     | transformers.Starcoder2ForCausalLM
     | transformers.Glm4MoeLiteForCausalLM
+    | transformers.Qwen3NextForCausalLM
 )
 Tokenizer = transformers.PreTrainedTokenizerFast
 TokenizerOffsetMapping = Sequence[tuple[int, int]]

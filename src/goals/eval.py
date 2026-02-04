@@ -243,3 +243,181 @@ def pretty_print_eval_results(
     if output_file:
         with open(output_file, "w") as f:
             f.write(console.export_text())  # Plain text with table structure preserved
+
+
+def evaluate_mcts_paths(
+    prefix: str,
+    paths: list[dict],
+    unit_tests: list[tuple[Any, Any]],
+    function_name: str = "func",
+    code_stop_tag: str = "</code>",
+) -> list[dict]:
+    """
+    Evaluate a list of MCTS paths against unit tests.
+
+    Takes paths from MCTSSearch.get_all_paths() and evaluates each by
+    concatenating the prefix with the path text.
+
+    Args:
+        prefix: The code prefix (e.g., sample.code + prefill) that the MCTS
+               expanded from.
+        paths: List of path dicts from MCTSSearch.get_all_paths().
+              Each dict should have at least "text" key.
+        unit_tests: List of (input, expected_output) tuples for testing.
+        function_name: The function name to test (default: "func").
+
+    Returns:
+        The same list of path dicts, with added keys:
+            - "full_code": The complete code (prefix + path)
+            - "eval": SingleCodeEval result from evaluation
+    """
+    for path in paths:
+        path_text = path.get("text", "")
+        if code_stop_tag:
+            # Fallback: most of our code is expected to end at the first newline
+            cur_stop_tag = code_stop_tag if code_stop_tag in path_text else "\n"
+            path_text = path_text.split(cur_stop_tag)[0].rstrip()
+
+        full_code = f"{prefix}{path_text}"
+
+        # Evaluate the code
+        eval_result = evaluate_single_code(full_code, unit_tests, function_name)
+
+        # Add results to the path dict
+        path["full_code"] = full_code
+        path["eval"] = eval_result
+
+    return paths
+
+
+def pretty_print_mcts_eval(
+    prefix: str,
+    paths: list[dict],
+    function_name: str = "func",
+    output_file: str | None = None,
+    show_passed_tests: bool = False,
+    max_paths: int | None = None,
+) -> None:
+    """
+    Pretty print evaluation results for MCTS paths.
+
+    Args:
+        prefix: The code prefix used for evaluation.
+        paths: List of path dicts with "eval" key from evaluate_mcts_paths().
+        function_name: The function name being tested (default: "func").
+        output_file: Optional file path to write output to.
+        show_passed_tests: If True, show unit test details even for passed tests.
+        max_paths: Maximum number of paths to display (None for all).
+    """
+    console = Console(record=True, width=200)
+
+    # Print the prefix
+    console.print(f'[dim]Prefix:[/dim] "{prefix}"')
+    console.print()
+
+    # Create results table
+    results_table = Table(title="MCTS Path Evaluation Results", show_lines=True)
+    results_table.add_column("#", style="dim", width=4)
+    results_table.add_column("Path Text", style="white", max_width=50)
+    results_table.add_column("Depth", style="cyan", justify="right", width=6)
+    results_table.add_column("Visits", style="cyan", justify="right", width=7)
+    results_table.add_column("Prob", style="cyan", justify="right", width=10)
+    results_table.add_column("Verdict", style="white", width=12)
+    results_table.add_column("Unit Tests / Errors", style="white", overflow="fold")
+
+    # Limit paths if requested
+    display_paths = paths[:max_paths] if max_paths else paths
+
+    # Count results for summary
+    passed_count = 0
+    failed_count = 0
+    error_count = 0
+
+    for idx, path in enumerate(display_paths):
+        eval_result: SingleCodeEval | None = path.get("eval")
+
+        if eval_result is None:
+            results_table.add_row(
+                str(idx + 1),
+                repr(path.get("text", "")),
+                str(path.get("depth", "?")),
+                str(path.get("visits", "?")),
+                f"{path.get('prob', 0):.2e}",
+                "[yellow]NOT EVALUATED[/yellow]",
+                "",
+            )
+            continue
+
+        verdict = eval_result.verdict
+        path_text = path.get("text", "")
+        depth = path.get("depth", "?")
+        visits = path.get("visits", "?")
+        prob = path.get("prob", 0)
+
+        # Format verdict with color
+        if verdict == "PASSED":
+            verdict_str = "[bright_green]PASSED[/bright_green]"
+            passed_count += 1
+        elif verdict in ["SYNTAX_ERROR", "ERROR"]:
+            verdict_str = f"[bright_red]{verdict}[/bright_red]"
+            error_count += 1
+        else:
+            verdict_str = f"[yellow]{verdict}[/yellow]"
+            failed_count += 1
+
+        # Format unit test results / error message
+        details_parts = []
+
+        if eval_result.error_message:
+            details_parts.append(f"[red]{eval_result.error_message}[/red]")
+
+        if eval_result.unit_test_results:
+            if verdict != "PASSED" or show_passed_tests:
+                for t in eval_result.unit_test_results:
+                    if t.error:
+                        details_parts.append(
+                            f"[red]{function_name}({t.input}) raised {t.error}[/red]"
+                        )
+                    elif t.passed:
+                        if show_passed_tests:
+                            details_parts.append(
+                                f"[green]{function_name}({t.input})={t.actual} ✓[/green]"
+                            )
+                    else:
+                        details_parts.append(
+                            f"[red]{function_name}({t.input})={t.actual}, "
+                            f"expected {t.expected} ✗[/red]"
+                        )
+
+        details_str = "\n".join(details_parts)
+
+        results_table.add_row(
+            str(idx + 1),
+            f'"{path_text}"',
+            str(depth),
+            str(visits),
+            f"{prob:.2e}",
+            verdict_str,
+            details_str,
+        )
+
+    console.print(results_table)
+
+    # Print summary
+    total = len(display_paths)
+    console.print()
+    console.print(
+        f"[bold]Summary:[/bold] "
+        f"[green]{passed_count} passed[/green], "
+        f"[yellow]{failed_count} failed[/yellow], "
+        f"[red]{error_count} errors[/red] "
+        f"(out of {total} paths)"
+    )
+
+    if max_paths and len(paths) > max_paths:
+        console.print(f"[dim](Showing {max_paths} of {len(paths)} total paths)[/dim]")
+
+    # Export to file or print to stdout
+    if output_file:
+        with open(output_file, "w") as f:
+            f.write(console.export_text())
