@@ -737,3 +737,78 @@ class MCTSSearch:
                 self._collect_tree_lines(
                     child, child_prefix, is_last_child, max_depth, show_colors, lines
                 )
+
+    def save_tree(
+        self,
+        filepath: str,
+        max_depth: int | None = None,
+        show_colors: bool = True,
+        dark_mode: bool = True,
+    ) -> None:
+        """
+        Save the tree to a file. Supports HTML (with colors) and plain text.
+
+        Args:
+            filepath: Path to save the tree. Use .html extension for colored output,
+                     or .txt for plain text.
+            max_depth: Maximum depth to include (None for full tree)
+            show_colors: If True and saving to HTML, include evaluation colors
+            dark_mode: If True (default), use dark background for HTML output
+
+        Example:
+            search.save_tree("mcts_tree.html")  # Colored HTML with dark background
+            search.save_tree("mcts_tree.txt", show_colors=False)  # Plain text
+        """
+        from rich.console import Console
+        from rich.terminal_theme import MONOKAI
+
+        lines: list[str] = []
+        self._collect_tree_lines(self.root, "", True, max_depth, show_colors, lines)
+        content = "\n".join(lines)
+
+        if filepath.endswith(".html"):
+            # Save as HTML with colors
+            console = Console(record=True, width=310, force_terminal=True)
+            console.print(content)
+
+            # Use a dark theme
+            theme = MONOKAI if dark_mode else None
+
+            # Export HTML and customize for dark mode
+            html = console.export_html(theme=theme, inline_styles=True)
+
+            if dark_mode:
+                # Inject custom CSS for dark background and white tree edges
+                custom_css = """
+<style>
+body {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    padding: 20px;
+}
+pre {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+}
+</style>
+"""
+                # Insert custom CSS after <head> or at the beginning
+                if "<head>" in html:
+                    html = html.replace("<head>", "<head>" + custom_css)
+                else:
+                    html = custom_css + html
+
+            with open(filepath, "w") as f:
+                f.write(html)
+            logger.info(f"Saved tree to {filepath} (HTML with colors)")
+        else:
+            # Save as plain text (strip rich markup if present)
+            if show_colors:
+                # Re-collect without colors for plain text
+                lines = []
+                self._collect_tree_lines(self.root, "", True, max_depth, False, lines)
+                content = "\n".join(lines)
+            with open(filepath, "w") as f:
+                f.write(content)
+            logger.info(f"Saved tree to {filepath} (plain text)")
