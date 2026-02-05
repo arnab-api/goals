@@ -17,8 +17,7 @@ from rich.console import Console
 from src.models import ModelandTokenizer
 from src.utils.typing import TokenizerOutput
 
-# Rich console for colored output (no highlighting, wide width to prevent wrapping)
-_console = Console(highlight=False, width=300)
+logger = logging.getLogger(__name__)
 
 # Color mapping for evaluation results (bright/bold for evaluated nodes)
 COLOR_STYLES = {
@@ -28,7 +27,14 @@ COLOR_STYLES = {
     None: "white",  # unevaluated nodes: plain white (not bold)
 }
 
-logger = logging.getLogger(__name__)
+
+def _get_console() -> Console:
+    """Create a fresh Console instance for colored output.
+
+    Created on demand (not at module level) to avoid interference from
+    notebooks that override the builtin print with rich.Console.print.
+    """
+    return Console(highlight=False, width=310)
 
 
 @dataclass
@@ -661,61 +667,73 @@ class MCTSSearch:
             max_depth: Maximum depth to print (None for full tree)
             show_colors: If True, use rich to show evaluation colors (default True)
         """
-        self._print_node(self.root, "", True, max_depth, show_colors)
+        # Collect all lines first, then print once to avoid
+        # Jupyter creating separate output cells per console.print() call
+        lines: list[str] = []
+        self._collect_tree_lines(self.root, "", True, max_depth, show_colors, lines)
 
-    def _print_node(
+        if show_colors:
+            # Single rich print call with all lines joined
+            console = _get_console()
+            console.print("\n".join(lines))
+        else:
+            # Use builtins.print to avoid notebook overrides
+            _print = (
+                __builtins__["print"]
+                if isinstance(__builtins__, dict)
+                else __builtins__.print
+            )
+            _print("\n".join(lines))
+
+    def _collect_tree_lines(
         self,
         node: MCTSNode,
         prefix: str,
         is_last: bool,
         max_depth: int | None,
-        show_colors: bool = True,
+        show_colors: bool,
+        lines: list[str],
     ) -> None:
-        """Recursively print a node and its children."""
+        """Recursively collect tree lines into a list."""
         if max_depth is not None and node.depth > max_depth:
             return
 
         connector = "└── " if is_last else "├── "
-        terminal_marker = " [TERMINAL]" if node.is_terminal else ""
+        terminal_marker = " \\[TERMINAL]" if node.is_terminal else ""
         color_style = COLOR_STYLES.get(node.color, "white")
 
-        if not show_colors:
-            # No colors - use regular Python print (no width limits)
-            if node.is_root():
-                print(f"[ROOT] visits={node.visits}")
-            else:
-                print(
-                    f"{prefix}{connector}{node.token_str!r} "
-                    f"(p={node.prior:.3f}, v={node.visits}){terminal_marker}"
+        if node.is_root():
+            if show_colors and node.color:
+                lines.append(
+                    f"[{color_style}]\\[ROOT][/{color_style}] "
+                    f"[dim]visits={node.visits}[/dim]"
                 )
-        else:
-            # Use rich for colors
-            if node.is_root():
-                if node.color:
-                    _console.print(
-                        f"[{color_style}]\\[ROOT][/{color_style}] "
-                        f"[dim]visits={node.visits}[/dim]"
-                    )
-                else:
-                    _console.print(f"\\[ROOT] [dim]visits={node.visits}[/dim]")
+            elif show_colors:
+                lines.append(f"\\[ROOT] [dim]visits={node.visits}[/dim]")
             else:
-                if node.color:
-                    # Evaluated node: bold bright color for token, dim/gray for info
-                    _console.print(
-                        f"{prefix}{connector}[{color_style}]{node.token_str!r}[/{color_style}] "
-                        f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
-                    )
-                else:
-                    # Unevaluated node: plain text for token, dim for info
-                    _console.print(
-                        f"{prefix}{connector}{node.token_str!r} "
-                        f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
-                    )
+                lines.append(f"[ROOT] visits={node.visits}")
+        else:
+            if show_colors and node.color:
+                lines.append(
+                    f"{prefix}{connector}[{color_style}]{node.token_str!r}[/{color_style}] "
+                    f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
+                )
+            elif show_colors:
+                lines.append(
+                    f"{prefix}{connector}{node.token_str!r} "
+                    f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
+                )
+            else:
+                tm = " [TERMINAL]" if node.is_terminal else ""
+                lines.append(
+                    f"{prefix}{connector}{node.token_str!r} "
+                    f"(p={node.prior:.3f}, v={node.visits}){tm}"
+                )
 
         if node.children:
             child_prefix = prefix + ("    " if is_last else "│   ")
             for i, child in enumerate(node.children):
                 is_last_child = i == len(node.children) - 1
-                self._print_node(
-                    child, child_prefix, is_last_child, max_depth, show_colors
+                self._collect_tree_lines(
+                    child, child_prefix, is_last_child, max_depth, show_colors, lines
                 )

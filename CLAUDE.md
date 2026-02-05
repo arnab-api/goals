@@ -107,7 +107,7 @@ When implementing new features (evals, utils, classes, etc.):
    conda run -n goals python test/test_<feature>.py
    ```
 
-5. **Validate your work**: After creating tests, run them to verify the implementation works correctly.
+5. **Ask before running tests**: Running tests consumes significant tokens (model loading, output parsing). Always ask the user before running test scripts. Only run tests autonomously if the user explicitly grants free rein for iterative development.
 
 6. **Test structure**: Follow the pattern from `notebooks/02_sampling.ipynb` for LM initialization and data loading:
    ```python
