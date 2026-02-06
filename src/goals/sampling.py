@@ -767,8 +767,9 @@ class MCTSSearch:
         content = "\n".join(lines)
 
         if filepath.endswith(".html"):
-            # Save as HTML with colors
-            console = Console(record=True, width=310, force_terminal=True)
+            # Save as HTML with colors (file=StringIO to suppress stdout)
+            from io import StringIO
+            console = Console(record=True, width=310, force_terminal=True, file=StringIO())
             console.print(content)
 
             # Use a dark theme
