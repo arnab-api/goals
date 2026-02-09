@@ -371,7 +371,7 @@ def generate_with_patch(
     mt: ModelandTokenizer,
     inputs: str | TokenizerOutput,
     n_gen_per_prompt: int = 5,
-    max_new_tokens: int = 20,
+    max_new_tokens: int = 16,
     patches: Optional[list[PatchSpec]] = None,
     do_sample: bool = True,
     patch_strategy: Literal["replace", "add"] = "replace",
@@ -406,24 +406,29 @@ def generate_with_patch(
         **kwargs,
     ) as gen_trace:  # noqa: F841
         if patches is not None:
-            if patch_at_all_generations:
-                mt.all()
-            for cur_patch in patches:
-                module_name, index = cur_patch.location
-                module = get_module_nnsight(mt, module_name)
-                current_state = (
-                    module.output.save()
-                    if ("mlp" in module_name or module_name == mt.embedder_name)
-                    else module.output[0].save()
-                )
-                if current_state.ndim == 2:
-                    current_state = current_state.unsqueeze(0)
-                if patch_strategy == "replace":
-                    current_state[:, index, :] = cur_patch.patch
-                elif patch_strategy == "add":
-                    current_state[:, index, :] += cur_patch.patch
-                else:
-                    raise ValueError("patch_strategy must be one of 'replace', 'add'")
+            # if patch_at_all_generations:
+            #     context = gen_trace.all()
+            # else:
+            #     context = gen_trace.invoke()
+            with gen_trace.all():
+                for cur_patch in patches:
+                    module_name, index = cur_patch.location
+                    module = get_module_nnsight(mt, module_name)
+                    current_state = (
+                        module.output.save()
+                        if ("mlp" in module_name or module_name == mt.embedder_name)
+                        else module.output[0].save()
+                    )
+                    if current_state.ndim == 2:
+                        current_state = current_state.unsqueeze(0)
+                    if patch_strategy == "replace":
+                        current_state[:, index, :] = cur_patch.patch
+                    elif patch_strategy == "add":
+                        current_state[:, index, :] += cur_patch.patch
+                    else:
+                        raise ValueError(
+                            "patch_strategy must be one of 'replace', 'add'"
+                        )
         gen_out = mt.generator.output.save()
 
     start = 0

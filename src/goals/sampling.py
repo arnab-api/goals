@@ -744,6 +744,7 @@ class MCTSSearch:
         max_depth: int | None = None,
         show_colors: bool = True,
         dark_mode: bool = True,
+        print_tree: bool = False,
     ) -> None:
         """
         Save the tree to a file. Supports HTML (with colors) and plain text.
@@ -767,9 +768,17 @@ class MCTSSearch:
         content = "\n".join(lines)
 
         if filepath.endswith(".html"):
-            # Save as HTML with colors (file=StringIO to suppress stdout)
-            from io import StringIO
-            console = Console(record=True, width=310, force_terminal=True, file=StringIO())
+            # Save as HTML with colors.
+            # We need console.print() to populate the recording buffer for export_html().
+            # To suppress visible output: redirect to devnull and disable Jupyter display.
+            import os as _os
+
+            console = Console(
+                record=True,
+                width=310,
+                force_jupyter=False,
+                file=open(_os.devnull, "w"),
+            )
             console.print(content)
 
             # Use a dark theme
