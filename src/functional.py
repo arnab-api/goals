@@ -390,6 +390,8 @@ def generate_with_patch(
             n_gen_per_prompt=n_gen_per_prompt,
         )
 
+    # logger.debug(f"{inputs.input_ids.shape}")
+
     if patches is not None and isinstance(patches, PatchSpec):
         patches = [patches]
     if patches is not None:
@@ -415,12 +417,15 @@ def generate_with_patch(
                     module_name, index = cur_patch.location
                     module = get_module_nnsight(mt, module_name)
                     current_state = (
-                        module.output.save()
-                        if ("mlp" in module_name or module_name == mt.embedder_name)
-                        else module.output[0].save()
+                        module.output[0].save()
+                        if ("attn" in module_name)
+                        else module.output.save()
                     )
                     if current_state.ndim == 2:
                         current_state = current_state.unsqueeze(0)
+                    # print(
+                    #     f"Patching at {module_name}[{index}] >> {current_state.shape=} | {cur_patch.patch.shape=}"
+                    # )
                     if patch_strategy == "replace":
                         current_state[:, index, :] = cur_patch.patch
                     elif patch_strategy == "add":

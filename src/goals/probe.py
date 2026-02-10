@@ -18,8 +18,12 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from src.goals.sampling import MCTSNode
@@ -219,7 +223,12 @@ def sample_contrastive_pairs(
         if probs.red >= min_red_confidence and probs.green <= max_green_in_negative:
             negative_nodes.append((node, probs))
 
-    # Create all pairs
+    logger.debug(
+        f"depth={depth}: {len(nodes_at_depth)} nodes, "
+        f"{len(positive_nodes)} positive, {len(negative_nodes)} negative"
+    )
+
+    # Create all pairs (Cartesian product)
     pairs = []
     for pos_node, pos_probs in positive_nodes:
         for neg_node, neg_probs in negative_nodes:
