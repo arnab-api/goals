@@ -293,7 +293,7 @@ def is_llama_variant(mt: Model | ModelandTokenizer) -> bool:
     """Determine if model/tokenizer is llama variant."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
-    if isinstance(mt, transformers.LlamaForCausalLM):
+    if isinstance(mt, transformers.LlamaForCausalLM | transformers.CwmForCausalLM):
         return True
     if hasattr(mt, "config"):
         config = mt.config

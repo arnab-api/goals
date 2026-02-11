@@ -39,7 +39,15 @@ def supports_chat_template(mt: ModelandTokenizer) -> bool:
     """
     Heuristic to determine if the model supports chat templates.
     """
-    instruct_signatures = ["instruct", "it", "chat", "oss", "zai-org/glm", "next"]
+    instruct_signatures = [
+        "instruct",
+        "it",
+        "chat",
+        "oss",
+        "zai-org/glm",
+        "next",
+        "cwm",
+    ]
     return any(
         inst_signature in mt.name.lower() for inst_signature in instruct_signatures
     )
