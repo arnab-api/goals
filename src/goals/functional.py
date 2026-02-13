@@ -47,6 +47,7 @@ def supports_chat_template(mt: ModelandTokenizer) -> bool:
         "zai-org/glm",
         "next",
         "cwm",
+        "distill",
     ]
     return any(
         inst_signature in mt.name.lower() for inst_signature in instruct_signatures
