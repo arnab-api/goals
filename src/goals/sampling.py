@@ -5,13 +5,16 @@ This module implements a bounded MCTS algorithm that explores different
 token continuations from an LM, building a tree of possible completions.
 """
 
+import json
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn.functional as F
+from dataclasses_json import DataClassJsonMixin
 from rich.console import Console
 
 from src.models import ModelandTokenizer
@@ -101,6 +104,62 @@ class MCTSNode:
             f"MCTSNode(token={self.token_str!r}, prior={self.prior:.4f}, "
             f"visits={self.visits}, depth={self.depth}, "
             f"children={len(self.children)}, terminal={self.is_terminal})"
+        )
+
+
+@dataclass
+class MCTSResult(DataClassJsonMixin):
+    """
+    Results from a single MCTS search + evaluation + contrastive sampling.
+    Serializable via DataClassJsonMixin (.to_dict() / .from_dict()).
+
+    The MCTS tree itself is not serialized (MCTSNode objects are not JSON-friendly).
+    Instead, we store the contrastive pairs as text paths + outcome probs,
+    and optionally save the tree as HTML via search.save_tree().
+    """
+
+    # Identification
+    model_name: str = ""
+    sample_idx: int = 0
+    prefill: str = ""
+    prefill_type: str = ""
+    function_name: str = "func"
+
+    # Prompt info
+    prompt: str = ""  # full prompt sent to LM
+    prefix: str = ""  # sample.code + prefill (for eval)
+
+    # MCTS config & stats
+    mcts_config: dict[str, Any] = field(default_factory=dict)
+    mcts_stats: dict[str, Any] = field(default_factory=dict)
+
+    # Evaluation counts {"green": N, "orange": N, "red": N, "total": N}
+    eval_counts: dict[str, int] = field(default_factory=dict)
+
+    # Contrastive pairs: depth (str key) -> list of {pos_path, neg_path, pos_probs, neg_probs}
+    contrastive_pairs: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+    # Sampling thresholds used
+    sampling_config: dict[str, Any] = field(default_factory=dict)
+
+    def save(self, filepath: str) -> None:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load(cls, filepath: str) -> "MCTSResult":
+        with open(filepath, "r") as f:
+            return cls.from_dict(json.load(f))
+
+    @property
+    def total_pairs(self) -> int:
+        return sum(len(p) for p in self.contrastive_pairs.values())
+
+    @property
+    def depths_with_pairs(self) -> list[int]:
+        return sorted(
+            int(d) for d in self.contrastive_pairs if self.contrastive_pairs[d]
         )
 
 
@@ -699,8 +758,19 @@ class MCTSSearch:
             return
 
         connector = "└── " if is_last else "├── "
-        terminal_marker = " \\[TERMINAL]" if node.is_terminal else ""
         color_style = COLOR_STYLES.get(node.color, "white")
+
+        # Build the leaf suffix: full path text shown at leaf nodes (terminal or non-terminal)
+        is_leaf_node = node.is_leaf() and not node.is_root()
+        leaf_suffix = ""
+        if is_leaf_node:
+            path_text = node.get_path_text()
+            # Use repr to show \n, \t, etc. but strip the surrounding quotes
+            path_repr = repr(path_text)[1:-1]
+            if node.is_terminal:
+                leaf_suffix = f" [TERMINAL] ('{path_repr}')"
+            else:
+                leaf_suffix = f" ('{path_repr}')"
 
         if node.is_root():
             if show_colors and node.color:
@@ -714,20 +784,34 @@ class MCTSSearch:
                 lines.append(f"[ROOT] visits={node.visits}")
         else:
             if show_colors and node.color:
-                lines.append(
-                    f"{prefix}{connector}[{color_style}]{node.token_str!r}[/{color_style}] "
-                    f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
-                )
+                if is_leaf_node:
+                    # Escape brackets in leaf_suffix for rich markup
+                    safe_suffix = leaf_suffix.replace("[", "\\[")
+                    lines.append(
+                        f"{prefix}{connector}[{color_style}]{node.token_str!r}[/{color_style}] "
+                        f"[dim](p={node.prior:.3f}, v={node.visits}){safe_suffix}[/dim]"
+                    )
+                else:
+                    lines.append(
+                        f"{prefix}{connector}[{color_style}]{node.token_str!r}[/{color_style}] "
+                        f"[dim](p={node.prior:.3f}, v={node.visits})[/dim]"
+                    )
             elif show_colors:
-                lines.append(
-                    f"{prefix}{connector}{node.token_str!r} "
-                    f"[dim](p={node.prior:.3f}, v={node.visits}){terminal_marker}[/dim]"
-                )
+                if is_leaf_node:
+                    safe_suffix = leaf_suffix.replace("[", "\\[")
+                    lines.append(
+                        f"{prefix}{connector}{node.token_str!r} "
+                        f"[dim](p={node.prior:.3f}, v={node.visits}){safe_suffix}[/dim]"
+                    )
+                else:
+                    lines.append(
+                        f"{prefix}{connector}{node.token_str!r} "
+                        f"[dim](p={node.prior:.3f}, v={node.visits})[/dim]"
+                    )
             else:
-                tm = " [TERMINAL]" if node.is_terminal else ""
                 lines.append(
                     f"{prefix}{connector}{node.token_str!r} "
-                    f"(p={node.prior:.3f}, v={node.visits}){tm}"
+                    f"(p={node.prior:.3f}, v={node.visits}){leaf_suffix}"
                 )
 
         if node.children:
