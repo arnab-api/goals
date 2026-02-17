@@ -21,8 +21,11 @@ import random
 import sys
 from collections import Counter, defaultdict
 
-import numpy as np
-import torch
+# Must be set before importing torch so CUDA sees only the requested devices.
+# Overridden by --cuda_devices CLI arg in main().
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+
+import torch  # noqa: E402
 
 from src.functional import free_gpu_cache
 from src.goals.data import IncompleteCodeDataset
@@ -193,7 +196,7 @@ def run_or_load_mcts(
             )
             reuse_cached = True
         else:
-            print(f"\nWARNING: Found cached MCTS results with DIFFERENT config:")
+            print("\nWARNING: Found cached MCTS results with DIFFERENT config:")
             for d in diffs:
                 print(d)
             if args.force_rerun_mcts:
@@ -201,15 +204,12 @@ def run_or_load_mcts(
                 reuse_cached = False
             elif not args.ask_override_permission:
                 print(
-                    "--ask_override_permission=False. "
-                    "Overriding with current params."
+                    "--ask_override_permission=False. Overriding with current params."
                 )
                 reuse_cached = False
             else:
                 answer = (
-                    input("Reuse cached results anyway? [y/N/q(uit)]: ")
-                    .strip()
-                    .lower()
+                    input("Reuse cached results anyway? [y/N/q(uit)]: ").strip().lower()
                 )
                 if answer == "q":
                     print("Exiting.")
@@ -232,11 +232,11 @@ def run_or_load_mcts(
     all_results: list[MCTSResult] = []
 
     for prefill_idx, (prefill_val, prefill_type) in enumerate(prefills):
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(
             f"Prefill {prefill_idx}/{len(prefills)}: ({prefill_type}) {prefill_val!r}"
         )
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         prompt = prompts[prefill_idx]
         prefix = sample.code + prefill_val
@@ -307,9 +307,7 @@ def run_or_load_mcts(
         all_results.append(result)
 
         # 6) Save to disk
-        safe_prefill_name = (
-            prefill_val.replace(" ", "_").replace("/", "_") or "empty"
-        )
+        safe_prefill_name = prefill_val.replace(" ", "_").replace("/", "_") or "empty"
         result_path = os.path.join(
             mcts_dir, f"prefill_{prefill_idx}_{safe_prefill_name}.json"
         )
@@ -394,9 +392,7 @@ def collect_and_split_pairs(
         print(f"  Depth {d}: {depth_counts[d]} pairs")
 
     # --- 2) Tree/prefill-level train/test split ---
-    pairs_per_prefill: dict[int, int] = Counter(
-        r["prefill_idx"] for r in pair_records
-    )
+    pairs_per_prefill: dict[int, int] = Counter(r["prefill_idx"] for r in pair_records)
 
     prefill_type_to_indices: dict[str, list[int]] = defaultdict(list)
     for idx, result in enumerate(all_results):
@@ -467,10 +463,10 @@ def collect_and_split_pairs(
     test_idx = sorted([old_to_new[i] for i in test_idx])
 
     # --- Print split summary ---
-    print(f"\n{'='*60}")
-    print(f"Tree-level train/test split (no latent leakage)")
+    print(f"\n{'=' * 60}")
+    print("Tree-level train/test split (no latent leakage)")
     if unique_positive_sampling:
-        print(f"  + unique positive sampling (each pos node in 1 pair only)")
+        print("  + unique positive sampling (each pos node in 1 pair only)")
     if n_train_pairs is not None:
         print(f"  + train cap: {n_train_pairs} (from {n_train_before_cap} available)")
     else:
@@ -479,7 +475,7 @@ def collect_and_split_pairs(
         print(f"  + test cap:  {n_test_pairs} (from {n_test_before_cap} available)")
     else:
         print(f"  + test cap:  None (using all {n_test_before_cap} available)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print(f"Train prefills ({len(train_prefill_set)}):")
     for idx in sorted(train_prefill_set):
@@ -773,11 +769,11 @@ def save_results(
         json.dump(config, f, indent=2)
 
     print(f"\nSaved results to {save_dir}/")
-    print(f"  contrastive_directions.pt")
-    print(f"  mean_diff_directions.pt")
-    print(f"  contrastive_infos.json")
-    print(f"  accuracies.json")
-    print(f"  config.json")
+    print("  contrastive_directions.pt")
+    print("  mean_diff_directions.pt")
+    print("  contrastive_infos.json")
+    print("  accuracies.json")
+    print("  config.json")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -794,10 +790,10 @@ def process_sample(mt: ModelandTokenizer, sample, sample_idx: int, args):
     )
     mcts_dir = os.path.join(save_dir, "MCTS")
 
-    print(f"\n{'#'*70}")
+    print(f"\n{'#' * 70}")
     print(f"# Sample {sample_idx}: {sample.function_name or 'func'}")
     print(f"# Save dir: {save_dir}")
-    print(f"{'#'*70}")
+    print(f"{'#' * 70}")
 
     # --- Build prefills and prompts ---
     prefills = []
@@ -830,9 +826,7 @@ def process_sample(mt: ModelandTokenizer, sample, sample_idx: int, args):
     )
 
     if sum(r.total_pairs for r in all_results) == 0:
-        logger.error(
-            f"No contrastive pairs for sample {sample_idx}. Skipping."
-        )
+        logger.error(f"No contrastive pairs for sample {sample_idx}. Skipping.")
         return
 
     # --- 2) Collect pairs + train/test split ---
@@ -844,9 +838,7 @@ def process_sample(mt: ModelandTokenizer, sample, sample_idx: int, args):
     )
 
     if len(train_idx) == 0:
-        logger.error(
-            f"No training pairs for sample {sample_idx}. Skipping."
-        )
+        logger.error(f"No training pairs for sample {sample_idx}. Skipping.")
         return
 
     if len(test_idx) == 0:
@@ -1024,26 +1016,35 @@ def parse_args() -> argparse.Namespace:
 # Main
 # ══════════════════════════════════════════════════════════════════════
 def main():
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     args = parse_args()
     logging_utils.configure(args)
     experiment_utils.set_seed(42)
 
     # --- Print config ---
-    print(f"\n{'='*70}")
-    print(f"Goal Direction Extraction")
-    print(f"{'='*70}")
+    print(f"\n{'=' * 70}")
+    print("Goal Direction Extraction")
+    print(f"{'=' * 70}")
     print(f"Model:           {args.model_name}")
     print(f"Results dir:     {env_utils.DEFAULT_RESULTS_DIR}/{args.results_dir}")
-    print(f"MCTS:            iters={args.mcts_iterations}, depth={args.mcts_max_depth}, "
-          f"top_k={args.mcts_top_k}, threshold={args.mcts_prob_threshold}")
-    print(f"Contrastive:     l1={args.l1_lambda}, l2={args.l2_lambda}, "
-          f"margin={args.margin}, lr={args.lr}, steps={args.n_steps}")
-    print(f"Pairs:           train_cap={args.n_train_pairs}, test_cap={args.n_test_pairs}, "
-          f"unique_pos={args.unique_positive_sampling}")
-    print(f"Layers:          from={args.layer_from}, to={args.layer_to or 'n_layer'}, "
-          f"step={args.layer_step}")
+    print(
+        f"MCTS:            iters={args.mcts_iterations}, depth={args.mcts_max_depth}, "
+        f"top_k={args.mcts_top_k}, threshold={args.mcts_prob_threshold}"
+    )
+    print(
+        f"Contrastive:     l1={args.l1_lambda}, l2={args.l2_lambda}, "
+        f"margin={args.margin}, lr={args.lr}, steps={args.n_steps}"
+    )
+    print(
+        f"Pairs:           train_cap={args.n_train_pairs}, test_cap={args.n_test_pairs}, "
+        f"unique_pos={args.unique_positive_sampling}"
+    )
+    print(
+        f"Layers:          from={args.layer_from}, to={args.layer_to or 'n_layer'}, "
+        f"step={args.layer_step}"
+    )
     print(f"Batch size:      {args.batch_size}")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
 
     # --- Load model ---
     logger.info(f"Loading model: {args.model_name}")
@@ -1072,9 +1073,9 @@ def main():
         sample = eval_dataset[sample_idx]
         process_sample(mt=mt, sample=sample, sample_idx=sample_idx, args=args)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"All done! Processed {len(sample_indices)} samples.")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
 
 if __name__ == "__main__":

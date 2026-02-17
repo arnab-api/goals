@@ -118,3 +118,7 @@ When implementing new features (evals, utils, classes, etc.):
    from src.goals.data import IncompleteCodeDataset
    # ... etc
    ```
+
+## Known Issues / TODOs
+
+- **Steering coeff tuning is per-prefill**: In `scripts/test_causality.py`, the steering coefficient (`coeff`) is tuned independently per sample *and* per prefill. Ideally, a single `coeff` should work across prefills for a given sample (or across samples). This needs to be revisited — consider finding a shared `coeff` selection strategy.
