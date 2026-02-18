@@ -179,6 +179,13 @@ class MCTSSearch:
         prob_threshold: Minimum probability to consider a token (default: 0.03)
         stop_tokens: Additional stop strings beyond </code> (default: None)
         c_puct: Exploration constant for PUCT formula (default: 1.0)
+        temperature: Temperature for logit scaling before softmax (default: 1.0).
+            Values > 1.0 flatten the distribution, increasing branching diversity.
+        min_children_up_to_depth: Force at least `min_children` children for nodes
+            at depth <= this value, ignoring prob_threshold (default: 0, disabled).
+            With depth_first=True, all forced children are fully expanded.
+        min_children: Minimum children to force at shallow depths (default: 2).
+            Only active when min_children_up_to_depth > 0.
     """
 
     def __init__(
@@ -190,12 +197,18 @@ class MCTSSearch:
         prob_threshold: float = 0.03,
         stop_tokens: list[str] | None = None,
         c_puct: float = 1.0,
+        temperature: float = 1.0,
+        min_children_up_to_depth: int = 0,
+        min_children: int = 2,
     ):
         self.mt = mt
         self.max_depth = max_depth
         self.top_k = top_k
         self.prob_threshold = prob_threshold
         self.c_puct = c_puct
+        self.temperature = temperature
+        self.min_children_up_to_depth = min_children_up_to_depth
+        self.min_children = min_children
 
         # Process prompt
         if isinstance(prompt, str):
@@ -263,16 +276,24 @@ class MCTSSearch:
 
                 # Depth-first: keep expanding down the highest-prior path
                 if depth_first and children:
-                    current = children[0]  # Highest prior child (list is sorted)
-                    while not current.is_terminal and current.depth < self.max_depth:
-                        new_children = self._expand(current)
-                        if not new_children:
-                            break
-                        # Backprop from current before going deeper
+                    # At shallow depths with forced children, depth-first expand
+                    # ALL forced children so each gets a complete code path.
+                    if leaf.depth < self.min_children_up_to_depth:
+                        children_to_expand = children[: self.min_children]
+                    else:
+                        children_to_expand = children[:1]
+
+                    for child in children_to_expand:
+                        current = child
+                        while not current.is_terminal and current.depth < self.max_depth:
+                            new_children = self._expand(current)
+                            if not new_children:
+                                break
+                            # Backprop from current before going deeper
+                            self._backpropagate(current)
+                            current = new_children[0]
+                        # Final backprop from the deepest node
                         self._backpropagate(current)
-                        current = new_children[0]
-                    # Final backprop from the deepest node
-                    self._backpropagate(current)
                 else:
                     # BACKPROPAGATE: Update visits from leaf to root
                     self._backpropagate(leaf)
@@ -355,16 +376,25 @@ class MCTSSearch:
         with torch.no_grad():
             outputs = self.mt._model(context)
             logits = outputs.logits[0, -1, :]  # Last token logits
+            if self.temperature != 1.0:
+                logits = logits / self.temperature
             probs = F.softmax(logits, dim=-1)
 
         # Get top-k tokens above probability threshold
         top_probs, top_indices = torch.topk(probs, min(self.top_k * 2, probs.shape[0]))
 
+        # At shallow depths, force at least min_children regardless of prob_threshold
+        force_children = (
+            node.depth <= self.min_children_up_to_depth
+            and self.min_children > 0
+        )
+
         children = []
         for prob, token_id in zip(top_probs.tolist(), top_indices.tolist()):
-            # Filter by probability threshold
+            # Filter by probability threshold (relaxed if forcing children at shallow depth)
             if prob < self.prob_threshold:
-                break
+                if not force_children or len(children) >= self.min_children:
+                    break
 
             # Stop at top_k children
             if len(children) >= self.top_k:

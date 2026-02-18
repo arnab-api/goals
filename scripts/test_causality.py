@@ -21,10 +21,18 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from src.functional import PatchSpec, free_gpu_cache, generate_with_patch, get_hs  # noqa: E402
+from src.functional import (  # noqa: E402
+    PatchSpec,
+    free_gpu_cache,
+    generate_with_patch,
+    get_hs,
+)
 from src.goals.data import Code, CodeGenerations, IncompleteCodeDataset  # noqa: E402
 from src.goals.eval import run_evaluation  # noqa: E402
-from src.goals.functional import apply_chat_template, supports_chat_template  # noqa: E402
+from src.goals.functional import (  # noqa: E402
+    apply_chat_template,
+    supports_chat_template,
+)
 from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
@@ -38,6 +46,7 @@ logger = logging.getLogger(__name__)
 # This is not ideal — see CLAUDE.md "Known Issues / TODOs".
 # ──────────────────────────────────────────────────────────────────────
 PREFILLS = ["(3", "1 -", "5", "3 +"]
+# PREFILLS = ["1 -"]
 
 # Coefficient grid search range
 COEFF_GRID = list(np.arange(0.02, 0.21, 0.02))
@@ -76,8 +85,12 @@ def generate_and_evaluate(
     prompt: str,
     n_generations: int,
     patches: list[PatchSpec] | None = None,
-) -> float:
-    """Generate with optional patches and return pass rate."""
+    label: str = "",
+) -> CodeGenerations:
+    """Generate with optional patches, evaluate, and return the full CodeGenerations."""
+    logger.debug(
+        f"Generating {n_generations} samples{f' ({label})' if label else ''}..."
+    )
     outputs = generate_with_patch(
         mt=mt,
         inputs=prompt,
@@ -89,6 +102,7 @@ def generate_and_evaluate(
         remove_prefix=True,
         max_new_tokens=32,
     )
+    logger.debug(f"Generation done. Evaluating {len(outputs)} outputs...")
 
     generations = CodeGenerations(
         sample=sample,
@@ -109,7 +123,59 @@ def generate_and_evaluate(
         code_stop_tag="</code>",
     )
 
-    return eval_results.summary.pass_count / eval_results.summary.total
+    pass_rate = eval_results.summary.pass_count / eval_results.summary.total
+    logger.debug(
+        f"Evaluation done: {eval_results.summary.pass_count}/{eval_results.summary.total} "
+        f"passed ({pass_rate:.3f})"
+    )
+
+    return eval_results
+
+
+def log_steering_error(
+    e: Exception,
+    error_log_path: str,
+    model_name: str,
+    sample_idx: int,
+    prefill: str,
+    coeff: float,
+    layer_from: int,
+    layer_to: int,
+    direction_type: str,
+) -> None:
+    """Log a nnsight steering error with full config to errors.log and logger.error."""
+    import traceback as tb_module
+
+    error_config = {
+        "model": model_name,
+        "sample_idx": sample_idx,
+        "prefill": prefill,
+        "coeff": round(coeff, 6),
+        "layer_from": layer_from,
+        "layer_to": layer_to,
+        "direction_type": direction_type,
+        "error_type": type(e).__name__,
+        "error_message": str(e),
+    }
+
+    logger.error(
+        f"Steering error [{direction_type}] sample={sample_idx}, prefill={prefill!r}, "
+        f"coeff={coeff:.3f}, layers=({layer_from},{layer_to}): "
+        f"{type(e).__name__}: {e}"
+    )
+
+    os.makedirs(os.path.dirname(error_log_path), exist_ok=True)
+    with open(error_log_path, "a") as f:
+        f.write(json.dumps(error_config) + "\n")
+        f.write(tb_module.format_exc() + "\n---\n")
+
+
+def save_eval_table(eval_results: CodeGenerations, filepath: str) -> None:
+    """Save the generation-evaluation table as JSON."""
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w") as f:
+        json.dump(eval_results.to_dict(), f, indent=2)
+    logger.debug(f"Saved eval table to {filepath}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -119,33 +185,46 @@ def process_sample(
     mt: ModelandTokenizer,
     sample,
     sample_idx: int,
-    sample_dir: str,
+    goal_sample_dir: str,
+    results_sample_dir: str,
+    error_log_path: str,
     args,
 ) -> dict | None:
     """
     Run steering evaluation for one sample across all prefills and coefficients.
 
+    Args:
+        goal_sample_dir: Where to load directions from (goal_dir.py output).
+        results_sample_dir: Where to save causality results.
+
     Returns a results dict for this sample, or None if directions not found.
     """
     # --- Load directions ---
-    contrastive_path = os.path.join(sample_dir, "contrastive_directions.pt")
-    mean_diff_path = os.path.join(sample_dir, "mean_diff_directions.pt")
+    contrastive_path = os.path.join(goal_sample_dir, "contrastive_directions.pt")
+    mean_diff_path = os.path.join(goal_sample_dir, "mean_diff_directions.pt")
 
     if not os.path.exists(contrastive_path) or not os.path.exists(mean_diff_path):
         logger.warning(
-            f"Directions not found in {sample_dir}. Skipping sample {sample_idx}."
+            f"Directions not found in {goal_sample_dir}. Skipping sample {sample_idx}."
         )
         return None
 
+    logger.info(f"Loading contrastive directions from {contrastive_path}")
     contrastive_directions = torch.load(contrastive_path, weights_only=False)
+    logger.info(f"Loading mean-diff directions from {mean_diff_path}")
     mean_diff_directions = torch.load(mean_diff_path, weights_only=False)
 
     layer_from = args.layer_from
     layer_to = args.layer_to if args.layer_to is not None else mt.n_layer
+    logger.info(f"Steering layers: {layer_from} to {layer_to}")
+
+    os.makedirs(results_sample_dir, exist_ok=True)
 
     print(f"\n{'#' * 70}")
     print(f"# Sample {sample_idx}: {sample.function_name or 'func'}")
-    print(f"# Directions from: {sample_dir}")
+    print(f'"{sample.code}"')
+    print(f"# Directions from: {goal_sample_dir}")
+    print(f"# Results to:      {results_sample_dir}")
     print(f"# Layers: {layer_from} to {layer_to}")
     print(f"# Prefills: {PREFILLS}")
     print(f"# Coeff grid: {[round(c, 3) for c in COEFF_GRID]}")
@@ -160,7 +239,14 @@ def process_sample(
         "prefill_results": {},
     }
 
-    for prefill in PREFILLS:
+    for pfx_i, prefill in enumerate(PREFILLS):
+        safe_prefill = prefill.replace(" ", "_").replace("/", "_") or "empty"
+        prefill_dir = os.path.join(results_sample_dir, f"prefill_{safe_prefill}")
+        os.makedirs(prefill_dir, exist_ok=True)
+
+        logger.info(
+            f"Sample {sample_idx}, prefill {pfx_i + 1}/{len(PREFILLS)}: {prefill!r}"
+        )
         print(f"\n  Prefill: {prefill!r}")
         print(f"  {'-' * 50}")
 
@@ -175,33 +261,51 @@ def process_sample(
             prompt = sample.instruction + "<code>" + sample.code + prefill
 
         # --- Get original hidden states for scaling ---
+        logger.debug(f"Extracting hidden states for prefill {prefill!r}...")
         tokenized = prepare_input(prompts=prompt, tokenizer=mt)
         hs = get_hs(
             mt=mt,
             input=tokenized,
             locations=[
-                (mt.layer_name_format.format(l), -1)
-                for l in range(layer_from, layer_to)
+                (mt.layer_name_format.format(li), -1)
+                for li in range(layer_from, layer_to)
             ],
         )
 
         # --- Baseline (no steering) ---
-        baseline_pass_rate = generate_and_evaluate(
+        logger.info(f"Running baseline (no steering) for prefill {prefill!r}...")
+        baseline_eval = generate_and_evaluate(
             mt=mt,
             sample=sample,
             prefill=prefill,
             prompt=prompt,
             n_generations=args.n_generations,
             patches=None,
+            label="baseline",
         )
+        baseline_pass_rate = (
+            baseline_eval.summary.pass_count / baseline_eval.summary.total
+        )
+        logger.info(f"Baseline pass rate: {baseline_pass_rate:.3f}")
         print(f"    Baseline pass rate: {baseline_pass_rate:.3f}")
+
+        # Save baseline eval table
+        save_eval_table(baseline_eval, os.path.join(prefill_dir, "baseline.json"))
 
         # --- Grid search over coeff ---
         contrastive_by_coeff = {}
         mean_diff_by_coeff = {}
 
-        for coeff in COEFF_GRID:
+        logger.info(
+            f"Starting coeff grid search ({len(COEFF_GRID)} values) "
+            f"for prefill {prefill!r}..."
+        )
+        for coeff_i, coeff in enumerate(COEFF_GRID):
             coeff_key = f"{coeff:.3f}"
+            logger.info(
+                f"Coeff {coeff_i + 1}/{len(COEFF_GRID)}: {coeff_key} "
+                f"(prefill {prefill!r}, sample {sample_idx})"
+            )
 
             # Contrastive steering
             contrastive_patches = build_steer_patches(
@@ -212,15 +316,37 @@ def process_sample(
                 layer_to=layer_to,
                 coeff=coeff,
             )
-            contrastive_pass_rate = generate_and_evaluate(
-                mt=mt,
-                sample=sample,
-                prefill=prefill,
-                prompt=prompt,
-                n_generations=args.n_generations,
-                patches=contrastive_patches,
-            )
-            contrastive_by_coeff[coeff_key] = contrastive_pass_rate
+            try:
+                contrastive_eval = generate_and_evaluate(
+                    mt=mt,
+                    sample=sample,
+                    prefill=prefill,
+                    prompt=prompt,
+                    n_generations=args.n_generations,
+                    patches=contrastive_patches,
+                    label=f"contrastive coeff={coeff_key}",
+                )
+                contrastive_pass_rate = (
+                    contrastive_eval.summary.pass_count / contrastive_eval.summary.total
+                )
+                contrastive_by_coeff[coeff_key] = contrastive_pass_rate
+                save_eval_table(
+                    contrastive_eval,
+                    os.path.join(prefill_dir, f"contrastive_coeff_{coeff_key}.json"),
+                )
+            except Exception as e:
+                log_steering_error(
+                    e=e,
+                    error_log_path=error_log_path,
+                    model_name=args.model,
+                    sample_idx=sample_idx,
+                    prefill=prefill,
+                    coeff=coeff,
+                    layer_from=layer_from,
+                    layer_to=layer_to,
+                    direction_type="contrastive",
+                )
+                contrastive_pass_rate = None
 
             # Mean-diff steering
             mean_diff_patches = build_steer_patches(
@@ -231,60 +357,109 @@ def process_sample(
                 layer_to=layer_to,
                 coeff=coeff,
             )
-            mean_diff_pass_rate = generate_and_evaluate(
-                mt=mt,
-                sample=sample,
-                prefill=prefill,
-                prompt=prompt,
-                n_generations=args.n_generations,
-                patches=mean_diff_patches,
-            )
-            mean_diff_by_coeff[coeff_key] = mean_diff_pass_rate
+            try:
+                mean_diff_eval = generate_and_evaluate(
+                    mt=mt,
+                    sample=sample,
+                    prefill=prefill,
+                    prompt=prompt,
+                    n_generations=args.n_generations,
+                    patches=mean_diff_patches,
+                    label=f"mean_diff coeff={coeff_key}",
+                )
+                mean_diff_pass_rate = (
+                    mean_diff_eval.summary.pass_count / mean_diff_eval.summary.total
+                )
+                mean_diff_by_coeff[coeff_key] = mean_diff_pass_rate
+                save_eval_table(
+                    mean_diff_eval,
+                    os.path.join(prefill_dir, f"mean_diff_coeff_{coeff_key}.json"),
+                )
+            except Exception as e:
+                log_steering_error(
+                    e=e,
+                    error_log_path=error_log_path,
+                    model_name=args.model,
+                    sample_idx=sample_idx,
+                    prefill=prefill,
+                    coeff=coeff,
+                    layer_from=layer_from,
+                    layer_to=layer_to,
+                    direction_type="mean_diff",
+                )
+                mean_diff_pass_rate = None
 
             print(
                 f"    coeff={coeff:.3f}: "
-                f"contrastive={contrastive_pass_rate:.3f}, "
-                f"mean_diff={mean_diff_pass_rate:.3f}"
+                f"contrastive={'ERROR' if contrastive_pass_rate is None else f'{contrastive_pass_rate:.3f}'}, "
+                f"mean_diff={'ERROR' if mean_diff_pass_rate is None else f'{mean_diff_pass_rate:.3f}'}"
             )
 
         # --- Find best coeff for this prefill ---
-        best_contrastive_coeff = max(contrastive_by_coeff, key=contrastive_by_coeff.get)
-        best_mean_diff_coeff = max(mean_diff_by_coeff, key=mean_diff_by_coeff.get)
+        if contrastive_by_coeff:
+            best_contrastive_coeff = max(
+                contrastive_by_coeff, key=contrastive_by_coeff.get
+            )
+            best_contrastive_pass_rate = contrastive_by_coeff[best_contrastive_coeff]
+        else:
+            logger.warning(
+                f"All contrastive coeff runs errored for prefill {prefill!r}."
+            )
+            best_contrastive_coeff = None
+            best_contrastive_pass_rate = None
+
+        if mean_diff_by_coeff:
+            best_mean_diff_coeff = max(mean_diff_by_coeff, key=mean_diff_by_coeff.get)
+            best_mean_diff_pass_rate = mean_diff_by_coeff[best_mean_diff_coeff]
+        else:
+            logger.warning(f"All mean_diff coeff runs errored for prefill {prefill!r}.")
+            best_mean_diff_coeff = None
+            best_mean_diff_pass_rate = None
 
         prefill_result = {
             "baseline_pass_rate": baseline_pass_rate,
             "contrastive_by_coeff": contrastive_by_coeff,
             "mean_diff_by_coeff": mean_diff_by_coeff,
             "best_contrastive_coeff": best_contrastive_coeff,
-            "best_contrastive_pass_rate": contrastive_by_coeff[best_contrastive_coeff],
+            "best_contrastive_pass_rate": best_contrastive_pass_rate,
             "best_mean_diff_coeff": best_mean_diff_coeff,
-            "best_mean_diff_pass_rate": mean_diff_by_coeff[best_mean_diff_coeff],
+            "best_mean_diff_pass_rate": best_mean_diff_pass_rate,
         }
         sample_results["prefill_results"][prefill] = prefill_result
 
-        print(
-            f"    Best contrastive: coeff={best_contrastive_coeff}, "
-            f"pass_rate={contrastive_by_coeff[best_contrastive_coeff]:.3f}"
-        )
-        print(
-            f"    Best mean_diff:   coeff={best_mean_diff_coeff}, "
-            f"pass_rate={mean_diff_by_coeff[best_mean_diff_coeff]:.3f}"
-        )
+        if best_contrastive_pass_rate is not None:
+            print(
+                f"    Best contrastive: coeff={best_contrastive_coeff}, "
+                f"pass_rate={best_contrastive_pass_rate:.3f}"
+            )
+        else:
+            print("    Best contrastive: all runs errored.")
 
-    # --- Save per-sample results ---
-    results_path = os.path.join(sample_dir, "causality_results.json")
-    with open(results_path, "w") as f:
+        if best_mean_diff_pass_rate is not None:
+            print(
+                f"    Best mean_diff:   coeff={best_mean_diff_coeff}, "
+                f"pass_rate={best_mean_diff_pass_rate:.3f}"
+            )
+        else:
+            print("    Best mean_diff:   all runs errored.")
+
+    # --- Save aggregated per-sample results ---
+    sample_agg_path = os.path.join(results_sample_dir, "sample_results.json")
+    with open(sample_agg_path, "w") as f:
         json.dump(sample_results, f, indent=2)
-    print(f"\n  Saved per-sample results to {results_path}")
+    logger.info(f"Saved per-sample results to {sample_agg_path}")
+    print(f"\n  Saved per-sample results to {sample_agg_path}")
 
-    # --- Log aggregated summary for this sample ---
+    # --- Log summary for this sample ---
     print(f"\n  === Sample {sample_idx} Summary ===")
     for prefill, pr in sample_results["prefill_results"].items():
+        c_rate = pr["best_contrastive_pass_rate"]
+        m_rate = pr["best_mean_diff_pass_rate"]
         print(
             f"    {prefill!r:>8}: baseline={pr['baseline_pass_rate']:.3f}, "
-            f"contrastive={pr['best_contrastive_pass_rate']:.3f} "
+            f"contrastive={'ERROR' if c_rate is None else f'{c_rate:.3f}'} "
             f"(coeff={pr['best_contrastive_coeff']}), "
-            f"mean_diff={pr['best_mean_diff_pass_rate']:.3f} "
+            f"mean_diff={'ERROR' if m_rate is None else f'{m_rate:.3f}'} "
             f"(coeff={pr['best_mean_diff_coeff']})"
         )
 
@@ -312,6 +487,12 @@ def parse_args() -> argparse.Namespace:
         default="probe",
         help="Subdirectory under DEFAULT_RESULTS_DIR where goal directions are saved "
         "(i.e., the --results_dir used in goal_dir.py)",
+    )
+    parser.add_argument(
+        "--causality_results_dir",
+        type=str,
+        default="causality",
+        help="Subdirectory under DEFAULT_RESULTS_DIR for saving causality results",
     )
     parser.add_argument(
         "--layer_from",
@@ -354,40 +535,52 @@ def main():
     set_seed(42)
 
     model_short_name = args.model.split("/")[-1]
-    model_dir = os.path.join(
+
+    # Directory where goal directions were saved (by goal_dir.py)
+    goal_model_dir = os.path.join(
         env_utils.DEFAULT_RESULTS_DIR, args.goal_dir_path, model_short_name
     )
+    # Directory where causality results will be saved
+    results_model_dir = os.path.join(
+        env_utils.DEFAULT_RESULTS_DIR, args.causality_results_dir, model_short_name
+    )
+    os.makedirs(results_model_dir, exist_ok=True)
+
+    # Shared error log for nnsight/steering failures across all samples
+    error_log_path = os.path.join(results_model_dir, "errors.log")
 
     # --- Print config ---
     print(f"\n{'=' * 70}")
     print("Steering Causality Test")
     print(f"{'=' * 70}")
     print(f"Model:           {args.model}")
-    print(f"Goal dir:        {model_dir}")
+    print(f"Goal dir:        {goal_model_dir}")
+    print(f"Results dir:     {results_model_dir}")
     print(f"Layers:          {args.layer_from} to {args.layer_to or 'n_layer'}")
     print(f"N generations:   {args.n_generations}")
     print(f"Prefills:        {PREFILLS}")
     print(f"Coeff grid:      {[round(c, 3) for c in COEFF_GRID]}")
     print(f"{'=' * 70}\n")
 
-    # --- Discover sample directories ---
+    # --- Discover sample directories from goal_dir output ---
     if args.sample_indices is not None:
         sample_indices = args.sample_indices
     else:
-        # Auto-discover sample_* dirs
-        if not os.path.isdir(model_dir):
-            logger.error(f"Model directory not found: {model_dir}")
+        if not os.path.isdir(goal_model_dir):
+            logger.error(f"Goal model directory not found: {goal_model_dir}")
             sys.exit(1)
         sample_indices = sorted(
             int(d.split("_")[1])
-            for d in os.listdir(model_dir)
-            if d.startswith("sample_") and os.path.isdir(os.path.join(model_dir, d))
+            for d in os.listdir(goal_model_dir)
+            if d.startswith("sample_")
+            and os.path.isdir(os.path.join(goal_model_dir, d))
         )
 
     if not sample_indices:
-        logger.error(f"No sample directories found in {model_dir}")
+        logger.error(f"No sample directories found in {goal_model_dir}")
         sys.exit(1)
 
+    logger.info(f"Samples to process: {sample_indices}")
     print(f"Samples to process: {sample_indices}\n")
 
     # --- Load model ---
@@ -407,15 +600,21 @@ def main():
     # --- Process each sample ---
     all_sample_results = {}
 
-    for sample_idx in sample_indices:
+    for si, sample_idx in enumerate(sample_indices):
+        logger.info(
+            f"Processing sample {sample_idx} ({si + 1}/{len(sample_indices)})..."
+        )
         sample = eval_dataset[sample_idx]
-        sample_dir = os.path.join(model_dir, f"sample_{sample_idx}")
+        goal_sample_dir = os.path.join(goal_model_dir, f"sample_{sample_idx}")
+        results_sample_dir = os.path.join(results_model_dir, f"sample_{sample_idx}")
 
         result = process_sample(
             mt=mt,
             sample=sample,
             sample_idx=sample_idx,
-            sample_dir=sample_dir,
+            goal_sample_dir=goal_sample_dir,
+            results_sample_dir=results_sample_dir,
+            error_log_path=error_log_path,
             args=args,
         )
 
@@ -424,12 +623,14 @@ def main():
 
         # Free GPU cache between samples
         free_gpu_cache()
+        logger.info(f"GPU cache cleared after sample {sample_idx}.")
         print(f"GPU cache cleared after sample {sample_idx}.")
 
-    # --- Save aggregated results ---
-    aggregated_path = os.path.join(model_dir, "causality_results.json")
+    # --- Save aggregated model-level results ---
+    aggregated_path = os.path.join(results_model_dir, "causality_results.json")
     with open(aggregated_path, "w") as f:
         json.dump(all_sample_results, f, indent=2)
+    logger.info(f"Saved aggregated model-level results to {aggregated_path}")
     print(f"\nSaved aggregated results to {aggregated_path}")
 
     # --- Print final summary ---
@@ -439,14 +640,23 @@ def main():
     for sidx, sr in all_sample_results.items():
         print(f"\nSample {sidx} ({sr['function_name']}):")
         for prefill, pr in sr["prefill_results"].items():
-            delta_c = pr["best_contrastive_pass_rate"] - pr["baseline_pass_rate"]
-            delta_m = pr["best_mean_diff_pass_rate"] - pr["baseline_pass_rate"]
+            c_rate = pr["best_contrastive_pass_rate"]
+            m_rate = pr["best_mean_diff_pass_rate"]
+            baseline = pr["baseline_pass_rate"]
+            c_str = (
+                f"ERROR (coeff={pr['best_contrastive_coeff']})"
+                if c_rate is None
+                else f"{c_rate:.3f} ({c_rate - baseline:+.3f}, coeff={pr['best_contrastive_coeff']})"
+            )
+            m_str = (
+                f"ERROR (coeff={pr['best_mean_diff_coeff']})"
+                if m_rate is None
+                else f"{m_rate:.3f} ({m_rate - baseline:+.3f}, coeff={pr['best_mean_diff_coeff']})"
+            )
             print(
-                f"  {prefill!r:>8}: baseline={pr['baseline_pass_rate']:.3f} | "
-                f"contrastive={pr['best_contrastive_pass_rate']:.3f} "
-                f"({delta_c:+.3f}, coeff={pr['best_contrastive_coeff']}) | "
-                f"mean_diff={pr['best_mean_diff_pass_rate']:.3f} "
-                f"({delta_m:+.3f}, coeff={pr['best_mean_diff_coeff']})"
+                f"  {prefill!r:>8}: baseline={baseline:.3f} | "
+                f"contrastive={c_str} | "
+                f"mean_diff={m_str}"
             )
 
     print(f"\n{'=' * 70}")

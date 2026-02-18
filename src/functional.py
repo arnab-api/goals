@@ -424,7 +424,7 @@ def generate_with_patch(
                     if current_state.ndim == 2:
                         current_state = current_state.unsqueeze(0)
                     # print(
-                    #     f"Patching at {module_name}[{index}] >> {current_state.shape=} | {cur_patch.patch.shape=}"
+                    #     f"Patching at {module_name}[{index}] >> {current_state.shape=}, {current_state.norm()=}  | {cur_patch.patch.shape=}, {cur_patch.patch.norm()=}"
                     # )
                     if patch_strategy == "replace":
                         current_state[:, index, :] = cur_patch.patch
@@ -434,6 +434,7 @@ def generate_with_patch(
                         raise ValueError(
                             "patch_strategy must be one of 'replace', 'add'"
                         )
+                # print(f"{current_state.shape=}")
         gen_out = mt.generator.output.save()
 
     start = 0

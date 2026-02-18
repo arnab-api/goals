@@ -119,6 +119,14 @@ When implementing new features (evals, utils, classes, etc.):
    # ... etc
    ```
 
+## Design Decisions
+
+- **Contrastive pair negative class**: In contrastive sampling (`src/goals/probe.py`), both **orange** (compiles but tests fail) and **red** (syntax error / crash) leaf nodes are lumped together as "negative" (`p_red`). This means contrastive pairs can be (green, orange), (green, red), or (green, mixed). Whether to separate these is an open question — "compiles but wrong" may carry a different latent signal than "doesn't compile at all." See `claude_reports/mcts_contrastive_design.md` for full details.
+
 ## Known Issues / TODOs
 
 - **Steering coeff tuning is per-prefill**: In `scripts/test_causality.py`, the steering coefficient (`coeff`) is tuned independently per sample *and* per prefill. Ideally, a single `coeff` should work across prefills for a given sample (or across samples). This needs to be revisited — consider finding a shared `coeff` selection strategy.
+
+- **`terminal_only=True` may yield too few contrastive pairs**: With `terminal_only=True`, only genuine terminal nodes (EOS, `</code>`, newline, max_depth) are evaluated. Since branches stop at the first newline, most terminals produce single-line completions — orange nodes (compiles but fails) are rare because a one-liner must be syntactically valid and produce wrong output. If training/test pair counts are too low, consider reverting to `terminal_only=False` in `goal_dir.py` (accepting stub contamination as noise) or relaxing `max_uncertain` in `SAMPLING_CONFIG`.
+
+- **Intermittent `UnboundLocalError` in nnsight steering**: `generate_with_patch()` (via `nnsight`) occasionally raises `UnboundLocalError` for specific configs (observed: sample_idx=4, prefill="1 -", coeff=0.12, mean_diff directions, layers 40-50). The exact trigger is unclear — likely an nnsight implementation detail around lazy proxy resolution inside `gen_trace.all()`. Errors are captured and logged to `errors.log` in `scripts/test_causality.py`. **TODO**: Implement a baukit-based version of `generate_with_patch` to replicate and debug the issue outside of nnsight — baukit uses eager hooks and will give better control for tracing the root cause.

@@ -55,6 +55,14 @@ SAMPLING_CONFIG = dict(
     max_uncertain=0.5,
 )
 
+# MCTS diversity/exploration settings (not exposed as CLI args)
+MCTS_DIVERSITY_CONFIG = dict(
+    c_puct=1.0,
+    temperature=1.0,
+    min_children_up_to_depth=3,
+    min_children=2,
+)
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Contrastive direction training
@@ -168,6 +176,7 @@ def run_or_load_mcts(
         top_k=args.mcts_top_k,
         prob_threshold=args.mcts_prob_threshold,
         depth_first=args.depth_first,
+        **MCTS_DIVERSITY_CONFIG,
     )
 
     model_short_name = mt.name.split("/")[-1]
@@ -248,6 +257,7 @@ def run_or_load_mcts(
             max_depth=args.mcts_max_depth,
             top_k=args.mcts_top_k,
             prob_threshold=args.mcts_prob_threshold,
+            **MCTS_DIVERSITY_CONFIG,
         )
         root = search.run(
             n_iterations=args.mcts_iterations, depth_first=args.depth_first
@@ -259,7 +269,7 @@ def run_or_load_mcts(
             prefix=prefix,
             unit_tests=sample.unit_tests,
             function_name=function_name,
-            terminal_only=False,
+            terminal_only=True,
         )
         print(f"  Eval counts: {counts}")
 
@@ -764,6 +774,8 @@ def save_results(
         "mcts_prob_threshold": args.mcts_prob_threshold,
         "depth_first": args.depth_first,
         "sampling_config": SAMPLING_CONFIG,
+        "mcts_diversity_config": MCTS_DIVERSITY_CONFIG,
+        "terminal_only": True,
     }
     with open(os.path.join(save_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
@@ -935,8 +947,8 @@ def parse_args() -> argparse.Namespace:
 
     # --- MCTS ---
     parser.add_argument("--mcts_iterations", type=int, default=1500)
-    parser.add_argument("--mcts_max_depth", type=int, default=20)
-    parser.add_argument("--mcts_top_k", type=int, default=10)
+    parser.add_argument("--mcts_max_depth", type=int, default=32)
+    parser.add_argument("--mcts_top_k", type=int, default=8)
     parser.add_argument("--mcts_prob_threshold", type=float, default=0.01)
     parser.add_argument("--depth_first", action="store_true", default=True)
     parser.add_argument(
