@@ -72,13 +72,15 @@ def evaluate_single_code(
         try:
             with warnings.catch_warnings(record=True) as warning_records:
                 warnings.simplefilter("always")
-                actual = func(input_val)
+                #! need to do this weird str() conversion in case the func returns a builtin function
+                actual = str(func(input_val))
+                # actual = func(input_val)
             warnings_captured.extend(
                 f"{warning.category.__name__}: {warning.message}"
                 for warning in warning_records
             )
             test_result.actual = actual
-            test_result.passed = actual == expected
+            test_result.passed = actual == str(expected)
         except Exception as exc:
             test_result.error = f"{type(exc).__name__}: {exc}"
 
@@ -125,7 +127,7 @@ def run_evaluation(
         out = code_entry.lm_generation
         # Clean up the output
         if code_stop_tag:
-            # Fallback: most of our code is expected to end at the first newline
+            #! Fallback: most of our code is expected to end at the first newline
             cur_stop_tag = code_stop_tag if code_stop_tag in out else "\n"
             out = out.split(cur_stop_tag)[0].rstrip()
 
