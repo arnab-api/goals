@@ -889,6 +889,7 @@ class MCTSSearch:
 
             console = Console(
                 record=True,
+                highlight=False,
                 width=310,
                 force_jupyter=False,
                 file=open(_os.devnull, "w"),

@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────
 SAMPLING_CONFIG = dict(
     min_depth=1,
-    max_depth=10,
+    max_depth=16,
     min_green_confidence=0.5,
     max_red_in_positive=0.3,
     min_red_confidence=0.5,
@@ -82,9 +82,17 @@ def learn_contrastive_direction(
     Learn a goal direction via the contrastive objective.
 
     Minimizes:  lambda1*||v||_1 + lambda2*||v||_2^2 + (1/N) sum_i max(0, margin - v.(z+_i - z-_i))
+
+    z_pos and z_neg are L2-normalized per sample before training so that the margin
+    has a consistent geometric meaning across layers (raw activations vary greatly in norm).
     """
     device = z_pos.device
     hidden_dim = z_pos.shape[1]
+
+    # L2-normalize per sample: puts all activations on the unit sphere so the
+    # margin is a meaningful cosine-space threshold, not an artifact of activation scale.
+    z_pos = z_pos / z_pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    z_neg = z_neg / z_neg.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
     delta = z_pos - z_neg  # (n_pairs, hidden_dim)
 
@@ -274,6 +282,9 @@ def run_or_load_mcts(
         print(f"  Eval counts: {counts}")
 
         # 3) Sample contrastive pairs
+        SAMPLING_CONFIG["max_depth"] = min(
+            SAMPLING_CONFIG["max_depth"], args.mcts_max_depth
+        )
         pairs_by_depth = sample_multidepth_pairs(root=search.root, **SAMPLING_CONFIG)
         n_pairs = sum(len(p) for p in pairs_by_depth.values())
         print(f"  Contrastive pairs: {n_pairs}")
@@ -600,6 +611,17 @@ def train_directions(
 
     print(f"\nTraining mean-diff directions for {len(layers)} layers...")
     print(f"  Train pairs: {len(train_idx)}, Test pairs: {len(test_idx)}")
+
+    # L2-normalize all activation tensors per sample upfront so that margin,
+    # mean-diff, and accuracy evaluations are all in the same unit-sphere space.
+    Z_pos_by_layer = {
+        layer: z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        for layer, z in Z_pos_by_layer.items()
+    }
+    Z_neg_by_layer = {
+        layer: z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        for layer, z in Z_neg_by_layer.items()
+    }
 
     for layer_idx in layers:
         z_pos_l = Z_pos_by_layer[layer_idx]
