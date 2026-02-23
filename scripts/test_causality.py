@@ -581,7 +581,6 @@ def main():
         sys.exit(1)
 
     logger.info(f"Samples to process: {sample_indices}")
-    print(f"Samples to process: {sample_indices}\n")
 
     # --- Load model ---
     logger.info(f"Loading model: {args.model}")

@@ -286,16 +286,20 @@ def run_or_load_mcts(
             SAMPLING_CONFIG["max_depth"], args.mcts_max_depth
         )
         pairs_by_depth = sample_multidepth_pairs(root=search.root, **SAMPLING_CONFIG)
-        n_pairs = sum(len(p) for p in pairs_by_depth.values())
-        print(f"  Contrastive pairs: {n_pairs}")
+        n_pairs_per_depth = {d: len(p) for d, p in pairs_by_depth.items()}
+        logger.debug(f"  Raw Cartesian pairs per depth: {n_pairs_per_depth}")
 
-        # 4) Serialize contrastive pairs (MCTSNode -> text paths)
+        # 4) Serialize contrastive pairs (MCTSNode -> text paths + token-ID paths)
+        # Token-ID paths are stored so that LCA depth can be reconstructed later
+        # without needing the live tree (used by --unique_positive_sampling).
         serialized_pairs = {}
         for depth, pairs in pairs_by_depth.items():
             serialized_pairs[str(depth)] = [
                 {
                     "pos_path": pair.positive.get_path_text(),
                     "neg_path": pair.negative.get_path_text(),
+                    "pos_path_tokens": pair.positive.get_path_tokens(),
+                    "neg_path_tokens": pair.negative.get_path_tokens(),
                     "pos_probs": {
                         "green": pair.pos_probs.green,
                         "red": pair.pos_probs.red,
@@ -340,9 +344,9 @@ def run_or_load_mcts(
         )
         search.save_tree(tree_path, show_colors=True)
 
-    print(f"\nDone! Saved {len(all_results)} results to {mcts_dir}")
-    print(
-        f"Total contrastive pairs across all prefills: "
+    logger.info(f"Saved {len(all_results)} MCTS results to {mcts_dir}")
+    logger.debug(
+        f"Total raw Cartesian pairs across all prefills (before LCA reduction): "
         f"{sum(r.total_pairs for r in all_results)}"
     )
     return all_results
@@ -378,6 +382,8 @@ def collect_and_split_pairs(
                         "prefix": result.prefix,
                         "pos_path": pair["pos_path"],
                         "neg_path": pair["neg_path"],
+                        "pos_path_tokens": pair["pos_path_tokens"],
+                        "neg_path_tokens": pair["neg_path_tokens"],
                         "depth": int(depth_str),
                         "prefill_idx": prefill_idx,
                         "prefill": result.prefill,
@@ -385,27 +391,84 @@ def collect_and_split_pairs(
                     }
                 )
 
-    n_pairs_before_dedup = len(pair_records)
-    print(f"Total contrastive pair records (Cartesian product): {n_pairs_before_dedup}")
+    n_pairs_cartesian = len(pair_records)
+    print(f"Total contrastive pair records (Cartesian product): {n_pairs_cartesian}")
 
-    # --- 1b) Optional: unique positive sampling ---
+    # --- 1b) Optional: LCA-based unique positive sampling ---
+    # For each (prefill_idx, depth) bucket, pair each positive node with the negative
+    # node whose lowest common ancestor (LCA) with it is deepest — i.e. the two
+    # trajectories diverged as late as possible.  This gives cleaner contrastive pairs
+    # because the divergence point is a single token choice rather than an early fork.
+    #
+    # Negatives are used at most once per bucket (soft uniqueness): an unassigned
+    # negative is always preferred, but reuse is allowed when #pos > #neg.
     if unique_positive_sampling:
         random.seed(42)
-        pos_groups: dict[tuple[int, str], list[int]] = defaultdict(list)
-        for i, rec in enumerate(pair_records):
-            pos_groups[(rec["prefill_idx"], rec["pos_path"])].append(i)
 
-        keep_indices = sorted(random.choice(indices) for indices in pos_groups.values())
+        def _lca_depth(a: list[int], b: list[int]) -> int:
+            d = 0
+            for x, y in zip(a, b):
+                if x == y:
+                    d += 1
+                else:
+                    break
+            return d
+
+        # Build lookup: (prefill_idx, depth, pos_path, neg_path) -> record_index
+        pair_lookup: dict[tuple[int, int, str, str], int] = {
+            (rec["prefill_idx"], rec["depth"], rec["pos_path"], rec["neg_path"]): i
+            for i, rec in enumerate(pair_records)
+        }
+
+        # Collect unique pos/neg (path_text -> token_ids) per (prefill_idx, depth) bucket
+        pos_by_bucket: dict[tuple[int, int], dict[str, list[int]]] = defaultdict(dict)
+        neg_by_bucket: dict[tuple[int, int], dict[str, list[int]]] = defaultdict(dict)
+        for rec in pair_records:
+            bk = (rec["prefill_idx"], rec["depth"])
+            pos_by_bucket[bk][rec["pos_path"]] = rec["pos_path_tokens"]
+            neg_by_bucket[bk][rec["neg_path"]] = rec["neg_path_tokens"]
+
+        keep_indices = []
+        for bk in sorted(pos_by_bucket):
+            prefill_idx, depth = bk
+            pos_items = sorted(pos_by_bucket[bk].items())  # [(path, tokens), ...]
+            neg_items = sorted(neg_by_bucket[bk].items())
+            random.shuffle(pos_items)  # shuffle for unbiased assignment order
+
+            assigned_neg: set[str] = set()
+            for pos_path, pos_tokens in pos_items:
+                # Prefer an unassigned negative with max LCA depth
+                best_neg_path, best_lca = None, -1
+                for neg_path, neg_tokens in neg_items:
+                    if neg_path in assigned_neg:
+                        continue
+                    d = _lca_depth(pos_tokens, neg_tokens)
+                    if d > best_lca:
+                        best_lca, best_neg_path = d, neg_path
+
+                if best_neg_path is None:
+                    # All negatives used — allow reuse, still pick closest
+                    for neg_path, neg_tokens in neg_items:
+                        d = _lca_depth(pos_tokens, neg_tokens)
+                        if d > best_lca:
+                            best_lca, best_neg_path = d, neg_path
+
+                assigned_neg.add(best_neg_path)
+                keep_indices.append(
+                    pair_lookup[(prefill_idx, depth, pos_path, best_neg_path)]
+                )
+
+        keep_indices = sorted(keep_indices)
         pair_records = [pair_records[i] for i in keep_indices]
 
-        n_unique_pos = len(pos_groups)
+        n_total_pos = sum(len(v) for v in pos_by_bucket.values())
         print(
-            f"Unique positive sampling: {n_pairs_before_dedup} -> {len(pair_records)} pairs "
-            f"({n_unique_pos} unique positive nodes, "
-            f"{n_pairs_before_dedup / n_unique_pos:.1f}x avg Cartesian expansion)"
+            f"LCA-based unique positive sampling: {n_pairs_cartesian} -> {len(pair_records)} pairs "
+            f"({n_total_pos} unique positive nodes across all buckets, "
+            f"{n_pairs_cartesian / max(n_total_pos, 1):.1f}x avg Cartesian expansion)"
         )
 
-    print(f"Pair records after dedup: {len(pair_records)}")
+    print(f"Pair records after Cartesian reduction: {len(pair_records)}")
 
     # Show distribution by depth
     depth_counts = Counter(r["depth"] for r in pair_records)
@@ -487,7 +550,7 @@ def collect_and_split_pairs(
     print(f"\n{'=' * 60}")
     print("Tree-level train/test split (no latent leakage)")
     if unique_positive_sampling:
-        print("  + unique positive sampling (each pos node in 1 pair only)")
+        print("  + LCA-based unique positive sampling (closest negative per positive per depth bucket)")
     if n_train_pairs is not None:
         print(f"  + train cap: {n_train_pairs} (from {n_train_before_cap} available)")
     else:
@@ -513,7 +576,7 @@ def collect_and_split_pairs(
     print(f"\nTrain pairs: {len(train_idx)}, Test pairs: {len(test_idx)}")
     print(
         f"Total pairs for latent extraction: {len(pair_records)} "
-        f"(was {n_pairs_before_dedup} before filtering)"
+        f"(was {n_pairs_cartesian} before filtering)"
     )
     if len(test_idx) == 0:
         logger.error(
@@ -1008,7 +1071,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n_test_pairs",
         type=int,
-        default=None,
+        default=10_000,
         help="Max test pairs (None = all). Set to 0 for no cap.",
     )
 
