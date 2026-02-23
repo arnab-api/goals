@@ -4,12 +4,24 @@ Research codebase investigating whether LLMs pursue consistent intermediate goal
 
 ## Research Question
 
-When an LM performs a task like writing code, does it have consistent intermediate goals? For example, when writing control-flow logic like `if b&1 == 0`, does the LM "know" it's going to write this logic ahead of time, or is it figuring it out token by token?
+When an LM writes code, does it have a stable internal representation of *what it intends to do next* — independent of *how* it will do it?
+
+We distinguish three levels:
+```
+Broader goal:      implement the function correctly
+Instrumental goal: check whether the input is odd        ← target of this research
+Implementation:    n % 2 != 0   vs   n & 1 == 1   vs   not n % 2
+```
+
+The core question is whether there exists a linear direction in the model's hidden state that encodes the **instrumental goal** — firing consistently for "about to check parity" regardless of which specific implementation the model produces. If such a direction exists and causally influences generation, it suggests the model has pre-committed to a sub-goal before writing the tokens that realize it.
+
+This is distinct from a *competence* direction (predicting whether generation will succeed) — we want a direction that captures *intent*, not *skill*.
 
 **Key Research Directions:**
-- **Goals**: Do Code-LLMs pursue consistent goals during generation?
-- **Mining Goals**: Can we extract/identify these goals using interpretability techniques (following Schut et al.)?
-- **Superhuman Knowledge**: Does RLVR training allow models to discover non-conventional approaches?
+- **Goal representations**: Do Code-LLMs have stable hidden-state representations of instrumental sub-goals?
+- **Mining Goals**: Can we extract linear directions that capture goal intent, following Schut et al.?
+- **Causality**: Do these directions causally influence generation, or are they merely correlated with outcome?
+- **Generalization**: Does a direction trained on one context transfer to a different context involving the same sub-goal?
 
 ## Methodology: Prefill Probing
 

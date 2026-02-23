@@ -4,20 +4,42 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Research codebase investigating whether LLMs have consistent intermediate goals during code generation. The central question: when an LM writes code (like control-flow logic `if b&1 == 0`), does it know ahead of time what it's going to write, or is it figuring it out token by token?
+Research codebase investigating whether LLMs have consistent intermediate goals during code generation. The central question: when an LM writes code, does it have a stable internal representation of *what it intends to do next*, or is it figuring it out token by token?
+
+**Three-level goal hierarchy (important framing):**
+```
+Broader goal:      implement the function correctly
+Instrumental goal: check the timeout condition        ← the target of this research
+Implementation:    timeout > 0  vs  timeout >= 1  vs  int(timeout) > 0
+```
+The key claim: the LM may have a consistent hidden-state direction representing "I am pursuing instrumental goal G" that is **invariant to implementation strategy** — i.e., the direction fires for "about to check timeout" regardless of whether it writes `timeout > 0` or `timeout >= 1`. Implementation plasticity is noise; the instrumental goal representation is the signal.
 
 **Research Questions:**
-1. **Goals**: Do Code-LLMs pursue consistent intermediate goals during generation?
-2. **Mining Goals**: Can we replicate the goal-mining recipe from Schut et al.?
-3. **Superhuman Knowledge**: Does RLVR training allow models to explore non-conventional approaches?
+1. **Goals**: Do Code-LLMs have stable hidden-state representations of instrumental goals during generation?
+2. **Mining Goals**: Can we extract linear directions that capture "intent to pursue goal G" (not just "will succeed")?
+3. **Causality**: Do these directions causally influence generation, or are they merely correlated?
+4. **Generalization**: Does a direction trained on one context (e.g., timeout-check in `validate_config`) transfer to a different context involving the same sub-goal?
+
+**Critical distinction — goal direction vs competence direction:**
+A direction that predicts success (correct vs incorrect completion) may just capture model competence, not intent. The goal is to find directions that capture *which* instrumental goal is being pursued, separable from *whether* it will be executed correctly.
 
 ## Experimental Setup
 
-The core methodology uses **prefill probing**:
-- Simple code completion tasks with a unique correct solution (single goal)
-- Insert different "prefills" before generation and check if the LM adapts while still achieving the goal
-- Example: `def is_odd(n: int) -> bool: return True if ` with prefills like `1+`, `n &`, `not`, etc.
-- If the model adapts to different prefills while solving the task correctly, it suggests consistent goal pursuit
+The core methodology uses **prefill probing** with MCTS exploration:
+- Simple code completion tasks (single broader goal, multiple possible instrumental approaches)
+- MCTS explores the tree of possible continuations, labeling nodes green (correct) / orange (wrong) / red (crash)
+- Contrastive pairs are formed between positive (green-leading) and negative (red/orange-leading) nodes at the same depth
+- Hidden states at contrastive nodes are used to train linear "goal directions" (mean-diff and contrastive hinge loss)
+- Directions are tested causally: steering with the direction should shift generation toward correct completions
+
+**Example (current dataset):** `def is_odd(n: int) -> bool: return ` with prefills like `n &`, `n %`, `not`, `1+` — the model must adapt to different implementation constraints while still achieving the broader goal.
+
+**Proposed harder setup (multi-predicate ordering):**
+- Functions with multiple independent predicates (e.g., `validate_config(timeout, host, port)`)
+- At a pivot point, the LM chooses which predicate to implement first (A, B, or C)
+- All orderings are correct — contrast is "pursuing goal A" vs "pursuing goal B", not correct vs incorrect
+- Requires multi-class probe (or one-vs-rest directions) instead of binary positive/negative
+- Generalization test: does direction for "about to check non-empty string" transfer across different functions?
 
 ## Setup
 

@@ -210,9 +210,13 @@ def process_sample(
         return None
 
     logger.info(f"Loading contrastive directions from {contrastive_path}")
-    contrastive_directions = torch.load(contrastive_path, weights_only=False)
+    contrastive_directions = torch.load(
+        contrastive_path, weights_only=False, map_location="cuda:0"
+    )
     logger.info(f"Loading mean-diff directions from {mean_diff_path}")
-    mean_diff_directions = torch.load(mean_diff_path, weights_only=False)
+    mean_diff_directions = torch.load(
+        mean_diff_path, weights_only=False, map_location="cuda:0"
+    )
 
     layer_from = args.layer_from
     layer_to = args.layer_to if args.layer_to is not None else mt.n_layer
