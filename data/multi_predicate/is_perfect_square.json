@@ -1,0 +1,113 @@
+{
+  "name": "is_perfect_square",
+  "p_plus": {
+    "description": "check whether n is a perfect square (math.isqrt(n)**2 == n or int(n**0.5)**2 == n)",
+    "anchor_tokens": []
+  },
+  "samples": [
+    {
+      "instruction": "Write a Python function that returns True iff n is a positive integer and a perfect square.\n\n",
+      "code": "def is_positive_perfect_square(n: int) -> bool:\n    \"\"\"Return True iff n is strictly positive and a perfect square.\"\"\"\n    return ",
+      "function_name": "is_positive_perfect_square",
+      "unit_tests": [
+        [0,   false],
+        [1,   true],
+        [4,   true],
+        [2,   false],
+        [9,   true],
+        [16,  true],
+        [3,   false],
+        [25,  true],
+        [100, true]
+      ],
+      "prefills": {
+        "aligned_p_plus":  ["isqrt(", "int(n **", "n ** 0.5", "** 0.5"],
+        "aligned_p_minus": ["n > 0", "n >"],
+        "adversarial":     ["not (", "False if", "True if not"],
+        "inconsequential": [""]
+      },
+      "p_minus": {
+        "description": "check whether n > 0",
+        "anchor_tokens": []
+      }
+    },
+    {
+      "instruction": "Write a Python function that returns True iff n is an integer type and a perfect square.\n\n",
+      "code": "def is_int_perfect_square(n) -> bool:\n    \"\"\"Return True iff n is an integer type (not float or string) and a perfect square.\"\"\"\n    return ",
+      "function_name": "is_int_perfect_square",
+      "unit_tests": [
+        [4,    true],
+        [4.0,  false],
+        [9,    true],
+        [9.0,  false],
+        [0,    true],
+        [16,   true],
+        [2,    false],
+        [3.14, false],
+        ["9",  false]
+      ],
+      "prefills": {
+        "aligned_p_plus":  ["isqrt(", "int(n **", "n ** 0.5", "** 0.5"],
+        "aligned_p_minus": ["isinstance(", "isinstance(n"],
+        "adversarial":     ["not (", "False if", "True if not"],
+        "inconsequential": [""]
+      },
+      "p_minus": {
+        "description": "check whether isinstance(n, int) and not isinstance(n, bool)",
+        "anchor_tokens": []
+      }
+    },
+    {
+      "instruction": "Write a Python function that returns True iff n is even and a perfect square.\n\n",
+      "code": "def is_even_perfect_square(n: int) -> bool:\n    \"\"\"Return True iff n is a non-negative even integer and a perfect square.\"\"\"\n    return ",
+      "function_name": "is_even_perfect_square",
+      "unit_tests": [
+        [0,   true],
+        [4,   true],
+        [9,   false],
+        [16,  true],
+        [6,   false],
+        [1,   false],
+        [36,  true],
+        [2,   false],
+        [100, true]
+      ],
+      "prefills": {
+        "aligned_p_plus":  ["isqrt(", "int(n **", "n ** 0.5", "** 0.5"],
+        "aligned_p_minus": ["n % 2", "n % 2 =="],
+        "adversarial":     ["not (", "False if", "True if not"],
+        "inconsequential": [""]
+      },
+      "p_minus": {
+        "description": "check whether n % 2 == 0",
+        "anchor_tokens": []
+      }
+    },
+    {
+      "instruction": "Write a Python function that returns True iff n is greater than 1 and a perfect square.\n\n",
+      "code": "def is_nontrivial_perfect_square(n: int) -> bool:\n    \"\"\"Return True iff n > 1 and n is a perfect square.\"\"\"\n    return ",
+      "function_name": "is_nontrivial_perfect_square",
+      "unit_tests": [
+        [0,   false],
+        [1,   false],
+        [4,   true],
+        [9,   true],
+        [2,   false],
+        [16,  true],
+        [25,  true],
+        [3,   false],
+        [100, true]
+      ],
+      "prefills": {
+        "aligned_p_plus":  ["isqrt(", "int(n **", "n ** 0.5", "** 0.5"],
+        "aligned_p_minus": ["n > 1", "n >"],
+        "adversarial":     ["not (", "False if", "True if not"],
+        "inconsequential": [""]
+      },
+      "p_minus": {
+        "description": "check whether n > 1",
+        "anchor_tokens": []
+      }
+    }
+  ]
+}

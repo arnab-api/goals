@@ -1,4 +1,6 @@
+import json
 import logging
+import pathlib
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -563,3 +565,441 @@ def clear_mcts_colors(root: "MCTSNode") -> None:
     root.eval_result = None
     for child in root.children:
         clear_mcts_colors(child)
+
+
+# ── Multi-predicate dataset evaluation ───────────────────────────────────────
+
+import io as _io
+
+from src.goals.predicate_data import MultiPredicateDataset, MultiPredicateSample  # noqa: E402
+
+_PREFILL_ORDER = ["aligned_p_plus", "aligned_p_minus", "adversarial", "inconsequential"]
+
+
+def _sorted_ptypes(ptypes: "list[str]") -> list[str]:
+    known = [p for p in _PREFILL_ORDER if p in ptypes]
+    rest = sorted(p for p in ptypes if p not in _PREFILL_ORDER)
+    return known + rest
+
+
+def _pct(numerator: int, denominator: int) -> str:
+    if denominator == 0:
+        return "–"
+    return f"{100 * numerator / denominator:.1f}%"
+
+
+def _blank_accum() -> dict:
+    return {"pass": 0, "total": 0, "by_prefill_type": {}}
+
+
+def _merge_into(accum: dict, source: dict) -> None:
+    """Add source pass/total into accum in-place; merge by_prefill_type."""
+    accum["pass"] += source["pass"]
+    accum["total"] += source["total"]
+    for ptype, data in source.get("by_prefill_type", {}).items():
+        if ptype not in accum["by_prefill_type"]:
+            accum["by_prefill_type"][ptype] = {"pass": 0, "total": 0}
+        accum["by_prefill_type"][ptype]["pass"] += data["pass"]
+        accum["by_prefill_type"][ptype]["total"] += data["total"]
+
+
+def _finalise(accum: dict) -> dict:
+    """Compute pass_rate fields from accumulated pass/total counts."""
+    accum["pass_rate"] = accum["pass"] / accum["total"] if accum["total"] else 0.0
+    for v in accum["by_prefill_type"].values():
+        v["pass_rate"] = v["pass"] / v["total"] if v["total"] else 0.0
+    return accum
+
+
+def _aggregate_code_gen(code_gen: CodeGenerations) -> dict:
+    """
+    Summarise all evaluated completions in one CodeGenerations object.
+
+    Each Code entry must already have an eval payload (i.e. run_evaluation()
+    was called beforehand). Entries without eval are skipped with a warning.
+
+    Each result entry stores full per-completion detail for use at the
+    ``"sample"`` verbosity level of ``_print_multi_predicate_report``.
+
+    Returns:
+        {pass, total, pass_rate,
+         by_prefill_type: {type: {pass, total, pass_rate, results: [
+             {prefill, lm_generation, verdict, passed,
+              unit_test_results: [{input, expected, actual, passed, error}],
+              warnings, error_message}
+         ]}}}
+    """
+    by_type: dict[str, dict] = {}
+    total_pass, total_count = 0, 0
+
+    for code in code_gen.generations:
+        if code.eval is None:
+            logger.warning(
+                f"Generation (prefill='{code.prefill}') has no eval payload; "
+                "call run_evaluation() on each CodeGenerations before passing to "
+                "evaluate_multi_predicate_dataset()."
+            )
+            continue
+        ptype = code.prefill_type or "unknown"
+        if ptype not in by_type:
+            by_type[ptype] = {"pass": 0, "total": 0, "results": []}
+        passed = code.eval.verdict == "PASSED"
+        by_type[ptype]["pass"] += int(passed)
+        by_type[ptype]["total"] += 1
+        by_type[ptype]["results"].append(
+            {
+                "prefill": code.prefill or "",
+                "lm_generation": code.lm_generation or "",
+                "verdict": code.eval.verdict,
+                "passed": passed,
+                "unit_test_results": [
+                    {
+                        "input": t.input,
+                        "expected": t.expected,
+                        "actual": t.actual,
+                        "passed": t.passed,
+                        "error": t.error,
+                    }
+                    for t in (code.eval.unit_test_results or [])
+                ],
+                "warnings": code.eval.warnings or [],
+                "error_message": code.eval.error_message,
+            }
+        )
+        total_pass += int(passed)
+        total_count += 1
+
+    for v in by_type.values():
+        v["pass_rate"] = v["pass"] / v["total"] if v["total"] else 0.0
+
+    return {
+        "pass": total_pass,
+        "total": total_count,
+        "pass_rate": total_pass / total_count if total_count else 0.0,
+        "by_prefill_type": by_type,
+    }
+
+
+def evaluate_multi_predicate_dataset(
+    generations: "list[list[CodeGenerations]]",
+    dataset: MultiPredicateDataset,
+    save_json: "str | pathlib.Path | None" = None,
+) -> dict:
+    """
+    Aggregate LM performance across a MultiPredicateDataset.
+
+    Computes the report dict only — display and file saving are handled
+    separately by ``_print_multi_predicate_report``.
+
+    Args:
+        generations: Nested list ``[group_idx][sample_idx]`` of CodeGenerations,
+                     each already passed through ``run_evaluation()``.
+                     Must match the structure of ``dataset.groups``.
+        dataset:     The corresponding MultiPredicateDataset (supplies P+/P- metadata).
+        save_json:   If given, write the full report as JSON to this path.
+
+    Returns:
+        Report dict with structure::
+
+            {
+              "overall":  {pass, total, pass_rate, by_prefill_type},
+              "by_group": {group_name: {pass, total, pass_rate}},
+              "groups": [
+                {
+                  "name", "p_plus",
+                  "pass", "total", "pass_rate", "by_prefill_type",
+                  "samples": [
+                    {
+                      "function_name", "p_minus",
+                      "pass", "total", "pass_rate",
+                      "by_prefill_type": {
+                        type: {pass, total, pass_rate, results: [
+                          {prefill, lm_generation, verdict, passed,
+                           unit_test_results, warnings, error_message}
+                        ]}
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+    """
+    if len(generations) != len(dataset.groups):
+        raise ValueError(
+            f"generations has {len(generations)} group(s) but "
+            f"dataset has {len(dataset.groups)} group(s)"
+        )
+
+    overall_accum = _blank_accum()
+    group_entries: list[dict] = []
+
+    for group, group_gens in zip(dataset.groups, generations):
+        if len(group_gens) != len(group.samples):
+            raise ValueError(
+                f"Group '{group.name}': {len(group_gens)} CodeGenerations provided "
+                f"but group has {len(group.samples)} sample(s)"
+            )
+
+        group_accum = _blank_accum()
+        sample_entries: list[dict] = []
+
+        for sample, code_gen in zip(group.samples, group_gens):
+            metrics = _aggregate_code_gen(code_gen)
+            _merge_into(group_accum, metrics)
+
+            p_minus_desc = (
+                sample.p_minus.description
+                if isinstance(sample, MultiPredicateSample) and sample.p_minus
+                else (sample.function_name or "?")
+            )
+            sample_entries.append(
+                {
+                    "function_name": sample.function_name or "",
+                    "p_minus": p_minus_desc,
+                    "pass": metrics["pass"],
+                    "total": metrics["total"],
+                    "pass_rate": metrics["pass_rate"],
+                    "by_prefill_type": metrics["by_prefill_type"],
+                }
+            )
+
+        _finalise(group_accum)
+        _merge_into(overall_accum, group_accum)
+
+        group_entries.append(
+            {
+                "name": group.name,
+                "p_plus": group.p_plus.description if group.p_plus else "",
+                "pass": group_accum["pass"],
+                "total": group_accum["total"],
+                "pass_rate": group_accum["pass_rate"],
+                "by_prefill_type": group_accum["by_prefill_type"],
+                "samples": sample_entries,
+            }
+        )
+
+    _finalise(overall_accum)
+
+    report = {
+        "overall": overall_accum,
+        "by_group": {
+            g["name"]: {
+                "pass": g["pass"],
+                "total": g["total"],
+                "pass_rate": g["pass_rate"],
+            }
+            for g in group_entries
+        },
+        "groups": group_entries,
+    }
+
+    if save_json is not None:
+        p = pathlib.Path(save_json)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w") as f:
+            json.dump(report, f, indent=2)
+        logger.info(f"JSON report saved to {p}")
+
+    return report
+
+
+def _print_multi_predicate_report(
+    report: dict,
+    level: str = "predicate",
+    save_txt: "str | pathlib.Path | None" = None,
+    show: bool = True,
+) -> None:
+    """
+    Render a multi-predicate evaluation report as rich tables.
+
+    Args:
+        report:    Dict returned by ``evaluate_multi_predicate_dataset()``.
+        level:     Verbosity level — one of:
+
+                   ``"summary"``
+                       Least verbose. Only the two aggregate tables:
+                       Overall Summary (by target predicate) and
+                       Performance by Prefill Type.
+
+                   ``"predicate"``  *(default)*
+                       Per-predicate aggregation tables (P- companions ×
+                       prefill types, with subtotals and group totals)
+                       followed by the summary tables.
+
+                   ``"sample"``
+                       Most verbose. Before each predicate table, shows
+                       one detailed table per MultiPredicateSample with
+                       per-completion rows: prefill type, completed logic,
+                       verdict, and notes (failing unit tests / compile
+                       errors / warnings).
+
+        save_txt:  If given, write the rendered output as plain text to
+                   this path.  Directory is created if it does not exist.
+        show:      If ``True`` *(default)*, print to stdout (captured by
+                   Jupyter as cell output).  If ``False``, output is only
+                   written to ``save_txt`` (requires ``save_txt`` to be set).
+    """
+    if level not in ("summary", "predicate", "sample"):
+        raise ValueError(f"level must be 'summary', 'predicate', or 'sample'; got {level!r}")
+    if not show and save_txt is None:
+        logger.warning("_print_multi_predicate_report: show=False but no save_txt given — nothing will be output.")
+        return
+
+    # Route output: show=True → stdout (captured by Jupyter), show=False → silent buffer.
+    # force_jupyter=False is required: without it, Rich detects the Jupyter kernel and
+    # routes output through IPython.display.display(), which bypasses `file` entirely
+    # and always appears in the cell regardless of what file we pass.
+    console = Console(
+        record=True,
+        highlight=False,
+        width=220,
+        force_jupyter=False,
+        file=None if show else _io.StringIO(),
+    )
+
+    # ── Sample-level detail ───────────────────────────────────────────────────
+    if level == "sample":
+        for group in report["groups"]:
+            console.rule(f"[bold]{group['name']}[/bold]  [dim](sample detail)[/dim]")
+            console.print(f"[dim]P+:[/dim] {group['p_plus']}")
+            console.print()
+
+            for sample in group["samples"]:
+                console.print(
+                    f"[bold]{sample['function_name']}[/bold]"
+                    f"  [dim]P-:[/dim] {sample['p_minus']}"
+                )
+                tbl = Table(show_lines=True, header_style="bold magenta", expand=False)
+                tbl.add_column("Prefill Type", style="white", min_width=18)
+                tbl.add_column("Logic", style="white", min_width=44, overflow="fold")
+                tbl.add_column("Verdict", min_width=10)
+                tbl.add_column("Notes", style="dim", min_width=36, overflow="fold")
+
+                for ptype in _sorted_ptypes(list(sample["by_prefill_type"].keys())):
+                    for res in sample["by_prefill_type"][ptype]["results"]:
+                        logic = f'[yellow]{res["prefill"]}[/yellow]{res["lm_generation"]}'
+                        if res["verdict"] == "PASSED":
+                            verdict_str = "[bright_green]PASSED[/bright_green]"
+                            notes = ""
+                        else:
+                            verdict_str = f"[bright_red]{res['verdict']}[/bright_red]"
+                            note_parts = []
+                            if res.get("error_message"):
+                                note_parts.append(f"[red]{res['error_message']}[/red]")
+                            for t in res.get("unit_test_results", []):
+                                if t.get("error"):
+                                    note_parts.append(f"[red]input={t['input']} raised {t['error']}[/red]")
+                                elif not t.get("passed"):
+                                    note_parts.append(
+                                        f"input={t['input']} → got {t['actual']}, expected {t['expected']}"
+                                    )
+                            for w in res.get("warnings", []):
+                                note_parts.append(f"[yellow]{w}[/yellow]")
+                            notes = "\n".join(note_parts)
+
+                        tbl.add_row(ptype, logic, verdict_str, notes)
+
+                console.print(tbl)
+                console.print()
+
+    # ── Predicate-level aggregation ───────────────────────────────────────────
+    if level in ("predicate", "sample"):
+        for group in report["groups"]:
+            console.rule(f"[bold]{group['name']}[/bold]")
+            console.print(f"[dim]P+:[/dim] {group['p_plus']}")
+            console.print()
+
+            tbl = Table(show_lines=True, header_style="bold cyan", expand=False)
+            tbl.add_column("P- Companion", style="white", min_width=32)
+            tbl.add_column("Prefill Type", style="white", min_width=20)
+            tbl.add_column("Pass", justify="right", style="green", min_width=6)
+            tbl.add_column("Total", justify="right", min_width=6)
+            tbl.add_column("Pass Rate", justify="right", min_width=10)
+
+            for sample in group["samples"]:
+                by_type = sample["by_prefill_type"]
+                ptypes = _sorted_ptypes(list(by_type.keys()))
+                first = True
+                for ptype in ptypes:
+                    data = by_type[ptype]
+                    tbl.add_row(
+                        sample["p_minus"] if first else "",
+                        ptype,
+                        str(data["pass"]),
+                        str(data["total"]),
+                        _pct(data["pass"], data["total"]),
+                    )
+                    first = False
+                tbl.add_row(
+                    "",
+                    "[dim]── subtotal ──[/dim]",
+                    f"[bold]{sample['pass']}[/bold]",
+                    f"[bold]{sample['total']}[/bold]",
+                    f"[bold]{_pct(sample['pass'], sample['total'])}[/bold]",
+                )
+
+            tbl.add_row(
+                "[bold]GROUP TOTAL[/bold]",
+                "",
+                f"[bold cyan]{group['pass']}[/bold cyan]",
+                f"[bold cyan]{group['total']}[/bold cyan]",
+                f"[bold cyan]{_pct(group['pass'], group['total'])}[/bold cyan]",
+            )
+            console.print(tbl)
+            console.print()
+
+    # ── Overall summary ───────────────────────────────────────────────────────
+    console.rule("[bold]Overall Summary[/bold]")
+    console.print()
+
+    summary_tbl = Table(show_lines=True, header_style="bold cyan", expand=False)
+    summary_tbl.add_column("Target Predicate", style="white", min_width=24)
+    summary_tbl.add_column("Pass", justify="right", style="green", min_width=6)
+    summary_tbl.add_column("Total", justify="right", min_width=6)
+    summary_tbl.add_column("Pass Rate", justify="right", min_width=10)
+
+    for group in report["groups"]:
+        summary_tbl.add_row(
+            group["name"],
+            str(group["pass"]),
+            str(group["total"]),
+            _pct(group["pass"], group["total"]),
+        )
+
+    ov = report["overall"]
+    summary_tbl.add_row(
+        "[bold]OVERALL[/bold]",
+        f"[bold cyan]{ov['pass']}[/bold cyan]",
+        f"[bold cyan]{ov['total']}[/bold cyan]",
+        f"[bold cyan]{_pct(ov['pass'], ov['total'])}[/bold cyan]",
+    )
+    console.print(summary_tbl)
+    console.print()
+
+    # ── By-prefill-type summary ───────────────────────────────────────────────
+    console.rule("[bold]Performance by Prefill Type[/bold]")
+    console.print()
+
+    ptype_tbl = Table(show_lines=True, header_style="bold cyan", expand=False)
+    ptype_tbl.add_column("Prefill Type", style="white", min_width=22)
+    ptype_tbl.add_column("Pass", justify="right", style="green", min_width=6)
+    ptype_tbl.add_column("Total", justify="right", min_width=6)
+    ptype_tbl.add_column("Pass Rate", justify="right", min_width=10)
+
+    for ptype in _sorted_ptypes(list(ov["by_prefill_type"].keys())):
+        data = ov["by_prefill_type"][ptype]
+        ptype_tbl.add_row(
+            ptype,
+            str(data["pass"]),
+            str(data["total"]),
+            _pct(data["pass"], data["total"]),
+        )
+    console.print(ptype_tbl)
+
+    # ── Save to file ──────────────────────────────────────────────────────────
+    if save_txt is not None:
+        p = pathlib.Path(save_txt)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w") as f:
+            f.write(console.export_text())
+        logger.info(f"Plain-text report saved to {p}")
