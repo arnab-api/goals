@@ -54,11 +54,18 @@ class TargetPredicate(DataClassJsonMixin):
     One TargetPredicate corresponds to one .json file in data/multi_predicate/.
     The file is named after the predicate (e.g., is_palindrome.json) and that
     stem is stored in `name`.
+
+    _source_path is set automatically when loaded via TargetPredicate.load() and
+    is used by save() to write back to the same file.  It is not serialized.
     """
 
     p_plus: PredicateSpec
     samples: list[MultiPredicateSample] = field(default_factory=list)
     name: str = ""
+
+    def __post_init__(self) -> None:
+        # Not a dataclass field — never serialized to JSON.
+        self._source_path: pathlib.Path | None = None
 
     @staticmethod
     def load(path: PathLike) -> "TargetPredicate":
@@ -68,10 +75,29 @@ class TargetPredicate(DataClassJsonMixin):
         tp = TargetPredicate.from_dict(data)
         if not tp.name:
             tp.name = path.stem
+        tp._source_path = path.resolve()
         logger.info(
             f"Loaded TargetPredicate '{tp.name}' with {len(tp.samples)} sample(s) from {path}"
         )
         return tp
+
+    def save(self, path: PathLike | None = None) -> None:
+        """Write this TargetPredicate back to disk as JSON.
+
+        Args:
+            path: Destination file.  If omitted, overwrites the file it was
+                  loaded from.  Raises ValueError if no path is available.
+        """
+        target = pathlib.Path(path) if path is not None else self._source_path
+        if target is None:
+            raise ValueError(
+                "No save path available.  Either pass path= explicitly or "
+                "load the TargetPredicate from a file first."
+            )
+        with open(target, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        self._source_path = target.resolve()
+        logger.info(f"Saved TargetPredicate '{self.name}' to {target}")
 
     def __len__(self) -> int:
         return len(self.samples)

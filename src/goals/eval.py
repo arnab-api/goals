@@ -571,7 +571,10 @@ def clear_mcts_colors(root: "MCTSNode") -> None:
 
 import io as _io
 
-from src.goals.predicate_data import MultiPredicateDataset, MultiPredicateSample  # noqa: E402
+from src.goals.predicate_data import (  # noqa: E402
+    MultiPredicateDataset,
+    MultiPredicateSample,
+)
 
 _PREFILL_ORDER = ["aligned_p_plus", "aligned_p_minus", "adversarial", "inconsequential"]
 
@@ -840,9 +843,13 @@ def _print_multi_predicate_report(
                    written to ``save_txt`` (requires ``save_txt`` to be set).
     """
     if level not in ("summary", "predicate", "sample"):
-        raise ValueError(f"level must be 'summary', 'predicate', or 'sample'; got {level!r}")
+        raise ValueError(
+            f"level must be 'summary', 'predicate', or 'sample'; got {level!r}"
+        )
     if not show and save_txt is None:
-        logger.warning("_print_multi_predicate_report: show=False but no save_txt given — nothing will be output.")
+        logger.warning(
+            "_print_multi_predicate_report: show=False but no save_txt given — nothing will be output."
+        )
         return
 
     # Route output: show=True → stdout (captured by Jupyter), show=False → silent buffer.
@@ -877,7 +884,9 @@ def _print_multi_predicate_report(
 
                 for ptype in _sorted_ptypes(list(sample["by_prefill_type"].keys())):
                     for res in sample["by_prefill_type"][ptype]["results"]:
-                        logic = f'[yellow]{res["prefill"]}[/yellow]{res["lm_generation"]}'
+                        logic = (
+                            f"[yellow]{res['prefill']}[/yellow]{res['lm_generation']}"
+                        )
                         if res["verdict"] == "PASSED":
                             verdict_str = "[bright_green]PASSED[/bright_green]"
                             notes = ""
@@ -888,7 +897,9 @@ def _print_multi_predicate_report(
                                 note_parts.append(f"[red]{res['error_message']}[/red]")
                             for t in res.get("unit_test_results", []):
                                 if t.get("error"):
-                                    note_parts.append(f"[red]input={t['input']} raised {t['error']}[/red]")
+                                    note_parts.append(
+                                        f"[red]input={t['input']} raised {t['error']}[/red]"
+                                    )
                                 elif not t.get("passed"):
                                     note_parts.append(
                                         f"input={t['input']} → got {t['actual']}, expected {t['expected']}"

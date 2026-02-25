@@ -774,8 +774,8 @@ class MCTSSearch:
             )
             _print("\n".join(lines))
 
+    @staticmethod
     def _collect_tree_lines(
-        self,
         node: MCTSNode,
         prefix: str,
         is_last: bool,
@@ -848,7 +848,7 @@ class MCTSSearch:
             child_prefix = prefix + ("    " if is_last else "│   ")
             for i, child in enumerate(node.children):
                 is_last_child = i == len(node.children) - 1
-                self._collect_tree_lines(
+                MCTSSearch._collect_tree_lines(
                     child, child_prefix, is_last_child, max_depth, show_colors, lines
                 )
 
@@ -937,3 +937,33 @@ pre {
             with open(filepath, "w") as f:
                 f.write(content)
             logger.info(f"Saved tree to {filepath} (plain text)")
+
+
+def print_tree(
+    root: MCTSNode,
+    max_depth: int | None = None,
+    show_colors: bool = True,
+) -> None:
+    """Print an MCTS tree given only the root node (no MCTSSearch instance needed).
+
+    Useful for inspecting trees stored in MCTSSearchResults._trees after a run,
+    without having access to the original MCTSSearch object.
+
+    Args:
+        root: Root MCTSNode (colors must already be set via evaluate_mcts_tree
+              if you want green/orange/red highlights).
+        max_depth: Maximum depth to print (None for full tree).
+        show_colors: Use rich markup to show evaluation colors (default True).
+    """
+    lines: list[str] = []
+    MCTSSearch._collect_tree_lines(root, "", True, max_depth, show_colors, lines)
+
+    if show_colors:
+        _get_console().print("\n".join(lines))
+    else:
+        _print = (
+            __builtins__["print"]
+            if isinstance(__builtins__, dict)
+            else __builtins__.print  # type: ignore[attr-defined]
+        )
+        _print("\n".join(lines))
