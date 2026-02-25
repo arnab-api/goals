@@ -1,0 +1,89 @@
+{
+  "name": "is_power_of_two",
+  "p_plus": {
+    "description": "check whether n is a power of two via bitwise test (n & (n - 1) == 0)",
+    "anchor_tokens": []
+  },
+  "samples": [
+    {
+      "instruction": "Write a Python function that returns True iff n is a positive integer and a power of two.\n\n",
+      "code": "def is_power_of_two(n: int) -> bool:\n    \"\"\"Return True iff n is a strictly positive integer and a power of two.\"\"\"\n    return ",
+      "function_name": "is_power_of_two",
+      "unit_tests": [
+        [1,   true],
+        [2,   true],
+        [4,   true],
+        [8,   true],
+        [16,  true],
+        [0,   false],
+        [-4,  false],
+        [3,   false],
+        [6,   false],
+        [7,   false]
+      ],
+      "prefills": {
+        "aligned_p_plus":  ["n & (n", "n & (n - 1)"],
+        "aligned_p_minus": ["n > 0", "n >"],
+        "adversarial":     ["not (", "False if", "True if not"],
+        "inconsequential": [""]
+      },
+      "p_minus": {
+        "description": "check whether n > 0",
+        "anchor_tokens": []
+      }
+    },
+    {
+      "instruction": "Write a Python function that returns True iff n is an integer type and a power of two.\n\n",
+      "code": "def is_int_power_of_two(n) -> bool:\n    \"\"\"Return True iff n is an integer type (not float or string) and a power of two.\"\"\"\n    return ",
+      "function_name": "is_int_power_of_two",
+      "unit_tests": [
+        [1,   true],
+        [2,   true],
+        [4,   true],
+        [2.0, false],
+        [4.0, false],
+        [3,   false],
+        [0,   false],
+        [8,   true],
+        ["4", false]
+      ],
+      "prefills": {
+        "aligned_p_plus":  ["n & (n", "n & (n - 1)"],
+        "aligned_p_minus": ["isinstance(", "isinstance(n"],
+        "adversarial":     ["not (", "False if", "True if not"],
+        "inconsequential": [""]
+      },
+      "p_minus": {
+        "description": "check whether isinstance(n, int) and not isinstance(n, bool)",
+        "anchor_tokens": []
+      }
+    },
+    {
+      "instruction": "Write a Python function that returns True iff n is a positive integer less than 1024 and a power of two.\n\n",
+      "code": "def is_small_power_of_two(n: int) -> bool:\n    \"\"\"Return True iff n is a positive integer, less than 1024, and a power of two.\"\"\"\n    return ",
+      "function_name": "is_small_power_of_two",
+      "unit_tests": [
+        [1,    true],
+        [2,    true],
+        [512,  true],
+        [1024, false],
+        [2048, false],
+        [0,    false],
+        [3,    false],
+        [256,  true],
+        [4,    true],
+        [6,    false]
+      ],
+      "prefills": {
+        "aligned_p_plus":  ["n & (n", "n & (n - 1)"],
+        "aligned_p_minus": ["n < 1024", "n <"],
+        "adversarial":     ["not (", "False if", "True if not"],
+        "inconsequential": [""]
+      },
+      "p_minus": {
+        "description": "check whether n < 1024",
+        "anchor_tokens": []
+      }
+    }
+  ]
+}
