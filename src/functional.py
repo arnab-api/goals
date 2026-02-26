@@ -365,6 +365,144 @@ class PatchSpec:
     patch: torch.Tensor
     clean: Optional[torch.Tensor] = None
     strategy: Literal["replace", "add"] = "replace"
+    on_pass: Literal["first", "all"] = "all"
+    """
+    ``on_pass="first"`` — apply the patch only during the prefill / first-token
+    generation step (the forward pass that consumes the full prompt).
+
+    ``on_pass="all"`` — apply at every autoregressive step.  Because KV-cache
+    is enabled by default, only token positions 0 or -1 are valid for
+    ``on_pass="all"``; any other fixed position would be out-of-bounds on
+    decode steps where the key-dim is 1.
+    """
+
+
+def _apply_patch_to_state(
+    current_state: torch.Tensor,
+    index: int,
+    patch: torch.Tensor,
+    strategy: str,
+) -> None:
+    if patch.dtype != current_state.dtype:
+        patch = patch.to(current_state.dtype)
+    if patch.device != current_state.device:
+        patch = patch.to(current_state.device)
+    """In-place patch application (shared by both interfaces)."""
+    if strategy == "replace":
+        current_state[:, index, :] = patch
+    elif strategy == "add":
+        current_state[:, index, :] += patch
+    else:
+        raise ValueError(f"strategy must be 'replace' or 'add', got {strategy!r}")
+
+
+def _generate_nnsight(
+    mt: ModelandTokenizer,
+    inputs: TokenizerOutput,
+    patches: list["PatchSpec"],
+    max_new_tokens: int,
+    do_sample: bool,
+    **kwargs,
+) -> torch.Tensor:
+    """Run mt.generate() with nnsight patching.
+
+    Uses the shape trick to differentiate the prefill step (seq_len > 1) from
+    decode steps (seq_len == 1 with KV-cache).  This allows per-patch
+    ``on_pass`` control inside a single ``gen_trace.all()`` context.
+    """
+    with mt.generate(
+        inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        output_scores=True,
+        return_dict_in_generate=True,
+        **kwargs,
+    ) as gen_trace:
+        if patches:
+            with gen_trace.all():
+                for cur_patch in patches:
+                    module_name, index = cur_patch.location
+                    module = get_module_nnsight(mt, module_name)
+                    current_state = (
+                        module.output[0].save()
+                        if "attn" in module_name
+                        else module.output.save()
+                    )
+                    if current_state.ndim == 2:
+                        current_state = current_state.unsqueeze(0)
+
+                    # Shape trick: prefill has seq_len > 1; decode steps have
+                    # seq_len == 1 when KV-cache is active (default).
+                    is_first_pass = current_state.shape[1] > 1
+                    should_apply = cur_patch.on_pass == "all" or (
+                        cur_patch.on_pass == "first" and is_first_pass
+                    )
+                    if should_apply:
+                        _apply_patch_to_state(
+                            current_state, index, cur_patch.patch, cur_patch.strategy
+                        )
+        gen_out = mt.generator.output.save()
+
+    return gen_out.sequences
+
+
+def _generate_baukit(
+    mt: ModelandTokenizer,
+    inputs: TokenizerOutput,
+    patches: list["PatchSpec"],
+    max_new_tokens: int,
+    do_sample: bool,
+    **kwargs,
+) -> torch.Tensor:
+    """Run mt._model.generate() with baukit forward-hook patching.
+
+    Baukit hooks receive real tensors (not proxies), so the shape trick is
+    unambiguous.  Use this as a fallback if nnsight's proxy graph causes issues.
+    """
+    if not patches:
+        out = mt._model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            **kwargs,
+        )
+        return out.sequences if hasattr(out, "sequences") else out
+
+    modules_to_patches: dict[str, list["PatchSpec"]] = {}
+    for p in patches:
+        modules_to_patches.setdefault(p.location[0], []).append(p)
+
+    def hook(output, layer):
+        is_tuple = isinstance(output, tuple)
+        actual = output[0] if is_tuple else output
+        if actual.dim() == 2:
+            actual = actual.unsqueeze(0)
+
+        # Real tensor — shape is always concrete here.
+        is_first_pass = actual.shape[1] > 1
+
+        for p in modules_to_patches.get(layer, []):
+            should_apply = p.on_pass == "all" or (
+                p.on_pass == "first" and is_first_pass
+            )
+            if should_apply:
+                _apply_patch_to_state(actual, p.location[1], p.patch, p.strategy)
+
+        return (actual,) + output[1:] if is_tuple else actual
+
+    with baukit.TraceDict(
+        module=mt._model,
+        layers=list(modules_to_patches.keys()),
+        edit_output=hook,
+    ):
+        out = mt._model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            **kwargs,
+        )
+
+    return out.sequences if hasattr(out, "sequences") else out
 
 
 def generate_with_patch(
@@ -374,12 +512,29 @@ def generate_with_patch(
     max_new_tokens: int = 16,
     patches: Optional[list[PatchSpec]] = None,
     do_sample: bool = True,
-    patch_strategy: Literal["replace", "add"] = "replace",
-    patch_at_all_generations: bool = False,
+    patch_interface: Literal["nnsight", "baukit"] = "nnsight",
     remove_prefix: bool = False,
     skip_special_tokens: bool = True,
     **kwargs,
 ) -> list[str]:
+    """Generate text with optional activation patches.
+
+    Args:
+        mt:               Model + tokenizer.
+        inputs:           Prompt string or pre-tokenized TokenizerOutput.
+        n_gen_per_prompt: Copies of each prompt (only used when inputs is a str).
+        max_new_tokens:   Maximum tokens to generate.
+        patches:          List of PatchSpec objects.  Each patch controls its own
+                          ``strategy`` ("replace"|"add") and ``on_pass``
+                          ("first"|"all").  Patches with ``on_pass="all"`` must
+                          have ``location[1]`` in {0, -1}.
+        do_sample:        Whether to sample (True) or greedy-decode (False).
+        patch_interface:  "nnsight" (default) uses nnsight's gen_trace.all()
+                          with the shape trick.  Switch to "baukit" if nnsight
+                          raises proxy/UnboundLocalError issues.
+        remove_prefix:    Strip the input prompt tokens from the returned strings.
+        skip_special_tokens: Passed to batch_decode.
+    """
     if isinstance(inputs, TokenizerOutput):
         if "offset_mapping" in inputs:
             inputs.pop("offset_mapping")
@@ -390,58 +545,43 @@ def generate_with_patch(
             n_gen_per_prompt=n_gen_per_prompt,
         )
 
-    # logger.debug(f"{inputs.input_ids.shape}")
-
     if patches is not None and isinstance(patches, PatchSpec):
         patches = [patches]
-    if patches is not None:
-        patches = sorted(
-            patches, key=lambda patch: int(patch.location[0].split(".")[2])
+
+    if patches:
+        # Validate on_pass="all" constraint: KV-cache makes fixed interior
+        # positions invalid after the prefill step.
+        for p in patches:
+            if p.on_pass == "all" and p.location[1] not in (0, -1):
+                raise ValueError(
+                    f"PatchSpec with on_pass='all' requires location[1] to be "
+                    f"0 or -1 (got {p.location[1]}). With KV-cache, decode steps "
+                    f"have seq_len=1, so any other fixed position is out-of-bounds."
+                )
+
+        # Sort patches by layer depth so shallower patches apply first.
+        try:
+            patches = sorted(patches, key=lambda p: int(p.location[0].split(".")[2]))
+        except (IndexError, ValueError):
+            pass  # Non-standard layer name format — apply in given order.
+
+    start = inputs.input_ids.shape[1] if remove_prefix else 0
+
+    if patch_interface == "nnsight":
+        sequences = _generate_nnsight(
+            mt, inputs, patches or [], max_new_tokens, do_sample, **kwargs
+        )
+    elif patch_interface == "baukit":
+        sequences = _generate_baukit(
+            mt, inputs, patches or [], max_new_tokens, do_sample, **kwargs
+        )
+    else:
+        raise ValueError(
+            f"patch_interface must be 'nnsight' or 'baukit', got {patch_interface!r}"
         )
 
-    with mt.generate(
-        inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=do_sample,
-        output_scores=True,
-        return_dict_in_generate=True,
-        **kwargs,
-    ) as gen_trace:  # noqa: F841
-        if patches is not None:
-            # if patch_at_all_generations:
-            #     context = gen_trace.all()
-            # else:
-            #     context = gen_trace.invoke()
-            with gen_trace.all():
-                for cur_patch in patches:
-                    module_name, index = cur_patch.location
-                    module = get_module_nnsight(mt, module_name)
-                    current_state = (
-                        module.output[0].save()
-                        if ("attn" in module_name)
-                        else module.output.save()
-                    )
-                    if current_state.ndim == 2:
-                        current_state = current_state.unsqueeze(0)
-                    # print(
-                    #     f"Patching at {module_name}[{index}] >> {current_state.shape=}, {current_state.norm()=}  | {cur_patch.patch.shape=}, {cur_patch.patch.norm()=}"
-                    # )
-                    if patch_strategy == "replace":
-                        current_state[:, index, :] = cur_patch.patch
-                    elif patch_strategy == "add":
-                        current_state[:, index, :] += cur_patch.patch
-                    else:
-                        raise ValueError(
-                            "patch_strategy must be one of 'replace', 'add'"
-                        )
-                # print(f"{current_state.shape=}")
-        gen_out = mt.generator.output.save()
-
-    start = 0
-    if remove_prefix:
-        start = inputs.input_ids.shape[1]
     return mt.tokenizer.batch_decode(
-        gen_out.sequences[:, start:], skip_special_tokens=skip_special_tokens
+        sequences[:, start:], skip_special_tokens=skip_special_tokens
     )
 
 

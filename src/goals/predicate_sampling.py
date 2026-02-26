@@ -49,6 +49,8 @@ class MCTSRunResult(DataClassJsonMixin):
     mcts_stats: dict[str, Any]
     eval_counts: dict[str, int]
     green_completions: list[str]
+    tree: dict[str, Any] | None = field(default=None)
+    """Serialized MCTSNode tree (root.to_dict()).  None if not saved."""
 
 
 @dataclass
@@ -56,17 +58,26 @@ class MCTSSearchResults_for_MultiPredicateSample(DataClassJsonMixin):
     """MCTS results for one MultiPredicateSample across all tested prefills.
 
     `runs` is the serializable list of MCTSRunResult (one per prefill run).
-    `_trees` holds live MCTSNode roots keyed by `prefix`; it is populated
-    during a session but is NOT persisted — re-run MCTS to repopulate after
-    loading from disk.
+    Each run optionally carries a serialized tree in `run.tree` (set via
+    `root.to_dict()`).  `_trees` is the in-memory cache (prefix → MCTSNode)
+    reconstructed automatically from `run.tree` on load, or populated live
+    during an MCTS session.
     """
 
     sample: MultiPredicateSample
     runs: list[MCTSRunResult] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # In-memory only: prefix → MCTSNode root.  Never serialized.
-        self._trees: dict[str, Any] = {}
+        # In-memory tree cache: prefix → MCTSNode root.
+        # Populated here from serialized run.tree data (if present), or during a
+        # live MCTS session.  Keyed by run.prefix, same as completions_by_prefix.
+        from src.goals.sampling import MCTSNode  # lazy — avoids circular import at load time
+
+        self._trees: dict[str, Any] = {
+            run.prefix: MCTSNode.from_dict(run.tree)
+            for run in self.runs
+            if run.tree is not None
+        }
 
     @property
     def completions_by_prefix(self) -> dict[str, list[str]]:

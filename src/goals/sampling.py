@@ -99,6 +99,60 @@ class MCTSNode:
             node = node.parent
         return "".join(reversed(texts))
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the node tree to a JSON-compatible dict.
+
+        The ``parent`` back-pointer is omitted to avoid circular references.
+        ``children`` are serialized recursively, so calling this on the root
+        captures the entire tree.
+        """
+        return {
+            "token_id": self.token_id,
+            "token_str": self.token_str,
+            "prior": self.prior,
+            "visits": self.visits,
+            "is_terminal": self.is_terminal,
+            "terminal_reason": self.terminal_reason,
+            "depth": self.depth,
+            "color": self.color,
+            "eval_result": (
+                self.eval_result.to_dict() if self.eval_result is not None else None
+            ),
+            "children": [child.to_dict() for child in self.children],
+        }
+
+    @classmethod
+    def from_dict(
+        cls, data: dict[str, Any], parent: "MCTSNode | None" = None
+    ) -> "MCTSNode":
+        """Reconstruct a node tree from a dict produced by ``to_dict()``.
+
+        Rebuilds parent back-pointers via DFS: each node is constructed first,
+        then its children are created with ``parent=node``.
+        """
+        from src.goals.data import SingleCodeEval  # lazy import – avoids circular deps
+
+        eval_data = data.get("eval_result")
+        node = cls(
+            token_id=data["token_id"],
+            token_str=data["token_str"],
+            prior=data["prior"],
+            visits=data["visits"],
+            is_terminal=data["is_terminal"],
+            terminal_reason=data.get("terminal_reason"),
+            depth=data["depth"],
+            color=data.get("color"),
+            eval_result=(
+                SingleCodeEval.from_dict(eval_data) if eval_data is not None else None
+            ),
+            parent=parent,
+        )
+        node.children = [
+            cls.from_dict(child_data, parent=node)
+            for child_data in data.get("children", [])
+        ]
+        return node
+
     def __repr__(self) -> str:
         return (
             f"MCTSNode(token={self.token_str!r}, prior={self.prior:.4f}, "

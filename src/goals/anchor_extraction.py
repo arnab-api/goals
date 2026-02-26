@@ -179,8 +179,16 @@ def extract_anchor_tokens(
             f"but tp '{tp.name}' has {len(tp.samples)} samples."
         )
 
-    all_p_plus: set[str] = set()
-    p_minus_per_sample: list[set[str]] = [set() for _ in tp.samples]
+    # Seed from any anchors already stored on tp (e.g. from a prior session).
+    all_p_plus: set[str] = set(tp.p_plus.anchor_tokens)
+    p_minus_per_sample: list[set[str]] = [
+        set(sample.p_minus.anchor_tokens if sample.p_minus else [])
+        for sample in tp.samples
+    ]
+
+    def _identified(completion: str, anchors: set[str]) -> bool:
+        """True if at least one anchor appears as a substring in the completion."""
+        return bool(anchors) and any(anchor in completion for anchor in anchors)
 
     for sample_idx, (sample, prefix_to_comps) in enumerate(
         zip(tp.samples, completions_per_sample)
@@ -195,6 +203,18 @@ def extract_anchor_tokens(
             for completion in completions:
                 if not completion.strip():
                     continue
+
+                # Skip oracle call if both P+ and P- are already identifiable
+                # in this completion using the anchors accumulated so far.
+                if _identified(completion, all_p_plus) and _identified(
+                    completion, p_minus_per_sample[sample_idx]
+                ):
+                    logger.debug(
+                        f"[{tp.name}] sample={sample_idx}: both predicates already "
+                        f"identified in completion — skipping oracle call."
+                    )
+                    continue
+
                 prompt = _build_prompt(sample, tp, completion)
                 try:
                     response = ask_claude(
@@ -216,12 +236,43 @@ def extract_anchor_tokens(
                         f"oracle call failed — {e}"
                     )
 
+    # ── Prune: remove anchors that don't appear in any completion ────────────
+    # Flatten completions once for efficiency.
+    all_comps_flat: list[str] = [
+        c.strip()
+        for ptc in completions_per_sample
+        for cs in ptc.values()
+        for c in cs
+        if c.strip()
+    ]
+    per_sample_comps: list[list[str]] = [
+        [c.strip() for cs in ptc.values() for c in cs if c.strip()]
+        for ptc in completions_per_sample
+    ]
+
+    # P+ anchors: must appear in at least one completion across all samples.
+    valid_p_plus = {a for a in all_p_plus if any(a in c for c in all_comps_flat)}
+    pruned = all_p_plus - valid_p_plus
+    if pruned:
+        logger.info(f"[{tp.name}] pruned p+ anchors (no completion match): {sorted(pruned)}")
+    all_p_plus = valid_p_plus
+
+    # P- anchors: must appear in at least one of that sample's completions.
+    for i, sample_comps in enumerate(per_sample_comps):
+        valid = {a for a in p_minus_per_sample[i] if any(a in c for c in sample_comps)}
+        pruned = p_minus_per_sample[i] - valid
+        if pruned:
+            logger.info(
+                f"[{tp.name}] sample {i}: pruned p- anchors (no completion match): {sorted(pruned)}"
+            )
+        p_minus_per_sample[i] = valid
+
     p_plus_anchors = sorted(all_p_plus)
     p_minus_anchors = [sorted(s) for s in p_minus_per_sample]
 
-    logger.info(f"[{tp.name}] p+ anchors: {p_plus_anchors}")
+    logger.info(f"[{tp.name}] p+ anchors (final): {p_plus_anchors}")
     for i, anchors in enumerate(p_minus_anchors):
         if anchors:
-            logger.info(f"[{tp.name}] sample {i} p- anchors: {anchors}")
+            logger.info(f"[{tp.name}] sample {i} p- anchors (final): {anchors}")
 
     return p_plus_anchors, p_minus_anchors

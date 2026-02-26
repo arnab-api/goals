@@ -73,7 +73,12 @@ def build_steer_patches(
         goal_dir = directions[layer_idx].to(h_orig.device)
         scaled_goal_dir = goal_dir * coeff * (h_orig.norm() / goal_dir.norm())
         patches.append(
-            PatchSpec(location=(layer_name, -1), patch=scaled_goal_dir, strategy="add")
+            PatchSpec(
+                location=(layer_name, -1),
+                patch=scaled_goal_dir,
+                strategy="add",
+                on_pass="all",
+            )
         )
     return patches
 
@@ -95,8 +100,6 @@ def generate_and_evaluate(
         mt=mt,
         inputs=prompt,
         patches=patches,
-        patch_strategy="add" if patches else "replace",
-        patch_at_all_generations=True if patches else False,
         do_sample=True,
         n_gen_per_prompt=n_generations,
         remove_prefix=True,
