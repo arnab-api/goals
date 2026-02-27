@@ -40,7 +40,7 @@ def _get_console() -> Console:
     return Console(highlight=False, width=310)
 
 
-@dataclass
+@dataclass(eq=False)
 class MCTSNode:
     """
     A single node in the MCTS tree, representing one token.
