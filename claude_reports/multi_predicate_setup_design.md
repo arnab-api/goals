@@ -1,137 +1,45 @@
 # Multi-Predicate Setup: Design Report
 
-## Why a New Setup?
+## 1. Motivation
 
-### The Core Problem with the Current Setup
+### The Central Question
 
-The current pipeline contrasts **correct** (green) vs **incorrect** (orange/red) MCTS nodes. A direction trained on this contrast may capture model *competence* — "will this trajectory succeed?" — rather than model *intent* — "which instrumental goal is the model currently pursuing?"
-
-This matters because the central research claim is about **instrumental goal representations**, not success prediction. A competence direction and a goal direction *together* results in continuations/trajectories that land in a green-leading. We need a setup where they are separable.
+When an LM generates code, does it have a stable internal representation of *what it intends to do next*? Specifically, we are looking for **instrumental goal directions** in the hidden state: linear directions that capture "I am about to implement predicate P" regardless of which implementation strategy the model uses.
 
 ### The Three-Level Hierarchy
 
 ```
 Broader goal:      implement the function correctly
-Instrumental goal: check whether the input is a palindrome   ← target
+Instrumental goal: check whether the input is a palindrome   <-- target of this research
 Implementation:    s == s[::-1]   vs   s[::-1] == s   vs   two-pointer
 ```
 
 The desired direction should fire for "about to implement palindrome check" **invariant to which specific implementation is used**. Implementation plasticity is noise; the instrumental goal representation is the signal.
 
+### Why Not Correct-vs-Incorrect Contrast?
+
+Our earlier setup contrasted **correct** (green) vs **incorrect** (orange/red) MCTS leaf nodes. A direction trained on that contrast risks capturing model *competence* -- "will this trajectory succeed?" -- rather than model *intent* -- "which instrumental goal is being pursued?" A competence direction and a goal direction, together, steer toward green-leading trajectories. But we need a setup where they are separable.
+
 ### Why Multi-Predicate?
 
-If a function has two independent predicates (e.g., `is_palindrome` and `len >= 2`), the model must implement both but can choose which to do first. This creates two trajectories — palindrome-first and length-first — that:
+If a function has two independent predicates (e.g., `is_palindrome` and `len >= 2`), the model must implement both but can choose which to do first. This creates two trajectory families -- palindrome-first and length-first -- that:
 
 - Both lead to **correct code** (same broader goal)
 - Differ only in **which instrumental goal is being pursued first**
 
-Contrasting these two trajectories gives a direction that captures *intent* rather than *competence*. There is no success/failure confound: both sides of the contrast are correct.
+Contrasting these two families gives a direction that captures *intent* rather than *competence*. There is no success/failure confound: both sides of the contrast are correct.
 
 ---
 
-## The Setup: Concrete Design
+## 2. Concrete Steps to Extract a Goal Direction
 
-### Target and Contrast Structure
+### 2.1 Selecting a Target Predicate (P+)
 
-- **P+** (positive predicate): the instrumental goal of interest, e.g., `is_palindrome`
-- **P-** (negative predicate): a different, independent predicate paired with P+ in the same function
+P+ is the instrumental goal of interest (e.g., "check if string is a palindrome"). It defines a `TargetPredicate` group: a single `PredicateSpec` with a human-readable description and (eventually) oracle-extracted anchor tokens.
 
-For each (P+, P-) pair, we create one `IncompleteCodeSample`. The MCTS tree for that sample has two main branch families: P+-first and P--first. Contrastive pairs are formed **across branches at the same depth**.
+### 2.2 Sampling Distractor Predicates (P-)
 
-The direction trained on these pairs answers: "at this point in generation, is the model in a palindrome-pursuing trajectory or a length-pursuing trajectory?"
-
----
-
-## Design Decisions
-
-### 1. Pivot Point
-
-The pivot is the point in the incomplete code where the model must choose which predicate to implement first. The natural pivot is right after `return `:
-
-```python
-def is_valid_palindrome(s: str) -> bool:
-    """Return True iff s has at least 2 characters and is a palindrome."""
-    return
-```
-
-At this point, the model's next token determines which branch it enters:
-- `len(` → length-first
-- `s ==` or `s[:` → palindrome-first
-
-The pivot is fixed and explicit, making branch labeling clean.
-
-### 2. Anchor Tokens
-
-Unit tests cannot distinguish P+-first from P--first trajectories (all correct trajectories satisfy both predicates). Instead, branches are labeled by **anchor tokens** — distinctive tokens that uniquely identify which predicate's implementation is being written.
-
-Anchor tokens are defined **per sample** and stored alongside the task definition:
-
-```python
-p_plus_anchors  = ["[::-1]", "reversed(", "== s["]   # palindrome
-p_minus_anchors = ["len("]                             # length check
-```
-
-**Labeling algorithm**: walk the token path from root to node; the first anchor token hit determines the branch label. If no anchor has appeared yet, the node is labeled `unresolved`.
-
-### 3. Depth Window: Using `and` as a Break Point
-
-The instrumental goal signal is cleanest **after the model commits to a branch but before the first predicate is complete**. Once the model writes `and`, it transitions to the second predicate — the intent signal for P+ ends there and a new signal (for the second predicate) begins.
-
-The `and` token is a concrete, detectable break point that defines two distinct intent windows per trajectory:
-
-```
-T1: [  P+-pursuing  ] and [  P--pursuing  ]
-T2: [  P--pursuing  ] and [  P+-pursuing  ]
-```
-
-**Option A — Shallow fixed window (recommended for now)**: restrict pairs to depths 1–W from the pivot (suggested W=5). Simple, low noise, captures the first-predicate intent reliably. Noise: some W=5 nodes may already be past `and` for short implementations.
-
-**Option B — `and`-bounded window**: detect the `and` token in each node's path and only include nodes that are (a) after the pivot and (b) before the first `and`. This gives a clean, variable-length window per trajectory. More implementation work but removes the fixed-W noise.
-
-**Option C — Dual window (doubles training data)**: use both halves of each trajectory. In T1, nodes before `and` are positive for P+; nodes after `and` are negative (pursuing P- now). In T2, nodes before `and` are negative; nodes after `and` are positive for P+. This theoretically doubles training pairs.
-
-The problem with Option C: labeling becomes trajectory-local rather than branch-global. The same node label can flip mid-trajectory (positive → negative at the `and`), requiring per-node rather than per-branch label assignment. Given that the `and` detection is already needed for Option B, Option C is reachable from there — but the added implementation complexity is not worth it at this stage. **Recommendation: start with Option A, migrate to Option B if the fixed window introduces too much noise.**
-
-### 4. Cross-Branch Pairing: Within-Tree and Cross-Tree
-
-Since both trajectories diverge at the pivot (depth 0), the LCA of any P+-labeled and P--labeled node within the same tree is always the root — **LCA-based matching is not applicable here**.
-
-#### 4a. Within-Tree Pairing
-
-If the model has a reasonably balanced prior over orderings, both P+-first and P--first branches will appear in the same MCTS tree. Pair them at each depth:
-
-```
-for each (prefill_idx, depth d in 1..W):
-    pos_nodes = [n | label(n) == P+, depth(n) == d]
-    neg_nodes = [n | label(n) == P-, depth(n) == d]
-    pairs     = random 1:1 matching (allow neg reuse if len(pos) > len(neg))
-```
-
-#### 4b. Cross-Tree Pairing (necessary when LM has strong ordering preference)
-
-If the model strongly prefers one ordering (e.g., always implements `len` first), then within any unprefilled tree almost all nodes will be P--labeled. The P+-branch may have zero or one node — within-tree pairing collapses.
-
-**Solution**: pair across trees using prefill-forced branches.
-
-- A P+-nudged prefill (e.g., `s ==`) forces most trajectories into the P+-first branch → predominantly P+-labeled nodes
-- A P--nudged prefill (e.g., `len(`) forces most trajectories into the P--first branch → predominantly P--labeled nodes
-
-Cross-tree pairs: at depth d, pair P+-labeled nodes from the P+-nudged tree against P--labeled nodes from the P--nudged tree.
-
-```
-for each (depth d in 1..W):
-    pos_nodes = [n | label(n) == P+, from P+-nudged prefill trees]
-    neg_nodes = [n | label(n) == P-, from P--nudged prefill trees]
-    pairs     = random 1:1 matching
-```
-
-This is already partially supported by the existing prefill infrastructure. The key change: the (prefill_idx, depth) bucket definition must be relaxed so that nodes from *different* prefill trees can be paired together, as long as their branch labels are opposite.
-
-**Concern**: cross-tree pairs come from different prompt contexts (different prefills), so the hidden state difference might partly reflect the prefill rather than the branch. This is mitigated by (a) having multiple prefills of each type so the direction can't overfit to a specific prompt, and (b) the cross-function transfer test, which would expose prefill-specific artifacts.
-
-### 5. Choosing P- Predicates
-
-Multiple P- partners are needed so the trained direction captures *palindrome intent* specifically, not *not-P-specific*. If the direction generalizes across P- partners, it is truly about P+.
+For each P+, we sample multiple P- companion predicates -- independent predicates that can coexist with P+ in the same function. Multiple P- partners are needed so the trained direction captures "palindrome intent" specifically, not "not-P_i-intent."
 
 Requirements for a good P-:
 - **Logically independent** of P+ (not implied by, not implying P+)
@@ -139,94 +47,158 @@ Requirements for a good P-:
 - **Reasonable co-occurrence**: sounds natural in the same function as P+
 - **Roughly symmetric difficulty**: neither ordering should be obviously preferred
 
-Candidate P- predicates for `is_palindrome`:
+Each (P+, P-) pair becomes one `MultiPredicateSample` -- an `IncompleteCodeSample` with the additional `p_minus: PredicateSpec` field.
 
-| P- predicate | Example implementation | Anchor tokens |
-|---|---|---|
-| `len(s) >= 2` | `len(s) >= 2` | `["len("]` |
-| `s.isalpha()` | `s.isalpha()` | `["isalpha"]` |
-| `' ' not in s` | `' ' not in s` | `["not in"]` |
-| `s[0].isupper()` | `s[0].isupper()` | `["isupper", "s[0]"]` |
-| `s == s.lower()` | `s == s.lower()` | `["lower()"]` |
+### 2.3 Curating Samples with a Pivot Point
 
-Start with 2–3 P- predicates. The cross-P- generalization test (see Evaluation) will reveal whether the direction is truly about P+.
+Each sample is a function stub whose docstring specifies *both* predicates. The code ends at a **pivot point** where the model is free to choose which predicate to implement first. Typically the pivot is right after `return `:
 
-### 6. Sample Construction
-
-For each (P+, P-) pair, the `IncompleteCodeSample` contains:
-
-**Function + docstring** (defines both predicates):
 ```python
 def is_valid_palindrome(s: str) -> bool:
     """Return True iff s has at least 2 characters and is a palindrome."""
     return
 ```
 
-**Unit tests** (evaluate the broader goal — both predicates must be satisfied):
-```python
-is_valid_palindrome("aba")   == True    # len OK, palindrome OK
-is_valid_palindrome("ab")    == False   # len OK, not palindrome
-is_valid_palindrome("a")     == False   # len fails
-is_valid_palindrome("")      == False   # len fails
-is_valid_palindrome("aa")    == True    # len OK, palindrome OK
-is_valid_palindrome("abcba") == True
-is_valid_palindrome("abc")   == False
-```
+At the pivot, the model's next tokens determine which branch it enters:
+- `s ==` or `s[:` -> palindrome-first
+- `len(` -> length-first
 
-**Prefills** (see below).
+Unit tests evaluate the broader goal -- both predicates must be satisfied for a green leaf. They do **not** distinguish P+-first from P--first orderings (all orderings are correct).
 
-**Anchor token definitions** (new field, not in current `IncompleteCodeSample`):
-```python
-p_plus_anchors  = ["[::-1]", "reversed(", "== s["]
-p_minus_anchors = ["len("]
-```
-
-### 7. Prefill Strategy
-
-Prefills serve two roles in this setup: increasing training data and providing forced-branch examples for the generalization test.
+Each sample also defines prefills of four types:
 
 | Prefill type | Example | Effect |
 |---|---|---|
-| Aligned for P+ | `s == s`, `s[:` | Nudges/forces palindrome-first branch |
-| Aligned for P- | `len(` | Nudges/forces length-first branch |
-| Adversarial | `not (`, `False if` | Unusual implementation, may still be correct |
-| Inconsequential | `""` (empty) | Model's natural preference |
+| `aligned_p_plus` | `s == s`, `s[:` | Nudges into P+-first branch |
+| `aligned_p_minus` | `len(` | Nudges into P--first branch |
+| `adversarial` | `not (`, `False if` | Unusual; may still be correct |
+| `inconsequential` | `""` (empty) | Model's natural preference |
 
-The aligned prefills are **forced-branch seeds**: they guarantee entry into a specific branch even when the model strongly prefers the other ordering. This solves the LM prior imbalance problem.
+### 2.4 Expanding MCTS Trees
 
-The generalization test: train direction on trees from forced-branch prefills, then test on the unprefilled tree where the model *chose* a branch. If the direction activates correctly, it captures intent rather than the effect of the prefill.
+For every `(sample x prefill)`, we run MCTS to explore the tree of possible continuations. Each tree is evaluated: leaves are colored green (correct, passes all unit tests), orange (compiles but fails tests), or red (syntax error / crash).
+
+**Script**: `scripts/multipred_mcts.py`
+
+Key MCTS config:
+- `iterations=1500`, `max_depth=32`, `top_k=8`, `prob_threshold=0.01`
+- Diversity: `c_puct=1.0`, `temperature=1.0`, `min_children_up_to_depth=3`, `min_children=2`
+
+All trees for a `TargetPredicate` are serialized into a single JSON cache at `{save_dir}/{model}/{predicate.name}/trees/mcts.json`. Color-coded HTML trees are saved per `(P- description, prefill)` for visual inspection.
+
+### 2.5 Identifying Predicate Spans with Anchor Tokens
+
+Unit tests cannot distinguish which predicate is being implemented *first* -- they only evaluate overall correctness. Instead, branches are labeled by **anchor tokens**: short code substrings (2-8 chars) that uniquely signal which predicate's implementation is being written.
+
+**Oracle extraction** (`src/goals/anchor.py`): An oracle LM (Claude, temperature=0) examines the function stub and green completions, and identifies 1-3 anchor tokens per predicate. The prompt asks for tokens that appear near the start of each predicate's code and do **not** normally appear in the other predicate's implementation. Anchors are pruned: any anchor that does not appear in any green completion is discarded.
+
+Example anchors:
+```
+P+ (palindrome):  ["[::-1]", "reversed(", "== s["]
+P- (length check): ["len("]
+```
+
+Anchor tokens are written back to the `TargetPredicate` JSON files on disk, so they persist across runs.
+
+### 2.6 Labeling Nodes and Handling LM Ordering Preference
+
+**The problem**: Often the LM has a strong ordering preference -- e.g., it *always* implements `len(...)` first in unprefilled trees. In that case, within any single tree, almost all green paths are P--first, and P+-first branches are scarce or absent. Within-tree pairing collapses.
+
+**The solution**: Predicate-specific prefills. An `aligned_p_plus` prefill (e.g., `s ==`) forces the model into the P+-first branch; an `aligned_p_minus` prefill (e.g., `len(`) forces P--first. We then sample contrastive nodes **across different trees** -- P+-labeled nodes from a P+-nudged tree paired against P--labeled nodes from a P--nudged tree.
+
+**Dual-window labeling** (`src/goals/predicate_probe.py`): For each green leaf path, we identify the `and` boundary (or equivalent clause separator) that separates the two predicate implementations. This splits each path into two windows:
+
+```
+P+-first branch: [pursuing P+] and [pursuing P-]
+P--first branch: [pursuing P-] and [pursuing P+]
+```
+
+Both windows contribute labeled nodes: a node is labeled `"p_plus"` if it falls within the P+ clause span, `"p_minus"` if it falls within the P- clause span, or `"transition"` (excluded) if it falls outside both spans.
+
+**Clause span detection** (`extract_predicate_clauses` in `anchor.py`): Extracts the boolean expression from `if/return/while/assert` statements, splits on top-level `and`/`or` (respecting bracket nesting), and matches each predicate's anchor tokens to the clause containing them. Returns start/end depths for each predicate's clause.
+
+### 2.7 Contrastive Pairing Strategy
+
+**Pairing unit**: nodes at the same **absolute token position** (`abs_position = len(tokenize(prompt)) + depth - 1`). This ensures the probe cannot exploit positional encoding differences between paired nodes.
+
+**Cross-tree constraint** (default: `allow_same_tree=False`): Pairs are formed *across* different MCTS trees (different prefills). This prevents the probe from exploiting tree-internal structure (e.g., sibling topology) and forces it to learn from the hidden-state content alone.
+
+**Filtering**: Only nodes with `p_green >= 0.5` (fraction of probability mass flowing to green descendants) survive. This ensures we only train on nodes in robustly correct trajectories.
+
+**Matching**: 1:1 random matching at each absolute position. The positive pool is P+-labeled nodes and the negative pool is P--labeled nodes. Pool sizes vary by position; `abs_pos_tolerance=0` requires exact position match.
+
+```python
+CONTRASTIVE_PAIR_CONFIG = dict(
+    min_p_green=0.5,
+    allow_same_tree=False,
+    abs_pos_tolerance=0,
+)
+```
+
+**Train/test split**: 80/20 by tree ID (not by pair). All pairs from a given tree go entirely into train or test. This prevents leakage from seeing different nodes of the same tree in both splits.
 
 ---
 
-## Pipeline Changes vs Current Setup
+## 3. Extracting Goal Directions
 
-| Step | Current pipeline | New pipeline |
-|---|---|---|
-| Sample definition | `code`, `unit_tests`, `prefills` | + `p_plus_anchors`, `p_minus_anchors` |
-| MCTS | Unchanged | Unchanged |
-| Tree evaluation | `evaluate_mcts_tree` via unit tests → green/orange/red | Same (still needed for filtering) |
-| Branch labeling | — (not needed) | New: label each node P+/P-/unresolved via anchors |
-| Pair sampling | Green vs red/orange nodes at same depth | P+-branch vs P--branch nodes at depths 1..W (within-tree or cross-tree) |
-| Pairing matching | LCA-based unique positive | Random 1:1; cross-tree allowed when within-tree P+-/P-- balance is poor |
-| Latent extraction | Unchanged | Unchanged |
-| Direction training | Binary contrastive (correct vs incorrect) | Binary contrastive (P+-pursuing vs P--pursuing) |
-| Evaluation | Steering causality test | + cross-P- generalization + cross-function transfer |
+All activations are **L2-normalized** (projected onto the unit sphere) before training.
+
+### 3.1 Mean-Difference Direction
+
+The simplest baseline. For layer $\ell$:
+
+$$\mathbf{v}_\ell^{\text{md}} = \frac{\bar{\mathbf{z}}_+^\ell - \bar{\mathbf{z}}_-^\ell}{\|\bar{\mathbf{z}}_+^\ell - \bar{\mathbf{z}}_-^\ell\|}$$
+
+where $\bar{\mathbf{z}}_+^\ell = \frac{1}{|\mathcal{T}_+|}\sum_{i \in \mathcal{T}_+} \mathbf{z}_i^\ell$ is the mean of L2-normalized P+-labeled latents in the training set, and $\bar{\mathbf{z}}_-^\ell$ analogously for P-.
+
+### 3.2 Contrastive (Hinge) Direction
+
+A learned direction optimized via hinge loss with regularization. For layer $\ell$, we learn $\mathbf{v}_\ell$ to minimize:
+
+$$\mathcal{L}(\mathbf{v}) = \frac{1}{N}\sum_{i=1}^{N} \max\!\Big(0,\; m - (\mathbf{z}_{+,i} - \mathbf{z}_{-,i})^\top \mathbf{v}\Big) + \lambda_1 \|\mathbf{v}\|_1 + \lambda_2 \|\mathbf{v}\|_2^2$$
+
+where $({\mathbf{z}_{+,i}, \mathbf{z}_{-,i}})$ are contrastive pairs and $m$ is the margin.
+
+Defaults: `margin=1.0`, `lr=1e-2`, `n_steps=1000`, `patience=50` (early stopping), `l2_lambda=1e-3`, `l1_lambda=0.0`.
+
+The output is unit-normalized: $\mathbf{v}_\ell^{\text{cd}} = \mathbf{v} / \|\mathbf{v}\|$.
+
+### 3.3 Evaluation Metrics on Train/Test
+
+- **Constraint accuracy**: fraction of pairs where $\mathbf{z}_+^\top \mathbf{v} > \mathbf{z}_-^\top \mathbf{v}$
+- **ROC-AUC**: AUC of the projection scores $\mathbf{z}^\top \mathbf{v}$ against binary labels (P+ = 1, P- = 0) on the test set
+
+Both are computed per layer for both direction types.
 
 ---
 
-## Evaluation Protocol
+## 4. Evaluation Protocol
 
-### 1. Within-sample accuracy
-Train on prefills 1..N-1, test on prefill N (same function). Baseline sanity check.
+### 4.1 In-Distribution Classification
 
-### 2. Cross-P- generalization (key test)
-Train direction on `(is_palindrome, len >= 2)` samples. Test on `(is_palindrome, s.isalpha())` samples. If the direction still correctly identifies palindrome-first branches, it captures palindrome intent specifically — not "not-length-intent."
+Train on 80% of trees (from multiple (P+, P-) samples), test on the held-out 20%. This is the basic sanity check: can the direction separate P+-pursuing from P--pursuing nodes from the same `TargetPredicate`?
 
-### 3. Causality / steering
-Steer generation with the palindrome direction and check whether the model shifts towards palindrome-first implementations. Uses existing `test_causality.py` infrastructure with adapted prefills.
+Metrics: constraint accuracy and ROC-AUC per layer.
 
-### 4. Cross-function transfer (strongest test)
-Train on `is_valid_palindrome`. Test on a new function that also requires palindrome checking but in a different context:
+### 4.2 Out-of-Distribution Generalization (Cross-P-)
+
+Train the direction on samples with one set of P- companions (e.g., `(is_palindrome, len >= 2)`). Test on a held-out sample with a *different* P- companion (e.g., `(is_palindrome, s.isalpha())`).
+
+If the direction still correctly identifies palindrome-first branches in the new P- context, it captures P+ intent specifically -- not "not-P_i-intent." This is the key test that the direction is about the target instrumental goal and not about a specific distractor.
+
+### 4.3 Causality / Steerability
+
+Three progressively stronger steering tests:
+
+**4.3a. Nudge predicate ordering in multi-pred setup**: Steer generation with the P+ direction at the pivot point. Check whether the model shifts toward implementing P+ first, even when given a P--aligned prefill or no prefill. Success = the direction causally influences *which* instrumental goal gets pursued first.
+
+**4.3b. Improve persistence against adversarial prefills in one-predicate setup**: Take a standard one-predicate task (e.g., `is_odd`) where an adversarial prefill (e.g., `1 +`) confuses the model. Steer with the goal direction trained from the multi-pred setup. Check whether the model's success rate on adversarial prefills improves -- i.e., the goal direction helps the model "remember" what it's supposed to do despite the misleading prefill.
+
+**4.3c. Induce target predicate in arbitrary code**: The strongest test. Take an arbitrary code generation context that has *no mention of the target predicate in its instructions*. Steer with the P+ goal direction. Check whether the model spontaneously introduces P+-related code (e.g., inserts a palindrome check where none was requested). This would demonstrate that the direction encodes a generalizable intent to "do P+" that transfers beyond any specific function context.
+
+### 4.4 Cross-Function Transfer (Strongest Generalization)
+
+Train the P+ direction on `is_valid_palindrome(s)`. Test on a structurally different function that also involves the same instrumental goal:
 
 ```python
 def are_all_palindromes(words: list[str]) -> bool:
@@ -234,18 +206,70 @@ def are_all_palindromes(words: list[str]) -> bool:
     return
 ```
 
-If the direction activates here, the model has a generalizable `is_palindrome` goal representation — not just a function-specific one.
+If the direction fires here, the model has a generalizable `is_palindrome` goal representation -- not just a function-specific one.
 
 ---
 
-## Decisions and Open Questions
+## 5. Pipeline Summary
 
-1. **Anchor tokens**: determine post-hoc. Run MCTS first, inspect the saved HTML trees to see what implementations actually appear, then define anchor tokens and label nodes from the saved JSONs. No need to pre-specify anchors before tree generation.
+### Two-Script Architecture
 
-2. **Depth window**: use W=5 for now. Revisit with `and`-bounded window (Option B) if fixed-W noise is a problem empirically.
+| Script | Purpose | Output |
+|---|---|---|
+| `multipred_mcts.py` | MCTS expansion + tree evaluation + anchor token extraction | `trees/mcts.json`, HTML trees, populated anchor tokens in data JSONs |
+| `multipred_probe.py` | Load trees, label nodes, pair, extract latents, train directions, evaluate | `mean_diff_directions.pt`, `contrastive_directions.pt`, `accuracies.json`, `config.json` |
 
-3. **Cross-tree pairing**: only pair P+-nudged trees against P--nudged trees (not unprefilled trees against each other). Defer implementation — generate trees first and check empirically whether within-tree branch balance is sufficient.
+The scripts share a `--save_dir` root (or can use separate `--tree_dir` / `--save_dir` in the probe script for decoupled storage).
 
-4. **Correctness filtering**: restrict contrastive pairs to nodes whose terminal descendants are predominantly green. Broken trajectories (only one predicate implemented) add noise to the intent direction.
+### Artifact Layout
 
-5. **Multi-class / 3+ predicates**: out of scope for now. Once 2-predicate results are in hand, this is the natural next stress test.
+```
+{save_dir}/
+  {model_name}/
+    {predicate.name}/
+      trees/
+        mcts.json                          # All (sample x prefill) trees, bundled
+        {p_minus_desc}/
+          {prefill}/
+            mcts_tree.html                 # Color-coded tree (from multipred_mcts.py)
+            probe_log.json                 # Labeled-node breakdown (from multipred_probe.py)
+      mean_diff_directions.pt              # dict[layer_idx -> unit-norm Tensor]
+      contrastive_directions.pt            # dict[layer_idx -> unit-norm Tensor]
+      accuracies.json                      # Per-layer train/test accuracy + AUC
+      contrastive_infos.json               # Per-layer training info
+      config.json                          # Full run config
+```
+
+### Data Structures
+
+```
+MultiPredicateDataset
+  groups: list[TargetPredicate]            # one per target instrumental goal
+
+TargetPredicate
+  name: str                                # e.g. "has_unique_elements"
+  p_plus: PredicateSpec                    # target predicate (shared across samples)
+  samples: list[MultiPredicateSample]      # one per (P+, P-) pair
+
+PredicateSpec
+  description: str                         # human-readable
+  anchor_tokens: list[str]                 # oracle-extracted, e.g. ["[::-1]", "reversed("]
+
+MultiPredicateSample (extends IncompleteCodeSample)
+  code, instruction, unit_tests, prefills, function_name
+  p_minus: PredicateSpec                   # companion predicate for this sample
+```
+
+---
+
+## 6. Open Questions and Considerations
+
+1. **`abs_pos_tolerance`**: Currently set to 0 (exact position match). If pairing is too sparse, relaxing to tolerance=1 would allow nearby-position pairs at the cost of introducing a small positional confound.
+
+2. **Cross-tree prefill confound**: Pairs from different prefill trees come from different prompt contexts, so the hidden-state difference might partly reflect the prefill rather than the branch. Mitigated by (a) having multiple prefills of each type, (b) the cross-function transfer test which would expose prefill-specific artifacts, and (c) the within-tree pairs (when available) serving as a control.
+
+3. **Multi-class / 3+ predicates**: The current setup is binary (P+ vs P-). With 3+ predicates in one function, one could train one-vs-rest directions or a multi-class probe. Out of scope for now -- once 2-predicate results are solid, this is the natural next stress test.
+
+4. **`terminal_only=True` leaf scarcity**: Since MCTS branches stop at the first newline, most terminals are single-line completions. Orange leaves (compiles but wrong) can be rare for one-liners. The `min_p_green` filter on internal nodes helps by allowing use of non-leaf nodes on green-leading paths.
+
+5. **Anchor token quality**: Anchors are extracted by an oracle LM and pruned against actual completions, but edge cases remain (e.g., an anchor for P+ that accidentally appears in a P- implementation). Manual inspection of anchor extractions is recommended for each new `TargetPredicate`.
