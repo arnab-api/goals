@@ -1,57 +1,196 @@
 {
-  "name": "has_unique_elements",
   "p_plus": {
     "description": "check whether all elements are unique (len(lst) == len(set(lst)))",
-    "anchor_tokens": []
+    "anchor_tokens": [
+      "!= len(set",
+      "== len",
+      "== len(",
+      "== len(set",
+      "== len(set(",
+      "count(x) == 1",
+      "len(",
+      "len(set",
+      "lst.count",
+      "lst[1:]",
+      "not in lst",
+      "set(",
+      "set(lst)"
+    ]
   },
   "samples": [
     {
       "instruction": "Write a Python function that returns True iff the list has at least 2 elements and contains no duplicate values.\n\n",
       "code": "def is_long_unique(lst: list) -> bool:\n    \"\"\"Return True iff lst has at least 2 elements and contains no duplicate values.\"\"\"\n    return ",
-      "function_name": "is_long_unique",
       "unit_tests": [
-        [[1, 2, 3],  true],
-        [[1, 1, 2],  false],
-        [[1],        false],
-        [[],         false],
-        [[3, 1, 2],  true],
-        [[1, 2],     true],
-        [[5, 5],     false],
-        [[-1, 0, 1], true],
-        [[0, 0],     false]
+        [
+          [
+            1,
+            2,
+            3
+          ],
+          true
+        ],
+        [
+          [
+            1,
+            1,
+            2
+          ],
+          false
+        ],
+        [
+          [
+            1
+          ],
+          false
+        ],
+        [
+          [],
+          false
+        ],
+        [
+          [
+            3,
+            1,
+            2
+          ],
+          true
+        ],
+        [
+          [
+            1,
+            2
+          ],
+          true
+        ],
+        [
+          [
+            5,
+            5
+          ],
+          false
+        ],
+        [
+          [
+            -1,
+            0,
+            1
+          ],
+          true
+        ],
+        [
+          [
+            0,
+            0
+          ],
+          false
+        ]
       ],
       "prefills": {
-        "aligned_p_plus":  ["set(lst)", "len(set(", "len(lst) == len(set"],
-        "aligned_p_minus": ["len(", "len(lst)"],
-        "adversarial":     ["not (", "False if", "True if not"],
-        "inconsequential": [""]
+        "aligned_p_plus": [
+          "set(lst)",
+          "len(set(",
+          "len(lst) == len(set"
+        ],
+        "aligned_p_minus": [
+          "len(",
+          "len(lst)"
+        ],
+        "adversarial": [
+          "not (",
+          "False if",
+          "True if not"
+        ],
+        "inconsequential": [
+          ""
+        ]
       },
+      "function_name": "is_long_unique",
       "p_minus": {
         "description": "check whether len(lst) >= 2",
-        "anchor_tokens": []
+        "anchor_tokens": [
+          "2 <=",
+          "<= len",
+          "== len",
+          "== len(lst) >= 2",
+          "== len(uniq) >= 2",
+          "> 1",
+          ">1",
+          ">= 2",
+          ">=2",
+          "else False",
+          "len(lst)",
+          "len(lst) >",
+          "len(lst) > 1",
+          "len(lst) >=",
+          "len(lst) >= 2"
+        ]
       }
     },
     {
       "instruction": "Write a Python function that returns True iff the list is sorted in non-decreasing order and contains no duplicate values.\n\n",
       "code": "def is_unique_sorted(lst: list) -> bool:\n    \"\"\"Return True iff lst is sorted in non-decreasing order and contains no duplicate values.\"\"\"\n    return ",
-      "function_name": "is_unique_sorted",
       "unit_tests": [
-        [[1, 2, 3],    true],
-        [[1, 1, 2],    false],
-        [[3, 1, 2],    false],
-        [[3, 2, 1],    false],
-        [[],           true],
-        [[5],          true],
-        [[0, 5, 10],   true],
-        [[1, 2, 2, 3], false],
-        [[-2, 0, 3],   true]
+        [
+          [],
+          true
+        ],
+        [
+          [],
+          false
+        ],
+        [
+          [],
+          false
+        ],
+        [
+          [],
+          false
+        ],
+        [
+          [],
+          true
+        ],
+        [
+          [],
+          true
+        ],
+        [
+          [],
+          true
+        ],
+        [
+          [
+            3
+          ],
+          false
+        ],
+        [
+          [],
+          true
+        ]
       ],
       "prefills": {
-        "aligned_p_plus":  ["set(lst)", "len(set(", "len(lst) == len(set"],
-        "aligned_p_minus": ["sorted(", "lst ==", "lst == sorted("],
-        "adversarial":     ["not (", "False if", "True if not"],
-        "inconsequential": [""]
+        "aligned_p_plus": [
+          "set(lst)",
+          "len(set(",
+          "len(lst) == len(set"
+        ],
+        "aligned_p_minus": [
+          "sorted(",
+          "lst ==",
+          "lst == sorted("
+        ],
+        "adversarial": [
+          "not (",
+          "False if",
+          "True if not"
+        ],
+        "inconsequential": [
+          ""
+        ]
       },
+      "function_name": "is_unique_sorted",
       "p_minus": {
         "description": "check whether lst == sorted(lst) (sorted in non-decreasing order)",
         "anchor_tokens": []
@@ -60,28 +199,111 @@
     {
       "instruction": "Write a Python function that returns True iff all elements of the list are integers and no element is repeated.\n\n",
       "code": "def is_int_unique(lst: list) -> bool:\n    \"\"\"Return True iff all elements of lst are integers and no element is repeated.\"\"\"\n    return ",
-      "function_name": "is_int_unique",
       "unit_tests": [
-        [[1, 2, 3],       true],
-        [[1, 1, 2],       false],
-        [[1.0, 2.0, 3.0], false],
-        [[1, 2, 3.0],     false],
-        [[],              true],
-        [["a", "b"],      false],
-        [[5],             true],
-        [[1, 2, 1],       false],
-        [[-1, 0, 1],      true]
+        [
+          [
+            1,
+            2,
+            3
+          ],
+          true
+        ],
+        [
+          [
+            1,
+            1,
+            2
+          ],
+          false
+        ],
+        [
+          [
+            1.0,
+            2.0,
+            3.0
+          ],
+          false
+        ],
+        [
+          [
+            1,
+            2,
+            3.0
+          ],
+          false
+        ],
+        [
+          [],
+          true
+        ],
+        [
+          [
+            "a",
+            "b"
+          ],
+          false
+        ],
+        [
+          [
+            5
+          ],
+          true
+        ],
+        [
+          [
+            1,
+            2,
+            1
+          ],
+          false
+        ],
+        [
+          [
+            -1,
+            0,
+            1
+          ],
+          true
+        ]
       ],
       "prefills": {
-        "aligned_p_plus":  ["set(lst)", "len(set(", "len(lst) == len(set"],
-        "aligned_p_minus": ["isinstance(", "all(isinstance"],
-        "adversarial":     ["not (", "False if", "True if not"],
-        "inconsequential": [""]
+        "aligned_p_plus": [
+          "set(lst)",
+          "len(set(",
+          "len(lst) == len(set"
+        ],
+        "aligned_p_minus": [
+          "isinstance(",
+          "all(isinstance"
+        ],
+        "adversarial": [
+          "not (",
+          "False if",
+          "True if not"
+        ],
+        "inconsequential": [
+          ""
+        ]
       },
+      "function_name": "is_int_unique",
       "p_minus": {
         "description": "check whether all(isinstance(x, int) for x in lst)",
-        "anchor_tokens": []
+        "anchor_tokens": [
+          "!= int",
+          "all(isinstance",
+          "filter(",
+          "for x in lst if",
+          "int)",
+          "isinstance",
+          "isinstance(x, int)",
+          "type(elem)",
+          "type(i) != int",
+          "type(item) != int",
+          "type(x) != int",
+          "type(x) == int"
+        ]
       }
     }
-  ]
+  ],
+  "name": "has_unique_elements"
 }

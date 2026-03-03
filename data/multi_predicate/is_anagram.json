@@ -1,31 +1,101 @@
 {
-  "name": "is_anagram",
   "p_plus": {
     "description": "check whether pair[0] and pair[1] are anagrams (sorted(pair[0]) == sorted(pair[1]))",
-    "anchor_tokens": []
+    "anchor_tokens": [
+      "sort",
+      "sorted(",
+      "sorted(pair[0])"
+    ]
   },
   "samples": [
     {
       "instruction": "Write a Python function that accepts a pair of strings and returns True iff both strings are at least 2 characters long and are anagrams of each other.\n\n",
       "code": "def is_long_anagram(pair: tuple[str, str]) -> bool:\n    \"\"\"Return True iff both strings in pair are at least 2 characters long and are anagrams of each other.\"\"\"\n    return ",
-      "function_name": "is_long_anagram",
       "unit_tests": [
-        [["listen", "silent"], true],
-        [["a", "a"],           false],
-        [["ab", "ba"],         true],
-        [["ab", "cd"],         false],
-        [["", ""],             false],
-        [["eat", "tea"],       true],
-        [["rat", "car"],       false],
-        [["abc", "ab"],        false],
-        [["hi", "ih"],         true]
+        [
+          [
+            "listen",
+            "silent"
+          ],
+          true
+        ],
+        [
+          [
+            "a",
+            "a"
+          ],
+          false
+        ],
+        [
+          [
+            "ab",
+            "ba"
+          ],
+          true
+        ],
+        [
+          [
+            "ab",
+            "cd"
+          ],
+          false
+        ],
+        [
+          [
+            "",
+            ""
+          ],
+          false
+        ],
+        [
+          [
+            "eat",
+            "tea"
+          ],
+          true
+        ],
+        [
+          [
+            "rat",
+            "car"
+          ],
+          false
+        ],
+        [
+          [
+            "abc",
+            "ab"
+          ],
+          false
+        ],
+        [
+          [
+            "hi",
+            "ih"
+          ],
+          true
+        ]
       ],
       "prefills": {
-        "aligned_p_plus":  ["sorted(pair[0])", "sorted(pair", "Counter(pair"],
-        "aligned_p_minus": ["len(pair[0])", "len(pair"],
-        "adversarial":     ["not (", "False if", "True if not"],
-        "inconsequential": [""]
+        "aligned_p_plus": [
+          "sorted(pair[0])",
+          "sorted(pair",
+          "Counter(pair"
+        ],
+        "aligned_p_minus": [
+          "len(pair[0])",
+          "len(pair"
+        ],
+        "adversarial": [
+          "not (",
+          "False if",
+          "True if not"
+        ],
+        "inconsequential": [
+          ""
+        ]
       },
+      "function_name": "is_long_anagram",
       "p_minus": {
         "description": "check whether len(pair[0]) >= 2 and len(pair[1]) >= 2",
         "anchor_tokens": []
@@ -34,24 +104,91 @@
     {
       "instruction": "Write a Python function that accepts a pair of strings and returns True iff both strings consist entirely of alphabetic characters and are anagrams of each other.\n\n",
       "code": "def is_alpha_anagram(pair: tuple[str, str]) -> bool:\n    \"\"\"Return True iff both strings in pair consist entirely of alphabetic characters and are anagrams of each other.\"\"\"\n    return ",
-      "function_name": "is_alpha_anagram",
       "unit_tests": [
-        [["listen", "silent"], true],
-        [["12", "21"],         false],
-        [["abc", "bca"],       true],
-        [["abc", "abd"],       false],
-        [["a1b", "b1a"],       false],
-        [["", ""],             false],
-        [["cat", "act"],       true],
-        [["rat", "car"],       false],
-        [["hi", "ih"],         true]
+        [
+          [
+            "listen",
+            "silent"
+          ],
+          true
+        ],
+        [
+          [
+            "12",
+            "21"
+          ],
+          false
+        ],
+        [
+          [
+            "abc",
+            "bca"
+          ],
+          true
+        ],
+        [
+          [
+            "abc",
+            "abd"
+          ],
+          false
+        ],
+        [
+          [
+            "a1b",
+            "b1a"
+          ],
+          false
+        ],
+        [
+          [
+            "",
+            ""
+          ],
+          false
+        ],
+        [
+          [
+            "cat",
+            "act"
+          ],
+          true
+        ],
+        [
+          [
+            "rat",
+            "car"
+          ],
+          false
+        ],
+        [
+          [
+            "hi",
+            "ih"
+          ],
+          true
+        ]
       ],
       "prefills": {
-        "aligned_p_plus":  ["sorted(pair[0])", "sorted(pair", "Counter(pair"],
-        "aligned_p_minus": ["pair[0].isalpha()", "pair[0].is"],
-        "adversarial":     ["not (", "False if", "True if not"],
-        "inconsequential": [""]
+        "aligned_p_plus": [
+          "sorted(pair[0])",
+          "sorted(pair",
+          "Counter(pair"
+        ],
+        "aligned_p_minus": [
+          "pair[0].isalpha()",
+          "pair[0].is"
+        ],
+        "adversarial": [
+          "not (",
+          "False if",
+          "True if not"
+        ],
+        "inconsequential": [
+          ""
+        ]
       },
+      "function_name": "is_alpha_anagram",
       "p_minus": {
         "description": "check whether pair[0].isalpha() and pair[1].isalpha()",
         "anchor_tokens": []
@@ -60,54 +197,195 @@
     {
       "instruction": "Write a Python function that accepts a pair of strings and returns True iff the two strings are anagrams of each other and are not identical.\n\n",
       "code": "def is_nontrivial_anagram(pair: tuple[str, str]) -> bool:\n    \"\"\"Return True iff the strings in pair are anagrams of each other and are not identical.\"\"\"\n    return ",
-      "function_name": "is_nontrivial_anagram",
       "unit_tests": [
-        [["listen", "silent"], true],
-        [["abc", "abc"],       false],
-        [["abc", "bca"],       true],
-        [["abc", "abd"],       false],
-        [["", ""],             false],
-        [["a", "a"],           false],
-        [["eat", "tea"],       true],
-        [["rat", "tar"],       true],
-        [["hi", "hi"],         false]
+        [
+          [
+            "listen",
+            "silent"
+          ],
+          true
+        ],
+        [
+          [
+            "abc",
+            "abc"
+          ],
+          false
+        ],
+        [
+          [
+            "abc",
+            "bca"
+          ],
+          true
+        ],
+        [
+          [
+            "abc",
+            "abd"
+          ],
+          false
+        ],
+        [
+          [
+            "",
+            ""
+          ],
+          false
+        ],
+        [
+          [
+            "a",
+            "a"
+          ],
+          false
+        ],
+        [
+          [
+            "eat",
+            "tea"
+          ],
+          true
+        ],
+        [
+          [
+            "rat",
+            "tar"
+          ],
+          true
+        ],
+        [
+          [
+            "hi",
+            "hi"
+          ],
+          false
+        ]
       ],
       "prefills": {
-        "aligned_p_plus":  ["sorted(pair[0])", "sorted(pair", "Counter(pair"],
-        "aligned_p_minus": ["pair[0] != pair[1]", "pair[0] !="],
-        "adversarial":     ["not (", "False if", "True if not"],
-        "inconsequential": [""]
+        "aligned_p_plus": [
+          "sorted(pair[0])",
+          "sorted(pair",
+          "Counter(pair"
+        ],
+        "aligned_p_minus": [
+          "pair[0] != pair[1]",
+          "pair[0] !="
+        ],
+        "adversarial": [
+          "not (",
+          "False if",
+          "True if not"
+        ],
+        "inconsequential": [
+          ""
+        ]
       },
+      "function_name": "is_nontrivial_anagram",
       "p_minus": {
         "description": "check whether pair[0] != pair[1]",
-        "anchor_tokens": []
+        "anchor_tokens": [
+          "!=",
+          "!= ",
+          "!= pair",
+          "!= pair[1]",
+          "pair[0] !="
+        ]
       }
     },
     {
       "instruction": "Write a Python function that accepts a pair of strings and returns True iff both strings are all-lowercase and are anagrams of each other.\n\n",
       "code": "def is_lower_anagram(pair: tuple[str, str]) -> bool:\n    \"\"\"Return True iff both strings in pair are all-lowercase and are anagrams of each other.\"\"\"\n    return ",
-      "function_name": "is_lower_anagram",
       "unit_tests": [
-        [["listen", "silent"], true],
-        [["Listen", "Silent"], false],
-        [["abc", "bca"],       true],
-        [["ABC", "BCA"],       false],
-        [["abc", "abd"],       false],
-        [["", ""],             false],
-        [["cat", "act"],       true],
-        [["Cat", "act"],       false],
-        [["hi", "ih"],         true]
+        [
+          [
+            "listen",
+            "silent"
+          ],
+          true
+        ],
+        [
+          [
+            "Listen",
+            "Silent"
+          ],
+          false
+        ],
+        [
+          [
+            "abc",
+            "bca"
+          ],
+          true
+        ],
+        [
+          [
+            "ABC",
+            "BCA"
+          ],
+          false
+        ],
+        [
+          [
+            "abc",
+            "abd"
+          ],
+          false
+        ],
+        [
+          [
+            "",
+            ""
+          ],
+          false
+        ],
+        [
+          [
+            "cat",
+            "act"
+          ],
+          true
+        ],
+        [
+          [
+            "Cat",
+            "act"
+          ],
+          false
+        ],
+        [
+          [
+            "hi",
+            "ih"
+          ],
+          true
+        ]
       ],
       "prefills": {
-        "aligned_p_plus":  ["sorted(pair[0])", "sorted(pair", "Counter(pair"],
-        "aligned_p_minus": ["pair[0].islower()", "pair[0].is"],
-        "adversarial":     ["not (", "False if", "True if not"],
-        "inconsequential": [""]
+        "aligned_p_plus": [
+          "sorted(pair[0])",
+          "sorted(pair",
+          "Counter(pair"
+        ],
+        "aligned_p_minus": [
+          "pair[0].islower()",
+          "pair[0].is"
+        ],
+        "adversarial": [
+          "not (",
+          "False if",
+          "True if not"
+        ],
+        "inconsequential": [
+          ""
+        ]
       },
+      "function_name": "is_lower_anagram",
       "p_minus": {
         "description": "check whether pair[0].islower() and pair[1].islower()",
         "anchor_tokens": []
       }
     }
-  ]
+  ],
+  "name": "is_anagram"
 }

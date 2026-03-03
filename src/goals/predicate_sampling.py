@@ -84,6 +84,20 @@ class MCTSSearchResults_for_MultiPredicateSample(DataClassJsonMixin):
         """Returns {prefix: green_completions} for use with extract_anchor_tokens."""
         return {run.prefix: run.green_completions for run in self.runs}
 
+    def save(self, path: PathLike) -> None:
+        path = pathlib.Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.info(f"Saved MCTSSearchResults for sample → {path}")
+
+    @classmethod
+    def load(cls, path: PathLike) -> "MCTSSearchResults_for_MultiPredicateSample":
+        with open(path, "r") as f:
+            result = cls.from_dict(json.load(f))
+        logger.info(f"Loaded MCTSSearchResults for sample from {path}")
+        return result
+
 
 @dataclass
 class MCTSSearchResults_for_TargetPredicate(DataClassJsonMixin):
@@ -108,21 +122,84 @@ class MCTSSearchResults_for_TargetPredicate(DataClassJsonMixin):
         """
         return [sr.completions_by_prefix for sr in self.sample_results]
 
-    def save(self, path: PathLike) -> None:
-        path = pathlib.Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+    def save(self, predicate_dir: PathLike) -> None:
+        """Save per-sample results as individual mcts.json files under predicate_dir.
+
+        Each sample is saved to {predicate_dir}/{subdir}/mcts.json where subdir
+        is derived from the sample's P- description (matching the MCTS script's
+        naming convention).
+        """
+        predicate_dir = pathlib.Path(predicate_dir)
+        predicate_dir.mkdir(parents=True, exist_ok=True)
+        for sr in self.sample_results:
+            # Derive subdir name from sample P- description (same as _p_minus_dir_name)
+            if sr.sample.p_minus is not None:
+                desc = sr.sample.p_minus.description[:50]
+                subdir = desc.strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
+                subdir = "".join(c for c in subdir if c.isalnum() or c in "_-.")
+                subdir = subdir[:40] or "empty"
+            else:
+                subdir = f"sample{self.sample_results.index(sr)}"
+            sample_path = predicate_dir / subdir / "mcts.json"
+            sr.save(sample_path)
         logger.info(
-            f"Saved MCTSSearchResults for '{self.target_predicate_name}' to {path}"
+            f"Saved MCTSSearchResults for '{self.target_predicate_name}' "
+            f"({len(self.sample_results)} sample(s)) under {predicate_dir}"
         )
 
     @classmethod
     def load(cls, path: PathLike) -> "MCTSSearchResults_for_TargetPredicate":
-        with open(path, "r") as f:
-            result = cls.from_dict(json.load(f))
+        """Load from a predicate directory containing per-sample subdirs.
+
+        Supports two layouts:
+          - New (per-sample): path is a directory, scan */mcts.json
+          - Legacy (single file): path is a single JSON file
+        """
+        path = pathlib.Path(path)
+
+        # Legacy: single JSON file
+        if path.is_file():
+            with open(path, "r") as f:
+                result = cls.from_dict(json.load(f))
+            logger.info(
+                f"Loaded MCTSSearchResults for '{result.target_predicate_name}' "
+                f"({len(result.sample_results)} sample(s)) from {path}"
+            )
+            return result
+
+        # New layout: path is predicate directory, scan subdirs for mcts.json
+        if not path.is_dir():
+            raise FileNotFoundError(f"MCTS results not found at {path}")
+
+        sample_jsons = sorted(path.glob("*/mcts.json"))
+        if not sample_jsons:
+            raise FileNotFoundError(
+                f"No per-sample mcts.json files found under {path}/*/mcts.json"
+            )
+
+        sample_results = []
+        mcts_config: dict = {}
+        model_name = ""
+        predicate_name = ""
+
+        for sp in sample_jsons:
+            sr = MCTSSearchResults_for_MultiPredicateSample.load(sp)
+            sample_results.append(sr)
+            # Infer metadata from first run
+            if sr.runs and not mcts_config:
+                mcts_config = sr.runs[0].mcts_config
+
+        # Infer predicate name from directory name
+        predicate_name = path.name
+
+        result = cls(
+            target_predicate_name=predicate_name,
+            model_name=model_name,
+            mcts_config=mcts_config,
+            sample_results=sample_results,
+        )
         logger.info(
-            f"Loaded MCTSSearchResults for '{result.target_predicate_name}' "
-            f"({len(result.sample_results)} sample(s)) from {path}"
+            f"Loaded MCTSSearchResults for '{predicate_name}' "
+            f"({len(sample_results)} sample(s)) from {path}"
         )
         return result
