@@ -118,6 +118,12 @@ P- (length check): ["len("]
 
 Anchor tokens are written back to the `TargetPredicate` JSON files on disk, so they persist across runs.
 
+**Ternary handling**: The extractor terminates the boolean expression at a top-level
+`else` keyword (boundary-checked so it is not part of an identifier). This ensures that
+`return True if cond else False` extracts only `cond`, not `cond else False`.
+Without this, the `else` branch would be absorbed into the clause and corrupt anchor
+matching for predicates that appear after `else`.
+
 **Script**: `scripts/multipred_probe.py` (step 1.5, runs before labeling)
 
 ```
@@ -190,6 +196,8 @@ collect_labeled_nodes(tp_results, tp, mt, sample_indices, min_p_green=0.5):
                 # 2. Label each non-root node on the path
                 first_label = "p_plus" if p_plus starts first else "p_minus"
                 for node in root→leaf path (depth 1..leaf):
+                    if node is leaf:   # goal already done — exclude from probing
+                        continue
                     if node.depth in [p_plus_clause.start .. p_plus_clause.end]:
                         label = "p_plus"
                     elif node.depth in [p_minus_clause.start .. p_minus_clause.end]:
@@ -212,6 +220,12 @@ collect_labeled_nodes(tp_results, tp, mt, sample_indices, min_p_green=0.5):
     return collected  # flat list, transition nodes excluded
 ```
 
+**Terminal node exclusion**: The leaf node itself is excluded from labeled node
+collection. At a terminal node the predicate implementation is already complete, so its
+hidden state reflects *completion* rather than *pursuit* of the goal. Probing on
+terminal nodes risks conflating goal intent with goal success. Only pre-terminal nodes
+— where the model is actively generating within a predicate clause — are retained.
+
 ### 2.7 Contrastive Pairing Strategy
 
 **Pairing scope**: Pairs are formed **per sample** (per P- companion). Nodes from different `(P+, P-)` pairs are never paired together — this prevents cross-P- contamination, where the probe could learn to distinguish "which P- is present" rather than "is P+ being pursued."
@@ -232,7 +246,7 @@ CONTRASTIVE_PAIR_CONFIG = dict(
 )
 ```
 
-**Train/test split**: 80/20 by tree ID (not by pair). All pairs from a given tree go entirely into train or test. This prevents leakage from seeing different nodes of the same tree in both splits.
+**Train/test split**: 70/30 by tree ID (not by pair). All pairs from a given tree go entirely into train or test. This prevents leakage from seeing different nodes of the same tree in both splits.
 
 ```
 collect_and_split_pairs(tp_results, tp, mt, args):
@@ -264,7 +278,7 @@ collect_and_split_pairs(tp_results, tp, mt, args):
 
     # ── Train/test split by tree ID ───────────────────────────────
     all_tree_ids = unique tree IDs from pair_records
-    shuffle, split 80/20
+    shuffle, split 70/30
     train_idx = pairs whose pos_tree_id ∈ train_trees
     test_idx  = pairs whose pos_tree_id ∈ test_trees
     cap train_idx at args.n_train_pairs, test_idx at args.n_test_pairs
@@ -363,7 +377,7 @@ Both are computed per layer for both direction types.
 
 ### 4.1 In-Distribution Classification
 
-Train on 80% of trees (from multiple (P+, P-) samples), test on the held-out 20%. This is the basic sanity check: can the direction separate P+-pursuing from P--pursuing nodes from the same `TargetPredicate`?
+Train on 70% of trees (from multiple (P+, P-) samples), test on the held-out 30%. This is the basic sanity check: can the direction separate P+-pursuing from P--pursuing nodes from the same `TargetPredicate`?
 
 Metrics: constraint accuracy and ROC-AUC per layer.
 
@@ -475,3 +489,15 @@ MultiPredicateSample (extends IncompleteCodeSample)
 4. **`terminal_only=True` leaf scarcity**: Since MCTS branches stop at the first newline, most terminals are single-line completions. Orange leaves (compiles but wrong) can be rare for one-liners. The `min_p_green` filter on internal nodes helps by allowing use of non-leaf nodes on green-leading paths.
 
 5. **Anchor token quality**: Anchors are extracted by an oracle LM and pruned against actual completions, but edge cases remain (e.g., an anchor for P+ that accidentally appears in a P- implementation). Manual inspection of anchor extractions is recommended for each new `TargetPredicate`.
+
+---
+
+## 7. Recent Updates
+
+**`IncompleteCodeDataset.find_by_function_name(name)`** (`src/goals/data.py`): Added to
+look up the standalone `IncompleteCodeSample` for any `TargetPredicate` by name. Used by
+evaluation/probing code to retrieve the base single-predicate task for a given P+.
+
+Three new entries were added to `data/incomplete_code.json` to cover all six current
+`TargetPredicate` names: `is_anagram`, `is_perfect_square`, `has_unique_elements`
+(joining the existing `is_sorted`, `is_palindrome`, `is_power_of_two`).

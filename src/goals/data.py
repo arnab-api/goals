@@ -48,6 +48,13 @@ class IncompleteCodeDataset(DataClassJsonMixin):
         logger.info(f"Loaded {len(samples)} samples from {path}")
         return IncompleteCodeDataset(samples=samples)
 
+    def find_by_function_name(self, name: str) -> "IncompleteCodeSample | None":
+        """Return the first sample whose function_name matches name, or None."""
+        for sample in self.samples:
+            if sample.function_name == name:
+                return sample
+        return None
+
     def __len__(self) -> int:
         return len(self.samples)
 
