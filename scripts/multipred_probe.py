@@ -3,7 +3,7 @@
 Loads pre-computed MCTS trees (produced by multipred_mcts.py) and trains
 goal-direction probes for each TargetPredicate.
 
-Run multipred_mcts.py FIRST to expand the trees and populate anchor tokens.
+Run multipred_mcts.py FIRST to expand the trees.
 
 Usage:
     python -m scripts.multipred_probe --model_name Qwen/Qwen2.5-Coder-32B-Instruct
@@ -11,10 +11,11 @@ Usage:
         --predicate_indices 0 1
 
 Pipeline per TargetPredicate:
-  1. Load MCTSSearchResults_for_TargetPredicate from
-         {save_dir}/{model}/{predicate.name}/trees/mcts.json
-  2. Collect P+ / P- labeled nodes (anchor-token based labeling)
-  3. Form cross-tree dual-window contrastive pairs
+  1. Load MCTSSearchResults_for_TargetPredicate from per-sample subdirs under
+         {save_dir}/{model}/{predicate.name}/{p_minus_desc}/mcts.json
+  1.5. Ensure P+ / P- anchor tokens are populated (oracle LM extraction if missing)
+  2. Collect P+ / P- labeled nodes (anchor-token based labeling) PER SAMPLE
+  3. Form cross-tree dual-window contrastive pairs PER SAMPLE (prevents cross-P- mixing)
   4. Write per-tree probe logs (labeled-node counts by depth / abs-position)
   5. Extract last-token latents for all pairs
   6. Train mean-diff (unit-norm) and contrastive (unit-norm) directions per layer
@@ -29,17 +30,15 @@ All paths are under {save_dir}/ (default: $RESULTS_DIR/multi_probe).
       {model_name}/                    e.g. Qwen2.5-Coder-32B-Instruct/
         {predicate.name}/              e.g. is_palindrome/
           │
-          ├── trees/
-          │     ├── mcts.json              (written by multipred_mcts.py — read-only here)
-          │     ├── {p_minus_desc}/
-          │     │     └── {prefill}/
-          │     │           └── probe_log.json   Per-tree log:
-          │     │                                  eval_counts   (green/orange/red/total)
-          │     │                                  mcts_stats
-          │     │                                  n_labeled_nodes
-          │     │                                  by_depth      {depth: {p_plus, p_minus}}
-          │     │                                  by_abs_position {pos:  {p_plus, p_minus}}
-          │     └── ...
+          ├── {p_minus_desc}/                (one dir per sample, written by multipred_mcts.py)
+          │     ├── mcts.json                  Per-sample MCTS results (read-only here)
+          │     ├── {prefill}.html              Color-coded MCTS tree
+          │     └── probe_log_{prefill}.json   Per-tree log:
+          │                                      eval_counts   (green/orange/red/total)
+          │                                      mcts_stats
+          │                                      n_labeled_nodes
+          │                                      by_depth      {depth: {p_plus, p_minus}}
+          │                                      by_abs_position {pos:  {p_plus, p_minus}}
           │
           ├── mean_diff_directions.pt    dict[layer_idx → unit-norm Tensor(hidden_dim,)]
           ├── contrastive_directions.pt  dict[layer_idx → unit-norm Tensor(hidden_dim,)]
@@ -60,6 +59,7 @@ import argparse
 import json
 import logging
 import os
+import pathlib
 import random
 from collections import defaultdict
 
@@ -70,6 +70,7 @@ import torch  # noqa: E402
 from sklearn.metrics import roc_auc_score
 
 from src.functional import free_gpu_cache
+from src.goals.anchor import extract_anchor_tokens
 from src.goals.functional import get_last_token_latents_batch
 from src.goals.predicate_data import MultiPredicateDataset, TargetPredicate
 from src.goals.predicate_probe import (
@@ -169,28 +170,108 @@ def _p_minus_dir_name(sample, sample_idx: int) -> str:
 # ══════════════════════════════════════════════════════════════════════
 def load_mcts_results(
     tp: TargetPredicate,
-    tree_root_dir: str,
+    predicate_dir: str,
 ) -> MCTSSearchResults_for_TargetPredicate:
-    """Load cached MCTS results from {tree_root_dir}/mcts.json.
+    """Load cached MCTS results from per-sample subdirs under predicate_dir.
 
-    Raises FileNotFoundError if the cache doesn't exist (run multipred_mcts.py first).
+    Supports both:
+      - New layout: {predicate_dir}/{p_minus_desc}/mcts.json  (per-sample)
+      - Legacy layout: {predicate_dir}/trees/mcts.json  (single bundled file)
+
+    Raises FileNotFoundError if no cache exists (run multipred_mcts.py first).
     """
-    cache_path = os.path.join(tree_root_dir, "mcts.json")
-    if not os.path.exists(cache_path):
-        raise FileNotFoundError(
-            f"MCTS cache not found: {cache_path}\n"
-            "Run multipred_mcts.py first to generate MCTS trees."
+    # Try new per-sample layout first
+    if os.path.isdir(predicate_dir):
+        sample_jsons = list(
+            p for p in sorted(
+                pathlib.Path(predicate_dir).glob("*/mcts.json")
+            )
+            # Exclude legacy trees/ subdirectory
+            if p.parent.name != "trees"
         )
+        if sample_jsons:
+            tp_results = MCTSSearchResults_for_TargetPredicate.load(predicate_dir)
+            n_trees = sum(len(sr._trees) for sr in tp_results.sample_results)
+            logger.info(
+                f"Loaded MCTS results for '{tp.name}': "
+                f"{len(tp_results.sample_results)} samples, {n_trees} in-memory trees."
+            )
+            if n_trees == 0:
+                logger.warning(
+                    "No in-memory trees in cache — anchor labeling may fail. "
+                    "Re-run multipred_mcts.py with --force_rerun_mcts to regenerate."
+                )
+            return tp_results
 
-    tp_results = MCTSSearchResults_for_TargetPredicate.load(cache_path)
-    n_trees = sum(len(sr._trees) for sr in tp_results.sample_results)
-    logger.info(f"Loaded MCTS results for '{tp.name}': {n_trees} in-memory trees.")
-    if n_trees == 0:
-        logger.warning(
-            "No in-memory trees in cache — anchor labeling may fail. "
-            "Re-run multipred_mcts.py with --force_rerun_mcts to regenerate."
+    # Fall back to legacy single-file layout
+    legacy_path = os.path.join(predicate_dir, "trees", "mcts.json")
+    if os.path.exists(legacy_path):
+        tp_results = MCTSSearchResults_for_TargetPredicate.load(legacy_path)
+        n_trees = sum(len(sr._trees) for sr in tp_results.sample_results)
+        logger.info(
+            f"Loaded MCTS results (legacy) for '{tp.name}': {n_trees} in-memory trees."
         )
-    return tp_results
+        if n_trees == 0:
+            logger.warning(
+                "No in-memory trees in cache — anchor labeling may fail. "
+                "Re-run multipred_mcts.py with --force_rerun_mcts to regenerate."
+            )
+        return tp_results
+
+    raise FileNotFoundError(
+        f"MCTS cache not found under {predicate_dir}\n"
+        "Run multipred_mcts.py first to generate MCTS trees."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Step 1.5 — Anchor tokens
+# ══════════════════════════════════════════════════════════════════════
+def ensure_anchor_tokens(
+    tp: TargetPredicate,
+    tp_results: MCTSSearchResults_for_TargetPredicate,
+    force_reextract: bool = False,
+) -> None:
+    """Populate P+ / P- anchor tokens via oracle LM if any are missing, then save to disk.
+
+    Anchor tokens live in:
+        tp.p_plus.anchor_tokens               (shared across all samples)
+        tp.samples[i].p_minus.anchor_tokens   (per-sample)
+
+    If all are already populated and force_reextract=False, this is a no-op.
+    On update, the TargetPredicate JSON is overwritten via tp.save().
+    """
+    needs = (
+        force_reextract
+        or not tp.p_plus.anchor_tokens
+        or any(
+            not (sample.p_minus and sample.p_minus.anchor_tokens)
+            for sample in tp.samples
+        )
+    )
+    if not needs:
+        logger.info(
+            f"Anchor tokens already populated for '{tp.name}' — skipping oracle."
+        )
+        return
+
+    print(f"\nExtracting anchor tokens for '{tp.name}' via oracle LM...")
+    p_plus_anchors, p_minus_per_sample = extract_anchor_tokens(
+        tp=tp,
+        completions_per_sample=tp_results.completions_per_sample,
+    )
+
+    tp.p_plus.anchor_tokens = sorted(p_plus_anchors)
+    for i, sample in enumerate(tp.samples):
+        if sample.p_minus is not None:
+            sample.p_minus.anchor_tokens = sorted(p_minus_per_sample[i])
+
+    tp.save()
+    print(f"  P+ anchors:  {tp.p_plus.anchor_tokens}")
+    for i, sample in enumerate(tp.samples):
+        anchors = sample.p_minus.anchor_tokens if sample.p_minus else []
+        print(f"  P- anchors (sample {i}): {anchors}")
+    print(f"Saved anchor tokens → {tp._source_path}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -200,9 +281,13 @@ def save_tree_logs(
     tp: TargetPredicate,
     tp_results: MCTSSearchResults_for_TargetPredicate,
     labeled_nodes: list[LabeledNode],
-    tree_root_dir: str,
+    predicate_dir: str,
 ) -> None:
-    """Write per-run JSON logs (eval counts + labeled-node breakdown by depth / abs-position)."""
+    """Write per-run JSON logs (eval counts + labeled-node breakdown by depth / abs-position).
+
+    Logs are written alongside MCTS artifacts:
+        {predicate_dir}/{p_minus_desc}/probe_log_{prefill}.json
+    """
     nodes_by_tree: dict[str, list[LabeledNode]] = defaultdict(list)
     for ln in labeled_nodes:
         nodes_by_tree[ln.tree_id].append(ln)
@@ -210,11 +295,11 @@ def save_tree_logs(
     for sample_idx, sr in enumerate(tp_results.sample_results):
         sample = tp.samples[sample_idx]
         p_minus_name = _p_minus_dir_name(sample, sample_idx)
+        sample_dir = os.path.join(predicate_dir, p_minus_name)
+        os.makedirs(sample_dir, exist_ok=True)
 
         for run in sr.runs:
             safe_pval = _safe_name(run.prefill) if run.prefill else "empty"
-            tree_dir = os.path.join(tree_root_dir, p_minus_name, safe_pval)
-            os.makedirs(tree_dir, exist_ok=True)
 
             tree_nodes = nodes_by_tree.get(run.prefix, [])
 
@@ -235,11 +320,11 @@ def save_tree_logs(
                 "by_depth": {str(d): v for d, v in sorted(by_depth.items())},
                 "by_abs_position": {str(p): v for p, v in sorted(by_abs_pos.items())},
             }
-            log_path = os.path.join(tree_dir, "probe_log.json")
+            log_path = os.path.join(sample_dir, f"probe_log_{safe_pval}.json")
             with open(log_path, "w") as f:
                 json.dump(log, f, indent=2)
 
-    logger.info(f"Per-tree logs written under {tree_root_dir}/")
+    logger.info(f"Per-tree logs written under {predicate_dir}/")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -251,56 +336,70 @@ def collect_and_split_pairs(
     mt: ModelandTokenizer,
     args,
 ) -> tuple[list[LabeledNode], list[dict], list[int], list[int]]:
-    """Collect labeled nodes, form cross-tree pairs, build pair records, split."""
-    labeled = collect_labeled_nodes(
-        tp_results=tp_results,
-        tp=tp,
-        mt=mt,
-        min_p_green=CONTRASTIVE_PAIR_CONFIG["min_p_green"],
-    )
-    print(f"\nLabeled nodes: {len(labeled)}")
-    p_plus_count = sum(1 for ln in labeled if ln.label == "p_plus")
-    p_minus_count = sum(1 for ln in labeled if ln.label == "p_minus")
-    print(f"  P+: {p_plus_count}  P-: {p_minus_count}")
+    """Collect labeled nodes, form cross-tree pairs, build pair records, split.
 
-    pairs_by_pos = sample_multipred_pairs(
-        labeled_nodes=labeled,
-        allow_same_tree=CONTRASTIVE_PAIR_CONFIG["allow_same_tree"],
-        abs_pos_tolerance=CONTRASTIVE_PAIR_CONFIG["abs_pos_tolerance"],
-    )
-    n_pairs_total = sum(len(v) for v in pairs_by_pos.values())
-    print(f"Contrastive pairs: {n_pairs_total} across {len(pairs_by_pos)} positions")
-
-    if n_pairs_total == 0:
-        return labeled, [], [], []
-
+    Pairing is done PER SAMPLE (per P- companion) to prevent cross-P-
+    contamination — nodes from different (P+, P-) pairs are never paired.
+    """
     prefix_to_prompt = {
         run.prefix: run.prompt for sr in tp_results.sample_results for run in sr.runs
     }
 
-    all_pairs = [pair for pairs in pairs_by_pos.values() for pair in pairs]
-    pair_records = []
-    for pair in all_pairs:
-        pos_ln = pair.positive
-        neg_ln = pair.negative
-        pair_records.append(
-            {
-                "pos_text": prefix_to_prompt.get(pos_ln.tree_id, "")
-                + pos_ln.node.get_path_text(),
-                "neg_text": prefix_to_prompt.get(neg_ln.tree_id, "")
-                + neg_ln.node.get_path_text(),
-                "abs_position": pair.abs_position,
-                "pos_depth": pos_ln.depth,
-                "neg_depth": neg_ln.depth,
-                "pos_window": pos_ln.window,
-                "neg_window": neg_ln.window,
-                "pos_tree_id": pos_ln.tree_id,
-                "neg_tree_id": neg_ln.tree_id,
-                "pos_prefill_type": pos_ln.prefill_type,
-                "neg_prefill_type": neg_ln.prefill_type,
-                "sample_idx": pos_ln.sample_idx,
-            }
+    all_labeled: list[LabeledNode] = []
+    pair_records: list[dict] = []
+
+    for sample_idx, _sr in enumerate(tp_results.sample_results):
+        # Collect labeled nodes for this sample only
+        labeled_i = collect_labeled_nodes(
+            tp_results=tp_results,
+            tp=tp,
+            mt=mt,
+            sample_indices=[sample_idx],
+            min_p_green=CONTRASTIVE_PAIR_CONFIG["min_p_green"],
         )
+        all_labeled.extend(labeled_i)
+
+        if not labeled_i:
+            continue
+
+        # Form pairs within this sample
+        pairs_by_pos_i = sample_multipred_pairs(
+            labeled_nodes=labeled_i,
+            allow_same_tree=CONTRASTIVE_PAIR_CONFIG["allow_same_tree"],
+            abs_pos_tolerance=CONTRASTIVE_PAIR_CONFIG["abs_pos_tolerance"],
+        )
+
+        for pairs in pairs_by_pos_i.values():
+            for pair in pairs:
+                pos_ln = pair.positive
+                neg_ln = pair.negative
+                pair_records.append(
+                    {
+                        "pos_text": prefix_to_prompt.get(pos_ln.tree_id, "")
+                        + pos_ln.node.get_path_text(),
+                        "neg_text": prefix_to_prompt.get(neg_ln.tree_id, "")
+                        + neg_ln.node.get_path_text(),
+                        "abs_position": pair.abs_position,
+                        "pos_depth": pos_ln.depth,
+                        "neg_depth": neg_ln.depth,
+                        "pos_window": pos_ln.window,
+                        "neg_window": neg_ln.window,
+                        "pos_tree_id": pos_ln.tree_id,
+                        "neg_tree_id": neg_ln.tree_id,
+                        "pos_prefill_type": pos_ln.prefill_type,
+                        "neg_prefill_type": neg_ln.prefill_type,
+                        "sample_idx": pos_ln.sample_idx,
+                    }
+                )
+
+    print(f"\nLabeled nodes: {len(all_labeled)}")
+    p_plus_count = sum(1 for ln in all_labeled if ln.label == "p_plus")
+    p_minus_count = sum(1 for ln in all_labeled if ln.label == "p_minus")
+    print(f"  P+: {p_plus_count}  P-: {p_minus_count}")
+    print(f"Contrastive pairs: {len(pair_records)} (paired per-sample to prevent cross-P- mixing)")
+
+    if not pair_records:
+        return all_labeled, [], [], []
 
     # Train/test split by tree (prevents leakage)
     random.seed(42)
@@ -322,7 +421,7 @@ def collect_and_split_pairs(
         f"Split: {len(train_idx)} train / {len(test_idx)} test  "
         f"({len(train_trees)} train trees / {len(test_trees)} test trees)"
     )
-    return labeled, pair_records, train_idx, test_idx
+    return all_labeled, pair_records, train_idx, test_idx
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -573,7 +672,7 @@ def process_predicate(
 ) -> None:
     model_short = mt.name.split("/")[-1]
     probe_dir = os.path.join(args.save_dir, model_short, tp.name)
-    tree_dir = os.path.join(args.tree_dir, model_short, tp.name, "trees")
+    predicate_dir = os.path.join(args.tree_dir, model_short, tp.name)
 
     print(f"\n{'#' * 70}")
     print(f"# Predicate [{predicate_idx}]: {tp.name}")
@@ -584,7 +683,7 @@ def process_predicate(
 
     # ── 1) Load MCTS ──────────────────────────────────────────────────
     try:
-        tp_results = load_mcts_results(tp=tp, tree_root_dir=tree_dir)
+        tp_results = load_mcts_results(tp=tp, predicate_dir=predicate_dir)
     except FileNotFoundError as e:
         logger.error(str(e))
         return
@@ -599,6 +698,9 @@ def process_predicate(
         logger.error(f"No green leaves for '{tp.name}'. Skipping.")
         return
 
+    # ── 1.5) Ensure anchor tokens ─────────────────────────────────────
+    ensure_anchor_tokens(tp, tp_results, args.force_reextract_anchors)
+
     # ── 2) Collect labeled nodes + contrastive pairs ──────────────────
     labeled, pair_records, train_idx, test_idx = collect_and_split_pairs(
         tp_results=tp_results, tp=tp, mt=mt, args=args
@@ -609,7 +711,7 @@ def process_predicate(
         tp=tp,
         tp_results=tp_results,
         labeled_nodes=labeled,
-        tree_root_dir=tree_dir,
+        predicate_dir=predicate_dir,
     )
 
     if not pair_records:
@@ -698,7 +800,7 @@ def parse_args() -> argparse.Namespace:
             "Root directory to load MCTS trees from "
             "(default: same as --save_dir). "
             "Useful when trees and directions live in separate locations. "
-            "Trees are expected at {tree_dir}/{model}/{predicate.name}/trees/mcts.json"
+            "Trees are expected at {tree_dir}/{model}/{predicate.name}/{p_minus_desc}/mcts.json"
         ),
     )
 
@@ -714,6 +816,14 @@ def parse_args() -> argparse.Namespace:
                         help="Max training pairs (0 = no cap)")
     parser.add_argument("--n_test_pairs",  type=int, default=10_000,
                         help="Max test pairs (0 = no cap)")
+
+    # Anchor tokens
+    parser.add_argument(
+        "--force_reextract_anchors",
+        action="store_true",
+        default=False,
+        help="Re-extract anchor tokens even if already populated",
+    )
 
     # Layers
     parser.add_argument("--layer_from", type=int, default=0)

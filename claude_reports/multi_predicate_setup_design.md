@@ -216,8 +216,8 @@ If the direction fires here, the model has a generalizable `is_palindrome` goal 
 
 | Script | Purpose | Output |
 |---|---|---|
-| `multipred_mcts.py` | MCTS expansion + tree evaluation + anchor token extraction | `trees/mcts.json`, HTML trees, populated anchor tokens in data JSONs |
-| `multipred_probe.py` | Load trees, label nodes, pair, extract latents, train directions, evaluate | `mean_diff_directions.pt`, `contrastive_directions.pt`, `accuracies.json`, `config.json` |
+| `multipred_mcts.py` | MCTS expansion + tree evaluation | `trees/mcts.json`, HTML trees |
+| `multipred_probe.py` | Anchor token extraction, load trees, label nodes, pair, extract latents, train directions, evaluate | `mean_diff_directions.pt`, `contrastive_directions.pt`, `accuracies.json`, `config.json`, populated anchor tokens in data JSONs |
 
 The scripts share a `--save_dir` root (or can use separate `--tree_dir` / `--save_dir` in the probe script for decoupled storage).
 

@@ -4,8 +4,6 @@ For each TargetPredicate in MultiPredicateDataset:
   1. Runs MCTS per (sample × prefill), or reuses cached results
   2. Evaluates each tree with unit tests (green / orange / red)
   3. Saves color-coded HTML trees per (P-, prefill) combination
-  4. Calls oracle LM to extract P+ / P- anchor tokens from green completions
-  5. Writes populated anchor tokens back to the data JSON files
 
 Run this script BEFORE multipred_probe.py.
 
@@ -21,16 +19,13 @@ All paths are under {save_dir}/ (default: $RESULTS_DIR/multi_probe).
     {save_dir}/
       {model_name}/                    e.g. Qwen2.5-Coder-32B-Instruct/
         {predicate.name}/              e.g. is_palindrome/
-          trees/
-            mcts.json                  Single bundled JSON: all samples × prefills,
+          {p_minus_desc}/              One dir per sample, named after P- description.
+            mcts.json                  Per-sample JSON: all prefills for this (P+, P-) pair,
                                        including serialized trees (root.to_dict()).
                                        Reused as cache on subsequent runs unless
                                        --force_rerun_mcts is set.
-            {p_minus_desc}/            One dir per sample, named after P- description.
-              {prefill}/               One dir per prefill (safe-name of prefill string).
-                mcts_tree.html         Color-coded MCTS tree (green/orange/red).
-
-    data/multi_predicate/{predicate.name}.json   ← anchor tokens written back here
+            trees/
+              {prefill}.html           Color-coded MCTS tree (green/orange/red).
 """
 
 import argparse
@@ -42,10 +37,13 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
 
 import torch  # noqa: E402
 
-from src.goals.anchor import extract_anchor_tokens
 from src.goals.eval import evaluate_mcts_tree
 from src.goals.functional import apply_chat_template, supports_chat_template
-from src.goals.predicate_data import MultiPredicateDataset, TargetPredicate
+from src.goals.predicate_data import (
+    MultiPredicateDataset,
+    MultiPredicateSample,
+    TargetPredicate,
+)
 from src.goals.predicate_sampling import (
     MCTSRunResult,
     MCTSSearchResults_for_MultiPredicateSample,
@@ -132,212 +130,152 @@ def _collect_green_leaves(root: MCTSNode) -> list[MCTSNode]:
 # ══════════════════════════════════════════════════════════════════════
 # Step 1 — MCTS
 # ══════════════════════════════════════════════════════════════════════
-def run_or_load_mcts(
+def run_or_load_mcts_sample(
     mt: ModelandTokenizer,
-    tp: TargetPredicate,
-    tree_root_dir: str,
+    sample: MultiPredicateSample,
+    sample_idx: int,
+    sample_dir: str,
+    current_config: dict,
     args,
-) -> MCTSSearchResults_for_TargetPredicate:
-    """Run MCTS for every (sample × prefill) of tp, or load from cache.
+) -> MCTSSearchResults_for_MultiPredicateSample:
+    """Run MCTS for every prefill of one sample, or load from cache.
 
-    Cache: {tree_root_dir}/mcts.json
-    HTML trees: {tree_root_dir}/{p_minus_desc}/{safe_prefill}/mcts_tree.html
+    Cache: {sample_dir}/mcts.json
+    HTML trees: {sample_dir}/trees/{safe_prefill}.html
     """
-    model_short = mt.name.split("/")[-1]
-    cache_path = os.path.join(tree_root_dir, "mcts.json")
 
-    current_config = dict(
-        iterations=args.mcts_iterations,
-        max_depth=args.mcts_max_depth,
-        top_k=args.mcts_top_k,
-        prob_threshold=args.mcts_prob_threshold,
-        depth_first=args.depth_first,
-        **MCTS_DIVERSITY_CONFIG,
-    )
+    cache_path = os.path.join(sample_dir, "mcts.json")
+    p_minus_name = _p_minus_dir_name(sample, sample_idx)
 
     # ── Try cache ──────────────────────────────────────────────────────
     reuse_cached = False
     if os.path.exists(cache_path) and not args.force_rerun_mcts:
-        cached = MCTSSearchResults_for_TargetPredicate.load(cache_path)
-        matches, diffs = _mcts_config_matches(cached.mcts_config, current_config)
-        if matches:
-            n_trees = sum(len(sr._trees) for sr in cached.sample_results)
-            if n_trees > 0:
-                logger.info(f"Cache hit for '{tp.name}' ({n_trees} trees).")
-                reuse_cached = True
+        cached = MCTSSearchResults_for_MultiPredicateSample.load(cache_path)
+        # Check config from first run
+        if cached.runs:
+            matches, diffs = _mcts_config_matches(
+                cached.runs[0].mcts_config, current_config
+            )
+            if matches:
+                n_trees = len(cached._trees)
+                if n_trees > 0:
+                    logger.info(
+                        f"Cache hit for sample {sample_idx} ({p_minus_name}): "
+                        f"{n_trees} trees."
+                    )
+                    reuse_cached = True
+                else:
+                    logger.warning(
+                        "Cached JSON has no in-memory trees — re-running MCTS."
+                    )
             else:
-                logger.warning("Cached JSON has no in-memory trees — re-running MCTS.")
-        else:
-            print(f"\nWARNING: Cached MCTS config differs for '{tp.name}':")
-            for d in diffs:
-                print(d)
-            if not args.ask_override_permission:
-                print("--no-ask_override_permission set. Re-running MCTS.")
-            else:
-                ans = input("Reuse cached results anyway? [y/N/q]: ").strip().lower()
-                if ans == "q":
-                    sys.exit(0)
-                reuse_cached = ans == "y"
+                print(
+                    f"\nWARNING: Cached MCTS config differs for "
+                    f"sample {sample_idx} ({p_minus_name}):"
+                )
+                for d in diffs:
+                    print(d)
+                if not args.ask_override_permission:
+                    print("--no-ask_override_permission set. Re-running MCTS.")
+                else:
+                    ans = (
+                        input("Reuse cached results anyway? [y/N/q]: ").strip().lower()
+                    )
+                    if ans == "q":
+                        sys.exit(0)
+                    reuse_cached = ans == "y"
 
     if reuse_cached:
-        tp_results = cached
         # Fill in any missing HTML trees from in-memory cache
-        for sample_idx, sr in enumerate(tp_results.sample_results):
-            sample = tp.samples[sample_idx]
-            p_minus_name = _p_minus_dir_name(sample, sample_idx)
-            for run in sr.runs:
-                safe_pval = _safe_name(run.prefill) if run.prefill else "empty"
-                html_path = os.path.join(
-                    tree_root_dir, p_minus_name, safe_pval, "mcts_tree.html"
-                )
-                if not os.path.exists(html_path):
-                    root = sr._trees.get(run.prefix)
-                    if root is not None:
-                        _save_tree_html(root, html_path)
-                    else:
-                        logger.warning(
-                            f"No in-memory tree for {run.prefix[:30]!r} — "
-                            "re-run with --force_rerun_mcts to generate HTML."
-                        )
-        return tp_results
+        for run in cached.runs:
+            safe_pval = _safe_name(run.prefill) if run.prefill else "empty"
+            html_path = os.path.join(sample_dir, "trees", f"{safe_pval}.html")
+            if not os.path.exists(html_path):
+                root = cached._trees.get(run.prefix)
+                if root is not None:
+                    _save_tree_html(root, html_path)
+                else:
+                    logger.warning(
+                        f"No in-memory tree for {run.prefix[:30]!r} — "
+                        "re-run with --force_rerun_mcts to generate HTML."
+                    )
+        return cached
 
     # ── Run MCTS from scratch ──────────────────────────────────────────
-    tp_results = MCTSSearchResults_for_TargetPredicate(
-        target_predicate_name=tp.name,
-        model_name=model_short,
-        mcts_config=current_config,
-    )
+    print(f"\n{'=' * 70}")
+    print(f"Sample {sample_idx}: fn={sample.function_name}  P-={p_minus_name}")
+    print(f"{'=' * 70}")
 
-    for sample_idx, sample in enumerate(tp.samples):
-        p_minus_name = _p_minus_dir_name(sample, sample_idx)
-        print(f"\n{'=' * 70}")
-        print(f"Sample {sample_idx}: fn={sample.function_name}  P-={p_minus_name}")
-        print(f"{'=' * 70}")
+    prefills: list[tuple[str, str]] = [
+        (pval, ptype) for ptype, plist in sample.prefills.items() for pval in plist
+    ]
 
-        prefills: list[tuple[str, str]] = [
-            (pval, ptype) for ptype, plist in sample.prefills.items() for pval in plist
+    if supports_chat_template(mt):
+        prompts = [
+            apply_chat_template(
+                mt=mt,
+                user_query=sample.instruction.strip(),
+                incomplete_code=sample.code + pval,
+            )
+            for pval, _ in prefills
+        ]
+    else:
+        prompts = [
+            sample.instruction + "<code>" + sample.code + pval for pval, _ in prefills
         ]
 
-        if supports_chat_template(mt):
-            prompts = [
-                apply_chat_template(
-                    mt=mt,
-                    user_query=sample.instruction.strip(),
-                    incomplete_code=sample.code + pval,
-                )
-                for pval, _ in prefills
-            ]
-        else:
-            prompts = [
-                sample.instruction + "<code>" + sample.code + pval
-                for pval, _ in prefills
-            ]
+    sr = MCTSSearchResults_for_MultiPredicateSample(sample=sample)
 
-        sr = MCTSSearchResults_for_MultiPredicateSample(sample=sample)
+    for (pval, ptype), prompt in zip(prefills, prompts):
+        prefix = sample.code + pval
+        safe_pval = _safe_name(pval) if pval else "empty"
+        print(f"\n  Prefill ({ptype}): {pval!r}")
 
-        for (pval, ptype), prompt in zip(prefills, prompts):
-            prefix = sample.code + pval
-            safe_pval = _safe_name(pval) if pval else "empty"
-            print(f"\n  Prefill ({ptype}): {pval!r}")
-
-            search = MCTSSearch(
-                mt=mt,
-                prompt=prompt,
-                max_depth=args.mcts_max_depth,
-                top_k=args.mcts_top_k,
-                prob_threshold=args.mcts_prob_threshold,
-                **MCTS_DIVERSITY_CONFIG,
-            )
-            search.run(n_iterations=args.mcts_iterations, depth_first=args.depth_first)
-
-            counts = evaluate_mcts_tree(
-                root=search.root,
-                prefix=prefix,
-                unit_tests=sample.unit_tests,
-                function_name=sample.function_name or "func",
-                terminal_only=True,
-            )
-            print(f"  Eval: {counts}")
-
-            run = MCTSRunResult(
-                prefill=pval,
-                prefill_type=ptype,
-                prompt=prompt,
-                prefix=prefix,
-                mcts_config=current_config,
-                mcts_stats=search.get_stats(),
-                eval_counts=counts,
-                green_completions=[
-                    node.get_path_text() for node in _collect_green_leaves(search.root)
-                ],
-                tree=search.root.to_dict(),
-            )
-            sr.runs.append(run)
-            sr._trees[prefix] = search.root
-
-            html_path = os.path.join(
-                tree_root_dir, p_minus_name, safe_pval, "mcts_tree.html"
-            )
-            os.makedirs(os.path.dirname(html_path), exist_ok=True)
-            search.save_tree(html_path, show_colors=True)
-            logger.info(f"  HTML → {html_path}")
-
-        tp_results.sample_results.append(sr)
-
-    os.makedirs(tree_root_dir, exist_ok=True)
-    tp_results.save(cache_path)
-    print(f"\nSaved MCTSSearchResults → {cache_path}")
-    return tp_results
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Step 2 — Anchor tokens
-# ══════════════════════════════════════════════════════════════════════
-def ensure_anchor_tokens(
-    tp: TargetPredicate,
-    tp_results: MCTSSearchResults_for_TargetPredicate,
-    force_reextract: bool = False,
-) -> None:
-    """Populate P+ / P- anchor tokens via oracle LM if any are missing, then save to disk.
-
-    Anchor tokens live in:
-        tp.p_plus.anchor_tokens               (shared across all samples)
-        tp.samples[i].p_minus.anchor_tokens   (per-sample)
-
-    If all are already populated and force_reextract=False, this is a no-op.
-    On update, the TargetPredicate JSON is overwritten via tp.save().
-    """
-    needs = (
-        force_reextract
-        or not tp.p_plus.anchor_tokens
-        or any(
-            not (sample.p_minus and sample.p_minus.anchor_tokens)
-            for sample in tp.samples
+        search = MCTSSearch(
+            mt=mt,
+            prompt=prompt,
+            max_depth=args.mcts_max_depth,
+            top_k=args.mcts_top_k,
+            prob_threshold=args.mcts_prob_threshold,
+            **MCTS_DIVERSITY_CONFIG,
         )
-    )
-    if not needs:
-        logger.info(
-            f"Anchor tokens already populated for '{tp.name}' — skipping oracle."
+        search.run(n_iterations=args.mcts_iterations, depth_first=args.depth_first)
+
+        counts = evaluate_mcts_tree(
+            root=search.root,
+            prefix=prefix,
+            unit_tests=sample.unit_tests,
+            function_name=sample.function_name or "func",
+            terminal_only=True,
         )
-        return
+        print(f"  Eval: {counts}")
 
-    print(f"\nExtracting anchor tokens for '{tp.name}' via oracle LM...")
-    p_plus_anchors, p_minus_per_sample = extract_anchor_tokens(
-        tp=tp,
-        completions_per_sample=tp_results.completions_per_sample,
-    )
+        run = MCTSRunResult(
+            prefill=pval,
+            prefill_type=ptype,
+            prompt=prompt,
+            prefix=prefix,
+            mcts_config=current_config,
+            mcts_stats=search.get_stats(),
+            eval_counts=counts,
+            green_completions=[
+                node.get_path_text() for node in _collect_green_leaves(search.root)
+            ],
+            tree=search.root.to_dict(),
+        )
+        sr.runs.append(run)
+        sr._trees[prefix] = search.root
 
-    tp.p_plus.anchor_tokens = sorted(p_plus_anchors)
-    for i, sample in enumerate(tp.samples):
-        if sample.p_minus is not None:
-            sample.p_minus.anchor_tokens = sorted(p_minus_per_sample[i])
+        tree_dir = os.path.join(sample_dir, "trees")
+        os.makedirs(tree_dir, exist_ok=True)
+        html_path = os.path.join(tree_dir, f"{safe_pval}.html")
+        search.save_tree(html_path, show_colors=True)
+        logger.info(f"  HTML → {html_path}")
 
-    tp.save()
-    print(f"  P+ anchors:  {tp.p_plus.anchor_tokens}")
-    for i, sample in enumerate(tp.samples):
-        anchors = sample.p_minus.anchor_tokens if sample.p_minus else []
-        print(f"  P- anchors (sample {i}): {anchors}")
-    print(f"Saved anchor tokens → {tp._source_path}")
+    os.makedirs(sample_dir, exist_ok=True)
+    sr.save(cache_path)
+    print(f"\nSaved sample MCTS → {cache_path}")
+    return sr
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -350,19 +288,44 @@ def process_predicate(
     args,
 ) -> None:
     model_short = mt.name.split("/")[-1]
-    tree_dir = os.path.join(
-        env_utils.DEFAULT_RESULTS_DIR, args.save_dir, model_short, tp.name, "trees"
+    predicate_dir = os.path.join(
+        env_utils.DEFAULT_RESULTS_DIR, args.save_dir, model_short, tp.name
     )
 
     print(f"\n{'#' * 70}")
     print(f"# Predicate [{predicate_idx}]: {tp.name}")
     print(f"# P+: {tp.p_plus.description}")
     print(f"# Samples: {len(tp.samples)}")
-    print(f"# Trees dir: {tree_dir}")
+    print(f"# Predicate dir: {predicate_dir}")
     print(f"{'#' * 70}")
 
-    # 1) MCTS
-    tp_results = run_or_load_mcts(mt=mt, tp=tp, tree_root_dir=tree_dir, args=args)
+    current_config = dict(
+        iterations=args.mcts_iterations,
+        max_depth=args.mcts_max_depth,
+        top_k=args.mcts_top_k,
+        prob_threshold=args.mcts_prob_threshold,
+        depth_first=args.depth_first,
+        **MCTS_DIVERSITY_CONFIG,
+    )
+
+    # 1) MCTS — run per-sample, then assemble TargetPredicate results
+    tp_results = MCTSSearchResults_for_TargetPredicate(
+        target_predicate_name=tp.name,
+        model_name=model_short,
+        mcts_config=current_config,
+    )
+    for sample_idx, sample in enumerate(tp.samples):
+        p_minus_name = _p_minus_dir_name(sample, sample_idx)
+        sample_dir = os.path.join(predicate_dir, p_minus_name)
+        sr = run_or_load_mcts_sample(
+            mt=mt,
+            sample=sample,
+            sample_idx=sample_idx,
+            sample_dir=sample_dir,
+            current_config=current_config,
+            args=args,
+        )
+        tp_results.sample_results.append(sr)
 
     total_green = sum(
         run.eval_counts.get("green", 0)
@@ -370,16 +333,6 @@ def process_predicate(
         for run in sr.runs
     )
     print(f"\nTotal green leaves across all runs: {total_green}")
-    if total_green == 0:
-        logger.error(f"No green leaves for '{tp.name}'. Anchor extraction skipped.")
-        return
-
-    # 2) Anchor tokens
-    ensure_anchor_tokens(
-        tp=tp,
-        tp_results=tp_results,
-        force_reextract=args.force_reextract_anchors,
-    )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -387,7 +340,7 @@ def process_predicate(
 # ══════════════════════════════════════════════════════════════════════
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run MCTS + anchor extraction for multi-predicate samples.",
+        description="Run MCTS expansion + evaluation for multi-predicate samples.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -398,7 +351,7 @@ def parse_args() -> argparse.Namespace:
         "--save_dir",
         type=str,
         default="multi_probe",
-        help="Root output dir. Trees saved as {save_dir}/{model}/{predicate.name}/trees/",
+        help="Root output dir. Trees saved as {save_dir}/{model}/{predicate.name}/{p_minus_desc}/",
     )
     parser.add_argument(
         "--predicate_indices",
@@ -410,7 +363,7 @@ def parse_args() -> argparse.Namespace:
 
     # MCTS
     parser.add_argument("--mcts_iterations", type=int, default=1500)
-    parser.add_argument("--mcts_max_depth", type=int, default=32)
+    parser.add_argument("--mcts_max_depth", type=int, default=48)
     parser.add_argument("--mcts_top_k", type=int, default=8)
     parser.add_argument("--mcts_prob_threshold", type=float, default=0.01)
     parser.add_argument("--depth_first", action="store_true", default=True)
@@ -431,14 +384,6 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Prompt before overriding cached MCTS with a different config",
-    )
-
-    # Anchor tokens
-    parser.add_argument(
-        "--force_reextract_anchors",
-        action="store_true",
-        default=False,
-        help="Re-extract anchor tokens even if already populated",
     )
 
     logging_utils.add_logging_args(parser)
