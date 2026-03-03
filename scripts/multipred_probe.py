@@ -88,9 +88,9 @@ logger = logging.getLogger(__name__)
 # Contrastive pair config  (edit here; not exposed as CLI args)
 # ──────────────────────────────────────────────────────────────────────
 CONTRASTIVE_PAIR_CONFIG = dict(
-    min_p_green=0.5,       # filter nodes with low green probability mass
-    allow_same_tree=False, # cross-tree pairing only
-    abs_pos_tolerance=0,   # exact abs-position match
+    min_p_green=0.5,  # filter nodes with low green probability mass
+    allow_same_tree=False,  # cross-tree pairing only
+    abs_pos_tolerance=0,  # exact abs-position match
 )
 
 
@@ -183,9 +183,8 @@ def load_mcts_results(
     # Try new per-sample layout first
     if os.path.isdir(predicate_dir):
         sample_jsons = list(
-            p for p in sorted(
-                pathlib.Path(predicate_dir).glob("*/mcts.json")
-            )
+            p
+            for p in sorted(pathlib.Path(predicate_dir).glob("*/mcts.json"))
             # Exclude legacy trees/ subdirectory
             if p.parent.name != "trees"
         )
@@ -303,8 +302,12 @@ def save_tree_logs(
 
             tree_nodes = nodes_by_tree.get(run.prefix, [])
 
-            by_depth: dict[int, dict[str, int]] = defaultdict(lambda: {"p_plus": 0, "p_minus": 0})
-            by_abs_pos: dict[int, dict[str, int]] = defaultdict(lambda: {"p_plus": 0, "p_minus": 0})
+            by_depth: dict[int, dict[str, int]] = defaultdict(
+                lambda: {"p_plus": 0, "p_minus": 0}
+            )
+            by_abs_pos: dict[int, dict[str, int]] = defaultdict(
+                lambda: {"p_plus": 0, "p_minus": 0}
+            )
             for ln in tree_nodes:
                 by_depth[ln.depth][ln.label] += 1
                 by_abs_pos[ln.abs_position][ln.label] += 1
@@ -396,7 +399,9 @@ def collect_and_split_pairs(
     p_plus_count = sum(1 for ln in all_labeled if ln.label == "p_plus")
     p_minus_count = sum(1 for ln in all_labeled if ln.label == "p_minus")
     print(f"  P+: {p_plus_count}  P-: {p_minus_count}")
-    print(f"Contrastive pairs: {len(pair_records)} (paired per-sample to prevent cross-P- mixing)")
+    print(
+        f"Contrastive pairs: {len(pair_records)} (paired per-sample to prevent cross-P- mixing)"
+    )
 
     if not pair_records:
         return all_labeled, [], [], []
@@ -405,11 +410,13 @@ def collect_and_split_pairs(
     random.seed(42)
     all_tree_ids = list({rec["pos_tree_id"] for rec in pair_records})
     random.shuffle(all_tree_ids)
-    n_train_trees = max(1, int(0.8 * len(all_tree_ids)))
+    n_train_trees = max(1, int(0.7 * len(all_tree_ids)))
     train_trees = set(all_tree_ids[:n_train_trees])
     test_trees = set(all_tree_ids[n_train_trees:])
 
-    train_idx = [i for i, r in enumerate(pair_records) if r["pos_tree_id"] in train_trees]
+    train_idx = [
+        i for i, r in enumerate(pair_records) if r["pos_tree_id"] in train_trees
+    ]
     test_idx = [i for i, r in enumerate(pair_records) if r["pos_tree_id"] in test_trees]
 
     if args.n_train_pairs and len(train_idx) > args.n_train_pairs:
@@ -475,8 +482,12 @@ def train_directions(
     args,
 ) -> tuple[dict, dict, dict, dict, dict, dict, dict]:
     # L2-normalize activations (unit-sphere) before training
-    Z_pos = {li: z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8) for li, z in Z_pos.items()}
-    Z_neg = {li: z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8) for li, z in Z_neg.items()}
+    Z_pos = {
+        li: z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8) for li, z in Z_pos.items()
+    }
+    Z_neg = {
+        li: z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8) for li, z in Z_neg.items()
+    }
 
     # ── Mean-diff ─────────────────────────────────────────────────────
     md_dirs: dict[int, torch.Tensor] = {}
@@ -494,7 +505,10 @@ def train_directions(
         md_train_accs[li] = (z_pos_tr @ v > z_neg_tr @ v).float().mean().item()
         if test_idx:
             md_test_accs[li] = (
-                (Z_pos[li][test_idx] @ v > Z_neg[li][test_idx] @ v).float().mean().item()
+                (Z_pos[li][test_idx] @ v > Z_neg[li][test_idx] @ v)
+                .float()
+                .mean()
+                .item()
             )
         else:
             md_test_accs[li] = float("nan")
@@ -512,7 +526,9 @@ def train_directions(
         reg_parts.append(f"l2={args.l2_lambda}")
     if not reg_parts:
         reg_parts.append("no-reg")
-    print(f"Training contrastive directions ({', '.join(reg_parts)}, margin={args.margin})...")
+    print(
+        f"Training contrastive directions ({', '.join(reg_parts)}, margin={args.margin})..."
+    )
 
     for li in layers:
         z_pos_tr = Z_pos[li][train_idx]
@@ -532,7 +548,10 @@ def train_directions(
         cd_train_accs[li] = (z_pos_tr @ v > z_neg_tr @ v).float().mean().item()
         if test_idx:
             cd_test_accs[li] = (
-                (Z_pos[li][test_idx] @ v > Z_neg[li][test_idx] @ v).float().mean().item()
+                (Z_pos[li][test_idx] @ v > Z_neg[li][test_idx] @ v)
+                .float()
+                .mean()
+                .item()
             )
         else:
             cd_test_accs[li] = float("nan")
@@ -554,8 +573,12 @@ def train_directions(
         )
 
     return (
-        md_dirs, md_train_accs, md_test_accs,
-        cd_dirs, cd_train_accs, cd_test_accs,
+        md_dirs,
+        md_train_accs,
+        md_test_accs,
+        cd_dirs,
+        cd_train_accs,
+        cd_test_accs,
         cd_infos,
     )
 
@@ -628,9 +651,9 @@ def save_results(
         json.dump({str(k): v for k, v in cd_infos.items()}, f, indent=2)
 
     accs = {
-        "mean_diff_train":  {str(k): v for k, v in md_train_accs.items()},
-        "mean_diff_test":   {str(k): v for k, v in md_test_accs.items()},
-        "contrastive_train":{str(k): v for k, v in cd_train_accs.items()},
+        "mean_diff_train": {str(k): v for k, v in md_train_accs.items()},
+        "mean_diff_test": {str(k): v for k, v in md_test_accs.items()},
+        "contrastive_train": {str(k): v for k, v in cd_train_accs.items()},
         "contrastive_test": {str(k): v for k, v in cd_test_accs.items()},
     }
     for key, layer_dict in auc_results.items():
@@ -671,8 +694,12 @@ def process_predicate(
     args,
 ) -> None:
     model_short = mt.name.split("/")[-1]
-    probe_dir = os.path.join(args.save_dir, model_short, tp.name)
-    predicate_dir = os.path.join(args.tree_dir, model_short, tp.name)
+    probe_dir = os.path.join(
+        env_utils.DEFAULT_RESULTS_DIR, args.save_dir, model_short, tp.name
+    )
+    predicate_dir = os.path.join(
+        env_utils.DEFAULT_RESULTS_DIR, args.tree_dir, model_short, tp.name
+    )
 
     print(f"\n{'#' * 70}")
     print(f"# Predicate [{predicate_idx}]: {tp.name}")
@@ -715,7 +742,9 @@ def process_predicate(
     )
 
     if not pair_records:
-        logger.error(f"No contrastive pairs for '{tp.name}'. Skipping direction training.")
+        logger.error(
+            f"No contrastive pairs for '{tp.name}'. Skipping direction training."
+        )
         return
 
     if not train_idx:
@@ -734,20 +763,29 @@ def process_predicate(
 
     # ── 6) Train directions ───────────────────────────────────────────
     (
-        md_dirs, md_train_accs, md_test_accs,
-        cd_dirs, cd_train_accs, cd_test_accs,
+        md_dirs,
+        md_train_accs,
+        md_test_accs,
+        cd_dirs,
+        cd_train_accs,
+        cd_test_accs,
         cd_infos,
     ) = train_directions(
-        Z_pos=Z_pos, Z_neg=Z_neg,
-        train_idx=train_idx, test_idx=test_idx,
-        layers=layers, args=args,
+        Z_pos=Z_pos,
+        Z_neg=Z_neg,
+        train_idx=train_idx,
+        test_idx=test_idx,
+        layers=layers,
+        args=args,
     )
 
     # ── 7) Evaluate (AUC) ─────────────────────────────────────────────
     auc_results = evaluate_directions(
-        Z_pos=Z_pos, Z_neg=Z_neg,
+        Z_pos=Z_pos,
+        Z_neg=Z_neg,
         test_idx=test_idx,
-        md_dirs=md_dirs, cd_dirs=cd_dirs,
+        md_dirs=md_dirs,
+        cd_dirs=cd_dirs,
         layers=layers,
     )
 
@@ -807,15 +845,22 @@ def parse_args() -> argparse.Namespace:
     # Predicate selection
     parser.add_argument(
         "--predicate_indices",
-        type=int, nargs="+", default=None,
+        type=int,
+        nargs="+",
+        default=None,
         help="Indices of TargetPredicates to process (default: all)",
     )
 
     # Pair collection
-    parser.add_argument("--n_train_pairs", type=int, default=10_000,
-                        help="Max training pairs (0 = no cap)")
-    parser.add_argument("--n_test_pairs",  type=int, default=10_000,
-                        help="Max test pairs (0 = no cap)")
+    parser.add_argument(
+        "--n_train_pairs",
+        type=int,
+        default=10_000,
+        help="Max training pairs (0 = no cap)",
+    )
+    parser.add_argument(
+        "--n_test_pairs", type=int, default=10_000, help="Max test pairs (0 = no cap)"
+    )
 
     # Anchor tokens
     parser.add_argument(
@@ -827,16 +872,20 @@ def parse_args() -> argparse.Namespace:
 
     # Layers
     parser.add_argument("--layer_from", type=int, default=0)
-    parser.add_argument("--layer_to",   type=int, default=None,
-                        help="Exclusive upper bound (default: mt.n_layer)")
+    parser.add_argument(
+        "--layer_to",
+        type=int,
+        default=None,
+        help="Exclusive upper bound (default: mt.n_layer)",
+    )
     parser.add_argument("--layer_step", type=int, default=1)
 
     # Contrastive training
     parser.add_argument("--l1_lambda", type=float, default=0.0)
     parser.add_argument("--l2_lambda", type=float, default=1e-3)
-    parser.add_argument("--margin",    type=float, default=1.0)
-    parser.add_argument("--lr",        type=float, default=1e-2)
-    parser.add_argument("--n_steps",   type=int,   default=1000)
+    parser.add_argument("--margin", type=float, default=1.0)
+    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--n_steps", type=int, default=1000)
 
     # Latent extraction
     parser.add_argument("--batch_size", type=int, default=32)

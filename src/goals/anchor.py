@@ -318,9 +318,15 @@ def _extract_boolean_expr(full_text: str) -> tuple[str, int] | None:
 
     Handles these patterns (in precedence order):
       'if <expr>:'      terminates at first unbracketed ':'
-      'return <expr>'   terminates at first unbracketed newline
+      'return <expr>'   terminates at first unbracketed newline or 'else'
       'while <expr>:'   terminates at first unbracketed ':'
       'assert <expr>'   terminates at first unbracketed newline or ','
+
+    A depth-0 'else' keyword always marks the default branch of a Python ternary
+    expression ('X if COND else Y') and is never part of the boolean predicate.
+    Stopping before it gives the correct condition for all patterns:
+      'return X if COND else Y'  → condition = 'X if COND'
+      'return COND else Y'       → condition = 'COND'
 
     If no terminator is found (partial generation), returns everything after
     the keyword so partial expressions can still be split into clauses.
@@ -347,6 +353,13 @@ def _extract_boolean_expr(full_text: str) -> tuple[str, int] | None:
                 return rest[:i], expr_start
             elif keyword == "assert" and ch == ",":
                 return rest[:i], expr_start
+            # Stop at depth-0 'else': terminates ternary-if default branch
+            # ('X if COND else Y' → return 'X if COND', never includes 'else Y')
+            elif ch == "e" and rest[i : i + 4] == "else":
+                prev_ok = i == 0 or not (rest[i - 1].isalnum() or rest[i - 1] == "_")
+                next_ok = i + 4 >= len(rest) or not (rest[i + 4].isalnum() or rest[i + 4] == "_")
+                if prev_ok and next_ok:
+                    return rest[:i].rstrip(), expr_start
 
     # No terminator found — return everything (partial/non-terminal node)
     return rest, expr_start

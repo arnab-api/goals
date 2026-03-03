@@ -81,10 +81,28 @@ For every `(sample x prefill)`, we run MCTS to explore the tree of possible cont
 **Script**: `scripts/multipred_mcts.py`
 
 Key MCTS config:
-- `iterations=1500`, `max_depth=32`, `top_k=8`, `prob_threshold=0.01`
-- Diversity: `c_puct=1.0`, `temperature=1.0`, `min_children_up_to_depth=3`, `min_children=2`
+- `iterations=1500`, `max_depth=48`, `top_k=8`, `prob_threshold=0.01`
+- Diversity: `c_puct=1.0`, `temperature=1.0`, `min_children_up_to_depth=6`, `min_children=4`
 
-All trees for a `TargetPredicate` are serialized into a single JSON cache at `{save_dir}/{model}/{predicate.name}/trees/mcts.json`. Color-coded HTML trees are saved per `(P- description, prefill)` for visual inspection.
+Per-sample results are cached as `{save_dir}/{model}/{predicate.name}/{p_minus_desc}/mcts.json`. Color-coded HTML trees are saved in a `trees/` subdirectory alongside each `mcts.json`.
+
+```
+multipred_mcts.py :: process_predicate(tp):
+    for sample in tp.samples:                        # each (P+, P-) pair
+        sample_dir = {save_dir}/{model}/{tp.name}/{p_minus_desc}/
+        if sample_dir/mcts.json exists and not --force_rerun_mcts:
+            sr = load from cache
+        else:
+            prefills = flatten(sample.prefills)       # all 4 types
+            for (pval, ptype) in prefills:
+                prompt = apply_chat_template(instruction, code + pval)
+                tree   = MCTSSearch(prompt, ...).run(n_iterations=1500)
+                evaluate_mcts_tree(tree, unit_tests)  # color leaves green/orange/red
+                save tree HTML → sample_dir/trees/{pval}.html
+            sr.save(sample_dir/mcts.json)
+        tp_results.sample_results.append(sr)
+    print total green leaf count (informational)
+```
 
 ### 2.5 Identifying Predicate Spans with Anchor Tokens
 
@@ -99,6 +117,33 @@ P- (length check): ["len("]
 ```
 
 Anchor tokens are written back to the `TargetPredicate` JSON files on disk, so they persist across runs.
+
+**Script**: `scripts/multipred_probe.py` (step 1.5, runs before labeling)
+
+```
+ensure_anchor_tokens(tp, tp_results, force_reextract):
+    if all anchors already populated and not force_reextract:
+        return  # no-op
+
+    # Gather green completions grouped by sample
+    completions_per_sample = [
+        {prefix: [green_leaf_texts...]}   # for each sample
+        for sr in tp_results.sample_results
+    ]
+
+    # Call oracle LM (Claude) to extract anchor tokens
+    p_plus_anchors, p_minus_per_sample = extract_anchor_tokens(tp, completions_per_sample)
+    # extract_anchor_tokens internally:
+    #   1. Builds a prompt with the function stub + representative green completions
+    #   2. Asks oracle: "what short code substrings (2-8 chars) uniquely signal each predicate?"
+    #   3. Prunes: discard any anchor not found in any green completion
+
+    tp.p_plus.anchor_tokens = sorted(p_plus_anchors)        # shared across all samples
+    for i, sample in enumerate(tp.samples):
+        sample.p_minus.anchor_tokens = sorted(p_minus_per_sample[i])  # per-sample
+
+    tp.save()  # writes back to data/multi_predicate/{predicate.name}.json
+```
 
 ### 2.6 Labeling Nodes and Handling LM Ordering Preference
 
@@ -117,11 +162,63 @@ Both windows contribute labeled nodes: a node is labeled `"p_plus"` if it falls 
 
 **Clause span detection** (`extract_predicate_clauses` in `anchor.py`): Extracts the boolean expression from `if/return/while/assert` statements, splits on top-level `and`/`or` (respecting bracket nesting), and matches each predicate's anchor tokens to the clause containing them. Returns start/end depths for each predicate's clause.
 
+```
+collect_labeled_nodes(tp_results, tp, mt, sample_indices, min_p_green=0.5):
+    for sample_idx in sample_indices:
+        sr = tp_results.sample_results[sample_idx]
+        p_plus_anchors  = tp.p_plus.anchor_tokens          # e.g. ["[::-1]"]
+        p_minus_anchors = tp.samples[sample_idx].p_minus.anchor_tokens  # e.g. ["len("]
+
+        for run in sr.runs:                                  # one run per prefill
+            root = sr._trees[run.prefix]                     # in-memory MCTS tree
+            prompt_token_len = len(tokenize(run.prompt))
+
+            for each green leaf in tree:
+                # 1. Find clause spans
+                p_plus_clause, p_minus_clause = extract_predicate_clauses(
+                    leaf, run.prefix, p_plus_anchors, p_minus_anchors
+                )
+                # extract_predicate_clauses internally:
+                #   a. Reconstruct full text = prefix + root→leaf tokens
+                #   b. Find the boolean expression (after return/if/while/assert)
+                #   c. Split on top-level 'and'/'or' (respecting bracket nesting)
+                #   d. Match each clause to P+/P- by checking which anchor appears in it
+                #   e. Return ClauseSpan(text, start_depth, end_depth) for each
+
+                if both clauses are None: skip leaf
+
+                # 2. Label each non-root node on the path
+                first_label = "p_plus" if p_plus starts first else "p_minus"
+                for node in root→leaf path (depth 1..leaf):
+                    if node.depth in [p_plus_clause.start .. p_plus_clause.end]:
+                        label = "p_plus"
+                    elif node.depth in [p_minus_clause.start .. p_minus_clause.end]:
+                        label = "p_minus"
+                    else:
+                        label = "transition"  → skip
+
+                    window = "first" if label == first_label else "second"
+
+                    # 3. Filter by green probability mass
+                    p_green = compute_outcome_probs(node).green
+                    if p_green < min_p_green: skip
+
+                    # 4. Compute absolute position
+                    abs_pos = prompt_token_len + node.depth - 1
+
+                    emit LabeledNode(node, label, window, abs_pos, depth,
+                                     tree_id=run.prefix, sample_idx, prefill_type)
+
+    return collected  # flat list, transition nodes excluded
+```
+
 ### 2.7 Contrastive Pairing Strategy
+
+**Pairing scope**: Pairs are formed **per sample** (per P- companion). Nodes from different `(P+, P-)` pairs are never paired together — this prevents cross-P- contamination, where the probe could learn to distinguish "which P- is present" rather than "is P+ being pursued."
 
 **Pairing unit**: nodes at the same **absolute token position** (`abs_position = len(tokenize(prompt)) + depth - 1`). This ensures the probe cannot exploit positional encoding differences between paired nodes.
 
-**Cross-tree constraint** (default: `allow_same_tree=False`): Pairs are formed *across* different MCTS trees (different prefills). This prevents the probe from exploiting tree-internal structure (e.g., sibling topology) and forces it to learn from the hidden-state content alone.
+**Cross-tree constraint** (default: `allow_same_tree=False`): Within each sample, pairs are formed *across* different MCTS trees (different prefills). This prevents the probe from exploiting tree-internal structure (e.g., sibling topology) and forces it to learn from the hidden-state content alone.
 
 **Filtering**: Only nodes with `p_green >= 0.5` (fraction of probability mass flowing to green descendants) survive. This ensures we only train on nodes in robustly correct trajectories.
 
@@ -137,9 +234,67 @@ CONTRASTIVE_PAIR_CONFIG = dict(
 
 **Train/test split**: 80/20 by tree ID (not by pair). All pairs from a given tree go entirely into train or test. This prevents leakage from seeing different nodes of the same tree in both splits.
 
+```
+collect_and_split_pairs(tp_results, tp, mt, args):
+    # ── Per-sample pairing ────────────────────────────────────────
+    for sample_idx in range(len(tp.samples)):
+        labeled_i = collect_labeled_nodes(
+            tp_results, tp, mt,
+            sample_indices=[sample_idx],     # THIS SAMPLE ONLY
+            min_p_green=0.5,
+        )
+
+        # Form pairs WITHIN this sample (cross-tree, same abs_position)
+        pairs_by_pos_i = sample_multipred_pairs(
+            labeled_nodes=labeled_i,
+            allow_same_tree=False,
+            abs_pos_tolerance=0,
+        )
+
+        # sample_multipred_pairs internally:
+        #   group labeled_i by abs_position
+        #   for each abs_pos:
+        #       p_plus_pool  = [ln for ln in group if ln.label == "p_plus"]
+        #       p_minus_pool = [ln for ln in group if ln.label == "p_minus"]
+        #       for each p_plus node:
+        #           pick a p_minus node from a DIFFERENT tree (tree_id != pos.tree_id)
+        #           emit MultiPredContrastivePair(positive, negative, abs_pos)
+
+        flatten pairs_by_pos_i → pair_records (with pos_text, neg_text, metadata)
+
+    # ── Train/test split by tree ID ───────────────────────────────
+    all_tree_ids = unique tree IDs from pair_records
+    shuffle, split 80/20
+    train_idx = pairs whose pos_tree_id ∈ train_trees
+    test_idx  = pairs whose pos_tree_id ∈ test_trees
+    cap train_idx at args.n_train_pairs, test_idx at args.n_test_pairs
+
+    return all_labeled, pair_records, train_idx, test_idx
+```
+
 ---
 
 ## 3. Extracting Goal Directions
+
+### 3.0 Latent Extraction
+
+For each contrastive pair, reconstruct the full input text (prompt + path tokens up to the node) and extract the last-token hidden state at every probed layer.
+
+```
+extract_latents(mt, pair_records, layers, batch_size):
+    pos_texts = [prompt + pos_node.get_path_text() for each pair]
+    neg_texts = [prompt + neg_node.get_path_text() for each pair]
+    all_texts = pos_texts + neg_texts
+
+    for batch in chunks(all_texts, batch_size):
+        hs = get_last_token_latents_batch(mt, batch, layers)
+        # hs[layer_idx] = Tensor(batch_size, hidden_dim)
+        # extracts hidden state at the LAST token position for each layer
+
+    Z_pos[layer] = first half of concatenated latents   # (n_pairs, hidden_dim)
+    Z_neg[layer] = second half                          # (n_pairs, hidden_dim)
+    return Z_pos, Z_neg
+```
 
 All activations are **L2-normalized** (projected onto the unit sphere) before training.
 
@@ -162,6 +317,38 @@ where $({\mathbf{z}_{+,i}, \mathbf{z}_{-,i}})$ are contrastive pairs and $m$ is 
 Defaults: `margin=1.0`, `lr=1e-2`, `n_steps=1000`, `patience=50` (early stopping), `l2_lambda=1e-3`, `l1_lambda=0.0`.
 
 The output is unit-normalized: $\mathbf{v}_\ell^{\text{cd}} = \mathbf{v} / \|\mathbf{v}\|$.
+
+```
+train_directions(Z_pos, Z_neg, train_idx, test_idx, layers):
+    # L2-normalize all activations
+    Z_pos[li] = Z_pos[li] / ||Z_pos[li]||   for each layer li
+    Z_neg[li] = Z_neg[li] / ||Z_neg[li]||
+
+    for each layer li:
+        z_pos_tr = Z_pos[li][train_idx]
+        z_neg_tr = Z_neg[li][train_idx]
+
+        # Mean-diff
+        v_md = mean(z_pos_tr) - mean(z_neg_tr)
+        v_md = v_md / ||v_md||
+
+        # Contrastive (hinge)
+        v_cd = randn(hidden_dim) * 0.01
+        for step in 1..1000:
+            delta = z_pos_tr - z_neg_tr
+            loss = mean(clamp(margin - delta @ v_cd, min=0))
+                 + l1 * mean(|v_cd|) + l2 * mean(v_cd²)
+            v_cd -= lr * grad(loss)
+            if no improvement for 50 steps: break
+        v_cd = v_cd / ||v_cd||
+
+        # Evaluate on test set
+        constraint_acc = fraction of test pairs where z_pos @ v > z_neg @ v
+        auc = roc_auc_score(labels=[1]*n_test + [0]*n_test,
+                            scores=[z_pos @ v; z_neg @ v])
+
+    return md_dirs, cd_dirs, accuracies, auc_results
+```
 
 ### 3.3 Evaluation Metrics on Train/Test
 
@@ -221,23 +408,38 @@ If the direction fires here, the model has a generalizable `is_palindrome` goal 
 
 The scripts share a `--save_dir` root (or can use separate `--tree_dir` / `--save_dir` in the probe script for decoupled storage).
 
+```
+multipred_probe.py :: process_predicate(tp):
+    1.   tp_results = load MCTS results from {tree_dir}/{model}/{tp.name}/*/mcts.json
+    1.5  ensure_anchor_tokens(tp, tp_results)         # oracle call if missing
+    2.   for each sample:                              # PER-SAMPLE pairing
+             labeled_i = collect_labeled_nodes(sample_indices=[sample_idx])
+             pairs_i = sample_multipred_pairs(labeled_i, allow_same_tree=False)
+         → all_labeled, pair_records, train_idx, test_idx
+    3.   save_tree_logs(labeled_nodes → per-run JSON logs)
+    4.   layers = range(layer_from, layer_to, layer_step)
+    5.   Z_pos, Z_neg = extract_latents(pair_records, layers)
+    6.   train mean-diff + contrastive directions per layer
+    7.   evaluate: constraint accuracy + ROC-AUC on test set
+    8.   save directions, accuracies, config to {save_dir}/{model}/{tp.name}/
+```
+
 ### Artifact Layout
 
 ```
 {save_dir}/
   {model_name}/
     {predicate.name}/
-      trees/
-        mcts.json                          # All (sample x prefill) trees, bundled
-        {p_minus_desc}/
-          {prefill}/
-            mcts_tree.html                 # Color-coded tree (from multipred_mcts.py)
-            probe_log.json                 # Labeled-node breakdown (from multipred_probe.py)
-      mean_diff_directions.pt              # dict[layer_idx -> unit-norm Tensor]
-      contrastive_directions.pt            # dict[layer_idx -> unit-norm Tensor]
-      accuracies.json                      # Per-layer train/test accuracy + AUC
-      contrastive_infos.json               # Per-layer training info
-      config.json                          # Full run config
+      {p_minus_desc}/                        # One dir per (P+, P-) sample
+        mcts.json                            # Per-sample MCTS results (from multipred_mcts.py)
+        trees/
+          {prefill}.html                     # Color-coded MCTS tree (from multipred_mcts.py)
+        probe_log_{prefill}.json             # Labeled-node breakdown (from multipred_probe.py)
+      mean_diff_directions.pt                # dict[layer_idx -> unit-norm Tensor]
+      contrastive_directions.pt              # dict[layer_idx -> unit-norm Tensor]
+      accuracies.json                        # Per-layer train/test accuracy + AUC
+      contrastive_infos.json                 # Per-layer training info
+      config.json                            # Full run config
 ```
 
 ### Data Structures

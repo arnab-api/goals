@@ -79,6 +79,7 @@ class LabeledNode:
     tree_id: str
     sample_idx: int
     prefill_type: str
+    prefill: str = ""     # the actual prefill string (e.g. "n %", "not ", ...)
     p_green: float = 1.0  # fraction of probability mass from this node flowing to green leaves
 
     def path_text(self) -> str:
@@ -178,6 +179,8 @@ def _label_path_nodes(
 
     result: list[tuple["MCTSNode", str, str]] = []
     for node in path_nodes:
+        if node is leaf:          # terminal node: goal already done, exclude from probing
+            continue
         d = node.depth
         in_p_plus  = p_plus_clause  is not None and p_plus_start  <= d <= p_plus_end
         in_p_minus = p_minus_clause is not None and p_minus_start <= d <= p_minus_end
@@ -281,6 +284,9 @@ def collect_labeled_nodes(
 
                 labeled_path = _label_path_nodes(leaf, p_plus_clause, p_minus_clause)
                 for node, pred_label, window in labeled_path:
+                    # "transition" covers pre-clause pivot tokens (e.g. "return") and
+                    # inter-clause connectors (e.g. "and") — neither reflects a single
+                    # predicate goal, so we skip them.
                     if pred_label == "transition":
                         continue
                     p_green = compute_outcome_probs(node).green
@@ -297,6 +303,7 @@ def collect_labeled_nodes(
                         tree_id=run.prefix,
                         sample_idx=sample_idx,
                         prefill_type=run.prefill_type,
+                        prefill=run.prefill,
                         p_green=p_green,
                     ))
                     n_labeled += 1
