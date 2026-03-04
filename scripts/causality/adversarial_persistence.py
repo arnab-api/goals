@@ -153,6 +153,7 @@ def build_steer_patches(
     return patches
 
 
+@torch.no_grad()
 def generate_and_evaluate(
     mt: ModelandTokenizer,
     sample,
@@ -161,6 +162,7 @@ def generate_and_evaluate(
     n_generations: int,
     patches: list[PatchSpec] | None = None,
     label: str = "",
+    patch_interface: str = "baukit",
 ) -> CodeGenerations:
     """Generate with optional patches, evaluate, and return the full CodeGenerations."""
     logger.debug(
@@ -170,6 +172,7 @@ def generate_and_evaluate(
         mt=mt,
         inputs=prompt,
         patches=patches,
+        patch_interface=patch_interface,
         do_sample=True,
         n_gen_per_prompt=n_generations,
         remove_prefix=True,
@@ -390,6 +393,8 @@ def process_predicate(
         print(f"    Baseline pass rate: {baseline_pass_rate:.3f}")
 
         save_eval_table(baseline_eval, os.path.join(prefill_dir, "baseline.json"))
+        del baseline_eval
+        free_gpu_cache()
 
         # --- Grid search over layer centers and coefficients ---
         by_layer = {}
@@ -459,6 +464,7 @@ def process_predicate(
                         direction_type="contrastive",
                     )
                     contrastive_pass_rate = None
+                free_gpu_cache()
 
                 # Mean-diff steering
                 mean_diff_patches = build_steer_patches(
@@ -501,6 +507,7 @@ def process_predicate(
                         direction_type="mean_diff",
                     )
                     mean_diff_pass_rate = None
+                free_gpu_cache()
 
                 print(
                     f"      coeff={coeff:.3f}: "

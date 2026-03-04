@@ -480,6 +480,7 @@ def _generate_baukit(
 
         # Real tensor — shape is always concrete here.
         is_first_pass = actual.shape[1] > 1
+        # print(f"{layer=} | {is_first_pass=}")
 
         for p in modules_to_patches.get(layer, []):
             should_apply = p.on_pass == "all" or (
@@ -1037,9 +1038,9 @@ def get_hs(
         # print(
         #     layer_name, layer_states[layer_name].shape, type(layer_states[layer_name])
         # )
-        hs[(layer_name, index)] = untuple(layer_states[layer_name])[
-            :, index, :
-        ].squeeze()
+        hs[(layer_name, index)] = (
+            untuple(layer_states[layer_name])[:, index, :].squeeze().detach()
+        )
 
     # print(f"==========> {len(hs)=}")
     if len(hs) == 1 and not return_dict:
