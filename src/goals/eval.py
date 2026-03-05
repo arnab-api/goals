@@ -5,6 +5,7 @@ import warnings
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from src.goals.data import (
@@ -210,28 +211,28 @@ def pretty_print_eval_results(
         unit_test_strs = []
         for t in eval_payload.unit_test_results:
             if t.error:
-                unit_test_strs.append(f"{function_name}({t.input}) raised {t.error}")
+                unit_test_strs.append(f"{function_name}({escape(str(t.input))}) raised {escape(t.error)}")
             elif t.passed:
-                unit_test_strs.append(f"{function_name}({t.input})={t.actual} ✓")
+                unit_test_strs.append(f"{function_name}({escape(str(t.input))})={escape(str(t.actual))} ✓")
             else:
                 unit_test_strs.append(
-                    f"{function_name}({t.input})={t.actual}, expected {t.expected} ✗"
+                    f"{function_name}({escape(str(t.input))})={escape(str(t.actual))}, expected {escape(str(t.expected))} ✗"
                 )
         unit_test_str = "\n".join(unit_test_strs)
 
         # Format logs
         log_parts = []
         if warns:
-            log_parts.append("[yellow]" + "\n".join(warns) + "[/yellow]")
+            log_parts.append("[yellow]" + "\n".join(escape(w) for w in warns) + "[/yellow]")
         if error_msg:
-            log_parts.append(error_msg)
+            log_parts.append(escape(error_msg))
         if verdict not in ["PASSED", "FAILED"]:
-            log_parts.append(f"[dim]{eval_payload.code}[/dim]")
+            log_parts.append(f"[dim]{escape(eval_payload.code)}[/dim]")
         log_str = "\n".join(log_parts)
 
         results_table.add_row(
-            f'{p_type}: "{prefill}"',
-            f'"[bright_yellow]{prefill}[/bright_yellow][white]{out}[/white]"',
+            f'{p_type}: "{escape(prefill)}"',
+            f'"[bright_yellow]{escape(prefill)}[/bright_yellow][white]{escape(out)}[/white]"',
             verdict_msg,
             unit_test_str if verdict != "PASSED" else "",
             log_str,

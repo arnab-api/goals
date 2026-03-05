@@ -38,6 +38,7 @@ Model = (
     | transformers.Qwen3NextForCausalLM
     | transformers.CwmForCausalLM
     | transformers.MistralForCausalLM
+    | transformers.Qwen3_5ForCausalLM
 )
 Tokenizer = transformers.PreTrainedTokenizerFast
 TokenizerOffsetMapping = Sequence[tuple[int, int]]

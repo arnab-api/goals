@@ -395,19 +395,13 @@ Three progressively stronger steering tests:
 
 **4.3b. Improve persistence against adversarial prefills in one-predicate setup**: Take a standard one-predicate task (e.g., `is_odd`) where an adversarial prefill (e.g., `1 +`) confuses the model. Steer with the goal direction trained from the multi-pred setup. Check whether the model's success rate on adversarial prefills improves -- i.e., the goal direction helps the model "remember" what it's supposed to do despite the misleading prefill.
 
-**4.3c. Induce target predicate in arbitrary code**: The strongest test. Take an arbitrary code generation context that has *no mention of the target predicate in its instructions*. Steer with the P+ goal direction. Check whether the model spontaneously introduces P+-related code (e.g., inserts a palindrome check where none was requested). This would demonstrate that the direction encodes a generalizable intent to "do P+" that transfers beyond any specific function context.
+**4.3c. Induce target predicate in a different context**: The strongest test. Steer with the P+ goal direction in a context where P+ was not part of the training distribution. Two variants of increasing strength:
 
-### 4.4 Cross-Function Transfer (Strongest Generalization)
+- **(i) Related function, same instrumental goal**: Train on `is_valid_palindrome(s)`, steer a structurally different function that also involves P+ (e.g., `are_all_palindromes(words: list[str])`). If the direction still fires here, the goal representation generalizes across function forms — it captures "about to implement palindrome check" invariant to the specific function context.
 
-Train the P+ direction on `is_valid_palindrome(s)`. Test on a structurally different function that also involves the same instrumental goal:
+- **(ii) Unrelated function, P+ absent from instructions**: Take a function with a completely different goal (e.g., `is_uppercase`) where the instructions make no mention of the target predicate. Steer with P+. Check whether the model spontaneously introduces P+-related code (e.g., inserts a palindrome check where none was requested).
 
-```python
-def are_all_palindromes(words: list[str]) -> bool:
-    """Return True iff every word in the list is a palindrome."""
-    return
-```
-
-If the direction fires here, the model has a generalizable `is_palindrome` goal representation -- not just a function-specific one.
+Both variants share the same setup: directions trained on the P+ source context, hidden states extracted from the destination context, patches applied to destination generation. The distinction is only in how unrelated the destination is. **Metric**: Frequency of P+ anchor tokens in steered vs. baseline outputs (plus destination task pass rate as a side effect — spurious P+ insertion should degrade it).
 
 ---
 

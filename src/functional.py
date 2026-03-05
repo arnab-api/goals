@@ -153,7 +153,7 @@ def patchscope(
     mt: ModelandTokenizer,
     h: torch.Tensor,
     context: str | None = None,
-    placeholder: str = "x",
+    placeholder: str = " x",
     context_tokenized: TokenizerOutput | None = None,
     placeholder_idx: int | None = None,
     patch_layers: Optional[list[str]] = None,
@@ -179,7 +179,7 @@ def patchscope(
         ]
         context = "\n".join([f"{p} >{p}" for p in phrases])
         context = f"{context}\n {placeholder} >"
-        logger.debug(context)
+        # logger.debug(context)
 
     if context_tokenized is None:
         context_tokenized = prepare_input(
@@ -192,7 +192,7 @@ def patchscope(
         context = mt.tokenizer.decode(
             context_tokenized["input_ids"][0], skip_special_tokens=True
         )
-        logger.debug(f"context: {context}")
+        # logger.debug(f"context: {context}")
 
     if placeholder_idx is None:
         placeholder_range = find_token_range(
@@ -218,7 +218,7 @@ def patchscope(
     placeholder_ends = mt.tokenizer.decode(
         context_tokenized["input_ids"][0, placeholder_idx]
     )
-    if placeholder.strip().endswith(placeholder_ends) is False:
+    if placeholder.strip().endswith(placeholder_ends.strip()) is False:
         logger.warning(
             f"{placeholder=} does not end with {placeholder_ends=} | {placeholder_idx=}"
         )

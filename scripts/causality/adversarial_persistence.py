@@ -109,6 +109,18 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════
 # Eval timeout helpers
 # ══════════════════════════════════════════════════════════════════════
+class _EvalTimeout(BaseException):
+    """Private timeout sentinel — inherits BaseException, not Exception.
+
+    This prevents it from being caught by the broad `except Exception` guards
+    inside evaluate_single_code (one wrapping exec(), one wrapping func(input_val)
+    in the unit test loop). If TimeoutError were used instead, it would be silently
+    swallowed on the first unit test, the alarm would not be re-armed, and the
+    second unit test's input() call would hang forever.
+    """
+    pass
+
+
 def _log_eval_timeout(code: str, context: dict, log_path: str) -> None:
     """Append a timed-out code snippet + context to eval_timeouts.log (JSON lines)."""
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -128,13 +140,13 @@ def _eval_with_timeout(
 ) -> SingleCodeEval:
     """Run evaluate_single_code with SIGALRM timeout. Linux main-thread only."""
     def _handler(signum, frame):
-        raise TimeoutError(f"eval timed out after {timeout_secs}s")
+        raise _EvalTimeout(f"eval timed out after {timeout_secs}s")
 
     old_handler = signal.signal(signal.SIGALRM, _handler)
     signal.alarm(timeout_secs)
     try:
         result = evaluate_single_code(full_code, unit_tests, function_name)
-    except TimeoutError:
+    except _EvalTimeout:
         result = SingleCodeEval(
             code=full_code,
             verdict="TIMEOUT",

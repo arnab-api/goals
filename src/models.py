@@ -350,6 +350,9 @@ def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
         or isinstance(mt, transformers.Qwen3ForCausalLM)
         or isinstance(mt, transformers.Qwen3MoeForCausalLM)
         or isinstance(mt, transformers.Qwen3NextForCausalLM)
+        or isinstance(
+            mt, transformers.Qwen3_5ForCausalLM
+        )  # TODO: address for self_attn vs linear attn
     ):
         return True
 

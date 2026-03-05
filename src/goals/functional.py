@@ -34,6 +34,7 @@ def apply_chat_template(
         add_generation_prompt=False,  # Don't add a new assistant header
         continue_final_message=True,  # Don't close the assistant turn with <|eot_id|>
         tokenize=False,
+        chat_template_kwargs={"enable_thinking": False},  # only Qwen3 and Qwen3.5
     )
     return prompt
 
@@ -51,6 +52,7 @@ def supports_chat_template(mt: ModelandTokenizer) -> bool:
         "next",
         "cwm",
         "distill",
+        "qwen3.5",
     ]
     return any(
         inst_signature in mt.name.lower() for inst_signature in instruct_signatures
