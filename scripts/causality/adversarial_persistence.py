@@ -73,6 +73,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 
 # Must be set before importing torch so CUDA sees only the requested devices.
@@ -87,8 +88,8 @@ from src.functional import (  # noqa: E402
     generate_with_patch,
     get_hs,
 )
-from src.goals.data import Code, CodeGenerations, IncompleteCodeDataset  # noqa: E402
-from src.goals.eval import run_evaluation  # noqa: E402
+from src.goals.data import Code, CodeGenerations, IncompleteCodeDataset, SingleCodeEval  # noqa: E402
+from src.goals.eval import evaluate_single_code, run_evaluation  # noqa: E402
 from src.goals.functional import (  # noqa: E402
     apply_chat_template,
     supports_chat_template,
@@ -103,6 +104,99 @@ from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Eval timeout helpers
+# ══════════════════════════════════════════════════════════════════════
+def _log_eval_timeout(code: str, context: dict, log_path: str) -> None:
+    """Append a timed-out code snippet + context to eval_timeouts.log (JSON lines)."""
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    entry = {"code": code, **context}
+    with open(log_path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    logger.warning(f"Eval timeout: context={context}")
+
+
+def _eval_with_timeout(
+    full_code: str,
+    unit_tests: list,
+    function_name: str,
+    timeout_secs: int,
+    timeout_log: str | None,
+    context: dict,
+) -> SingleCodeEval:
+    """Run evaluate_single_code with SIGALRM timeout. Linux main-thread only."""
+    def _handler(signum, frame):
+        raise TimeoutError(f"eval timed out after {timeout_secs}s")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(timeout_secs)
+    try:
+        result = evaluate_single_code(full_code, unit_tests, function_name)
+    except TimeoutError:
+        result = SingleCodeEval(
+            code=full_code,
+            verdict="TIMEOUT",
+            warnings=[],
+            unit_test_results=[],
+            error_message=f"Timed out after {timeout_secs}s",
+        )
+        if timeout_log:
+            _log_eval_timeout(full_code, context, timeout_log)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+    return result
+
+
+def run_evaluation_timed(
+    result: CodeGenerations,
+    function_name: str | None,
+    code_stop_tag: str,
+    eval_timeout: int,
+    eval_timeout_log: str | None,
+    context: dict,
+) -> CodeGenerations:
+    """Like run_evaluation but with per-code SIGALRM timeout."""
+    sample = result.sample
+    base_code = sample.code
+    unit_tests = list(sample.unit_tests)
+    target_function = (
+        function_name or result.function_name or sample.function_name or "func"
+    )
+    result.function_name = target_function
+
+    for code_entry in result.generations:
+        prefill = code_entry.prefill or ""
+        out = code_entry.lm_generation
+        if code_stop_tag:
+            cur_stop_tag = code_stop_tag if code_stop_tag in out else "\n"
+            out = out.split(cur_stop_tag)[0].rstrip()
+        code_entry.lm_generation = out
+        full_code = f"{base_code}{prefill}{out}"
+        code_entry.source_code = full_code
+        code_entry.function_name = target_function
+
+        single_result = _eval_with_timeout(
+            full_code, unit_tests, target_function,
+            eval_timeout, eval_timeout_log, context,
+        )
+        single_result.prefill = (prefill, code_entry.prefill_type or "")
+        single_result.output = out
+        code_entry.eval = single_result
+
+    pass_count = sum(
+        1 for e in result.generations
+        if e.eval and e.eval.verdict == "PASSED"
+    )
+    fail_count = len(result.generations) - pass_count
+    from src.goals.data import EvaluationSummary
+    result.summary = EvaluationSummary(
+        pass_count=pass_count, fail_count=fail_count, total=len(result.generations)
+    )
+    return result
+
 
 # Coefficient grid search range (matches test_causality.py)
 COEFF_GRID = list(np.arange(0.02, 0.21, 0.02))
@@ -153,6 +247,44 @@ def build_steer_patches(
     return patches
 
 
+def build_context_patches(
+    mt: ModelandTokenizer,
+    directions: dict[int, torch.Tensor],
+    hs: dict[tuple[str, int], torch.Tensor],
+    layer_from: int,
+    layer_to: int,
+    coeff: float,
+    n_tokens: int,
+) -> list[PatchSpec]:
+    """Build on_pass='first' patches for all input context positions (0..n_tokens-2).
+
+    Each position is scaled by its own hidden-state norm (not the last token's).
+    Position n_tokens-1 (the last input token) is handled by build_steer_patches
+    with on_pass='all', so it is excluded here to avoid double-application.
+    """
+    patches = []
+    for layer_idx in range(layer_from, layer_to):
+        layer_name = mt.layer_name_format.format(layer_idx)
+        if layer_idx not in directions:
+            continue
+        goal_dir = directions[layer_idx]
+        for token_idx in range(
+            n_tokens - 1
+        ):  # excludes last token (handled by build_steer_patches)
+            h_tok = hs[(layer_name, token_idx)]
+            goal_dir_dev = goal_dir.to(h_tok.device)
+            scaled = goal_dir_dev * coeff * (h_tok.norm() / goal_dir_dev.norm())
+            patches.append(
+                PatchSpec(
+                    location=(layer_name, token_idx),
+                    patch=scaled,
+                    strategy="add",
+                    on_pass="first",
+                )
+            )
+    return patches
+
+
 @torch.no_grad()
 def generate_and_evaluate(
     mt: ModelandTokenizer,
@@ -163,6 +295,8 @@ def generate_and_evaluate(
     patches: list[PatchSpec] | None = None,
     label: str = "",
     patch_interface: str = "baukit",
+    eval_timeout: int = 5,
+    eval_timeout_log: str | None = None,
 ) -> CodeGenerations:
     """Generate with optional patches, evaluate, and return the full CodeGenerations."""
     logger.debug(
@@ -193,10 +327,14 @@ def generate_and_evaluate(
         ],
     )
 
-    eval_results = run_evaluation(
+    eval_context = {"label": label, "prefill": prefill}
+    eval_results = run_evaluation_timed(
         result=generations,
         function_name=sample.function_name,
         code_stop_tag="</code>",
+        eval_timeout=eval_timeout,
+        eval_timeout_log=eval_timeout_log,
+        context=eval_context,
     )
 
     pass_rate = eval_results.summary.pass_count / eval_results.summary.total
@@ -319,6 +457,10 @@ def process_predicate(
 
     os.makedirs(results_predicate_dir, exist_ok=True)
 
+    eval_timeout_log = os.path.join(
+        os.path.dirname(error_log_path), "eval_timeouts.log"
+    )
+
     print(f"\n{'#' * 70}")
     print(f"# Predicate {predicate_idx}: {tp.name!r}")
     print(f"# P+: {tp.p_plus.description}")
@@ -370,9 +512,19 @@ def process_predicate(
             f"Extracting hidden states (layers {global_lo}-{global_hi}) for prefill {prefill!r}..."
         )
         tokenized = prepare_input(prompts=prompt, tokenizer=mt)
+        n_tokens = tokenized.input_ids.shape[1]
+
         locations = [
             (mt.layer_name_format.format(i), -1) for i in range(global_lo, global_hi)
         ]
+
+        if args.steer_context:
+            locations += [
+                (mt.layer_name_format.format(i), t)
+                for i in range(global_lo, global_hi)
+                for t in range(n_tokens-1)
+            ]
+
         hs = get_hs(mt=mt, input=tokenized, locations=locations)
 
         # --- Baseline (no steering) ---
@@ -385,6 +537,7 @@ def process_predicate(
             n_generations=args.n_generations,
             patches=None,
             label="baseline",
+            eval_timeout_log=eval_timeout_log,
         )
         baseline_pass_rate = (
             baseline_eval.summary.pass_count / baseline_eval.summary.total
@@ -431,6 +584,16 @@ def process_predicate(
                     layer_to=window_hi,
                     coeff=coeff,
                 )
+                if args.steer_context:
+                    contrastive_patches += build_context_patches(
+                        mt=mt,
+                        directions=contrastive_directions,
+                        hs=hs,
+                        layer_from=window_lo,
+                        layer_to=window_hi,
+                        coeff=coeff,
+                        n_tokens=n_tokens,
+                    )
                 try:
                     contrastive_eval = generate_and_evaluate(
                         mt=mt,
@@ -440,6 +603,7 @@ def process_predicate(
                         n_generations=args.n_generations,
                         patches=contrastive_patches,
                         label=f"contrastive layer={layer_idx} coeff={coeff_key}",
+                        eval_timeout_log=eval_timeout_log,
                     )
                     contrastive_pass_rate = (
                         contrastive_eval.summary.pass_count
@@ -475,6 +639,16 @@ def process_predicate(
                     layer_to=window_hi,
                     coeff=coeff,
                 )
+                if args.steer_context:
+                    mean_diff_patches += build_context_patches(
+                        mt=mt,
+                        directions=mean_diff_directions,
+                        hs=hs,
+                        layer_from=window_lo,
+                        layer_to=window_hi,
+                        coeff=coeff,
+                        n_tokens=n_tokens,
+                    )
                 try:
                     mean_diff_eval = generate_and_evaluate(
                         mt=mt,
@@ -484,6 +658,7 @@ def process_predicate(
                         n_generations=args.n_generations,
                         patches=mean_diff_patches,
                         label=f"mean_diff layer={layer_idx} coeff={coeff_key}",
+                        eval_timeout_log=eval_timeout_log,
                     )
                     mean_diff_pass_rate = (
                         mean_diff_eval.summary.pass_count / mean_diff_eval.summary.total
@@ -762,6 +937,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--steer_context",
+        action="store_true",
+        default=False,
+        help=(
+            "In addition to steering the last token at every generation step "
+            "(on_pass='all'), also steer all input context positions during the "
+            "prefill pass (on_pass='first') with per-token norm scaling."
+        ),
+    )
+
     logging_utils.add_logging_args(parser)
 
     return parser.parse_args()
@@ -808,6 +994,7 @@ def main():
     print(f"Predicate filter:{args.predicate_names or 'all'}")
     print(f"Prefills:        {active_prefills}")
     print(f"Coeff grid:      {[round(c, 3) for c in COEFF_GRID]}")
+    print(f"Steer context:   {args.steer_context}")
     print(f"{'=' * 70}\n")
 
     # --- Load MultiPredicateDataset ---
