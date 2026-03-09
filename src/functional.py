@@ -513,7 +513,7 @@ def generate_with_patch(
     max_new_tokens: int = 16,
     patches: Optional[list[PatchSpec]] = None,
     do_sample: bool = True,
-    patch_interface: Literal["nnsight", "baukit"] = "nnsight",
+    patch_interface: Literal["nnsight", "baukit"] | callable = "nnsight",
     remove_prefix: bool = False,
     skip_special_tokens: bool = True,
     **kwargs,
@@ -568,17 +568,28 @@ def generate_with_patch(
 
     start = inputs.input_ids.shape[1] if remove_prefix else 0
 
-    if patch_interface == "nnsight":
-        sequences = _generate_nnsight(
-            mt, inputs, patches or [], max_new_tokens, do_sample, **kwargs
-        )
-    elif patch_interface == "baukit":
-        sequences = _generate_baukit(
-            mt, inputs, patches or [], max_new_tokens, do_sample, **kwargs
-        )
+    if type(patch_interface) is str:
+        if patch_interface == "nnsight":
+            sequences = _generate_nnsight(
+                mt, inputs, patches or [], max_new_tokens, do_sample, **kwargs
+            )
+        elif patch_interface == "baukit":
+            sequences = _generate_baukit(
+                mt, inputs, patches or [], max_new_tokens, do_sample, **kwargs
+            )
+        else:
+            raise ValueError(
+                f"patch_interface must be 'nnsight' or 'baukit', got {patch_interface!r}"
+            )
     else:
-        raise ValueError(
-            f"patch_interface must be 'nnsight' or 'baukit', got {patch_interface!r}"
+        # Custom interface provided by caller.
+        sequences = patch_interface(
+            mt=mt,
+            inputs=inputs,
+            patches=patches or [],
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            **kwargs,
         )
 
     return mt.tokenizer.batch_decode(

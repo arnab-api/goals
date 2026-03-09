@@ -88,8 +88,13 @@ from src.functional import (  # noqa: E402
     generate_with_patch,
     get_hs,
 )
-from src.goals.data import Code, CodeGenerations, IncompleteCodeDataset, SingleCodeEval  # noqa: E402
-from src.goals.eval import evaluate_single_code, run_evaluation  # noqa: E402
+from src.goals.data import (  # noqa: E402
+    Code,
+    CodeGenerations,
+    IncompleteCodeDataset,
+    SingleCodeEval,
+)
+from src.goals.eval import evaluate_single_code  # noqa: E402
 from src.goals.functional import (  # noqa: E402
     apply_chat_template,
     supports_chat_template,
@@ -118,6 +123,7 @@ class _EvalTimeout(BaseException):
     swallowed on the first unit test, the alarm would not be re-armed, and the
     second unit test's input() call would hang forever.
     """
+
     pass
 
 
@@ -139,6 +145,7 @@ def _eval_with_timeout(
     context: dict,
 ) -> SingleCodeEval:
     """Run evaluate_single_code with SIGALRM timeout. Linux main-thread only."""
+
     def _handler(signum, frame):
         raise _EvalTimeout(f"eval timed out after {timeout_secs}s")
 
@@ -191,19 +198,23 @@ def run_evaluation_timed(
         code_entry.function_name = target_function
 
         single_result = _eval_with_timeout(
-            full_code, unit_tests, target_function,
-            eval_timeout, eval_timeout_log, context,
+            full_code,
+            unit_tests,
+            target_function,
+            eval_timeout,
+            eval_timeout_log,
+            context,
         )
         single_result.prefill = (prefill, code_entry.prefill_type or "")
         single_result.output = out
         code_entry.eval = single_result
 
     pass_count = sum(
-        1 for e in result.generations
-        if e.eval and e.eval.verdict == "PASSED"
+        1 for e in result.generations if e.eval and e.eval.verdict == "PASSED"
     )
     fail_count = len(result.generations) - pass_count
     from src.goals.data import EvaluationSummary
+
     result.summary = EvaluationSummary(
         pass_count=pass_count, fail_count=fail_count, total=len(result.generations)
     )
@@ -309,6 +320,7 @@ def generate_and_evaluate(
     patch_interface: str = "baukit",
     eval_timeout: int = 5,
     eval_timeout_log: str | None = None,
+    max_new_tokens: int = 32,
 ) -> CodeGenerations:
     """Generate with optional patches, evaluate, and return the full CodeGenerations."""
     logger.debug(
@@ -322,7 +334,7 @@ def generate_and_evaluate(
         do_sample=True,
         n_gen_per_prompt=n_generations,
         remove_prefix=True,
-        max_new_tokens=32,
+        max_new_tokens=max_new_tokens,
     )
     logger.debug(f"Generation done. Evaluating {len(outputs)} outputs...")
 
@@ -534,7 +546,7 @@ def process_predicate(
             locations += [
                 (mt.layer_name_format.format(i), t)
                 for i in range(global_lo, global_hi)
-                for t in range(n_tokens-1)
+                for t in range(n_tokens - 1)
             ]
 
         hs = get_hs(mt=mt, input=tokenized, locations=locations)
