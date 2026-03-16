@@ -62,6 +62,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _re_search_safe(pattern: str, text: str) -> "re.Match | None":
+    """re.search with graceful handling of invalid regex patterns."""
+    try:
+        return re.search(pattern, text)
+    except re.error:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Prompt template
 # ---------------------------------------------------------------------------
@@ -82,18 +91,20 @@ One valid green completion (passes all unit tests):
 return {completion}
 ```
 
-**Task**: Identify *anchor tokens* — short Python code substrings that appear in the completion and unambiguously signal which predicate is being implemented at the branching point (right after `return`).
+**Task**: Identify *anchor patterns* — Python regex patterns that match the earliest distinctive code fragment signaling which predicate is being implemented at the branching point (right after `return`).
 
-- **P+ anchor tokens**: the earliest, shortest substring(s) that uniquely indicate the model is implementing P+. Must NOT normally appear in a P--only implementation.
-- **P- anchor tokens**: same for P-. Must NOT normally appear in a P+-only implementation.
+- **P+ anchor patterns**: regex(es) that match the earliest code fragment(s) uniquely indicating P+ is being implemented. Must NOT normally match a P--only implementation.
+- **P- anchor patterns**: same for P-. Must NOT normally match a P+-only implementation.
 
 Rules:
-- Focus on substrings near the *start* of each predicate's code in the completion.
-- Prefer short, distinctive substrings (2–8 characters typical, e.g. `len(`, `s ==`, `[::-1]`).
-- Include 1–3 anchors per predicate — only the most distinctive ones.
+- Focus on fragments near the *start* of each predicate's code in the completion.
+- Prefer short, distinctive patterns (e.g. `\\[::-1\\]`, `len\\(`, `\\.isalpha\\(\\)`).
+- **Do NOT include specific variable names** from the function signature. Use `\\w+` in their place (e.g. use `\\w+\\[::-1\\]` instead of `s\\[::-1\\]`, use `len\\(\\w+\\)` instead of `len\\(s\\)`).
+- Include 1–3 patterns per predicate — only the most distinctive ones.
+- Each pattern must be a valid Python regex string.
 
 Respond with ONLY a JSON object, no markdown fences, no explanation:
-{{"p_plus_anchor_tokens": ["...", "..."], "p_minus_anchor_tokens": ["...", "..."]}}"""
+{{"p_plus_anchor_patterns": ["...", "..."], "p_minus_anchor_patterns": ["...", "..."]}}"""
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +191,9 @@ def _parse_response(response: str) -> tuple[list[str], list[str]]:
     if not match:
         raise ValueError(f"No JSON object found in oracle response:\n{response}")
     data = json.loads(match.group(0))
-    p_plus = data.get("p_plus_anchor_tokens", [])
-    p_minus = data.get("p_minus_anchor_tokens", [])
+    # Support both old key names (cache compat) and new names
+    p_plus = data.get("p_plus_anchor_patterns", data.get("p_plus_anchor_tokens", []))
+    p_minus = data.get("p_minus_anchor_patterns", data.get("p_minus_anchor_tokens", []))
     if not isinstance(p_plus, list) or not isinstance(p_minus, list):
         raise ValueError(f"Expected lists in oracle response, got: {data}")
     return [str(t) for t in p_plus], [str(t) for t in p_minus]
@@ -224,12 +236,15 @@ def _label_leaf(
     path_nodes = _get_path_nodes(leaf)
     full_text = prefix + "".join(n.token_str for n in path_nodes)
 
-    def _first_char_pos(anchors: list[str]) -> int | None:
+    def _first_char_pos(patterns: list[str]) -> int | None:
         best: int | None = None
-        for a in anchors:
-            pos = full_text.find(a)
-            if pos >= 0 and (best is None or pos < best):
-                best = pos
+        for p in patterns:
+            try:
+                m = re.search(p, full_text)
+            except re.error:
+                continue
+            if m is not None and (best is None or m.start() < best):
+                best = m.start()
         return best
 
     p_plus_char = _first_char_pos(p_plus_anchors)
@@ -510,14 +525,16 @@ def extract_anchor_tokens(
             f"but tp '{tp.name}' has {len(tp.samples)} samples."
         )
 
-    all_p_plus: set[str] = set(tp.p_plus.anchor_tokens)
+    all_p_plus: set[str] = set(tp.p_plus.anchor_patterns)
     p_minus_per_sample: list[set[str]] = [
-        set(sample.p_minus.anchor_tokens if sample.p_minus else [])
+        set(sample.p_minus.anchor_patterns if sample.p_minus else [])
         for sample in tp.samples
     ]
 
-    def _identified(completion: str, anchors: set[str]) -> bool:
-        return bool(anchors) and any(anchor in completion for anchor in anchors)
+    def _identified(completion: str, patterns: set[str]) -> bool:
+        return bool(patterns) and any(
+            _re_search_safe(p, completion) for p in patterns
+        )
 
     for sample_idx, (sample, prefix_to_comps) in enumerate(
         zip(tp.samples, completions_per_sample)
@@ -576,32 +593,77 @@ def extract_anchor_tokens(
         for ptc in completions_per_sample
     ]
 
-    valid_p_plus = {a for a in all_p_plus if any(a in c for c in all_comps_flat)}
+    valid_p_plus = {p for p in all_p_plus if any(_re_search_safe(p, c) for c in all_comps_flat)}
     pruned = all_p_plus - valid_p_plus
     if pruned:
         logger.info(
-            f"[{tp.name}] pruned p+ anchors (no completion match): {sorted(pruned)}"
+            f"[{tp.name}] pruned p+ patterns (no completion match): {sorted(pruned)}"
         )
     all_p_plus = valid_p_plus
 
     for i, sample_comps in enumerate(per_sample_comps):
-        valid = {a for a in p_minus_per_sample[i] if any(a in c for c in sample_comps)}
+        valid = {p for p in p_minus_per_sample[i] if any(_re_search_safe(p, c) for c in sample_comps)}
         pruned = p_minus_per_sample[i] - valid
         if pruned:
             logger.info(
-                f"[{tp.name}] sample {i}: pruned p- anchors (no completion match): {sorted(pruned)}"
+                f"[{tp.name}] sample {i}: pruned p- patterns (no completion match): {sorted(pruned)}"
             )
         p_minus_per_sample[i] = valid
 
     p_plus_anchors = sorted(all_p_plus)
     p_minus_anchors = [sorted(s) for s in p_minus_per_sample]
 
-    logger.info(f"[{tp.name}] p+ anchors (final): {p_plus_anchors}")
+    logger.info(f"[{tp.name}] p+ patterns (final): {p_plus_anchors}")
     for i, anchors in enumerate(p_minus_anchors):
         if anchors:
-            logger.info(f"[{tp.name}] sample {i} p- anchors (final): {anchors}")
+            logger.info(f"[{tp.name}] sample {i} p- patterns (final): {anchors}")
 
     return p_plus_anchors, p_minus_anchors
+
+
+# ---------------------------------------------------------------------------
+# Public — conversion utility
+# ---------------------------------------------------------------------------
+
+
+def convert_anchor_tokens_to_patterns(
+    anchor_tokens: list[str],
+    var_names: list[str],
+) -> list[str]:
+    """Convert literal anchor token strings to variable-agnostic regex patterns.
+
+    For each anchor token:
+    1. Replace whole-word occurrences of each var_name with a NUL placeholder.
+    2. re.escape() the remaining literal text.
+    3. Replace placeholders with \\w+.
+
+    This makes patterns robust to variable renaming: "s[::-1]" with var "s"
+    becomes "\\w+\\[::-1\\]", which still matches "text[::-1]" after renaming.
+
+    Tokens that contain no var_names are simply re.escape()'d (safe default).
+
+    Args:
+        anchor_tokens: List of literal anchor strings (current JSON format).
+        var_names:     List of variable names to strip (typically the function
+                       parameter names extracted from the code stub).
+
+    Returns:
+        List of regex pattern strings, same length as anchor_tokens.
+
+    Example:
+        >>> convert_anchor_tokens_to_patterns(["s[::-1]", "len(s)", "[::-1]"], ["s"])
+        ['\\\\w+\\\\[::-1\\\\]', 'len\\\\(\\\\w+\\\\)', '\\\\[::-1\\\\]']
+    """
+    PLACEHOLDER = "\x00VAR\x00"
+    results: list[str] = []
+    for token in anchor_tokens:
+        s = token
+        # Replace longest variable names first to avoid partial matches
+        for var in sorted(var_names, key=len, reverse=True):
+            s = re.sub(r"\b" + re.escape(var) + r"\b", PLACEHOLDER, s)
+        parts = s.split(PLACEHOLDER)
+        results.append(r"\w+".join(re.escape(p) for p in parts))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -716,20 +778,22 @@ def show_span_annotation(
     full_text = prefix + path_text
     lines = [f"  Path (after prefix): {path_text!r}"]
 
-    def _find(anchors: list[str], pred_name: str) -> int | None:
+    def _find(patterns: list[str], pred_name: str) -> int | None:
         best_pos: int | None = None
-        best_anchor: str = ""
-        for anchor in anchors:
-            pos = full_text.find(anchor)
-            if pos >= 0 and (best_pos is None or pos < best_pos):
-                best_pos = pos
-                best_anchor = anchor
+        best_pattern: str = ""
+        best_match_len: int = 0
+        for pattern in patterns:
+            m = _re_search_safe(pattern, full_text)
+            if m is not None and (best_pos is None or m.start() < best_pos):
+                best_pos = m.start()
+                best_pattern = pattern
+                best_match_len = len(m.group(0))
         if best_pos is not None:
             in_prefix = best_pos < len(prefix)
             rel_pos = best_pos - len(prefix)  # position within path_text
             start = max(0, best_pos - 8)
-            snippet = full_text[start : best_pos + len(best_anchor) + 12]
-            marker = " " * (best_pos - start) + "^" * len(best_anchor)
+            snippet = full_text[start : best_pos + best_match_len + 12]
+            marker = " " * (best_pos - start) + "^" * best_match_len
             depth_str = ""
             if label is not None:
                 d = (
@@ -743,11 +807,11 @@ def show_span_annotation(
                 if in_prefix
                 else f"at char {rel_pos} in path"
             )
-            lines.append(f"  {pred_name} anchor {best_anchor!r} — {loc}{depth_str}:")
+            lines.append(f"  {pred_name} pattern {best_pattern!r} — {loc}{depth_str}:")
             lines.append(f"    {snippet!r}")
             lines.append(f"    {marker}")
         else:
-            lines.append(f"  {pred_name} anchor: (none found)")
+            lines.append(f"  {pred_name} pattern: (none found)")
         return best_pos
 
     p_plus_pos = _find(p_plus_anchors, "P+")
@@ -806,13 +870,13 @@ def extract_predicate_clauses(
         return None, None
 
     def _match(anchors: list[str]) -> "ClauseSpan | None":
-        # Try each anchor; use the clause whose start comes earliest in full_text
+        # Try each pattern; use the clause whose start comes earliest in full_text
         best: tuple[int, str, int, int] | None = (
             None  # (abs_start, text, abs_start, abs_end)
         )
         for anchor in anchors:
             for clause_text, abs_start, abs_end in clauses:
-                if anchor in clause_text:
+                if _re_search_safe(anchor, clause_text):
                     if best is None or abs_start < best[0]:
                         best = (abs_start, clause_text, abs_start, abs_end)
         if best is None:

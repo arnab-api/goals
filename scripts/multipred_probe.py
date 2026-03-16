@@ -231,46 +231,46 @@ def ensure_anchor_tokens(
     tp_results: MCTSSearchResults_for_TargetPredicate,
     force_reextract: bool = False,
 ) -> None:
-    """Populate P+ / P- anchor tokens via oracle LM if any are missing, then save to disk.
+    """Populate P+ / P- anchor patterns via oracle LM if any are missing, then save to disk.
 
-    Anchor tokens live in:
-        tp.p_plus.anchor_tokens               (shared across all samples)
-        tp.samples[i].p_minus.anchor_tokens   (per-sample)
+    Anchor patterns live in:
+        tp.p_plus.anchor_patterns               (shared across all samples)
+        tp.samples[i].p_minus.anchor_patterns   (per-sample)
 
     If all are already populated and force_reextract=False, this is a no-op.
     On update, the TargetPredicate JSON is overwritten via tp.save().
     """
     needs = (
         force_reextract
-        or not tp.p_plus.anchor_tokens
+        or not tp.p_plus.anchor_patterns
         or any(
-            not (sample.p_minus and sample.p_minus.anchor_tokens)
+            not (sample.p_minus and sample.p_minus.anchor_patterns)
             for sample in tp.samples
         )
     )
     if not needs:
         logger.info(
-            f"Anchor tokens already populated for '{tp.name}' — skipping oracle."
+            f"Anchor patterns already populated for '{tp.name}' — skipping oracle."
         )
         return
 
-    print(f"\nExtracting anchor tokens for '{tp.name}' via oracle LM...")
+    print(f"\nExtracting anchor patterns for '{tp.name}' via oracle LM...")
     p_plus_anchors, p_minus_per_sample = extract_anchor_tokens(
         tp=tp,
         completions_per_sample=tp_results.completions_per_sample,
     )
 
-    tp.p_plus.anchor_tokens = sorted(p_plus_anchors)
+    tp.p_plus.anchor_patterns = sorted(p_plus_anchors)
     for i, sample in enumerate(tp.samples):
         if sample.p_minus is not None:
-            sample.p_minus.anchor_tokens = sorted(p_minus_per_sample[i])
+            sample.p_minus.anchor_patterns = sorted(p_minus_per_sample[i])
 
     tp.save()
-    print(f"  P+ anchors:  {tp.p_plus.anchor_tokens}")
+    print(f"  P+ patterns:  {tp.p_plus.anchor_patterns}")
     for i, sample in enumerate(tp.samples):
-        anchors = sample.p_minus.anchor_tokens if sample.p_minus else []
-        print(f"  P- anchors (sample {i}): {anchors}")
-    print(f"Saved anchor tokens → {tp._source_path}")
+        anchors = sample.p_minus.anchor_patterns if sample.p_minus else []
+        print(f"  P- patterns (sample {i}): {anchors}")
+    print(f"Saved anchor patterns → {tp._source_path}")
 
 
 # ══════════════════════════════════════════════════════════════════════

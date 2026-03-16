@@ -244,8 +244,8 @@ def collect_labeled_nodes(
         sr = tp_results.sample_results[sample_idx]
         sample = tp.samples[sample_idx]
 
-        p_plus_anchors  = tp.p_plus.anchor_tokens
-        p_minus_anchors = sample.p_minus.anchor_tokens if sample.p_minus else []
+        p_plus_anchors  = tp.p_plus.anchor_patterns
+        p_minus_anchors = sample.p_minus.anchor_patterns if sample.p_minus else []
         if not p_plus_anchors or not p_minus_anchors:
             logger.warning(f"Sample {sample_idx}: missing anchor tokens — skipping.")
             continue

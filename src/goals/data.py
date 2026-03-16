@@ -19,6 +19,7 @@ class IncompleteCodeSample(DataClassJsonMixin):
     unit_tests: list[tuple[Any, Any]] = field(default_factory=list)
     prefills: dict[str, list[str]] = field(default_factory=dict)
     function_name: str | None = None
+    augmentation: dict | None = None
 
     def __str__(self) -> str:
         return f"""Instruction: {self.instruction}

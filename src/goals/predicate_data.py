@@ -19,12 +19,18 @@ MULTI_PREDICATE_DIR = os.path.join(DEFAULT_DATA_DIR, "multi_predicate")
 class PredicateSpec(DataClassJsonMixin):
     """Specification for one predicate in a multi-predicate task.
 
-    anchor_tokens: token substrings that uniquely identify the model is
-    implementing this predicate (filled in post-hoc after inspecting MCTS trees).
+    short_description: short template describing the predicate, with {var} as a
+    placeholder for the function's primary variable name.
+    E.g. "{var} is a palindrome".  Used to build docstrings for augmented samples.
+
+    anchor_patterns: variable-agnostic regex patterns that uniquely identify the
+    model is implementing this predicate (filled in post-hoc after inspecting MCTS
+    trees).  Variable names are replaced with \\w+ so patterns survive renaming.
     """
 
     description: str
-    anchor_tokens: list[str] = field(default_factory=list)
+    short_description: str = ""
+    anchor_patterns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -45,6 +51,7 @@ class MultiPredicateSample(IncompleteCodeSample):
     """
 
     p_minus: PredicateSpec | None = None
+    augmentation: dict | None = None
 
 
 @dataclass
