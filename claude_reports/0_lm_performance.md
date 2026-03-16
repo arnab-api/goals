@@ -1,6 +1,6 @@
 # LM Performance on Prefill Probing
 
-## Overall Results (16 Models)
+## Overall Results (21 Models)
 
 | Model | Aligned | Adversarial | Inconsequential | Overall |
 |-------|---------|-------------|-----------------|---------|
@@ -12,14 +12,21 @@
 | GPT-OSS-20B | 94.9% | 51.9% | 89.5% | 80.6% |
 | Qwen3-Coder-30B-A3B-Instruct | 90.7% | 53.2% | 87.7% | 78.6% |
 | Qwen3-Coder-Next | 92.4% | 57.1% | 77.2% | 78.2% |
+| **GLM-4.7-Flash** | **89.8%** | **54.5%** | **70.2%** | **74.6%** |
+| **deepseek-coder-33b-instruct** | **92.4%** | **41.6%** | **82.5%** | **74.6%** |
 | DeepSeek-Coder-V2-Lite-Instruct | 90.7% | 41.6% | 84.2% | 74.2% |
+| **DeepSeek-R1-Distill-Qwen-32B** | **88.1%** | **46.8%** | **80.7%** | **73.8%** |
+| **DeepSeek-R1-Distill-Llama-70B** | **90.7%** | **42.9%** | **78.9%** | **73.4%** |
 | Qwen2.5-Coder-14B-Instruct | 91.5% | 49.4% | 68.4% | 73.4% |
 | Qwen2.5-Coder-32B (base) | 89.8% | 48.1% | 71.9% | 73.0% |
 | deepseek-coder-33b-base | 93.2% | 40.3% | 71.9% | 72.2% |
+| **Qwen3.5-27B** | **82.1%** | **52.7%** | **69.6%** | **70.2%** |
 | Qwen2.5-72B (base) | 80.5% | 41.6% | 56.1% | 63.1% |
 | starcoder2-15b | 89.8% | 39.0% | 35.1% | 61.9% |
 | Olmo-3-1125-32B | 79.7% | 37.7% | 24.6% | 54.4% |
 | Olmo-3.1-7B-RL-Zero-Code | 77.1% | 22.1% | 35.1% | 50.8% |
+
+New models (5 added) are shown in **bold**. Note: Qwen3.5-27B is evaluated on 17 samples (includes is_anagram, is_perfect_square, has_unique_elements) vs 14 for all other models.
 
 All models handle aligned prefills well (77-99%), but adversarial prefills expose significant fragility (22-74%).
 
@@ -27,7 +34,7 @@ All models handle aligned prefills well (77-99%), but adversarial prefills expos
 - Adversarial prefills cause a ~35 percentage point drop from aligned performance
 - Top models on adversarial robustness: Qwen2.5-Coder-32B-Instruct & Qwen2.5-72B-Instruct (tied at 74%), Olmo-3.1-32B-Instruct (70%)
 - Worst: Olmo-3.1-7B-RL-Zero-Code (22% adversarial) despite RL training
-- New models CWM (58.4%) and Qwen3-Coder-Next (57.1%) are mid-pack on adversarial robustness
+- New models CWM (58.4%) and Qwen3-Coder-Next (57.1%) are mid-pack; among the 5 newly added models, GLM-4.7-Flash (54.5%) is the most adversarially robust
 
 ---
 
@@ -43,16 +50,20 @@ All models handle aligned prefills well (77-99%), but adversarial prefills expos
 | 4 | Llama-3.3-70B-Instruct | 63.6% | 35.6% |
 | 5 | CWM | 58.4% | 34.8% |
 | 6 | Qwen3-Coder-Next | 57.1% | 35.3% |
-| 7 | Qwen3-Coder-30B-A3B-Instruct | 53.2% | 37.5% |
-| 8 | GPT-OSS-20B | 51.9% | 43.0% |
-| 9 | Qwen2.5-Coder-14B-Instruct | 49.4% | 42.1% |
-| 10 | Qwen2.5-Coder-32B (base) | 48.1% | 41.7% |
-| 11 | Qwen2.5-72B (base) | 41.6% | 38.9% |
-| 12 | DeepSeek-Coder-V2-Lite-Instruct | 41.6% | 49.1% |
-| 13 | deepseek-coder-33b-base | 40.3% | 52.9% |
-| 14 | starcoder2-15b | 39.0% | 50.8% |
-| 15 | Olmo-3-1125-32B | 37.7% | 42.0% |
-| 16 | Olmo-3.1-7B-RL-Zero-Code | 22.1% | 55.0% (least robust) |
+| 7 | **GLM-4.7-Flash** | **54.5%** | **35.3%** |
+| 8 | Qwen3-Coder-30B-A3B-Instruct | 53.2% | 37.5% |
+| 9 | **Qwen3.5-27B** | **52.7%** | **29.5%** |
+| 11 | Qwen2.5-Coder-14B-Instruct | 49.4% | 42.1% |
+| 12 | Qwen2.5-Coder-32B (base) | 48.1% | 41.7% |
+| 13 | **DeepSeek-R1-Distill-Qwen-32B** | **46.8%** | **41.4%** |
+| 14 | **DeepSeek-R1-Distill-Llama-70B** | **42.9%** | **47.8%** |
+| 15 | Qwen2.5-72B (base) | 41.6% | 38.9% |
+| 16 | DeepSeek-Coder-V2-Lite-Instruct | 41.6% | 49.1% |
+| 17 | **deepseek-coder-33b-instruct** | **41.6%** | **50.8%** |
+| 18 | deepseek-coder-33b-base | 40.3% | 52.9% |
+| 19 | starcoder2-15b | 39.0% | 50.8% |
+| 20 | Olmo-3-1125-32B | 37.7% | 42.0% |
+| 21 | Olmo-3.1-7B-RL-Zero-Code | 22.1% | 55.0% (least robust) |
 
 ### Universal Breaking Prefills (ALL models fail)
 
@@ -84,9 +95,14 @@ All models handle aligned prefills well (77-99%), but adversarial prefills expos
    - Smallest aligned-adversarial gaps (20.9% and 20.1% respectively)
    - Top 4 in overall performance (86.5% and 85.3%)
 
-5. **New model observations:**
+5. **New model observations (5 models added):**
    - CWM (81.0% overall, 58.4% adversarial) shows strong general capability with moderate robustness
    - Qwen3-Coder-Next (78.2% overall, 57.1% adversarial) is comparable to CWM in robustness
+   - **GLM-4.7-Flash** (74.6% overall, 54.5% adversarial) — best among the new batch; competitive adversarial robustness
+   - **deepseek-coder-33b-instruct** (74.6% overall, 41.6% adversarial) — instruction-tuning over 33b-base gives +1.3% adversarial, much smaller gain than Qwen/Olmo instruct pairs
+   - **DeepSeek-R1-Distill-Qwen-32B** (73.8% overall, 46.8% adversarial) — R1 distillation gives modest adversarial robustness
+   - **DeepSeek-R1-Distill-Llama-70B** (73.4% overall, 42.9% adversarial) — larger base but slightly weaker than Qwen-32B distill; R1 distillation doesn't prioritize prefill robustness
+   - **Qwen3.5-27B** (70.2% overall, 52.7% adversarial, 17-sample eval) — mid-range instruct model; notably smaller aligned-adversarial gap (29.5%) than similarly-ranked models
    - Qwen2.5-72B base (63.1% overall, 41.6% adversarial) significantly underperforms its instruct variant
    - Olmo-3-1125-32B (54.4% overall, 37.7% adversarial, 24.6% inconsequential) struggles especially on inconsequential prefills
 
@@ -99,7 +115,7 @@ All models handle aligned prefills well (77-99%), but adversarial prefills expos
 
 ## Research Implications
 
-The 20-55% gap between aligned and adversarial performance across all 16 models confirms:
+The 20-55% gap between aligned and adversarial performance across all 21 models confirms:
 
 1. **Goals exist** — models succeed on aligned prefills (77-99%)
 2. **Goals are fragile** — adversarial prefills break them (22-74%)
