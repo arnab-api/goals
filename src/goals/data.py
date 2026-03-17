@@ -19,7 +19,15 @@ class IncompleteCodeSample(DataClassJsonMixin):
     unit_tests: list[tuple[Any, Any]] = field(default_factory=list)
     prefills: dict[str, list[str]] = field(default_factory=dict)
     function_name: str | None = None
-    augmentation: dict | None = None
+    augmentation: list[dict] | None = None
+
+    @property
+    def is_original(self) -> bool:
+        return not self.augmentation  # True for None and []
+
+    def augment(self, augmentation_type: str, augmentation_config: dict | None = None) -> "IncompleteCodeSample":
+        from src.goals.augment import augment_sample
+        return augment_sample(self, augmentation_type, augmentation_config or {})
 
     def __str__(self) -> str:
         return f"""Instruction: {self.instruction}
@@ -38,16 +46,25 @@ Prefills: {json.dumps(self.prefills, indent=2)}"""
 class IncompleteCodeDataset(DataClassJsonMixin):
     samples: list[IncompleteCodeSample] = field(default_factory=list)
 
+    def augment(self) -> None:
+        from src.goals.augment import generate_variants_incomplete
+        new = [v for s in self.samples if s.is_original for v in generate_variants_incomplete(s)]
+        self.samples.extend(new)
+
     @staticmethod
     def load_dataset(
         path: PathLike = os.path.join(DEFAULT_DATA_DIR, "incomplete_code.json"),
+        augment: bool = False,
     ) -> "IncompleteCodeDataset":
         with open(path, "r") as f:
             data = json.load(f)
         samples = [IncompleteCodeSample.from_dict(sample_dict) for sample_dict in data]
 
         logger.info(f"Loaded {len(samples)} samples from {path}")
-        return IncompleteCodeDataset(samples=samples)
+        ds = IncompleteCodeDataset(samples=samples)
+        if augment:
+            ds.augment()
+        return ds
 
     def find_by_function_name(self, name: str) -> "IncompleteCodeSample | None":
         """Return the first sample whose function_name matches name, or None."""

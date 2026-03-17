@@ -372,7 +372,9 @@ def _extract_boolean_expr(full_text: str) -> tuple[str, int] | None:
             # ('X if COND else Y' → return 'X if COND', never includes 'else Y')
             elif ch == "e" and rest[i : i + 4] == "else":
                 prev_ok = i == 0 or not (rest[i - 1].isalnum() or rest[i - 1] == "_")
-                next_ok = i + 4 >= len(rest) or not (rest[i + 4].isalnum() or rest[i + 4] == "_")
+                next_ok = i + 4 >= len(rest) or not (
+                    rest[i + 4].isalnum() or rest[i + 4] == "_"
+                )
                 if prev_ok and next_ok:
                     return rest[:i].rstrip(), expr_start
 
@@ -532,9 +534,7 @@ def extract_anchor_tokens(
     ]
 
     def _identified(completion: str, patterns: set[str]) -> bool:
-        return bool(patterns) and any(
-            _re_search_safe(p, completion) for p in patterns
-        )
+        return bool(patterns) and any(_re_search_safe(p, completion) for p in patterns)
 
     for sample_idx, (sample, prefix_to_comps) in enumerate(
         zip(tp.samples, completions_per_sample)
@@ -593,7 +593,9 @@ def extract_anchor_tokens(
         for ptc in completions_per_sample
     ]
 
-    valid_p_plus = {p for p in all_p_plus if any(_re_search_safe(p, c) for c in all_comps_flat)}
+    valid_p_plus = {
+        p for p in all_p_plus if any(_re_search_safe(p, c) for c in all_comps_flat)
+    }
     pruned = all_p_plus - valid_p_plus
     if pruned:
         logger.info(
@@ -602,7 +604,11 @@ def extract_anchor_tokens(
     all_p_plus = valid_p_plus
 
     for i, sample_comps in enumerate(per_sample_comps):
-        valid = {p for p in p_minus_per_sample[i] if any(_re_search_safe(p, c) for c in sample_comps)}
+        valid = {
+            p
+            for p in p_minus_per_sample[i]
+            if any(_re_search_safe(p, c) for c in sample_comps)
+        }
         pruned = p_minus_per_sample[i] - valid
         if pruned:
             logger.info(
@@ -869,11 +875,16 @@ def extract_predicate_clauses(
     if not clauses:
         return None, None
 
+    def _discriminative(anchors: list[str]) -> list[str]:
+        """Keep only anchors that match exactly one clause for this path."""
+        return [
+            anchor for anchor in anchors
+            if sum(1 for ct, _, _ in clauses if _re_search_safe(anchor, ct)) == 1
+        ]
+
     def _match(anchors: list[str]) -> "ClauseSpan | None":
         # Try each pattern; use the clause whose start comes earliest in full_text
-        best: tuple[int, str, int, int] | None = (
-            None  # (abs_start, text, abs_start, abs_end)
-        )
+        best: tuple[int, str, int, int] | None = None
         for anchor in anchors:
             for clause_text, abs_start, abs_end in clauses:
                 if _re_search_safe(anchor, clause_text):
@@ -890,7 +901,35 @@ def extract_predicate_clauses(
             ),
         )
 
-    return _match(p_plus_anchors), _match(p_minus_anchors)
+    disc_p_plus  = _discriminative(p_plus_anchors)
+    disc_p_minus = _discriminative(p_minus_anchors)
+    return _match(disc_p_plus), _match(disc_p_minus)
+
+
+def _highlight_spans_in_path(
+    path_text: str,
+    spans: list[tuple[int, int, str]],
+) -> str:
+    """Build a Rich-markup string from path_text with highlighted substrings.
+
+    Args:
+        path_text: Raw path text.
+        spans:     List of (start, end, rich_style) in path_text char coords,
+                   sorted by start.  Non-overlapping spans only.
+
+    Returns:
+        Rich-markup string suitable for Console.print().
+    """
+    from rich.markup import escape as _esc
+
+    result = ""
+    cursor = 0
+    for start, end, style in spans:
+        result += _esc(path_text[cursor:start])
+        result += f"[{style}]{_esc(path_text[start:end])}[/{style}]"
+        cursor = end
+    result += _esc(path_text[cursor:])
+    return result
 
 
 def show_clause_spans(
@@ -899,10 +938,14 @@ def show_clause_spans(
     p_plus_anchors: list[str],
     p_minus_anchors: list[str],
 ) -> str:
-    """Return a multi-line string showing identified P+ and P- clause spans for a leaf.
+    """Return a multi-line Rich-markup string showing P+ and P- clause spans for a leaf.
 
-    Example output:
+    The Path: line highlights the matched P+ span in bright green and the P-
+    span in magenta directly within the path text.
+
+    Example output (rendered):
         Path: ' timeout > 0 and host != "" and port > 0:\\n    return True'
+                ^^^^^^^^^^^           ^^^^^^^^^
           P+: 'timeout > 0'          depth 1 → 4
           P-: 'host != ""'           depth 5 → 8
           All clauses: ['timeout > 0', 'host != ""', 'port > 0']
@@ -914,33 +957,72 @@ def show_clause_spans(
         p_minus_anchors: P- anchor token list.
 
     Returns:
-        Formatted annotation string (plain text, no rich markup).
+        Formatted string with Rich markup (pass to Console.print()).
     """
+    from rich.markup import escape as _esc
+
     path_nodes = _get_path_nodes(leaf)
     full_text = prefix + "".join(n.token_str for n in path_nodes)
     path_text = leaf.get_path_text()
 
-    lines = [f"  Path: {path_text!r}"]
+    p_plus_clause, p_minus_clause = extract_predicate_clauses(
+        leaf, prefix, p_plus_anchors, p_minus_anchors
+    )
+
+    # Mutual exclusivity check: if both resolve to the same clause the leaf is
+    # not usable for contrastive pairs — treat P- as unresolved.
+    conflict = (
+        p_plus_clause is not None
+        and p_minus_clause is not None
+        and p_plus_clause.text == p_minus_clause.text
+    )
+    if conflict:
+        p_minus_clause = None
+
+    # Build highlighted Path line — find each clause's position within path_text.
+    _clause_styles = [
+        (p_plus_clause, "bold cyan"),
+        (p_minus_clause, "bold magenta"),
+    ]
+    raw_spans: list[tuple[int, int, str]] = []
+    for clause, style in _clause_styles:
+        if clause is not None:
+            pos = path_text.find(clause.text)
+            if pos >= 0:
+                raw_spans.append((pos, pos + len(clause.text), style))
+    raw_spans.sort(key=lambda x: x[0])
+
+    if raw_spans:
+        highlighted = _highlight_spans_in_path(path_text, raw_spans)
+    else:
+        highlighted = _esc(path_text)
+    lines = [f"  Path: '{highlighted}'"]
 
     # Show all clauses found in the condition
     cond_result = _extract_boolean_expr(full_text)
     if cond_result is not None:
         condition, cond_start = cond_result
         all_clauses = [t for t, _, _ in _split_clauses(condition, cond_start)]
-        lines.append(f"  All clauses: {all_clauses}")
+        lines.append(f"  All clauses: {_esc(str(all_clauses))}")
     else:
         lines.append("  All clauses: (no if/return/while/assert found)")
 
-    p_plus_clause, p_minus_clause = extract_predicate_clauses(
-        leaf, prefix, p_plus_anchors, p_minus_anchors
-    )
-
-    for name, clause in (("P+", p_plus_clause), ("P-", p_minus_clause)):
+    for name, clause, style in (
+        ("P+", p_plus_clause, "bold cyan"),
+        ("P-", p_minus_clause, "bold magenta"),
+    ):
         if clause is None:
-            lines.append(f"  {name}: (not matched to any clause)")
+            if name == "P-" and conflict:
+                lines.append(
+                    f"  [{style}]{name}[/{style}]: "
+                    f"[dim](conflicted — same clause as P+, excluded from contrastive pairs)[/dim]"
+                )
+            else:
+                lines.append(f"  {name}: (not matched to any clause)")
         else:
             lines.append(
-                f"  {name}: {clause.text!r:40s}  depth {clause.start_depth} → {clause.end_depth}"
+                f"  [{style}]{name}[/{style}]: {_esc(repr(clause.text)):40s}"
+                f"  depth {clause.start_depth} → {clause.end_depth}"
             )
 
     return "\n".join(lines)

@@ -103,7 +103,7 @@ def test_parse_docstring_clauses():
 
 def test_rename_variable():
     sample = _make_mp_sample(var="s")
-    new = rename_variable(sample, "s", "text")
+    new = sample.augment("variable_rename", {"old_var": "s", "new_var": "text"})
     assert "text" in new.code
     assert "s: str" not in new.code  # annotation replaced too
     assert "text" in new.instruction
@@ -112,7 +112,7 @@ def test_rename_variable():
     assert new.unit_tests == sample.unit_tests
     assert new.p_minus.anchor_patterns == sample.p_minus.anchor_patterns
     assert new.function_name == sample.function_name
-    assert new.augmentation == {"type": "variable_rename", "mapping": {"s": "text"}}
+    assert new.augmentation == [{"type": "variable_rename", "mapping": {"s": "text"}}]
     # original unchanged
     assert "s: str" in sample.code
     print("PASS test_rename_variable")
@@ -120,10 +120,10 @@ def test_rename_variable():
 
 def test_rename_function():
     sample = _make_mp_sample(fn="is_foo")
-    new = rename_function(sample, "check_foo")
+    new = sample.augment("function_rename", {"new_name": "check_foo"})
     assert "def check_foo(" in new.code
     assert new.function_name == "check_foo"
-    assert new.augmentation == {"type": "function_rename", "old_name": "is_foo", "new_name": "check_foo"}
+    assert new.augmentation == [{"type": "function_rename", "old_name": "is_foo", "new_name": "check_foo"}]
     # instruction unchanged
     assert new.instruction == sample.instruction
     # original unchanged
@@ -133,31 +133,24 @@ def test_rename_function():
 
 def test_toggle_type_hints():
     sample = _make_mp_sample()
-    new = toggle_type_hints(sample)
+    new = sample.augment("toggle_type_hints")
     assert "s: str" not in new.code
     assert "-> bool" in new.code
-    assert new.augmentation == {"type": "toggle_type_hints", "action": "remove"}
+    assert new.augmentation == [{"type": "toggle_type_hints", "action": "remove"}]
     assert "s: str" in sample.code  # original unchanged
     print("PASS test_toggle_type_hints")
 
 
 def test_swap_predicate_order():
     sample = _make_mp_sample(var="s")
-    tp = TargetPredicate(
-        p_plus=PredicateSpec(
-            description="is a palindrome",
-            short_description="is a palindrome",
-        ),
-        samples=[sample],
-        name="test_tp",
-    )
     sample.p_minus.short_description = "{var} has no spaces"
+    sample.p_plus_short_description = "{var} is a palindrome"
 
-    swapped = swap_predicate_order(sample, tp)
+    swapped = swap_predicate_order(sample)
     assert swapped is not None
     # p_plus clause should now appear first in docstring
     assert "is a palindrome and s has no spaces" in swapped.code
-    assert swapped.augmentation == {"type": "swap_predicate_order"}
+    assert swapped.augmentation == [{"type": "swap_predicate_order"}]
     # original code unchanged
     assert "has no spaces and" in sample.code
     print("PASS test_swap_predicate_order")
@@ -165,13 +158,9 @@ def test_swap_predicate_order():
 
 def test_swap_predicate_order_missing_desc():
     sample = _make_mp_sample()
-    tp = TargetPredicate(
-        p_plus=PredicateSpec(description="is a palindrome", short_description=""),
-        samples=[sample],
-        name="test_tp",
-    )
-    result = swap_predicate_order(sample, tp)
-    assert result is None  # should return None when short_description missing
+    # p_plus_short_description is "" (default) — should return None
+    result = swap_predicate_order(sample)
+    assert result is None
     print("PASS test_swap_predicate_order_missing_desc")
 
 
@@ -189,23 +178,28 @@ def test_extract_short_descriptions():
     assert "spaces" in sample.p_minus.short_description
     # should use {var} placeholder, not 's'
     assert "{var}" in sample.p_minus.short_description or "s" not in sample.p_minus.short_description
+    # per-sample p_plus_short_description is also set
+    assert sample.p_plus_short_description != ""
+    assert "palindrome" in sample.p_plus_short_description
     print("PASS test_extract_short_descriptions")
 
 
 def test_generate_variants_multi():
     sample = _make_mp_sample(fn="is_foo", var="s")
     sample.p_minus.short_description = "{var} has no spaces"
+    sample.p_plus_short_description = "{var} is a palindrome"
     tp = TargetPredicate(
         p_plus=PredicateSpec(
             description="is a palindrome",
-            short_description="is a palindrome",
+            short_description="{var} is a palindrome",
         ),
         samples=[sample],
         name="test_tp",
     )
 
-    variants = generate_variants(tp)
-    types = [(v.augmentation or {}).get("type") for v in variants]
+    tp.augment()
+    variants = [s for s in tp.samples if not s.is_original]
+    types = [s.augmentation[-1].get("type") for s in variants if s.augmentation]
 
     assert types.count("variable_rename") == 3   # text, input_str, string
     assert types.count("function_rename") == 3   # check_, verify_, has_
@@ -213,11 +207,10 @@ def test_generate_variants_multi():
     assert types.count("swap_predicate_order") == 1
     assert len(variants) == 8
 
-    # No augmented sample should itself produce variants
-    variants2 = generate_variants(tp)
-    tp.samples.extend(variants)
-    variants3 = generate_variants(tp)
-    assert len(variants3) == len(variants2)  # same count — augmented skipped
+    # Calling tp.augment() again should not double-add (augmented skipped)
+    count_before = len(tp.samples)
+    tp.augment()
+    assert len(tp.samples) == count_before
 
     print("PASS test_generate_variants_multi")
 
@@ -225,7 +218,7 @@ def test_generate_variants_multi():
 def test_generate_variants_incomplete():
     sample = _make_incomplete_sample()
     variants = generate_variants_incomplete(sample)
-    types = [(v.augmentation or {}).get("type") for v in variants]
+    types = [v.augmentation[-1].get("type") for v in variants if v.augmentation]
 
     assert types.count("variable_rename") == 3   # num, number, val
     assert types.count("function_rename") == 3   # check_, verify_, has_
@@ -247,21 +240,57 @@ def test_no_var_vocab_match():
         prefills={},
     )
     variants = generate_variants_incomplete(sample)
-    types = [(v.augmentation or {}).get("type") for v in variants]
+    types = [v.augmentation[-1].get("type") for v in variants if v.augmentation]
     assert "variable_rename" not in types
     assert types.count("function_rename") == 3
     assert types.count("toggle_type_hints") == 1
     print("PASS test_no_var_vocab_match")
 
 
-def test_loaded_dataset_counts():
-    """Sanity check: loaded dataset has expected originals/augmented counts."""
-    ds = MultiPredicateDataset.load_dataset()
-    orig = sum(1 for tp in ds.groups for s in tp.samples if s.augmentation is None)
-    aug = sum(1 for tp in ds.groups for s in tp.samples if s.augmentation is not None)
-    assert orig == 23, f"expected 23 originals, got {orig}"
-    assert aug == 184, f"expected 184 augmented, got {aug}"
-    print(f"PASS test_loaded_dataset_counts  (orig={orig}, aug={aug})")
+def test_augment_online():
+    """Online augmentation: load_dataset(augment=True) expands in-memory; JSON stays clean."""
+    import json, os
+    from src.utils.env_utils import DEFAULT_DATA_DIR
+
+    ds = MultiPredicateDataset.load_dataset(augment=True)
+    orig = sum(1 for tp in ds.groups for s in tp.samples if s.is_original)
+    aug  = sum(1 for tp in ds.groups for s in tp.samples if not s.is_original)
+
+    assert orig > 0, "expected at least some originals"
+    assert aug > 0, "expected augmented samples after augment=True"
+    assert aug > orig, "expected more augmented than original"
+
+    # JSON files must remain clean (no augmented samples)
+    multi_pred_dir = os.path.join(DEFAULT_DATA_DIR, "multi_predicate")
+    for fn in sorted(os.listdir(multi_pred_dir)):
+        if not fn.endswith(".json"):
+            continue
+        with open(os.path.join(multi_pred_dir, fn)) as f:
+            data = json.load(f)
+        dirty = [s for s in data.get("samples", []) if s.get("augmentation") is not None]
+        assert not dirty, f"{fn} is dirty! Found {len(dirty)} augmented sample(s)"
+
+    print(f"PASS test_augment_online  (orig={orig}, aug={aug}, JSON files clean)")
+
+
+def test_augmentation_stacking():
+    """Stacking two augmentations produces a list of 2 entries."""
+    sample = _make_mp_sample(fn="is_foo", var="s")
+    assert sample.is_original
+
+    stacked = sample.augment("toggle_type_hints").augment("function_rename", {"new_name": "check_foo"})
+
+    assert stacked.augmentation is not None
+    assert len(stacked.augmentation) == 2
+    assert stacked.augmentation[0]["type"] == "toggle_type_hints"
+    assert stacked.augmentation[1]["type"] == "function_rename"
+    assert not stacked.is_original
+
+    # original is still untouched
+    assert sample.augmentation is None
+    assert sample.is_original
+
+    print("PASS test_augmentation_stacking")
 
 
 # ---------------------------------------------------------------------------
@@ -282,5 +311,6 @@ if __name__ == "__main__":
     test_generate_variants_multi()
     test_generate_variants_incomplete()
     test_no_var_vocab_match()
-    test_loaded_dataset_counts()
+    test_augment_online()
+    test_augmentation_stacking()
     print("\nAll tests passed.")

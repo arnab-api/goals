@@ -51,7 +51,15 @@ class MultiPredicateSample(IncompleteCodeSample):
     """
 
     p_minus: PredicateSpec | None = None
-    augmentation: dict | None = None
+    augmentation: list[dict] | None = None
+    p_plus_short_description: str = ""
+
+    def augment(
+        self, augmentation_type: str, augmentation_config: dict | None = None
+    ) -> "MultiPredicateSample":
+        from src.goals.augment import augment_sample
+
+        return augment_sample(self, augmentation_type, augmentation_config or {})
 
 
 @dataclass
@@ -83,6 +91,8 @@ class TargetPredicate(DataClassJsonMixin):
         if not tp.name:
             tp.name = path.stem
         tp._source_path = path.resolve()
+        for sample in tp.samples:
+            sample.p_plus_short_description = tp.p_plus.short_description
         logger.info(
             f"Loaded TargetPredicate '{tp.name}' with {len(tp.samples)} sample(s) from {path}"
         )
@@ -106,6 +116,12 @@ class TargetPredicate(DataClassJsonMixin):
         self._source_path = target.resolve()
         logger.info(f"Saved TargetPredicate '{self.name}' to {target}")
 
+    def augment(self) -> None:
+        from src.goals.augment import generate_variants
+
+        new = generate_variants(self)
+        self.samples.extend(new)
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -123,9 +139,14 @@ class MultiPredicateDataset(DataClassJsonMixin):
 
     groups: list[TargetPredicate] = field(default_factory=list)
 
+    def augment(self) -> None:
+        for tp in self.groups:
+            tp.augment()
+
     @staticmethod
     def load_dataset(
         dir_path: PathLike = MULTI_PREDICATE_DIR,
+        augment: bool = False,
     ) -> "MultiPredicateDataset":
         dir_path = pathlib.Path(dir_path)
         json_files = sorted(dir_path.glob("*.json"))
@@ -136,7 +157,10 @@ class MultiPredicateDataset(DataClassJsonMixin):
             f"Loaded MultiPredicateDataset: {len(groups)} target predicate(s) "
             f"from {dir_path}"
         )
-        return MultiPredicateDataset(groups=groups)
+        ds = MultiPredicateDataset(groups=groups)
+        if augment:
+            ds.augment()
+        return ds
 
     def __len__(self) -> int:
         return len(self.groups)

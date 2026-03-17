@@ -7,23 +7,17 @@ sample, keeping goal-relevant structure invariant:
   - Type-hint toggle      (remove param annotations, keep -> bool)
   - Docstring predicate swap  (multi-predicate only)
 
-Augmented variants are derived only from originals (augmentation == None) to
-prevent combinatorial blowup.  Each variant records what was changed in its
-augmentation dict.
+Augmentation is **online (in-memory)**. JSON files remain clean (originals only).
+Augmented variants are derived only from originals (is_original == True) to
+prevent combinatorial blowup.  Each variant appends an entry to its
+augmentation list so stacking is supported:
+    sample.augment("toggle_type_hints").augment("function_rename", {"new_name": "check_foo"})
 
 Typical usage:
-    from src.goals.augment import generate_variants, extract_short_descriptions
+    from src.goals.predicate_data import MultiPredicateDataset
 
-    # First time: populate short_description fields
-    for tp in ds.groups:
-        extract_short_descriptions(tp)
-        tp.save()
-
-    # Generate variants
-    for tp in ds.groups:
-        new_samples = generate_variants(tp)
-        tp.samples.extend(new_samples)
-        tp.save()
+    ds = MultiPredicateDataset.load_dataset(augment=True)
+    # or: ds.augment() after loading
 """
 
 from __future__ import annotations
@@ -88,7 +82,9 @@ def adapt_text_var(text: str, old_var: str, new_var: str) -> str:
     return re.sub(r"\b" + re.escape(old_var) + r"\b", new_var, text)
 
 
-def adapt_prefills(prefills: dict[str, list[str]], old_var: str, new_var: str) -> dict[str, list[str]]:
+def adapt_prefills(
+    prefills: dict[str, list[str]], old_var: str, new_var: str
+) -> dict[str, list[str]]:
     """Apply adapt_text_var to every prefill string in every category."""
     return {
         category: [adapt_text_var(p, old_var, new_var) for p in plist]
@@ -131,7 +127,9 @@ def _toggle_type_hints_in_def(def_line: str) -> str:
             return m2.group(1)
         return param
 
-    cleaned_params = ", ".join(_strip_annotation(p).strip() for p in params_str.split(","))
+    cleaned_params = ", ".join(
+        _strip_annotation(p).strip() for p in params_str.split(",")
+    )
     return def_line[: paren_start + 1] + cleaned_params + def_line[paren_end:]
 
 
@@ -169,14 +167,15 @@ def _parse_docstring_clauses(code: str) -> list[str] | None:
 
 
 def extract_short_descriptions(tp: TargetPredicate) -> None:
-    """Populate short_description on tp.p_plus and each sample.p_minus (in-place).
+    """Populate short_description on tp.p_plus, each sample.p_minus, and
+    sample.p_plus_short_description (in-place).
 
     Only fills in empty short_description fields; existing values are left alone.
     """
     p_plus_desc_seen: str | None = None
 
     for sample_idx, sample in enumerate(tp.samples):
-        if sample.augmentation is not None:
+        if not sample.is_original:
             continue  # skip augmented copies
 
         clauses = _parse_docstring_clauses(sample.code)
@@ -201,7 +200,11 @@ def extract_short_descriptions(tp: TargetPredicate) -> None:
         if sample.p_minus and not sample.p_minus.short_description:
             sample.p_minus.short_description = p_minus_template
 
-        # p_plus is shared — take first sample's value; warn on inconsistency
+        # Per-sample p_plus_short_description (from this sample's own docstring)
+        if not sample.p_plus_short_description:
+            sample.p_plus_short_description = p_plus_template
+
+        # tp-level p_plus is shared — take first sample's value; warn on inconsistency
         if not tp.p_plus.short_description:
             tp.p_plus.short_description = p_plus_template
             p_plus_desc_seen = p_plus_template
@@ -227,11 +230,16 @@ def rename_variable(sample: S, old_var: str, new_var: str) -> S:
     s.code = adapt_text_var(s.code, old_var, new_var)
     s.instruction = adapt_text_var(s.instruction, old_var, new_var)
     s.prefills = adapt_prefills(s.prefills, old_var, new_var)
-    if isinstance(s, MultiPredicateSample) and s.p_minus and s.p_minus.short_description:
+    if (
+        isinstance(s, MultiPredicateSample)
+        and s.p_minus
+        and s.p_minus.short_description
+    ):
         s.p_minus.short_description = adapt_text_var(
             s.p_minus.short_description, old_var, new_var
         )
-    s.augmentation = {"type": "variable_rename", "mapping": {old_var: new_var}}
+    prev = list(s.augmentation) if s.augmentation else []
+    s.augmentation = prev + [{"type": "variable_rename", "mapping": {old_var: new_var}}]
     return s
 
 
@@ -245,7 +253,10 @@ def rename_function(sample: S, new_name: str) -> S:
     old_name = s.function_name or ""
     s.code = re.sub(r"def\s+\w+\s*\(", f"def {new_name}(", s.code, count=1)
     s.function_name = new_name
-    s.augmentation = {"type": "function_rename", "old_name": old_name, "new_name": new_name}
+    prev = list(s.augmentation) if s.augmentation else []
+    s.augmentation = prev + [
+        {"type": "function_rename", "old_name": old_name, "new_name": new_name}
+    ]
     return s
 
 
@@ -263,51 +274,94 @@ def toggle_type_hints(sample: S) -> S:
             lines[i] = _toggle_type_hints_in_def(line)
             break
     s.code = "\n".join(lines)
-    s.augmentation = {"type": "toggle_type_hints", "action": "remove"}
+    prev = list(s.augmentation) if s.augmentation else []
+    s.augmentation = prev + [{"type": "toggle_type_hints", "action": "remove"}]
     return s
 
 
+def _derive_p_plus_short_description(sample: MultiPredicateSample) -> str | None:
+    """Derive the p_plus short_description template from the sample's own docstring.
+
+    Returns a template string (with {var} placeholder where the variable name
+    appeared), or None if the docstring cannot be parsed.
+    """
+    clauses = _parse_docstring_clauses(sample.code)
+    if clauses is None:
+        return None
+    var_names = extract_var_names_from_code(sample.code)
+    primary_var = var_names[0] if var_names else None
+    clause_2 = clauses[1]
+    if primary_var:
+        clause_2 = re.sub(r"\b" + re.escape(primary_var) + r"\b", "{var}", clause_2)
+    return clause_2
+
+
 def swap_predicate_order(
-    sample: MultiPredicateSample, tp: TargetPredicate
+    sample: MultiPredicateSample,
 ) -> MultiPredicateSample | None:
     """Return a copy of sample with the docstring predicate order swapped.
 
-    Returns None if short_description is missing on either p_plus or p_minus.
+    If p_plus_short_description is empty, it is derived automatically from the
+    sample's docstring (supports direct .augment() calls without needing
+    extract_short_descriptions to have been called first).
+
+    Returns None if p_minus.short_description is missing or the docstring
+    cannot be parsed.
     Does NOT swap aligned_p_plus / aligned_p_minus prefills (they track goal
     alignment, not docstring position).
     """
-    if not tp.p_plus.short_description:
-        logger.warning(
-            f"[{tp.name}]: tp.p_plus.short_description is empty — cannot swap"
-        )
-        return None
+    # Auto-derive p_plus_short_description from docstring if not already set
+    p_plus_short_desc = sample.p_plus_short_description
+    if not p_plus_short_desc:
+        p_plus_short_desc = _derive_p_plus_short_description(sample)
+        if not p_plus_short_desc:
+            logger.warning(
+                f"Cannot derive p_plus_short_description for {sample.function_name!r}: "
+                f"docstring could not be parsed"
+            )
+            return None
+
     if sample.p_minus is None or not sample.p_minus.short_description:
         logger.warning(
-            f"[{tp.name}]: sample.p_minus.short_description is empty — cannot swap"
+            f"sample.p_minus.short_description is empty for {sample.function_name!r} — cannot swap"
         )
         return None
 
     var_names = extract_var_names_from_code(sample.code)
     var = var_names[0] if var_names else None
 
-    # Render templates with concrete variable name
+    p_plus_tmpl = p_plus_short_desc
+    p_minus_tmpl = sample.p_minus.short_description
+
+    if "{var}" not in p_plus_tmpl:
+        logger.warning(
+            f"p_plus_short_description missing {{var}} placeholder for {sample.function_name!r}: {p_plus_tmpl!r}"
+        )
+    if "{var}" not in p_minus_tmpl:
+        logger.warning(
+            f"p_minus.short_description missing {{var}} placeholder for {sample.function_name!r}: {p_minus_tmpl!r}"
+        )
+
+    # Docstring compound: render {var} → concrete variable name from the def line
     def _render(template: str, v: str | None) -> str:
-        if v is None:
-            return template
-        return template.replace("{var}", v)
+        return template.replace("{var}", v) if v is not None else template
 
-    p_plus_clause = _render(tp.p_plus.short_description, var)
-    p_minus_clause = _render(sample.p_minus.short_description, var)
+    swapped_code_compound = (
+        f"{_render(p_plus_tmpl, var)} and {_render(p_minus_tmpl, var)}"
+    )
 
-    # Build swapped compound predicate: p_plus first, then p_minus
-    swapped_compound = f"{p_plus_clause} and {p_minus_clause}"
+    # Instruction compound: render {var} → "the input" (instruction uses natural language)
+    swapped_instr_compound = (
+        f"{p_plus_tmpl.replace('{var}', 'the input')} and "
+        f"{p_minus_tmpl.replace('{var}', 'the input')}"
+    )
 
     s = copy.deepcopy(sample)
 
     # Replace docstring clause in code
     s.code = re.sub(
         r'("""Return True iff ).+?(""")',
-        lambda m: m.group(1) + swapped_compound + "." + m.group(2),
+        lambda m: m.group(1) + swapped_code_compound + "." + m.group(2),
         s.code,
         count=1,
         flags=re.DOTALL,
@@ -317,14 +371,46 @@ def swap_predicate_order(
     # Template: "Write a Python function that returns True iff {compound}.\n\n"
     s.instruction = re.sub(
         r"(returns True iff ).+?(\.\n)",
-        lambda m: m.group(1) + swapped_compound + m.group(2),
+        lambda m: m.group(1) + swapped_instr_compound + m.group(2),
         s.instruction,
         count=1,
         flags=re.DOTALL,
     )
 
-    s.augmentation = {"type": "swap_predicate_order"}
+    prev = list(s.augmentation) if s.augmentation else []
+    s.augmentation = prev + [{"type": "swap_predicate_order"}]
     return s
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher
+# ---------------------------------------------------------------------------
+
+
+def augment_sample(sample: S, augmentation_type: str, augmentation_config: dict) -> S:
+    """Dispatch to the appropriate augmentation function by type string.
+
+    This is the entry point for sample.augment(type, config) calls.
+    """
+    if augmentation_type == "variable_rename":
+        return rename_variable(
+            sample, augmentation_config["old_var"], augmentation_config["new_var"]
+        )
+    elif augmentation_type == "function_rename":
+        return rename_function(sample, augmentation_config["new_name"])
+    elif augmentation_type == "toggle_type_hints":
+        return toggle_type_hints(sample)
+    elif augmentation_type == "swap_predicate_order":
+        if not isinstance(sample, MultiPredicateSample):
+            raise TypeError("swap_predicate_order requires a MultiPredicateSample")
+        result = swap_predicate_order(sample)
+        if result is None:
+            raise ValueError(
+                f"swap_predicate_order failed: p_plus_short_description missing on sample {sample.function_name!r}"
+            )
+        return result  # type: ignore[return-value]
+    else:
+        raise ValueError(f"Unknown augmentation_type: {augmentation_type!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +421,9 @@ def swap_predicate_order(
 def generate_variants(tp: TargetPredicate) -> list[MultiPredicateSample]:
     """Generate all augmented variants for every original sample in tp.
 
+    Calls extract_short_descriptions(tp) first to ensure p_plus_short_description
+    is set on all originals (idempotent — skips already-populated fields).
+
     Variants per original sample:
       1. Variable rename (up to 3 alternatives from _VAR_VOCAB)
       2. Function rename (up to 3 prefix swaps if fn starts with "is_")
@@ -343,10 +432,12 @@ def generate_variants(tp: TargetPredicate) -> list[MultiPredicateSample]:
 
     Returns a flat list of new samples (not appended to tp.samples yet).
     """
+    extract_short_descriptions(tp)
+
     new_samples: list[MultiPredicateSample] = []
 
     for sample in tp.samples:
-        if sample.augmentation is not None:
+        if not sample.is_original:
             continue  # only augment originals
 
         var_names = extract_var_names_from_code(sample.code)
@@ -360,7 +451,7 @@ def generate_variants(tp: TargetPredicate) -> list[MultiPredicateSample]:
         # 2. Function rename
         fn = sample.function_name or ""
         if fn.startswith("is_"):
-            suffix = fn[len("is_"):]
+            suffix = fn[len("is_") :]
             for prefix in _FN_PREFIXES:
                 new_samples.append(rename_function(sample, prefix + suffix))
 
@@ -368,20 +459,22 @@ def generate_variants(tp: TargetPredicate) -> list[MultiPredicateSample]:
         new_samples.append(toggle_type_hints(sample))
 
         # 4. Docstring predicate swap
-        swapped = swap_predicate_order(sample, tp)
+        swapped = swap_predicate_order(sample)
         if swapped is not None:
             new_samples.append(swapped)
 
     return new_samples
 
 
-def generate_variants_incomplete(sample: IncompleteCodeSample) -> list[IncompleteCodeSample]:
+def generate_variants_incomplete(
+    sample: IncompleteCodeSample,
+) -> list[IncompleteCodeSample]:
     """Generate augmented variants for a single IncompleteCodeSample.
 
     No docstring swap (these samples have no docstring).
     Variants: variable rename, function rename, type hint toggle.
     """
-    if sample.augmentation is not None:
+    if not sample.is_original:
         return []
 
     new_samples: list[IncompleteCodeSample] = []
@@ -397,7 +490,7 @@ def generate_variants_incomplete(sample: IncompleteCodeSample) -> list[Incomplet
     # 2. Function rename
     fn = sample.function_name or ""
     if fn.startswith("is_"):
-        suffix = fn[len("is_"):]
+        suffix = fn[len("is_") :]
         for prefix in _FN_PREFIXES:
             new_samples.append(rename_function(sample, prefix + suffix))
 
