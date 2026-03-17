@@ -48,11 +48,37 @@ from src.utils.typing import PathLike
 logger = logging.getLogger(__name__)
 
 GENERIC_INSTRUCTION = "Complete the Python function below."
+CPP_INSTRUCTION = "Complete the C++ function below."
 
 
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
+
+
+def build_cpp_prompt(
+    mt,
+    sample,
+    include_docstring: bool = False,
+) -> str:
+    """Build the source C++ prompt ending at ``return ``.
+
+    Args:
+        mt: ModelandTokenizer instance.
+        sample: SinglePredicateSample whose ``cpp_incomplete_code`` ends with
+            ``return`` in one-liner brace form (e.g. ``bool isPalindrome(string s) { return``).
+        include_docstring: When True and ``sample.docstring`` is non-empty, appends
+            the docstring as a C++ inline comment before ``return``.
+
+    Returns:
+        Full prompt string ready for tokenization.
+    """
+    code_at_pivot = sample.cpp_incomplete_code + " "
+    if include_docstring and sample.docstring:
+        code_at_pivot = code_at_pivot.rstrip() + f"  // {sample.docstring}\n    return "
+    if supports_chat_template(mt):
+        return apply_chat_template(mt, CPP_INSTRUCTION, code_at_pivot)
+    return "<code>\n" + code_at_pivot
 
 
 def build_python_prompt(
@@ -664,17 +690,22 @@ def find_pivot_instances(
     pairs: list[PredicatePair] | None = None,
     include_case1: bool = True,
     include_case2: bool = True,
+    include_case3: bool = False,
     include_docstring: bool = False,
     # Case 2 params
     min_stable_k: int = 3,
+    # Case 3 params
+    n_oracle: int = 5,
+    oracle_temperature: float = 0.5,
+    max_completion_tokens: int = 32,
 ) -> list[PivotInstance]:
-    """Mine all pivot instances for the given model, combining Case 1 and Case 2.
+    """Mine all pivot instances for the given model, combining Case 1, 2, and/or 3.
 
     This is the main entry point for Step 4.  Call this once per LM; results are
     model-specific and should not be reused across different models.
 
     Deduplicates by ``(destination_predicate, target_predicate, pivot_prefix)`` —
-    the Case 1 bare-return instance is kept over any Case 2 duplicate if both are
+    the Case 1 bare-return instance is kept over any Case 2/3 duplicate if both are
     found (Case 1 comes first in the combined list).
 
     Args:
@@ -684,9 +715,13 @@ def find_pivot_instances(
             Run ``run_mcts_for_dataset`` first to populate this.
         pairs: Subset of pairs to evaluate.  Defaults to ``ds.pairs``.
         include_case1: Whether to run Case 1 (bare-return divergence).
-        include_case2: Whether to run Case 2 (shared-prefix divergence).
+        include_case2: Whether to run Case 2 (MCTS shared-prefix divergence).
+        include_case3: Whether to run Case 3 (oracle LLM shared-prefix divergence).
         include_docstring: Insert sample docstrings into prompts when True.
-        min_stable_k: (Case 2) Minimum LCP frequency to be considered stable.
+        min_stable_k: (Case 2/3) Minimum LCP frequency to be considered stable.
+        n_oracle: (Case 3) Number of oracle implementations requested per predicate.
+        oracle_temperature: (Case 3) Oracle LLM sampling temperature.
+        max_completion_tokens: (Case 3) Max tokens for greedy generation in the completion gate.
 
     Returns:
         Deduplicated list of PivotInstances where ``tokens_diverge`` is True.
@@ -718,6 +753,21 @@ def find_pivot_instances(
                 pairs=pairs,
                 min_stable_k=min_stable_k,
                 include_docstring=include_docstring,
+            )
+        )
+
+    if include_case3:
+        from src.goals.head_loc_oracle import case3_pivot_instances
+        all_instances.extend(
+            case3_pivot_instances(
+                mt,
+                ds,
+                pairs=pairs,
+                include_docstring=include_docstring,
+                n_oracle=n_oracle,
+                oracle_temperature=oracle_temperature,
+                min_stable_k=min_stable_k,
+                max_completion_tokens=max_completion_tokens,
             )
         )
 
