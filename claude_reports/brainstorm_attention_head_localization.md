@@ -30,12 +30,20 @@ This is the central challenge. The filter paper has a beautiful setup: single-to
 
 ### 2a. What exactly should the patching flip?
 
-The interchange setup:
-- **Source run**: prompt that naturally leads to implementing `is_palindrome` first (e.g., with `aligned_p_plus` prefill like `s == s`)
-- **Destination run**: prompt that naturally leads to implementing `is_upper` first (e.g., with `aligned_p_minus` prefill like `s.is`)
-- **Patched run**: destination prompt, but attention outputs from source injected at selected heads
+The interchange setup (updated to three-role cross-language design — see §5f):
+- **Source run**: C++ prompt that naturally leads to implementing `is_palindrome` (pivot at `return`)
+- **Destination run**: Python prompt for a *different* predicate (e.g., `is_lower`) — same parameter signature, different goal
+- **Target run**: Python prompt for `is_palindrome` — same language as destination, same predicate as source
+- **Patched run**: destination prompt, but attention head outputs from source injected at selected heads
 
-**Success = the patched run starts implementing the source predicate instead of the destination predicate.**
+**Success = the patched destination run looks like the target run** — the model switches from implementing `is_lower` in Python to implementing `is_palindrome` in Python, because the injected heads carry the palindrome goal from the C++ source.
+
+The training objective is:
+```
+L = KL( LM(destination | head_intervention) || LM(target) )
+```
+
+(Previously framed as `KL(P_patched || P_src)` — the cross-language design is necessary to prevent the optimization from finding heads that just copy implementation-specific token distributions rather than goal representations. See §5f.)
 
 But how do you measure this? Several options, from cheapest to most expensive:
 
@@ -151,20 +159,23 @@ L_sparsity = sum(sigmoid(logits))     # L1 on mask values, encourages sparsity
 ### Training loop
 
 ```python
-for src_prompt, dest_prompt in interchange_pairs:
+for src_prompt, dest_prompt, target_prompt in interchange_triples:
+    # src_prompt:    C++ is_palindrome  (source of goal signal)
+    # dest_prompt:   Python is_lower    (receives intervention)
+    # target_prompt: Python is_palindrome  (KL reference — what we want dest to become)
+
     # 1. Clean forward passes (cached, no grad)
     with torch.no_grad():
-        src_head_outs = get_all_head_outputs(mt, src_prompt)   # dict[(ℓ,h)] → tensor
+        src_head_outs = get_all_head_outputs(mt, src_prompt)    # dict[(ℓ,h)] → tensor
         dest_head_outs = get_all_head_outputs(mt, dest_prompt)
-        P_src = get_next_token_dist(mt, src_prompt)  # target distribution
+        P_target = get_next_token_dist(mt, target_prompt)       # KL target (Python palindrome)
 
     # 2. Patched forward pass (grad flows through mask only)
     mask = torch.sigmoid(logits / temperature)
-    # Construct patched activations and run forward
     P_patched = forward_with_masked_heads(mt, dest_prompt, src_head_outs, dest_head_outs, mask)
 
-    # 3. Loss
-    loss = kl_div(P_patched, P_src) + lambda_ * mask.sum()
+    # 3. Loss: push patched destination toward target (Python palindrome), not toward source (C++)
+    loss = kl_div(P_patched, P_target) + lambda_ * mask.sum()
     loss.backward()
     optimizer.step()
 ```
@@ -245,6 +256,88 @@ These create surface-level diversity while preserving the semantic structure. Us
 
 ## 5. Critiques and Potential Issues
 
+### 5f. [IMPORTANT] Implementation-specificity confound in the KL objective
+
+The current design sets `P_src` as the next-token distribution of the source prompt (e.g., `is_palindrome` in Python). The mask is optimized to minimize `KL(P_patched || P_src)`. But `P_src` contains implementation-specific token probabilities — the model knows it will write `s`, `==`, `s[::-1]`, etc. A late-layer attention head can "cheat" by memorizing `P_src` as a distribution over Python tokens, with no abstraction to the goal level. The optimization would find heads that carry "Python palindrome tokens" rather than "palindrome-checking goal."
+
+This is the same confound as competence directions vs. goal directions in the probing work: the signal could just be "I am about to write palindrome code" at the token level, not "I have committed to the palindrome sub-goal."
+
+**Fix: cross-language source/target design**
+
+Introduce a third role alongside source and destination:
+
+| Role | Predicate | Language | Purpose |
+|------|-----------|----------|---------|
+| **Source** | `is_palindrome` | C++ | provides the goal signal to patch |
+| **Destination** | `is_lower` | Python | receives the intervention |
+| **Target** | `is_palindrome` | Python | KL reference — what we want the destination to become |
+
+Training objective:
+```
+L = KL( LM(destination | head_intervention_from_source) || LM(target) )
+```
+
+**Why this fixes the confound:** The source run is in C++; its palindrome implementation uses `reverse()`, `rbegin()/rend()`, `s.substr()` — none of which are valid Python tokens. A head encoding "my next token is `[::-1]`" would be useless when injected into a Python forward pass. For the KL objective to be satisfied, the patched heads must carry something language-agnostic — the goal of checking palindrome — which the Python model then *decodes* into Python palindrome tokens. The language boundary acts as a filter: only truly goal-level representations survive the transfer.
+
+**Destination/target constraint:** `is_lower` (destination) and `is_palindrome` (target) must share the same parameter signature (e.g., both take `s: str`) so the incomplete code templates are aligned and `P_target` is a meaningful reference at the pivot.
+
+### 5g. Pivot point alignment across languages
+
+The cross-language design introduces a new problem: the pivot in C++ and Python need to be "equivalent" positions where the model has committed to a goal but hasn't yet written implementation tokens. In Python, `return ` (with a space) is a clean pivot — the model is about to write a boolean expression. In C++, the situation is more complex.
+
+**Option 1: Constrain C++ source to one-liner return forms (recommended)**
+
+Python:
+```python
+def is_palindrome(s: str) -> bool:
+    return  # ← pivot
+```
+
+C++:
+```cpp
+bool isPalindrome(string s) { return  // ← pivot
+```
+
+When C++ is structured as a one-liner, the `return` token serves the same purpose in both languages: "I have processed the function context and am now about to emit a boolean expression." The model's goal representation at `return` is maximally aligned across languages. This is achievable — most simple predicate functions (`is_palindrome`, `is_lower`, `is_sorted`) have natural one-liner forms in C++.
+
+**Option 2: Let the mask find the pivot**
+
+Cache head outputs at *all* positions (not just `return`) in the source run, and let the mask optimization determine which position/layer combination carries the goal signal. If the goal is present at `return`, the mask will concentrate there. If it's present earlier (e.g., at the function name token), it will find that. This requires no manual pivot alignment but adds a position dimension to the mask (~n_layers × n_heads × n_positions).
+
+**Verdict:** Use Option 1 (`return`) as the default source extraction point. Fall back to Option 2 (position-free mask) if the signal at `return` turns out to be weak.
+
+**Why `return` is the right source extraction point:** `return` has the same *functional role* in both C++ and Python — it marks the moment the model commits to evaluating and emitting a boolean expression. By the time the model reaches `return` in C++, it has processed the function name (`isPalindrome`), the parameter types, and must now decide *what expression to return*. That decision is the goal. There is no closer equivalent position in C++.
+
+The intervention patches head `(ℓ, h)` output at source position `t_src` (absolute token index of `return` in the C++ sequence) into destination position `t_dest` (absolute token index of `return` in the Python sequence). These indices differ, but functional alignment is what matters, not index equality.
+
+**Residual concern with `return` as source position:** The model at C++ `return` encodes both "palindrome goal" and "I am in C++, C++ expression syntax follows." The latter is language-specific noise. The cross-language filter handles this: for the intervention to reduce `KL(P_patched || P_target)`, the goal component must be doing the work — C++ syntax knowledge is actively harmful in a Python context, so the optimization learns to rely on the parts that transfer. The noise makes optimization harder but does not invalidate the identified heads.
+
+### 5h. Ensuring maximal training signal: dest/target must diverge at the first generated token
+
+The training objective `KL(P_patched || P_target)` carries a signal only if `KL(P_dest || P_target)` is large to begin with — i.e., the unpatched destination is *far* from the target. This requires choosing a pivot prefix that forces divergence at the **first generated token**.
+
+The pivot prefix is the incomplete code that appears in both the destination and target prompts up to (and including) the pivot. For example:
+
+```
+pivot prefix:  return True if s == s
+                                      ↑ generation starts here
+```
+
+- **`P_target`** (`is_palindrome`): strongly predicts `[` (for `[::-1]`)
+- **`P_dest`** (`is_lower`): strongly predicts `.` (for `.lower()`)
+
+First generated token differs → `KL(P_dest || P_target)` is large → strong training signal.
+
+**How to choose the pivot prefix:**
+
+1. **Use `aligned_p_plus` prefills from `IncompleteCodeSample`**: these were designed to push toward predicate-specific tokens. The pivot prefix = `code_prefix + aligned_p_plus_prefill` for the target predicate. The same prefix applied to the destination predicate will generate different tokens because the destination predicate has a different implementation.
+
+2. **Empirically gate each triple `(dest_prompt, target_prompt, pivot_prefix)`**: measure `KL(P_dest || P_target)` at the pivot before training. Only include triples above a threshold (e.g., 0.5 nats). Pairs where both predicates happen to share the same first token at a given prefix are uninformative and should be dropped.
+
+3. **The dest and target must share the same parameter signature** (`s: str`, etc.) so that the pivot prefix is syntactically valid in both contexts and `P_dest`, `P_target` are distributions over the same vocabulary at the same position.
+
+This gating step replaces the need for anchor tokens — you don't need to know *which* token diverges, just that it does.
+
 ### 5a. The KL objective might be too easy to satisfy
 
 If the source and destination distributions are very similar at the pivot (both might put high probability on `s`, `not`, `(`, etc.), then the mask could learn to patch nothing and still get low KL. This would happen if the goal decision doesn't actually manifest strongly in the next-token distribution at the pivot point.
@@ -316,7 +409,107 @@ This sanity check tells you whether the interchange setup is viable before inves
 3. Cross-predicate test: do the same heads matter for `is_sorted` as for `is_palindrome`?
 
 
-## 7. Implementation Notes
+## 7. Dataset Design for Head Localization
+
+### 7a. Overview of the three-prompt structure
+
+Each training instance consists of three prompts:
+
+| Role | Language | Predicate | Purpose |
+|------|----------|-----------|---------|
+| **Source** | C++ | `is_palindrome` | provides goal signal — head outputs extracted at `return` |
+| **Destination** | Python | `is_lower` | receives the intervention |
+| **Target** | Python | `is_palindrome` | KL reference — what destination should look like after patching |
+
+Source is in a different language to prevent implementation-token copying (§5f). Destination and target are both Python, same variable name, same parameter signature — they must be token-identical up to and including the pivot prefix, differing only in predicate (function name + docstring). This is required so that pivot prefix tokens in the output are purely goal-driven and not confounded by surface differences in variable naming.
+
+**Augmentation rule**: variable renaming and function renaming augmentations must be applied jointly to destination and target (same new name in both), never independently. Source (C++) is augmented independently — it is already decoupled by the language boundary.
+
+---
+
+### 7b. Step 1 — Base dataset: single-predicate functions
+
+Create a set of single-predicate functions, each with:
+- Python version trimmed at `return ` (including trailing space, before any expression)
+- C++ version trimmed at `return ` in one-liner form: `bool fnName(type var) { return`
+- Unit tests shared across both (they test the same mathematical predicate)
+- The variable name used in the Python version (needed for pivot prefix alignment between dest/target)
+
+Suggested predicate groups by type:
+
+| Type | Predicates |
+|------|-----------|
+| `str` | `is_palindrome`, `is_upper`, `is_lower`, `is_anagram`, `has_unique_chars` |
+| `int` | `is_prime`, `is_power_of_two`, `is_odd`, `is_perfect_square`, `is_fibonacci` |
+| `list[int]` | `is_sorted`, `has_duplicates`, `all_positive`, `is_strictly_increasing` |
+
+C++ generation: prompt an oracle LLM with the Python function and ask for a C++ one-liner equivalent. Validate by compiling and running unit tests.
+
+---
+
+### 7c. Step 2 — Predicate pairing
+
+Store a `pairs.json` alongside the dataset. Each entry records a valid (source_predicate, destination_predicate) pair:
+
+```json
+{
+  "pairs": [
+    {
+      "source": "is_palindrome",
+      "destination": "is_lower",
+      "variable_type": "str",
+      "variable_name": "s",
+      "oracle_verified": true,
+      "top_token_diverges_at_bare_return": true
+    },
+    ...
+  ]
+}
+```
+
+Pairing constraint: same variable type and signature. Verify each candidate pair with an oracle LLM call: "do these two functions take identical signatures and implement meaningfully different predicates?" Store both `(A→B)` and `(B→A)` as separate entries since training signal quality may differ by direction.
+
+`top_token_diverges_at_bare_return`: pre-computed flag (Case 1 check below). Pairs where this is already true don't need the prefix-search step and can be used directly.
+
+---
+
+### 7d. Step 3 — Pivot prefix selection
+
+For a given (destination, target) pair, find all pivot prefixes P such that:
+- P is a prefix of some high-probability passing completion of both destination and target
+- The first token after P differs between destination and target
+
+This is a unified pipeline over prefix depth 0 (no prefill) and depth > 0 (with prefill):
+
+**Case 1 — no prefill (P = empty):**
+Run `predict_next_token` on both `dest_prompt + "return "` and `target_prompt + "return "`. If the top predicted token differs (or more precisely, `KL(P_dest || P_target) > threshold`), record the empty prefix as a valid pivot. This is cheap — one forward pass per prompt.
+
+**Case 2 — with prefill (P non-empty):**
+1. Sample N greedy/temperature generations from `return ` for both destination and target prompts. Filter to passing generations only (unit test evaluation).
+2. Compute pairwise longest common prefix (LCP) across all (dst_gen, targ_gen) pairs.
+3. Keep LCPs that are **stable**: appear in at least K distinct (dst_gen, targ_gen) pairs. Unstable LCPs are accidents of specific samples, not structural branching points.
+4. For each stable LCP P, verify `KL(P_dest+P || P_target+P) > threshold` — i.e., the first token after P genuinely diverges.
+5. Fallback: if not enough stable prefixes are found via sampling, run MCTS on the Python prompts (infrastructure already exists) to enumerate the prefix tree directly.
+
+Each valid P for a pair (dest, target) becomes one training instance `(source, dest+P, target+P)`.
+
+**Threshold**: 0.5 nats is a reasonable starting point for `KL(P_dest || P_target)`. Tune based on whether the mask optimization receives meaningful gradient signal.
+
+---
+
+### 7e. Step 4 — Augmentation
+
+Applied to the Python (destination + target) pair jointly:
+- **Variable rename**: replace variable name with a new name in *both* destination and target simultaneously (e.g., `s` → `word` in both). Since the pivot prefix contains variable name tokens, this must be synchronized to preserve token identity in the prefix.
+- **Function rename**: rename function in both independently (function names don't appear in the pivot prefix or generated expression).
+- **Type hint toggle**: add/remove type hints in both simultaneously.
+
+Source (C++) is augmented independently (variable name changes, function name changes) — it is already fully decoupled from the Python pair by the language boundary.
+
+Do **not** apply independent variable renames to destination vs target. The pivot prefix tokens must be identical in both prompts up to the divergence point; a mismatch in variable name would create spurious token-level divergence that has nothing to do with the goal.
+
+
+## 8. Implementation Notes
 
 ### Getting per-head outputs in nnsight
 

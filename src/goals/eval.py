@@ -211,9 +211,13 @@ def pretty_print_eval_results(
         unit_test_strs = []
         for t in eval_payload.unit_test_results:
             if t.error:
-                unit_test_strs.append(f"{function_name}({escape(str(t.input))}) raised {escape(t.error)}")
+                unit_test_strs.append(
+                    f"{function_name}({escape(str(t.input))}) raised {escape(t.error)}"
+                )
             elif t.passed:
-                unit_test_strs.append(f"{function_name}({escape(str(t.input))})={escape(str(t.actual))} ✓")
+                unit_test_strs.append(
+                    f"{function_name}({escape(str(t.input))})={escape(str(t.actual))} ✓"
+                )
             else:
                 unit_test_strs.append(
                     f"{function_name}({escape(str(t.input))})={escape(str(t.actual))}, expected {escape(str(t.expected))} ✗"
@@ -223,7 +227,9 @@ def pretty_print_eval_results(
         # Format logs
         log_parts = []
         if warns:
-            log_parts.append("[yellow]" + "\n".join(escape(w) for w in warns) + "[/yellow]")
+            log_parts.append(
+                "[yellow]" + "\n".join(escape(w) for w in warns) + "[/yellow]"
+            )
         if error_msg:
             log_parts.append(escape(error_msg))
         if verdict not in ["PASSED", "FAILED"]:
