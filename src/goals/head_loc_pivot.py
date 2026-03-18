@@ -184,7 +184,7 @@ def case1_pivot_instances(
     ds: HeadLocDataset,
     pairs: list[PredicatePair] | None = None,
     include_docstring: bool = False,
-) -> list[PivotInstance]:
+) -> list[tuple[PredicatePair, PivotInstance]]:
     """Mine Case 1 pivot instances: divergence at bare ``return `` (pivot_prefix="").
 
     For each pair, runs two forward passes to get the top predicted token for dest
@@ -202,10 +202,10 @@ def case1_pivot_instances(
             when True and the sample has a non-empty ``docstring`` field.
 
     Returns:
-        List of PivotInstances where dest and target predict different top tokens.
+        List of (pair, PivotInstance) tuples where dest and target predict different top tokens.
     """
     target_pairs = pairs if pairs is not None else ds.pairs
-    instances: list[PivotInstance] = []
+    instances: list[tuple[PredicatePair, PivotInstance]] = []
 
     for pair in target_pairs:
         dest_sample = ds.get_sample(pair.destination_predicate)
@@ -243,16 +243,10 @@ def case1_pivot_instances(
         )
 
         if dest_tok != targ_tok:
-            instances.append(
-                PivotInstance(
-                    source_predicate=pair.source_predicate,
-                    destination_predicate=pair.destination_predicate,
-                    target_predicate=pair.source_predicate,
-                    pivot_prefix="",
-                    dest_top_token=dest_tok,
-                    target_top_token=targ_tok,
-                )
-            )
+            instances.append((
+                pair,
+                PivotInstance(pivot_prefix="", dest_top_token=dest_tok, target_top_token=targ_tok),
+            ))
 
     logger.info(
         f"Case 1: {len(instances)} diverging pivot instances out of {len(target_pairs)} pairs"
@@ -572,7 +566,7 @@ def case2_pivot_instances(
     pairs: list[PredicatePair] | None = None,
     min_stable_k: int = 1,
     include_docstring: bool = False,
-) -> list[PivotInstance]:
+) -> list[tuple[PredicatePair, PivotInstance]]:
     """Mine Case 2 pivot instances: divergence at ``return <shared_prefix>``.
 
     For each pair, reads pre-computed green_completions from ``mcts_results``,
@@ -595,11 +589,11 @@ def case2_pivot_instances(
             when True and the sample has a non-empty ``docstring`` field.
 
     Returns:
-        List of PivotInstances where dest and target predict different top tokens
+        List of (pair, PivotInstance) tuples where dest and target predict different top tokens
         at a stable shared prefix.
     """
     target_pairs = pairs if pairs is not None else ds.pairs
-    instances: list[PivotInstance] = []
+    instances: list[tuple[PredicatePair, PivotInstance]] = []
 
     for pair in target_pairs:
         dest_sample = ds.get_sample(pair.destination_predicate)
@@ -663,16 +657,10 @@ def case2_pivot_instances(
             )
 
             if dest_tok != targ_tok:
-                instances.append(
-                    PivotInstance(
-                        source_predicate=pair.source_predicate,
-                        destination_predicate=pair.destination_predicate,
-                        target_predicate=pair.source_predicate,
-                        pivot_prefix=lcp,
-                        dest_top_token=dest_tok,
-                        target_top_token=targ_tok,
-                    )
-                )
+                instances.append((
+                    pair,
+                    PivotInstance(pivot_prefix=lcp, dest_top_token=dest_tok, target_top_token=targ_tok),
+                ))
 
     logger.info(f"Case 2: {len(instances)} diverging pivot instances")
     return instances
@@ -691,6 +679,7 @@ def find_pivot_instances(
     include_case1: bool = True,
     include_case2: bool = True,
     include_case3: bool = False,
+    include_case3b: bool = False,
     include_docstring: bool = False,
     # Case 2 params
     min_stable_k: int = 3,
@@ -698,6 +687,9 @@ def find_pivot_instances(
     n_oracle: int = 5,
     oracle_temperature: float = 0.5,
     max_completion_tokens: int = 32,
+    # Case 3b params
+    n_implementations: int = 8,
+    min_prefix_len: int = 3,
 ) -> list[PivotInstance]:
     """Mine all pivot instances for the given model, combining Case 1, 2, and/or 3.
 
@@ -717,14 +709,17 @@ def find_pivot_instances(
         include_case1: Whether to run Case 1 (bare-return divergence).
         include_case2: Whether to run Case 2 (MCTS shared-prefix divergence).
         include_case3: Whether to run Case 3 (oracle LLM shared-prefix divergence).
+        include_case3b: Whether to run Case 3b (per-predicate oracle + mechanical LCP).
         include_docstring: Insert sample docstrings into prompts when True.
-        min_stable_k: (Case 2/3) Minimum LCP frequency to be considered stable.
+        min_stable_k: (Case 2) Minimum LCP frequency to be considered stable.
         n_oracle: (Case 3) Number of oracle implementations requested per predicate.
-        oracle_temperature: (Case 3) Oracle LLM sampling temperature.
-        max_completion_tokens: (Case 3) Max tokens for greedy generation in the completion gate.
+        oracle_temperature: (Case 3/3b) Oracle LLM sampling temperature.
+        max_completion_tokens: (Case 3/3b) Max tokens for greedy generation in the completion gate.
+        n_implementations: (Case 3b) Number of oracle implementations per predicate.
+        min_prefix_len: (Case 3b) Minimum character length for a candidate LCP.
 
     Returns:
-        Deduplicated list of PivotInstances where ``tokens_diverge`` is True.
+        Deduplicated list of (pair, PivotInstance) tuples where ``tokens_diverge`` is True.
 
     Raises:
         ValueError: If ``include_case2=True`` and ``mcts_results`` is None.
@@ -735,7 +730,7 @@ def find_pivot_instances(
             "Run run_mcts_for_dataset() first."
         )
 
-    all_instances: list[PivotInstance] = []
+    all_instances: list[tuple[PredicatePair, PivotInstance]] = []
 
     if include_case1:
         all_instances.extend(
@@ -766,19 +761,33 @@ def find_pivot_instances(
                 include_docstring=include_docstring,
                 n_oracle=n_oracle,
                 oracle_temperature=oracle_temperature,
-                min_stable_k=min_stable_k,
                 max_completion_tokens=max_completion_tokens,
             )
         )
 
-    # Deduplicate by (destination_predicate, target_predicate, pivot_prefix)
+    if include_case3b:
+        from src.goals.head_loc_oracle import case3b_pivot_instances
+        all_instances.extend(
+            case3b_pivot_instances(
+                mt,
+                ds,
+                pairs=pairs,
+                include_docstring=include_docstring,
+                n_implementations=n_implementations,
+                oracle_temperature=oracle_temperature,
+                min_prefix_len=min_prefix_len,
+                max_completion_tokens=max_completion_tokens,
+            )
+        )
+
+    # Deduplicate by (destination_predicate, source_predicate, pivot_prefix)
     seen: set[tuple[str, str, str]] = set()
-    deduped: list[PivotInstance] = []
-    for pi in all_instances:
-        key = (pi.destination_predicate, pi.target_predicate, pi.pivot_prefix)
+    deduped: list[tuple[PredicatePair, PivotInstance]] = []
+    for pair, pi in all_instances:
+        key = (pair.destination_predicate, pair.source_predicate, pi.pivot_prefix)
         if key not in seen:
             seen.add(key)
-            deduped.append(pi)
+            deduped.append((pair, pi))
 
     logger.info(
         f"find_pivot_instances: {len(all_instances)} total -> {len(deduped)} after dedup"

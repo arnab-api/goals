@@ -25,8 +25,11 @@ class IncompleteCodeSample(DataClassJsonMixin):
     def is_original(self) -> bool:
         return not self.augmentation  # True for None and []
 
-    def augment(self, augmentation_type: str, augmentation_config: dict | None = None) -> "IncompleteCodeSample":
+    def augment(
+        self, augmentation_type: str, augmentation_config: dict | None = None
+    ) -> "IncompleteCodeSample":
         from src.goals.augment import augment_sample
+
         return augment_sample(self, augmentation_type, augmentation_config or {})
 
     def __str__(self) -> str:
@@ -48,7 +51,13 @@ class IncompleteCodeDataset(DataClassJsonMixin):
 
     def augment(self) -> None:
         from src.goals.augment import generate_variants_incomplete
-        new = [v for s in self.samples if s.is_original for v in generate_variants_incomplete(s)]
+
+        new = [
+            v
+            for s in self.samples
+            if s.is_original
+            for v in generate_variants_incomplete(s)
+        ]
         self.samples.extend(new)
 
     @staticmethod
@@ -87,6 +96,10 @@ class UnitTestResult(DataClassJsonMixin):
     actual: Any | None = None
     passed: bool = False
     error: str | None = None
+
+    def __str__(self) -> str:
+        status = "(✓)" if self.passed else "(✗)"
+        return f"Input: {self.input}, Expected: {self.expected}, Actual: {self.actual}, Status: {status}, Error: {self.error}"
 
 
 @dataclass

@@ -35,7 +35,7 @@ from torch import nn
 from torch.optim import AdamW
 
 from src.functional import get_module_nnsight
-from src.goals.head_loc_data import HeadLocDataset, PivotInstance
+from src.goals.head_loc_data import HeadLocDataset, PredicatePair, PivotInstance
 from src.goals.head_loc_pivot import (
     build_cpp_prompt,
     build_python_prompt,
@@ -169,7 +169,7 @@ class PivotCache:
 @torch.inference_mode()
 def cache_pivot_data(
     mt,
-    pivot_instances: list[PivotInstance],
+    pivot_instances: list[tuple[PredicatePair, PivotInstance]],
     ds: HeadLocDataset,
     layers: list[int],
     include_docstring: bool = False,
@@ -181,21 +181,20 @@ def cache_pivot_data(
     """
     caches: list[PivotCache] = []
 
-    for i, pi in enumerate(pivot_instances):
+    for i, (pair, pi) in enumerate(pivot_instances):
         logger.info(
             f"  Caching {i + 1}/{len(pivot_instances)}: "
-            f"{pi.destination_predicate} ← {pi.source_predicate} "
+            f"{pair.destination_predicate} ← {pair.source_predicate} "
             f"prefix={pi.pivot_prefix!r}"
         )
 
-        src_sample = ds.get_sample(pi.source_predicate)
-        dest_sample = ds.get_sample(pi.destination_predicate)
-        targ_sample = ds.get_sample(pi.target_predicate)
+        src_sample = ds.get_sample(pair.source_predicate)
+        dest_sample = ds.get_sample(pair.destination_predicate)
+        targ_sample = ds.get_sample(pair.source_predicate)  # target == source
 
         for name, sample in [
-            (pi.source_predicate, src_sample),
-            (pi.destination_predicate, dest_sample),
-            (pi.target_predicate, targ_sample),
+            (pair.source_predicate, src_sample),
+            (pair.destination_predicate, dest_sample),
         ]:
             if sample is None:
                 raise ValueError(f"Sample not found: {name!r}")

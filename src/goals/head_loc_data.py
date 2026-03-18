@@ -12,7 +12,8 @@ from src.utils.typing import PathLike
 logger = logging.getLogger(__name__)
 
 HEAD_LOC_DATA_DIR = os.path.join(DEFAULT_DATA_DIR, "head_loc")
-PIVOT_INSTANCES_FILENAME = "pivot_instances.json"
+HEAD_LOC_PAIRS_SUBDIR = "pairs"
+GLOBAL_PAIRS_FILENAME = "global_pairs.json"
 
 
 @dataclass
@@ -54,11 +55,45 @@ class SinglePredicateSample(DataClassJsonMixin):
 
 
 @dataclass
+class PivotInstance(DataClassJsonMixin):
+    """A validated pivot prefix for a PredicatePair.
+
+    Stores only the prefix-specific data — predicate identifiers are held by the
+    containing ``PredicatePair``.  Access the pair to resolve samples via
+    ``HeadLocDataset.get_sample(pair.destination_predicate)``.
+
+    The full incomplete code at pivot:
+        sample.python_incomplete_code + " " + pivot_prefix
+    (the space after `return` is prepended here, not stored in python_incomplete_code).
+
+    pivot_prefix == "" for Case 1 (bare return divergence),
+    non-empty for Case 2/3 (shared prefix of successful generations).
+
+    Token divergence (dest_top_token != target_top_token) is the primary selection
+    criterion. Pivot instances are mined online per model — do not cache across models.
+    """
+
+    pivot_prefix: str       # shared prefix appended after "return "; "" for Case 1
+    dest_top_token: str     # top-1 predicted token for destination at pivot
+    target_top_token: str   # top-1 predicted token for target at pivot
+
+    @property
+    def tokens_diverge(self) -> bool:
+        """True when dest and target predict different top tokens at the pivot."""
+        return self.dest_top_token != self.target_top_token
+
+
+@dataclass
 class PredicatePair(DataClassJsonMixin):
-    """Pairing metadata between a source predicate (C++) and a destination predicate (Python).
+    """Pairing metadata between a source predicate (C++) and a destination predicate (Python),
+    together with all validated pivot prefixes for this pair.
 
     Both (A→B) and (B→A) directions are stored as separate entries since training
     signal quality may differ by direction.
+
+    ``pivot_instances`` are mined online (per model) and persisted here so that
+    ``pairs.json`` is the single source of truth for both pairing metadata and pivots.
+    They are model-specific and should be re-mined when switching models.
 
     kl_at_bare_return and top_token_diverges_at_bare_return are populated by the
     pairing script (Step 3) which requires a model forward pass; stored as 0.0 / False
@@ -71,39 +106,7 @@ class PredicatePair(DataClassJsonMixin):
     oracle_verified: bool = False
     kl_at_bare_return: float = 0.0
     top_token_diverges_at_bare_return: bool = False
-
-
-@dataclass
-class PivotInstance(DataClassJsonMixin):
-    """A ready-to-train triple for the head localization experiment.
-
-    Stores predicate name keys only (not inline sample objects) to avoid redundancy.
-    Samples are resolved via HeadLocDataset.get_sample().
-
-    The full incomplete code at pivot:
-        sample.python_incomplete_code + " " + pivot_prefix
-    (the space after `return` is prepended here, not stored in python_incomplete_code).
-
-    pivot_prefix == "" for Case 1 (bare return divergence),
-    non-empty for Case 2 (shared prefix of successful generations).
-
-    Token divergence (dest_top_token != target_top_token) is the primary selection
-    criterion. KL is not stored here because it is model-specific and can change
-    across LMs; the top-token strings are more interpretable and capture the same
-    signal. Pivot instances are mined online per model — do not cache across models.
-    """
-
-    source_predicate: str       # C++ sample whose head outputs are patched in
-    destination_predicate: str  # Python sample receiving the intervention
-    target_predicate: str       # Python sample to match (semantically == source_predicate)
-    pivot_prefix: str           # shared prefix appended after "return "; "" for Case 1
-    dest_top_token: str         # top-1 predicted token for destination at pivot
-    target_top_token: str       # top-1 predicted token for target at pivot
-
-    @property
-    def tokens_diverge(self) -> bool:
-        """True when dest and target predict different top tokens at the pivot."""
-        return self.dest_top_token != self.target_top_token
+    pivot_instances: list[PivotInstance] = field(default_factory=list)
 
 
 @dataclass
@@ -170,14 +173,30 @@ class HeadLocDataset:
             or p.destination_predicate == predicate_name
         ]
 
+    @property
+    def pivot_instances(self) -> list[tuple[PredicatePair, PivotInstance]]:
+        """Flat list of (pair, pivot) across all pairs, in pair order."""
+        return [(pair, pi) for pair in self.pairs for pi in pair.pivot_instances]
+
     # ------------------------------------------------------------------
     # I/O
     # ------------------------------------------------------------------
 
     @classmethod
-    def load(cls, dir_path: PathLike = HEAD_LOC_DATA_DIR) -> "HeadLocDataset":
+    def load(
+        cls,
+        model_name: str,
+        dir_path: PathLike = HEAD_LOC_DATA_DIR,
+    ) -> "HeadLocDataset":
+        """Load predicates and model-specific pairs.
+
+        Args:
+            model_name: Short model identifier, e.g. ``mt.name.split('/')[-1]``.
+                Used to locate ``pairs/{model_name}.json``.
+            dir_path: Root head_loc data directory.
+        """
         predicates_dir = os.path.join(dir_path, "predicates")
-        pairs_path = os.path.join(dir_path, "pairs.json")
+        pairs_path = os.path.join(dir_path, HEAD_LOC_PAIRS_SUBDIR, f"{model_name}.json")
 
         samples = []
         if os.path.isdir(predicates_dir):
@@ -192,26 +211,101 @@ class HeadLocDataset:
                 data = json.load(f)
                 pairs = [PredicatePair.from_dict(p) for p in data.get("pairs", [])]
 
-        logger.info(f"Loaded {len(samples)} predicates, {len(pairs)} pairs from {dir_path}")
+        logger.info(
+            f"Loaded {len(samples)} predicates, {len(pairs)} pairs"
+            f" from {pairs_path}"
+        )
         return cls(samples=samples, pairs=pairs)
 
-    def save_pairs(self, dir_path: PathLike = HEAD_LOC_DATA_DIR) -> None:
-        """Persist updated pairs list (e.g. after KL values are filled in by Step 3)."""
-        pairs_path = os.path.join(dir_path, "pairs.json")
+    def save_global_pairs(
+        self,
+        dir_path: PathLike = HEAD_LOC_DATA_DIR,
+    ) -> None:
+        """Persist oracle-verified pairing metadata to ``global_pairs.json``.
+
+        Only saves the model-agnostic fields (source, destination, variable_type,
+        oracle_verified). Model-specific fields (kl, pivot_instances) are not
+        included — those live in ``pairs/{model_name}.json``.
+        """
+        path = os.path.join(dir_path, GLOBAL_PAIRS_FILENAME)
+        records = [
+            {
+                "source_predicate": p.source_predicate,
+                "destination_predicate": p.destination_predicate,
+                "variable_type": p.variable_type,
+                "oracle_verified": p.oracle_verified,
+            }
+            for p in self.pairs
+        ]
+        with open(path, "w") as f:
+            json.dump({"pairs": records}, f, indent=2)
+        logger.info(f"Saved {len(records)} global pairs to {path}")
+
+    @staticmethod
+    def load_global_pairs(
+        dir_path: PathLike = HEAD_LOC_DATA_DIR,
+    ) -> list[PredicatePair]:
+        """Load model-agnostic pairs from ``global_pairs.json``.
+
+        Returns only oracle-verified pairs. Returns [] if file absent.
+        """
+        path = os.path.join(dir_path, GLOBAL_PAIRS_FILENAME)
+        if not os.path.isfile(path):
+            return []
+        with open(path) as f:
+            data = json.load(f)
+        pairs = [
+            PredicatePair(
+                source_predicate=p["source_predicate"],
+                destination_predicate=p["destination_predicate"],
+                variable_type=p["variable_type"],
+                oracle_verified=p.get("oracle_verified", False),
+            )
+            for p in data.get("pairs", [])
+            if p.get("oracle_verified", False)
+        ]
+        logger.info(f"Loaded {len(pairs)} oracle-verified global pairs from {path}")
+        return pairs
+
+    def initialize_model_pairs(
+        self,
+        model_name: str,
+        dir_path: PathLike = HEAD_LOC_DATA_DIR,
+    ) -> None:
+        """Bootstrap ``pairs/{model_name}.json`` from ``global_pairs.json``.
+
+        Loads oracle-verified global pairs and writes them to the model-specific
+        file with empty model fields (kl=0.0, top_token_diverges=False,
+        pivot_instances=[]). Overwrites any existing file for this model.
+
+        Call this once per new model before running Case 1 or pivot mining.
+        """
+        global_pairs = self.load_global_pairs(dir_path)
+        if not global_pairs:
+            raise FileNotFoundError(
+                f"global_pairs.json not found or empty in {dir_path}. "
+                "Run generate_global_pairs() first."
+            )
+        self.pairs = global_pairs
+        self.save_pairs(model_name, dir_path)
+        logger.info(
+            f"Initialized pairs/{model_name}.json with "
+            f"{len(global_pairs)} global pairs"
+        )
+
+    def save_pairs(
+        self,
+        model_name: str,
+        dir_path: PathLike = HEAD_LOC_DATA_DIR,
+    ) -> None:
+        """Persist pairs (including pivot_instances) to ``pairs/{model_name}.json``."""
+        pairs_dir = os.path.join(dir_path, HEAD_LOC_PAIRS_SUBDIR)
+        os.makedirs(pairs_dir, exist_ok=True)
+        pairs_path = os.path.join(pairs_dir, f"{model_name}.json")
         with open(pairs_path, "w") as f:
             json.dump({"pairs": [p.to_dict() for p in self.pairs]}, f, indent=2)
         logger.info(f"Saved {len(self.pairs)} pairs to {pairs_path}")
 
-    def save_pivot_instances(
-        self,
-        pivot_instances: list[PivotInstance],
-        dir_path: PathLike = HEAD_LOC_DATA_DIR,
-    ) -> None:
-        """Persist pivot instances to pivot_instances.json."""
-        path = os.path.join(dir_path, PIVOT_INSTANCES_FILENAME)
-        with open(path, "w") as f:
-            json.dump([pi.to_dict() for pi in pivot_instances], f, indent=2)
-        logger.info(f"Saved {len(pivot_instances)} pivot instances to {path}")
 
     def save_mcts_result(
         self,
@@ -256,16 +350,6 @@ class HeadLocDataset:
         )
         return results
 
-    @staticmethod
-    def load_pivot_instances(
-        dir_path: PathLike = HEAD_LOC_DATA_DIR,
-    ) -> list[PivotInstance]:
-        """Load pivot instances from pivot_instances.json. Returns [] if file absent."""
-        path = os.path.join(dir_path, PIVOT_INSTANCES_FILENAME)
-        if not os.path.isfile(path):
-            return []
-        with open(path) as f:
-            return [PivotInstance.from_dict(d) for d in json.load(f)]
 
     # ------------------------------------------------------------------
     # Container protocol
