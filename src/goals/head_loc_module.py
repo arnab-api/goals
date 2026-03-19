@@ -313,7 +313,7 @@ def run_attn_boundary_sweep(
             n_patched = len(layer_indices)
             logger.debug(
                 f"  {mode} boundary={boundary:3d}  n_patched={n_patched:3d}"
-                f"  score={cur_score:.4f}  top5: {_top5_str(mt, logits)}"
+                f"  score={cur_score:.4f}  top5: {_top5_str(mt, logits, metric)}"
             )
         else:
             cur_score = boundary_patch_score(

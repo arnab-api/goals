@@ -20,6 +20,18 @@ from src.utils.typing import TokenizerOutput
 logger = logging.getLogger(__name__)
 
 
+def _safe_token(t: str) -> str:
+    """Replace HTML angle-bracket characters with fullwidth Unicode look-alikes.
+
+    circuitsvis passes tokens as JSON to a React component which renders them
+    as text nodes.  Raw ``<`` / ``>`` characters inside the JSON get parsed as
+    HTML tags by the browser before React runs, corrupting special tokens such
+    as ``<|im_start|>``.  Fullwidth variants (U+FF1C / U+FF1E) are visually
+    identical but are never treated as HTML markup.
+    """
+    return t.replace("<", "\uff1c").replace(">", "\uff1e")
+
+
 @dataclass(frozen=False)
 class AttentionInformation(DataClassJsonMixin):
     tokenized_prompt: list[str]
@@ -43,8 +55,25 @@ class AttentionInformation(DataClassJsonMixin):
         self.tokenized_prompt = tokenized_prompt
         self.attention_matrices = attention_matrices
 
-    def get_attn_matrix(self, layer: int, head: int) -> torch.tensor:
+    def get_attn_matrix(self, layer: int, head: int) -> np.ndarray:
         return self.attention_matrices[layer, head]
+
+    def get_layer_attn(self, layer: int, agg: str = "mean") -> np.ndarray:
+        """Aggregate attention across all heads for a single layer.
+
+        Args:
+            layer: Layer index.
+            agg: Aggregation method — ``"mean"`` (default) or ``"sum"``.
+
+        Returns:
+            ``(seq, seq)`` float32 array of aggregated attention weights.
+        """
+        if agg == "mean":
+            return self.attention_matrices[layer].mean(axis=0)
+        elif agg == "sum":
+            return self.attention_matrices[layer].sum(axis=0)
+        else:
+            raise ValueError(f"Unknown agg={agg!r}; expected 'mean' or 'sum'")
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -110,7 +139,7 @@ def get_attention_matrices(
         mt=mt,
         inputs=input,
         patches=patches if patches is not None else [],
-        model_kwargs=dict(output_attentions=True),
+        model_kwargs=dict(output_attentions=True, use_cache=True),
     )
     # print(output.__dict__.keys())
     logits = output.logits[0][-1]
@@ -120,19 +149,27 @@ def get_attention_matrices(
     output.attentions = [attn.cuda() for attn in output.attentions]
     attentions = torch.vstack(output.attentions)  # (layers, heads, tokens, tokens)
     if value_weighted:
-        values = torch.vstack(
-            [
-                output.past_key_values[i][1].cuda()
-                for i in range(mt.config.num_hidden_layers)
-            ]
-        )  # (layers, heads, tokens, head_dim)
-        values = repeat_kv(
-            values, n_rep=mt.model.layers[0].self_attn.num_key_value_groups
-        )
+        pkv = output.past_key_values
+        # transformers ≥ 4.36 returns a Cache object; the internal structure
+        # changed again in later versions.  Try the known access patterns:
+        #   - new layered API  (DynamicCache.layers[i].values)
+        #   - mid-era API      (.value_cache list)
+        #   - legacy tuple     ([i][1])
+        if hasattr(pkv, "layers") and hasattr(pkv.layers[0], "values"):
+            value_list = [layer.values.cuda() for layer in pkv.layers]
+        elif hasattr(pkv, "value_cache"):
+            value_list = [v.cuda() for v in pkv.value_cache]
+        else:
+            value_list = [pkv[i][1].cuda() for i in range(mt.config.num_hidden_layers)]
+        values = torch.vstack(value_list)  # (layers, kv_heads, tokens, head_dim)
+        n_rep = mt.config.num_attention_heads // mt.config.num_key_value_heads
+        values = repeat_kv(values, n_rep=n_rep)
         # logger.debug(f"{attentions.shape=} | {values.shape=}")
         attentions = torch.einsum("abcd,abd->abcd", attentions, values.norm(dim=-1))
     return AttentionInformation(
-        tokenized_prompt=[mt.tokenizer.decode(tok) for tok in input.input_ids[0]],
+        tokenized_prompt=[
+            _safe_token(mt.tokenizer.decode(tok)) for tok in input.input_ids[0]
+        ],
         attention_matrices=attentions.detach().cpu().to(torch.float32).numpy(),
         logits=logits.detach().cpu(),
     )
@@ -142,7 +179,7 @@ def visualize_attn_matrix(
     attn_matrix: torch.Tensor,
     tokens: list[str],
     q_index: int = -1,
-    start_from: int = 1,
+    start_from: int = 0,
     end_at: Optional[int] = None,
     vis_args: dict = {},
 ):
@@ -159,6 +196,7 @@ def visualize_attn_matrix(
         else attn_matrix.squeeze()[q_index][start_from:end_at]
     )
     tokens = tokens[start_from:] if end_at is None else tokens[start_from:end_at]
+    tokens = [_safe_token(t) for t in tokens]
     assert len(tokens) == attn_matrix.shape[0], (
         f"Shape mismatch: {len(tokens)=} | {attn_matrix.shape=}"
     )
@@ -224,11 +262,7 @@ def visualize_average_attn_matrix(
             mt.tokenizer.decode(t, skip_special_tokens=False)
             for t in tokenized["input_ids"][0]
         ][start_from:]
-        for idx, t in enumerate(tokens):
-            if t == "<think>":
-                tokens[idx] = "<|think|>"
-            elif t == "</think>":
-                tokens[idx] = "<|/think|>"
+        tokens = [_safe_token(t) for t in tokens]
 
         display(
             colored_tokens(tokens=tokens, values=avg_attn_module_matrix[start_from:])
