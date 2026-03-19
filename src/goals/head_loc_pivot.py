@@ -75,7 +75,7 @@ def build_cpp_prompt(
     """
     code_at_pivot = sample.cpp_incomplete_code + " "
     if include_docstring and sample.docstring:
-        code_at_pivot = code_at_pivot.rstrip() + f"  // {sample.docstring}\n    return "
+        code_at_pivot = f"// {sample.docstring}\n{code_at_pivot}"
     if supports_chat_template(mt):
         return apply_chat_template(mt, CPP_INSTRUCTION, code_at_pivot)
     return "<code>\n" + code_at_pivot

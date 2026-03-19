@@ -19,7 +19,7 @@ from src.utils.typing import PathLike, PredictedToken, TokenizerOutput
 logger = logging.getLogger(__name__)
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def patched_run(
     mt: ModelandTokenizer,
     inputs: TokenizerOutput,
@@ -27,7 +27,7 @@ def patched_run(
 ) -> torch.Tensor:
     # os.environ["TORCH_LOGS"] = "not_implemented"
 
-    with mt.trace(inputs, scan=False) as trace:
+    with mt.trace(inputs, scan=False):
         for location in states:
             layer_name, token_idx = location
             module = get_module_nnsight(mt, layer_name)
@@ -352,283 +352,102 @@ def trace_important_states(
     )
 
 
-# @torch.inference_mode()
-# def trace_important_states_RAG(
-#     mt: ModelandTokenizer,
-#     clean_query: InContextQuery,
-#     corrupt_query: InContextQuery,
-#     kind: Literal["residual", "mlp", "attention"] = "residual",
-#     trace_token_strategy: Literal["subj_query", "all"] = "subj_query",
-#     window_size: int = 1,
-#     normalize=True,
-# ) -> CausalTracingResult:
-#     assert (
-#         clean_query.template == corrupt_query.template
-#     ), "Queries do not have the same template"
+# ---------------------------------------------------------------------------
+# Window-patching (used by nb 07)
+# ---------------------------------------------------------------------------
 
-#     clean_inputs = prepare_input(
-#         prompts=clean_query.query, tokenizer=mt, return_offset_mapping=True
-#     )
-#     corrupt_inputs = prepare_input(
-#         prompts=corrupt_query.query, tokenizer=mt, return_offset_mapping=True
-#     )
 
-#     if trace_token_strategy == "subj_query":
-#         clean_subj_range = find_token_range(
-#             string=clean_query.query,
-#             substring=clean_query.subject,
-#             tokenizer=mt.tokenizer,
-#             occurrence=-1,
-#             offset_mapping=clean_inputs["offset_mapping"][0],
-#         )
-#         corrupt_subj_range = find_token_range(
-#             string=corrupt_query.query,
-#             substring=corrupt_query.subject,
-#             tokenizer=mt.tokenizer,
-#             occurrence=-1,
-#             offset_mapping=corrupt_inputs["offset_mapping"][0],
-#         )
-#         logger.debug(f"{clean_subj_range=} | {corrupt_subj_range=}")
+@torch.no_grad()
+def window_patch_score(
+    mt: ModelandTokenizer,
+    dest_inputs: TokenizerOutput,
+    src_states: dict[int, torch.Tensor],
+    center: int,
+    window: int,
+    target_token_ids: int | list[int],
+    metric: Literal["logit", "prob", "log_norm"] = "prob",
+    layer_name_format: str | None = None,
+) -> float:
+    """Patch a sliding window of module outputs from src into dest at the last token.
 
-#         # always insert 1 padding token
-#         subj_end = max(clean_subj_range[1], corrupt_subj_range[1]) + 1
-#         logger.debug(f"setting {subj_end=}")
+    For ``center=15, window=5``, patches layers [13, 14, 15, 16, 17] (clamped at
+    boundaries).  The outputs are sourced from ``src_states`` (typically extracted via
+    ``get_hs``) and injected into the dest forward pass at
+    position ``-1`` (last token).
 
-#         clean_inputs = insert_padding_before_subj(
-#             clean_inputs,
-#             clean_subj_range,
-#             subj_end,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
-#         corrupt_inputs = insert_padding_before_subj(
-#             corrupt_inputs,
-#             corrupt_subj_range,
-#             subj_end,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
+    The patching uses ``patched_run`` which already handles the tuple-vs-tensor output
+    distinction via the ``"mlp" in layer_name`` heuristic.
 
-#         clean_shift = subj_end - clean_subj_range[1]
-#         clean_subj_range = (clean_subj_range[0] + clean_shift, subj_end)
+    Args:
+        mt: ModelandTokenizer.
+        dest_inputs: Tokenised destination prompt (batch=1), already on model device.
+        src_states: ``{layer_idx: (n_embd,) tensor}`` from ``get_hs``.
+        center: Layer index at the center of the patch window.
+        window: Window width.  ``window=1`` patches only ``center``; ``window=5``
+            patches [center-2, ..., center+2] (clamped to valid range).
+        target_token_ids: Token id(s) to score after the patch.
+        metric: Scoring metric passed to ``get_score``.
+        layer_name_format: Module name template; defaults to ``mt.attn_module_name_format``.
 
-#         corrupt_shift = subj_end - corrupt_subj_range[1]
-#         corrupt_subj_range = (corrupt_subj_range[0] + corrupt_shift, subj_end)
+    Returns:
+        Scalar score of ``target_token_ids`` in the patched forward pass.
+    """
+    if layer_name_format is None:
+        layer_name_format = mt.attn_module_name_format
 
-#         logger.debug(f"<shifted> {clean_subj_range=} | {corrupt_subj_range=}")
+    half = window // 2
+    layer_indices = list(
+        range(max(0, center - half), min(mt.n_layer, center + half + 1))
+    )
 
-#     elif trace_token_strategy == "all":
-#         clean_subj_ranges = [
-#             find_token_range(
-#                 string=clean_query.query,
-#                 substring=clean_query.subject,
-#                 tokenizer=mt.tokenizer,
-#                 occurrence=order,
-#                 offset_mapping=clean_inputs["offset_mapping"][0],
-#             )
-#             for order in [0, -1]
-#         ]
+    states = {
+        (layer_name_format.format(li), -1): src_states[li]
+        for li in layer_indices
+        if li in src_states
+    }
+    logits = patched_run(mt=mt, inputs=dest_inputs, states=states)
+    return get_score(logits=logits, token_id=target_token_ids, metric=metric)
 
-#         corrupt_subj_ranges = [
-#             find_token_range(
-#                 string=corrupt_query.query,
-#                 substring=corrupt_query.subject,
-#                 tokenizer=mt.tokenizer,
-#                 occurrence=order,
-#                 offset_mapping=corrupt_inputs["offset_mapping"][0],
-#             )
-#             for order in [0, -1]
-#         ]
 
-#         clean_cofa_range = find_token_range(
-#             string=clean_query.query,
-#             substring=guess_subject(clean_query.cf_description),
-#             tokenizer=mt.tokenizer,
-#             occurrence=-1,
-#             offset_mapping=clean_inputs["offset_mapping"][0],
-#         )
+@torch.no_grad()
+def boundary_patch_score(
+    mt: ModelandTokenizer,
+    dest_inputs: TokenizerOutput,
+    src_states: dict[int, torch.Tensor],
+    boundary: int,
+    mode: Literal["upto", "from"],
+    target_token_ids: int | list[int],
+    metric: Literal["logit", "prob", "log_norm"] = "prob",
+    layer_name_format: str | None = None,
+) -> float:
+    """Patch a prefix or suffix of layers from src into dest at the last token.
 
-#         corrupt_cofa_range = find_token_range(
-#             string=corrupt_query.query,
-#             substring=guess_subject(corrupt_query.cf_description),
-#             tokenizer=mt.tokenizer,
-#             occurrence=-1,
-#             offset_mapping=corrupt_inputs["offset_mapping"][0],
-#         )
+    Args:
+        mt: ModelandTokenizer.
+        dest_inputs: Tokenised destination prompt (batch=1).
+        src_states: ``{layer_idx: (n_embd,) tensor}`` from ``get_hs``.
+        boundary: The boundary layer index.
+        mode: ``"upto"`` patches layers [0, …, boundary] (inclusive);
+              ``"from"`` patches layers [boundary, …, n_layer-1] (inclusive).
+        target_token_ids: Token id(s) to score after the patch.
+        metric: Scoring metric passed to ``get_score``.
+        layer_name_format: Module name template; defaults to ``mt.attn_module_name_format``.
 
-#         # align the subjects in the context
-#         subj_end_in_context = (
-#             max(clean_subj_ranges[0][1], corrupt_subj_ranges[0][1]) + 1
-#         )
-#         clean_inputs = insert_padding_before_subj(
-#             clean_inputs,
-#             clean_subj_ranges[0],
-#             subj_end_in_context,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
-#         corrupt_inputs = insert_padding_before_subj(
-#             corrupt_inputs,
-#             corrupt_subj_ranges[0],
-#             subj_end_in_context,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
+    Returns:
+        Scalar score of ``target_token_ids`` in the patched forward pass.
+    """
+    if layer_name_format is None:
+        layer_name_format = mt.attn_module_name_format
 
-#         n_clean_pads = subj_end_in_context - clean_subj_ranges[0][1]
-#         clean_subj_ranges[1] = (
-#             clean_subj_ranges[1][0] + n_clean_pads,
-#             clean_subj_ranges[1][1] + n_clean_pads,
-#         )
-#         clean_cofa_range = (
-#             clean_cofa_range[0] + n_clean_pads,
-#             clean_cofa_range[1] + n_clean_pads,
-#         )
+    if mode == "upto":
+        layer_indices = list(range(0, boundary + 1))
+    else:
+        layer_indices = list(range(boundary, mt.n_layer))
 
-#         n_corrupt_pads = subj_end_in_context - corrupt_subj_ranges[0][1]
-#         corrupt_subj_ranges[1] = (
-#             corrupt_subj_ranges[1][0] + n_corrupt_pads,
-#             corrupt_subj_ranges[1][1] + n_corrupt_pads,
-#         )
-#         corrupt_cofa_range = (
-#             corrupt_cofa_range[0] + n_corrupt_pads,
-#             corrupt_cofa_range[1] + n_corrupt_pads,
-#         )
-
-#         # align the counterfactuals in the context
-#         cofa_ends_in_context = max(clean_cofa_range[1], corrupt_cofa_range[1]) + 1
-#         clean_inputs = insert_padding_before_subj(
-#             clean_inputs,
-#             clean_cofa_range,
-#             cofa_ends_in_context,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
-#         corrupt_inputs = insert_padding_before_subj(
-#             corrupt_inputs,
-#             corrupt_cofa_range,
-#             cofa_ends_in_context,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
-
-#         n_clean_pads = cofa_ends_in_context - clean_cofa_range[1]
-#         clean_subj_ranges[1] = (
-#             clean_subj_ranges[1][0] + n_clean_pads,
-#             clean_subj_ranges[1][1] + n_clean_pads,
-#         )
-#         n_corrupt_pads = cofa_ends_in_context - corrupt_cofa_range[1]
-#         corrupt_subj_ranges[1] = (
-#             corrupt_subj_ranges[1][0] + n_corrupt_pads,
-#             corrupt_subj_ranges[1][1] + n_corrupt_pads,
-#         )
-
-#         # align the subjects in the query
-#         subj_ends_in_query = max(clean_subj_ranges[1][1], corrupt_subj_ranges[1][1]) + 1
-#         clean_inputs = insert_padding_before_subj(
-#             clean_inputs,
-#             clean_subj_ranges[1],
-#             subj_ends_in_query,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
-#         corrupt_inputs = insert_padding_before_subj(
-#             corrupt_inputs,
-#             corrupt_subj_ranges[1],
-#             subj_ends_in_query,
-#             pad_id=mt.tokenizer.pad_token_id,
-#         )
-
-#     else:
-#         raise ValueError("trace_token_strategy must be one of 'subj_query', 'all'")
-
-#     for idx, (t1, a1, t2, a2) in enumerate(
-#         zip(
-#             clean_inputs.input_ids[0],
-#             clean_inputs.attention_mask[0],
-#             corrupt_inputs.input_ids[0],
-#             corrupt_inputs.attention_mask[0],
-#         )
-#     ):
-#         logger.debug(
-#             f"{idx=} =>  [{a1}] {mt.tokenizer.decode(t1)} || [{a2}] {mt.tokenizer.decode(t2)}"
-#         )
-
-#     # trace start idx
-#     if trace_token_strategy == "subj_query":
-#         trace_start_idx = min(clean_subj_range[0], corrupt_subj_range[0])
-#     elif trace_token_strategy == "all":
-#         trace_start_idx = 1
-
-#     # clean run
-#     clean_states = get_all_module_states(mt=mt, input=clean_inputs, kind=kind)
-#     answer = predict_next_token(mt=mt, inputs=clean_inputs, k=1)[0][0]
-#     base_probability = answer.prob
-#     logger.debug(f"{answer=}")
-
-#     # corrupted run
-#     # corrupt_states = get_all_module_states(mt=mt, input=corrupt_inputs, kind=kind)
-#     corrupt_answer, track_ans = predict_next_token(
-#         mt=mt, inputs=corrupt_inputs, k=1, token_of_interest=answer.token
-#     )
-#     corrupt_answer = corrupt_answer[0][0]
-#     corrupt_probability = track_ans[0][1].prob
-#     logger.debug(f"{corrupt_answer=}")
-#     logger.debug(f"{track_ans=}")
-
-#     logger.debug("---------- tracing important states ----------")
-
-#     assert (
-#         answer.token != corrupt_answer.token
-#     ), "Answers in the clean and corrupt runs are the same"
-
-#     layer_name_format = None
-#     if kind == "residual":
-#         layer_name_format = mt.layer_name_format
-#     elif kind == "mlp":
-#         layer_name_format = mt.mlp_module_name_format
-#     elif kind == "attention":
-#         layer_name_format = mt.attn_module_name_format
-#     else:
-#         raise ValueError(f"kind must be one of 'residual', 'mlp', 'attention'")
-
-#     # calculate indirect effects in the patched run
-#     locations = [
-#         (layer_idx, token_idx)
-#         for layer_idx in range(mt.n_layer)
-#         for token_idx in range(trace_start_idx, clean_inputs.input_ids.size(1))
-#     ]
-#     indirect_effects = calculate_indirect_effects(
-#         mt=mt,
-#         locations=locations,
-#         corrupted_input=corrupt_inputs,
-#         patch_states=clean_states,
-#         patch_ans_t=answer.token_id,
-#         layer_name_format=layer_name_format,
-#         window_size=window_size,
-#         kind=kind,
-#     )
-
-#     indirect_effect_matrix = []
-#     for token_idx in range(trace_start_idx, clean_inputs.input_ids.size(1)):
-#         indirect_effect_matrix.append(
-#             [
-#                 indirect_effects[(layer_idx, token_idx)]
-#                 for layer_idx in range(mt.n_layer)
-#             ]
-#         )
-
-#     indirect_effect_matrix = torch.tensor(indirect_effect_matrix)
-#     if normalize:
-#         indirect_effect_matrix = (indirect_effect_matrix - corrupt_probability) / (
-#             base_probability - corrupt_probability
-#         )
-
-#     return CausalTracingResult(
-#         patch_input_toks=[
-#             mt.tokenizer.decode(tok) for tok in clean_inputs.input_ids[0]
-#         ],
-#         corrupt_input_toks=[
-#             mt.tokenizer.decode(tok) for tok in corrupt_inputs.input_ids[0]
-#         ],
-#         trace_start_idx=trace_start_idx,
-#         answer=answer,
-#         low_score=corrupt_probability,
-#         indirect_effects=indirect_effect_matrix,
-#         normalized=normalize,
-#         kind=kind,
-#         window=window_size,
-#     )
+    states = {
+        (layer_name_format.format(li), -1): src_states[li]
+        for li in layer_indices
+        if li in src_states
+    }
+    logits = patched_run(mt=mt, inputs=dest_inputs, states=states)
+    return get_score(logits=logits, token_id=target_token_ids, metric=metric)

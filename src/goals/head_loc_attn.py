@@ -35,8 +35,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 
-from src.functional import get_module_nnsight
-from src.goals.head_loc_data import HeadLocDataset, PredicatePair, PivotInstance
+from src.functional import free_gpu_cache, get_module_nnsight
+from src.goals.head_loc_data import HeadLocDataset, PivotInstance, PredicatePair
 from src.goals.head_loc_pivot import (
     build_cpp_prompt,
     build_python_prompt,
@@ -240,22 +240,30 @@ def cache_pivot_data(
     layers: list[int],
     include_docstring: bool = False,
     precompute_deltas: bool = True,
+    cache_batch_size: int = 64,
 ) -> list[PivotCache]:
     """Cache all data needed for mask training.
 
-    Builds all prompts first, then runs 2 or 3 batched forward passes:
+    Builds all prompts first, then runs forward passes in chunks of
+    ``cache_batch_size`` to bound peak GPU activation memory.
 
     **``precompute_deltas=True``** (default — fastest training, most memory):
-      - src + dest o_proj: 1 combined pass (N src and N dest prompts together so
-        they share sequence length, preventing positional leakage into the delta).
-      - target next-token probs: 1 pass.
+      - src + dest o_proj: chunked combined passes (src and dest in same chunk
+        so they share sequence length → no positional shift in the delta).
+      - target next-token probs: chunked pass.
       - CPU RAM: ~5 GB for N=100, Qwen-32B.
 
     **``precompute_deltas=False``** (memory-efficient — lazily recomputed in training):
-      - Only target next-token probs are cached now (1 pass).
+      - Only target next-token probs are cached (chunked).
       - ``src_prompt`` is stored; deltas are recomputed per batch per epoch inside
         ``train_head_mask`` (2 extra forward passes per optimizer step).
       - CPU RAM: negligible (only log_p_target per instance).
+
+    Args:
+        cache_batch_size: Max prompts per forward pass during caching.  Each
+            targ-prob chunk runs ``cache_batch_size`` prompts; each delta chunk
+            runs ``2 × cache_batch_size`` (src + dest interleaved).  Default 64
+            keeps peak GPU activation memory to ~8 GB on Qwen-32B (A100 safe).
     """
     src_prompts: list[str] = []
     dest_prompts: list[str] = []
@@ -273,34 +281,64 @@ def cache_pivot_data(
             if sample is None:
                 raise ValueError(f"Sample not found: {name!r}")
 
-        src_prompts.append(build_cpp_prompt(mt, src_sample, include_docstring=include_docstring))
+        src_prompts.append(
+            build_cpp_prompt(mt, src_sample, include_docstring=include_docstring)
+        )
         dest_prompts.append(
-            build_python_prompt(mt, dest_sample, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
+            build_python_prompt(
+                mt,
+                dest_sample,
+                pivot_prefix=pi.pivot_prefix,
+                include_docstring=include_docstring,
+            )
         )
         targ_prompts.append(
-            build_python_prompt(mt, targ_sample, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
+            build_python_prompt(
+                mt,
+                targ_sample,
+                pivot_prefix=pi.pivot_prefix,
+                include_docstring=include_docstring,
+            )
         )
 
     N = len(pivot_instances)
 
-    # Target next-token probs — always cached (cheap: one pass, small output)
     logger.info(
-        f"cache_pivot_data: {N} instances | precompute_deltas={precompute_deltas}"
+        f"cache_pivot_data: {N} instances | precompute_deltas={precompute_deltas} | "
+        f"cache_batch_size={cache_batch_size}"
     )
-    p_targ       = get_next_token_probs_batch(mt, targ_prompts)   # (N, vocab)
-    log_p_target = torch.log(p_targ.clamp(min=1e-10))             # (N, vocab)
 
-    # Per-head deltas — optionally precomputed
+    # Target next-token log-probs — always cached, processed in chunks.
+    log_p_chunks: list[torch.Tensor] = []
+    for i in range(0, N, cache_batch_size):
+        chunk = targ_prompts[i : i + cache_batch_size]
+        p = get_next_token_probs_batch(mt, chunk)  # (chunk, vocab) CPU
+        log_p_chunks.append(torch.log(p.clamp(min=1e-10)))
+        free_gpu_cache()
+        logger.debug(f"  targ probs: {min(i + cache_batch_size, N)}/{N}")
+    log_p_target = torch.cat(log_p_chunks, dim=0)  # (N, vocab) CPU float32
+
+    # Per-head deltas — optionally precomputed, also chunked.
     all_deltas: torch.Tensor | None = None
     if precompute_deltas:
-        # Combine src+dest into ONE batch so both are padded to the same sequence
-        # length → same absolute positions → no positional shift in the delta.
-        combined_o = get_o_proj_inputs_batch(
-            mt, src_prompts + dest_prompts, layers
-        )  # {layer: (2N, n_embd)}
-        src_o  = {layer: combined_o[layer][:N] for layer in layers}
-        dest_o = {layer: combined_o[layer][N:] for layer in layers}
-        all_deltas = precompute_per_head_deltas_batch(mt, src_o, dest_o, layers)  # (N, L, H, E)
+        delta_chunks: list[torch.Tensor] = []
+        for i in range(0, N, cache_batch_size):
+            src_chunk = src_prompts[i : i + cache_batch_size]
+            dest_chunk = dest_prompts[i : i + cache_batch_size]
+            B = len(src_chunk)
+            # Combine src+dest so they share sequence length → no positional shift.
+            combined_o = get_o_proj_inputs_batch(
+                mt, src_chunk + dest_chunk, layers
+            )  # {layer: (2B, n_embd)}
+            src_o = {layer: combined_o[layer][:B] for layer in layers}
+            dest_o = {layer: combined_o[layer][B:] for layer in layers}
+            delta_chunks.append(
+                precompute_per_head_deltas_batch(mt, src_o, dest_o, layers)
+            )  # (B, L, H, E)
+            del combined_o, src_o, dest_o
+            free_gpu_cache()
+            logger.debug(f"  deltas: {min(i + cache_batch_size, N)}/{N}")
+        all_deltas = torch.cat(delta_chunks, dim=0)  # (N, L, H, E)
         logger.info("cache_pivot_data: deltas precomputed and cached")
 
     caches: list[PivotCache] = []
@@ -384,15 +422,22 @@ def forward_with_masked_patch(
         # Weighted sum kept in float32 so gradients w.r.t. mask_vals are
         # computed at full precision — bfloat16 would corrupt them.
         delta_f32 = (
-            mask_vals[li].to(dev).view(1, -1, 1)      # float32, requires_grad
-            * batch_deltas[:, li].to(dev)              # float32 (precomputed CPU)
+            mask_vals[li].to(dev).view(1, -1, 1)  # float32, requires_grad
+            * batch_deltas[:, li].to(dev)  # float32 (precomputed CPU)
         ).sum(dim=1)  # (batch, n_embd) float32
 
-        # Cast to model dtype only for the residual addition
-        b, seq, embd = attn_out.shape
-        delta_3d = torch.zeros(b, seq, embd, device=dev, dtype=torch.float32)
-        delta_3d[:, -1, :] = delta_f32
-        new_attn_out = attn_out + delta_3d.to(dtype)
+        # Patch only the last token position.  Avoid allocating a full
+        # (batch, seq, n_embd) float32 tensor — that would keep ~97 MB per
+        # layer live in the autograd graph until backward() (~3 GB total for
+        # 34 layers at batch=16, seq=200, n_embd=5120).
+        # torch.cat preserves gradient flow: CatBackward routes the upstream
+        # gradient slice [:, -1:, :] back through new_last → delta_f32 → mask_vals.
+        new_last = attn_out[:, -1:, :] + delta_f32.to(dtype).unsqueeze(
+            1
+        )  # (batch, 1, n_embd)
+        new_attn_out = torch.cat(
+            [attn_out[:, :-1, :], new_last], dim=1
+        )  # (batch, seq, n_embd)
 
         return (new_attn_out,) + output[1:] if is_tuple else new_attn_out
 
@@ -428,6 +473,8 @@ def train_head_mask(
     lr: float = 1e-2,
     lambda_sparse: float = 1e-2,
     batch_size: int = 8,
+    checkpoint_dir: str | None = None,
+    checkpoint_every: int = 10,
 ) -> tuple[HeadMask, MaskTrainingHistory]:
     """Learn a sparse head mask via projected gradient descent.
 
@@ -477,19 +524,21 @@ def train_head_mask(
     # When lazy_deltas=True, src_prompts are stored per batch instead of stacked
     # delta tensors — deltas are recomputed on every optimizer step.
     batch_log_p_list = [
-        torch.stack([c.log_p_target for c in grp]) for grp in batch_groups  # (B, vocab) CPU
+        torch.stack([c.log_p_target for c in grp])
+        for grp in batch_groups  # (B, vocab) CPU
     ]
     if lazy_deltas:
-        batch_src_prompts_list  = [[c.src_prompt  for c in grp] for grp in batch_groups]
+        batch_src_prompts_list = [[c.src_prompt for c in grp] for grp in batch_groups]
         batch_dest_prompts_list = [[c.dest_prompt for c in grp] for grp in batch_groups]
     else:
         batch_inputs_list = [
-            prepare_input([c.dest_prompt for c in grp], tokenizer=mt) for grp in batch_groups
-        ]
-        batch_deltas_list = [
-            torch.stack([c.per_head_deltas for c in grp])  # (B, L, H, E) CPU
+            prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
             for grp in batch_groups
         ]
+        # Do NOT pre-stack deltas here: torch.stack would copy all N × (L, H, E)
+        # float32 tensors that already live in pivot_caches[*].per_head_deltas,
+        # doubling CPU RAM (~14 GB for N=512 on Qwen-32B).  Stack on-the-fly per
+        # batch inside the epoch loop instead (negligible cost: 16 tensors × 28 MB).
 
     logger.info(
         f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
@@ -508,18 +557,29 @@ def train_head_mask(
             if lazy_deltas:
                 # Recompute deltas for this batch: one combined forward pass so
                 # src and dest share the same sequence length (no positional shift).
-                src_ps  = batch_src_prompts_list[bi]
+                src_ps = batch_src_prompts_list[bi]
                 dest_ps = batch_dest_prompts_list[bi]
                 B = len(src_ps)
                 with torch.inference_mode():
                     combined_o = get_o_proj_inputs_batch(mt, src_ps + dest_ps, layers)
-                src_o_b  = {layer: combined_o[layer][:B] for layer in layers}
+                src_o_b = {layer: combined_o[layer][:B] for layer in layers}
                 dest_o_b = {layer: combined_o[layer][B:] for layer in layers}
-                batch_deltas = precompute_per_head_deltas_batch(mt, src_o_b, dest_o_b, layers)
+                batch_deltas = precompute_per_head_deltas_batch(
+                    mt, src_o_b, dest_o_b, layers
+                )
+                del (
+                    combined_o,
+                    src_o_b,
+                    dest_o_b,
+                )  # free CPU tensors before forward pass
+                free_gpu_cache()  # flush nnsight trace residuals before the grad pass
                 batch_inputs = prepare_input(dest_ps, tokenizer=mt)
             else:
                 batch_inputs = batch_inputs_list[bi]
-                batch_deltas = batch_deltas_list[bi]
+                # Stack on-the-fly — avoids the ~14 GB duplicate that pre-stacking would create.
+                batch_deltas = torch.stack(
+                    [c.per_head_deltas for c in batch_groups[bi]]
+                )  # (B, L, H, E) CPU float32
 
             optimizer.zero_grad()
 
@@ -548,6 +608,18 @@ def train_head_mask(
             epoch_sparse += loss_sparse.item()
             n_steps += 1
 
+            if logger.isEnabledFor(logging.DEBUG):
+                mem_alloc = {
+                    i: f"{torch.cuda.memory_allocated(i) / 1e9:.2f}GB"
+                    for i in range(torch.cuda.device_count())
+                }
+                logger.debug(
+                    f"  e{epoch + 1:03d} b{bi + 1:03d}/{len(batch_log_p_list)}"
+                    f"  KL={loss_kl.item():.4f}  sparse={loss_sparse.item():.4f}"
+                    f"  n_active={mask.n_active()}"
+                    f"  gpu_alloc={mem_alloc}"
+                )
+
         avg_kl = epoch_kl / n_steps
         avg_sparse = epoch_sparse / n_steps
         avg_total = avg_kl + avg_sparse
@@ -558,12 +630,38 @@ def train_head_mask(
         history.loss_total.append(avg_total)
         history.n_active.append(n_act)
 
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            logger.info(
-                f"  Epoch {epoch + 1:3d}/{n_epochs}: "
-                f"KL={avg_kl:.4f}  sparse={avg_sparse:.4f}  "
-                f"total={avg_total:.4f}  n_active={n_act}"
+        free_gpu_cache()
+
+        logger.debug("-" * 100)
+        logger.info(
+            f"  Epoch {epoch + 1:3d}/{n_epochs}: "
+            f"KL={avg_kl:.4f}  sparse={avg_sparse:.4f}  "
+            f"total={avg_total:.4f}  n_active={n_act}"
+        )
+        logger.debug("-" * 100)
+
+        if checkpoint_dir is not None and (epoch + 1) % checkpoint_every == 0:
+            import os
+
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            ckpt_path = os.path.join(
+                checkpoint_dir, f"checkpoint_epoch_{epoch + 1:04d}.pt"
             )
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "mask_values": mask.values.detach().cpu(),
+                    "layers": layers,
+                    "history": {
+                        "loss_causal": history.loss_causal,
+                        "loss_sparse": history.loss_sparse,
+                        "loss_total": history.loss_total,
+                        "n_active": history.n_active,
+                    },
+                },
+                ckpt_path,
+            )
+            logger.info(f"  Checkpoint saved → {ckpt_path}")
 
     selected = mask.selected_heads(layers)
     logger.info(f"train_head_mask done: {len(selected)} active heads → {selected}")

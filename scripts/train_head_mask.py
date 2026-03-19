@@ -92,6 +92,21 @@ def main() -> None:
             "2 extra forward passes per optimizer step per epoch)"
         ),
     )
+    parser.add_argument(
+        "--cache-batch-size",
+        type=int,
+        default=64,
+        help=(
+            "Max prompts per forward pass during caching (default: 64). "
+            "Lower this if cache_pivot_data OOMs (e.g. --cache-batch-size 32)."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=5,
+        help="Save a mask checkpoint every K epochs (default: 10). 0 = disabled.",
+    )
     add_logging_args(parser)
     args = parser.parse_args()
     configure(args)
@@ -100,12 +115,16 @@ def main() -> None:
     layers = list(range(args.layers_start, args.layers_end))
 
     logger.info(f"model:         {args.model_key}")
-    logger.info(f"layers:        {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)")
+    logger.info(
+        f"layers:        {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)"
+    )
     logger.info(f"n_epochs:      {args.n_epochs}")
     logger.info(f"lr:            {args.lr}")
     logger.info(f"lambda_sparse: {args.lambda_sparse}")
     logger.info(f"batch_size:    {args.batch_size}")
     logger.info(f"lazy_deltas:   {args.lazy_deltas}")
+    logger.info(f"cache_batch_size: {args.cache_batch_size}")
+    logger.info(f"checkpoint_every: {args.checkpoint_every}")
 
     # ------------------------------------------------------------------
     # Load dataset
@@ -150,12 +169,16 @@ def main() -> None:
         ds,
         layers=layers,
         precompute_deltas=not args.lazy_deltas,
+        cache_batch_size=args.cache_batch_size,
     )
 
     # ------------------------------------------------------------------
     # Train head mask
     # ------------------------------------------------------------------
     logger.info("=== Training head mask ===")
+    checkpoint_dir = os.path.join(
+        DEFAULT_RESULTS_DIR, "localization", model_short_name, "checkpoints"
+    )
     mask, history = train_head_mask(
         mt,
         pivot_caches,
@@ -164,6 +187,8 @@ def main() -> None:
         lr=args.lr,
         lambda_sparse=args.lambda_sparse,
         batch_size=args.batch_size,
+        checkpoint_dir=checkpoint_dir if args.checkpoint_every > 0 else None,
+        checkpoint_every=args.checkpoint_every,
     )
 
     # ------------------------------------------------------------------
