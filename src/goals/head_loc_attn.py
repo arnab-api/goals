@@ -13,6 +13,7 @@ Pipeline:
     2. Precompute per-head analytical deltas: W_o_h @ (src_h - dest_h).
     3. Train mask: differentiable patched forward pass via baukit eager hooks.
        attn_out[l][:,-1,:] += Σ_h mask[l,h] * delta[l,h]
+       Sparsity: lambda * mean(mask) — scale-invariant to number of layers tested.
     4. Post-training threshold (mask > 0.5) → selected heads.
 
 Mask parameterization (from paper):
@@ -39,7 +40,7 @@ from src.goals.head_loc_data import HeadLocDataset, PredicatePair, PivotInstance
 from src.goals.head_loc_pivot import (
     build_cpp_prompt,
     build_python_prompt,
-    get_next_token_probs,
+    get_next_token_probs_batch,
 )
 from src.tokens import prepare_input
 
@@ -103,6 +104,30 @@ def _get_o_proj_weight(mt, layer: int) -> torch.Tensor:
 
 
 @torch.inference_mode()
+def get_o_proj_inputs_batch(
+    mt, prompts: list[str], layers: list[int]
+) -> dict[int, torch.Tensor]:
+    """Extract o_proj input at last token for each layer, for a batch of prompts.
+
+    Left-padding (from prepare_input) ensures ``[:, -1, :]`` is the last real
+    token for every sequence in the batch.
+
+    Returns:
+        ``{layer: (batch, n_embd) float32 CPU tensor}``
+    """
+    inputs = prepare_input(prompts=prompts, tokenizer=mt)
+    saves: dict[int, Any] = {}
+
+    with mt.trace(inputs, scan=False, validate=False):
+        for layer in layers:
+            attn_name = mt.attn_module_name_format.format(layer)
+            o_proj = get_module_nnsight(mt, attn_name + ".o_proj")
+            saves[layer] = o_proj.input[:, -1, :].save()  # (batch, n_embd)
+
+    return {layer: saves[layer].float().cpu() for layer in layers}
+
+
+@torch.inference_mode()
 def get_o_proj_inputs(mt, prompt: str, layers: list[int]) -> dict[int, torch.Tensor]:
     """Extract o_proj input at last token for each layer in a single trace.
 
@@ -119,6 +144,40 @@ def get_o_proj_inputs(mt, prompt: str, layers: list[int]) -> dict[int, torch.Ten
             saves[layer] = o_proj.input[0, -1, :].save()
 
     return {layer: saves[layer].float().cpu() for layer in layers}
+
+
+@torch.no_grad()
+def precompute_per_head_deltas_batch(
+    mt,
+    src_o_proj_inputs: dict[int, torch.Tensor],
+    dest_o_proj_inputs: dict[int, torch.Tensor],
+    layers: list[int],
+) -> torch.Tensor:
+    """Compute per-head deltas for a batch of (src, dest) pairs.
+
+    Args:
+        src_o_proj_inputs:  ``{layer: (batch, n_embd)}`` from get_o_proj_inputs_batch.
+        dest_o_proj_inputs: ``{layer: (batch, n_embd)}`` from get_o_proj_inputs_batch.
+        layers: Layer indices.
+
+    Returns:
+        Float32 CPU tensor of shape ``(batch, n_layers_tested, n_heads, n_embd)``.
+    """
+    n_heads = mt.model.config.num_attention_heads
+    head_dim = mt.n_embd // n_heads
+    batch = src_o_proj_inputs[layers[0]].shape[0]
+
+    deltas = torch.zeros(batch, len(layers), n_heads, mt.n_embd)
+
+    for li, layer in enumerate(layers):
+        W_o = _get_o_proj_weight(mt, layer)  # (n_embd, n_embd)
+        diff = src_o_proj_inputs[layer] - dest_o_proj_inputs[layer]  # (batch, n_embd)
+        for h in range(n_heads):
+            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]  # (n_embd, head_dim)
+            diff_h = diff[:, h * head_dim : (h + 1) * head_dim]  # (batch, head_dim)
+            deltas[:, li, h] = diff_h @ W_o_h.T  # (batch, n_embd)
+
+    return deltas
 
 
 @torch.no_grad()
@@ -158,12 +217,19 @@ def precompute_per_head_deltas(
 
 @dataclass
 class PivotCache:
-    """Pre-computed tensors for one PivotInstance.  Cached once, reused every epoch."""
+    """Pre-computed tensors for one PivotInstance.  Cached once, reused every epoch.
+
+    ``per_head_deltas`` may be ``None`` when ``cache_pivot_data`` is called with
+    ``precompute_deltas=False``.  In that case ``src_prompt`` is populated and
+    ``train_head_mask`` recomputes deltas lazily per batch (saves ~5 GB CPU RAM
+    for N=100, at the cost of 2 extra forward passes per optimizer step per epoch).
+    """
 
     pivot_instance: PivotInstance
-    dest_inputs: Any  # TokenizerOutput for the dest prompt
+    dest_prompt: str  # raw string — batched with src_prompt for o_proj extraction
     log_p_target: torch.Tensor  # (vocab_size,) float32 CPU — log of target dist
-    per_head_deltas: torch.Tensor  # (n_layers_tested, n_heads, n_embd) float32 CPU
+    per_head_deltas: torch.Tensor | None  # (n_layers_tested, n_heads, n_embd) or None
+    src_prompt: str | None = None  # populated when precompute_deltas=False
 
 
 @torch.inference_mode()
@@ -173,21 +239,29 @@ def cache_pivot_data(
     ds: HeadLocDataset,
     layers: list[int],
     include_docstring: bool = False,
+    precompute_deltas: bool = True,
 ) -> list[PivotCache]:
     """Cache all data needed for mask training.
 
-    Heavy upfront cost (2 forward passes per instance); training steps are then
-    cheap (one patched forward pass + backward through the mask only).
+    Builds all prompts first, then runs 2 or 3 batched forward passes:
+
+    **``precompute_deltas=True``** (default — fastest training, most memory):
+      - src + dest o_proj: 1 combined pass (N src and N dest prompts together so
+        they share sequence length, preventing positional leakage into the delta).
+      - target next-token probs: 1 pass.
+      - CPU RAM: ~5 GB for N=100, Qwen-32B.
+
+    **``precompute_deltas=False``** (memory-efficient — lazily recomputed in training):
+      - Only target next-token probs are cached now (1 pass).
+      - ``src_prompt`` is stored; deltas are recomputed per batch per epoch inside
+        ``train_head_mask`` (2 extra forward passes per optimizer step).
+      - CPU RAM: negligible (only log_p_target per instance).
     """
-    caches: list[PivotCache] = []
+    src_prompts: list[str] = []
+    dest_prompts: list[str] = []
+    targ_prompts: list[str] = []
 
-    for i, (pair, pi) in enumerate(pivot_instances):
-        logger.info(
-            f"  Caching {i + 1}/{len(pivot_instances)}: "
-            f"{pair.destination_predicate} ← {pair.source_predicate} "
-            f"prefix={pi.pivot_prefix!r}"
-        )
-
+    for pair, pi in pivot_instances:
         src_sample = ds.get_sample(pair.source_predicate)
         dest_sample = ds.get_sample(pair.destination_predicate)
         targ_sample = ds.get_sample(pair.source_predicate)  # target == source
@@ -199,39 +273,50 @@ def cache_pivot_data(
             if sample is None:
                 raise ValueError(f"Sample not found: {name!r}")
 
-        src_prompt = build_cpp_prompt(
-            mt, src_sample, include_docstring=include_docstring
+        src_prompts.append(build_cpp_prompt(mt, src_sample, include_docstring=include_docstring))
+        dest_prompts.append(
+            build_python_prompt(mt, dest_sample, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
         )
-        dest_prompt = build_python_prompt(
-            mt,
-            dest_sample,
-            pivot_prefix=pi.pivot_prefix,
-            include_docstring=include_docstring,
-        )
-        targ_prompt = build_python_prompt(
-            mt,
-            targ_sample,
-            pivot_prefix=pi.pivot_prefix,
-            include_docstring=include_docstring,
+        targ_prompts.append(
+            build_python_prompt(mt, targ_sample, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
         )
 
-        src_o_proj = get_o_proj_inputs(mt, src_prompt, layers)
-        dest_o_proj = get_o_proj_inputs(mt, dest_prompt, layers)
-        per_head_deltas = precompute_per_head_deltas(
-            mt, src_o_proj, dest_o_proj, layers
+    N = len(pivot_instances)
+
+    # Target next-token probs — always cached (cheap: one pass, small output)
+    logger.info(
+        f"cache_pivot_data: {N} instances | precompute_deltas={precompute_deltas}"
+    )
+    p_targ       = get_next_token_probs_batch(mt, targ_prompts)   # (N, vocab)
+    log_p_target = torch.log(p_targ.clamp(min=1e-10))             # (N, vocab)
+
+    # Per-head deltas — optionally precomputed
+    all_deltas: torch.Tensor | None = None
+    if precompute_deltas:
+        # Combine src+dest into ONE batch so both are padded to the same sequence
+        # length → same absolute positions → no positional shift in the delta.
+        combined_o = get_o_proj_inputs_batch(
+            mt, src_prompts + dest_prompts, layers
+        )  # {layer: (2N, n_embd)}
+        src_o  = {layer: combined_o[layer][:N] for layer in layers}
+        dest_o = {layer: combined_o[layer][N:] for layer in layers}
+        all_deltas = precompute_per_head_deltas_batch(mt, src_o, dest_o, layers)  # (N, L, H, E)
+        logger.info("cache_pivot_data: deltas precomputed and cached")
+
+    caches: list[PivotCache] = []
+    for i, (pair, pi) in enumerate(pivot_instances):
+        logger.debug(
+            f"  Building cache {i + 1}/{N}: "
+            f"{pair.destination_predicate} ← {pair.source_predicate} "
+            f"prefix={pi.pivot_prefix!r}"
         )
-
-        p_target = get_next_token_probs(mt, targ_prompt)
-        log_p_target = torch.log(p_target.clamp(min=1e-10))
-
-        dest_inputs = prepare_input(prompts=[dest_prompt], tokenizer=mt)
-
         caches.append(
             PivotCache(
                 pivot_instance=pi,
-                dest_inputs=dest_inputs,
-                log_p_target=log_p_target,
-                per_head_deltas=per_head_deltas,
+                dest_prompt=dest_prompts[i],
+                log_p_target=log_p_target[i],
+                per_head_deltas=all_deltas[i] if all_deltas is not None else None,
+                src_prompt=src_prompts[i] if not precompute_deltas else None,
             )
         )
 
@@ -254,42 +339,60 @@ def forward_with_masked_patch(
     """Run dest_inputs with mask-weighted head patching via baukit eager hooks.
 
     For each layer l (index li in layers):
-        attn_out[l][:, -1, :] += Σ_h mask.values[li, h] * per_head_deltas[li, h]
+        attn_out[l][:, -1, :] += Σ_h mask.values[li, h] * per_head_deltas[:, li, h]
 
     Differentiable w.r.t. mask.values — gradients flow through the linear
     combination of precomputed deltas.
 
     Args:
         mt: ModelandTokenizer (frozen).
-        dest_inputs: Tokenized destination prompt.
-        per_head_deltas: (n_layers_tested, n_heads, n_embd) float32 CPU.
+        dest_inputs: Tokenized destination prompt(s).
+        per_head_deltas: Either:
+            - 3D ``(n_layers_tested, n_heads, n_embd)`` for a single instance →
+              returns ``(vocab_size,)`` logits (backward-compatible).
+            - 4D ``(batch, n_layers_tested, n_heads, n_embd)`` for a batch →
+              returns ``(batch, vocab_size)`` logits.
         mask: HeadMask with learnable values (requires_grad=True).
-        layers: Layer indices corresponding to per_head_deltas axis 0.
+        layers: Layer indices corresponding to per_head_deltas axis -3.
 
     Returns:
-        (vocab_size,) float32 logits, differentiable w.r.t. mask.values.
+        ``(vocab_size,)`` float32 logits for 3D input (single instance), or
+        ``(batch, vocab_size)`` float32 logits for 4D input (batch).
+        Always differentiable w.r.t. mask.values.
     """
-    device = mt.device
+    # Normalise to 4D; remember whether we need to squeeze the output
+    if per_head_deltas.dim() == 3:
+        per_head_deltas = per_head_deltas.unsqueeze(0)  # (1, L, H, E)
+        squeeze_output = True
+    else:
+        squeeze_output = False
+
     attn_names = [mt.attn_module_name_format.format(layer) for layer in layers]
     layer_to_li = {name: li for li, name in enumerate(attn_names)}
     mask_vals = mask.values  # (n_layers_tested, n_heads)
-    deltas = per_head_deltas.to(device)  # (n_layers_tested, n_heads, n_embd)
+    batch_deltas = per_head_deltas  # (batch, n_layers_tested, n_heads, n_embd) — CPU
 
     def edit_fn(output, layer_name):
         li = layer_to_li[layer_name]
         is_tuple = isinstance(output, tuple)
         attn_out = output[0] if is_tuple else output  # (batch, seq, n_embd)
-        device = attn_out.device
+        dev = attn_out.device
         dtype = attn_out.dtype
 
-        # (n_heads,) @ (n_heads, n_embd) = (n_embd,) — differentiable w.r.t. mask_vals
-        delta = mask_vals[li].to(dtype).to(device) @ deltas[li].to(dtype).to(device)
+        # mask_vals[li]: (n_heads,)
+        # batch_deltas[:, li]: (batch, n_heads, n_embd)
+        # Weighted sum kept in float32 so gradients w.r.t. mask_vals are
+        # computed at full precision — bfloat16 would corrupt them.
+        delta_f32 = (
+            mask_vals[li].to(dev).view(1, -1, 1)      # float32, requires_grad
+            * batch_deltas[:, li].to(dev)              # float32 (precomputed CPU)
+        ).sum(dim=1)  # (batch, n_embd) float32
 
-        # Non-in-place addition at last token position only
-        batch, seq, _ = attn_out.shape
-        last_pos = torch.zeros(batch, seq, 1, device=device, dtype=dtype)
-        last_pos[:, -1, :] = 1.0
-        new_attn_out = attn_out + last_pos * delta.to(attn_out.dtype).view(1, 1, -1)
+        # Cast to model dtype only for the residual addition
+        b, seq, embd = attn_out.shape
+        delta_3d = torch.zeros(b, seq, embd, device=dev, dtype=torch.float32)
+        delta_3d[:, -1, :] = delta_f32
+        new_attn_out = attn_out + delta_3d.to(dtype)
 
         return (new_attn_out,) + output[1:] if is_tuple else new_attn_out
 
@@ -300,7 +403,8 @@ def forward_with_masked_patch(
     ):
         output = mt._model(**dest_inputs)
 
-    return output.logits[0, -1, :].float()
+    logits = output.logits[:, -1, :].float()  # (batch, vocab)
+    return logits[0] if squeeze_output else logits
 
 
 # ---------------------------------------------------------------------------
@@ -323,14 +427,24 @@ def train_head_mask(
     n_epochs: int = 20,
     lr: float = 1e-2,
     lambda_sparse: float = 1e-2,
+    batch_size: int = 8,
 ) -> tuple[HeadMask, MaskTrainingHistory]:
     """Learn a sparse head mask via projected gradient descent.
 
     Objective:
-        L = KL(P_patched ∥ P_target) + lambda_sparse * Σ mask.values
+        L = KL(P_patched ∥ P_target) + lambda_sparse * mean(mask.values)
 
     KL direction: KL(P_patched ∥ P_target) = Σ P_patched * log(P_patched/P_target)
     — pushes the patched destination distribution toward the Python target.
+
+    Instances are processed in batches of ``batch_size`` per optimizer step
+    (``reduction="batchmean"`` keeps the KL loss scale consistent with the old
+    per-instance ``reduction="sum"`` regardless of batch size).
+
+    If ``pivot_caches[0].per_head_deltas is None`` (i.e., ``cache_pivot_data`` was
+    called with ``precompute_deltas=False``), deltas are recomputed lazily per batch
+    per epoch using one combined src+dest forward pass — same positional alignment
+    as the eager path, at the cost of extra compute.
 
     Args:
         mt: ModelandTokenizer (frozen — only mask params are updated).
@@ -339,12 +453,14 @@ def train_head_mask(
         n_epochs: Training epochs (default 20, from paper).
         lr: AdamW learning rate (default 1e-2, from paper).
         lambda_sparse: L1 sparsity coefficient (default 1e-2, from paper).
+        batch_size: Instances per optimizer step (default 8).
 
     Returns:
         (trained HeadMask, MaskTrainingHistory)
     """
     n_layers_tested = len(layers)
     n_heads = mt.model.config.num_attention_heads
+    N = len(pivot_caches)
 
     mask = HeadMask(n_layers_tested, n_heads)
     optimizer = AdamW(mask.parameters(), lr=lr)
@@ -354,37 +470,74 @@ def train_head_mask(
     for param in mt._model.parameters():
         param.requires_grad_(False)
 
+    lazy_deltas = pivot_caches[0].per_head_deltas is None
+    batch_groups = [pivot_caches[i : i + batch_size] for i in range(0, N, batch_size)]
+
+    # Pre-build everything that is cheap to cache outside the epoch loop.
+    # When lazy_deltas=True, src_prompts are stored per batch instead of stacked
+    # delta tensors — deltas are recomputed on every optimizer step.
+    batch_log_p_list = [
+        torch.stack([c.log_p_target for c in grp]) for grp in batch_groups  # (B, vocab) CPU
+    ]
+    if lazy_deltas:
+        batch_src_prompts_list  = [[c.src_prompt  for c in grp] for grp in batch_groups]
+        batch_dest_prompts_list = [[c.dest_prompt for c in grp] for grp in batch_groups]
+    else:
+        batch_inputs_list = [
+            prepare_input([c.dest_prompt for c in grp], tokenizer=mt) for grp in batch_groups
+        ]
+        batch_deltas_list = [
+            torch.stack([c.per_head_deltas for c in grp])  # (B, L, H, E) CPU
+            for grp in batch_groups
+        ]
+
     logger.info(
         f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
         f"{n_layers_tested * n_heads} mask params | "
-        f"{len(pivot_caches)} instances | {n_epochs} epochs | "
-        f"lr={lr} λ={lambda_sparse}"
+        f"{N} instances | batch_size={batch_size} ({len(batch_groups)} batches/epoch) | "
+        f"{n_epochs} epochs | lr={lr} λ={lambda_sparse} | "
+        f"lazy_deltas={lazy_deltas}"
     )
 
     for epoch in range(n_epochs):
         epoch_kl = 0.0
         epoch_sparse = 0.0
+        n_steps = 0
 
-        for cache in pivot_caches:
+        for bi, batch_log_p in enumerate(batch_log_p_list):
+            if lazy_deltas:
+                # Recompute deltas for this batch: one combined forward pass so
+                # src and dest share the same sequence length (no positional shift).
+                src_ps  = batch_src_prompts_list[bi]
+                dest_ps = batch_dest_prompts_list[bi]
+                B = len(src_ps)
+                with torch.inference_mode():
+                    combined_o = get_o_proj_inputs_batch(mt, src_ps + dest_ps, layers)
+                src_o_b  = {layer: combined_o[layer][:B] for layer in layers}
+                dest_o_b = {layer: combined_o[layer][B:] for layer in layers}
+                batch_deltas = precompute_per_head_deltas_batch(mt, src_o_b, dest_o_b, layers)
+                batch_inputs = prepare_input(dest_ps, tokenizer=mt)
+            else:
+                batch_inputs = batch_inputs_list[bi]
+                batch_deltas = batch_deltas_list[bi]
+
             optimizer.zero_grad()
 
             logits = forward_with_masked_patch(
-                mt, cache.dest_inputs, cache.per_head_deltas, mask, layers
-            )
+                mt, batch_inputs, batch_deltas, mask, layers
+            )  # (B, vocab)
 
-            # KL(P_patched ∥ P_target):
-            # F.kl_div(log_p_target, log_p_patched, log_target=True)
-            # = Σ exp(log_p_patched) * (log_p_patched - log_p_target)
-            # = Σ p_patched * log(p_patched / p_target)  ✓
+            # KL(P_patched ∥ P_target) — batchmean: sum over vocab / batch_size
+            # Consistent loss scale with old per-instance reduction="sum"
             log_p_patched = F.log_softmax(logits, dim=-1)
             loss_kl = F.kl_div(
-                cache.log_p_target.to(logits.device),
+                batch_log_p.to(logits.device),
                 log_p_patched,
-                reduction="sum",
+                reduction="batchmean",
                 log_target=True,
             )
 
-            loss_sparse = lambda_sparse * mask.values.sum()
+            loss_sparse = lambda_sparse * mask.values.mean()
             loss = loss_kl + loss_sparse
 
             loss.backward()
@@ -393,10 +546,10 @@ def train_head_mask(
 
             epoch_kl += loss_kl.item()
             epoch_sparse += loss_sparse.item()
+            n_steps += 1
 
-        n = len(pivot_caches)
-        avg_kl = epoch_kl / n
-        avg_sparse = epoch_sparse / n
+        avg_kl = epoch_kl / n_steps
+        avg_sparse = epoch_sparse / n_steps
         avg_total = avg_kl + avg_sparse
         n_act = mask.n_active()
 

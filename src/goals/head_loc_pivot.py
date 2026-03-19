@@ -143,6 +143,25 @@ def get_next_token_probs(mt, prompt: str) -> torch.Tensor:
     return torch.softmax(logits.float(), dim=-1).cpu()
 
 
+@torch.inference_mode()
+def get_next_token_probs_batch(mt, prompts: list[str]) -> torch.Tensor:
+    """Return softmax probabilities for the next token after each prompt.
+
+    Args:
+        mt: ModelandTokenizer instance.
+        prompts: List of prompt strings.
+
+    Returns:
+        Float32 CPU tensor of shape ``(batch, vocab_size)`` with probabilities
+        summing to 1 along dim=-1.  Left-padding ensures ``[:, -1, :]`` is the
+        last real token for every sequence.
+    """
+    inputs = prepare_input(prompts=prompts, tokenizer=mt)
+    with mt.trace(inputs, scan=False, validate=False):
+        logits = mt.lm_head.output[:, -1, :].save()  # (batch, vocab)
+    return torch.softmax(logits.float(), dim=-1).cpu()
+
+
 def get_top_token(mt, probs: torch.Tensor) -> str:
     """Decode the argmax token from a probability distribution.
 
