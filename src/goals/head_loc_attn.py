@@ -26,6 +26,7 @@ Mask parameterization (from paper):
 from __future__ import annotations
 
 import logging
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,7 +38,7 @@ from torch.optim import AdamW
 
 from src.functional import free_gpu_cache, get_module_nnsight
 from src.goals.head_loc_augment import augment_pair, augment_source
-from src.goals.augment import _VAR_VOCAB
+from src.goals.augment import _VAR_VOCAB, adapt_text_var
 from src.goals.head_loc_data import HeadLocDataset, PivotInstance, PredicatePair
 from src.goals.head_loc_pivot import (
     build_cpp_prompt,
@@ -387,11 +388,13 @@ def augment_pivot_caches(
         target.  The C++ src is also toggled (Python-side only).  Never touches
         the ``return <pivot_prefix>`` line, so the pivot position is unchanged.
 
-    ``variable_rename`` (pivot_prefix == "" only)
+    ``variable_rename``
         Renames the variable throughout src, dest, and target using the same new
-        name, so the pivot prefix tokens stay identical across dest and target.
-        Skipped for non-empty pivot prefixes because the prefix may contain the
-        old variable name.
+        name.  The pivot_prefix string is also rewritten via word-boundary regex
+        (``adapt_text_var``), which handles the common cases where the variable
+        appears in the prefix: ``n % 2``, ``lst[0]``, ``timeout > 0``, etc.
+        Skipped silently if the variable name does not appear in the prefix at all
+        (i.e., the rename is a no-op on the prefix — still applied to the code).
 
     The returned caches always have ``per_head_deltas`` precomputed (not lazy),
     regardless of whether the originals are lazy.  If you mix augmented caches
@@ -434,41 +437,46 @@ def augment_pivot_caches(
             )
             continue
 
-        def _add(aug_src, aug_dest, aug_targ):
+        def _add(aug_src, aug_dest, aug_targ, pivot_prefix: str):
             aug_src_prompts.append(
                 build_cpp_prompt(mt, aug_src, include_docstring=include_docstring)
             )
             aug_dest_prompts.append(
                 build_python_prompt(
-                    mt, aug_dest, pivot_prefix=pi.pivot_prefix,
+                    mt, aug_dest, pivot_prefix=pivot_prefix,
                     include_docstring=include_docstring,
                 )
             )
             aug_targ_prompts.append(
                 build_python_prompt(
-                    mt, aug_targ, pivot_prefix=pi.pivot_prefix,
+                    mt, aug_targ, pivot_prefix=pivot_prefix,
                     include_docstring=include_docstring,
                 )
             )
-            aug_pis.append(pi)
+            aug_pis.append(
+                dataclasses.replace(pi, pivot_prefix=pivot_prefix)
+                if pivot_prefix != pi.pivot_prefix
+                else pi
+            )
 
-        # 1. toggle_type_hints — always safe (only changes the def line)
+        # 1. toggle_type_hints — always safe (only changes the def line, not the prefix)
         aug_dest_th, aug_targ_th = augment_pair(dest_sample, targ_sample, "toggle_type_hints")
         aug_src_th = augment_source(src_sample, "toggle_type_hints")
-        _add(aug_src_th, aug_dest_th, aug_targ_th)
+        _add(aug_src_th, aug_dest_th, aug_targ_th, pi.pivot_prefix)
 
-        # 2. variable_rename — only safe when pivot_prefix is empty
-        if pi.pivot_prefix == "":
-            old_var = dest_sample.variable_name
-            for new_var in _VAR_VOCAB.get(old_var, [])[:3]:
-                if new_var == old_var:
-                    continue
-                cfg = {"new_var": new_var}
-                aug_dest_v, aug_targ_v = augment_pair(
-                    dest_sample, targ_sample, "variable_rename", cfg
-                )
-                aug_src_v = augment_source(src_sample, "variable_rename", cfg)
-                _add(aug_src_v, aug_dest_v, aug_targ_v)
+        # 2. variable_rename — apply adapt_text_var to pivot_prefix as well
+        #    Uses \b word-boundary regex, handles: "n % 2", "lst[0]", "timeout > 0", ...
+        old_var = dest_sample.variable_name
+        for new_var in _VAR_VOCAB.get(old_var, [])[:3]:
+            if new_var == old_var:
+                continue
+            cfg = {"new_var": new_var}
+            aug_dest_v, aug_targ_v = augment_pair(
+                dest_sample, targ_sample, "variable_rename", cfg
+            )
+            aug_src_v = augment_source(src_sample, "variable_rename", cfg)
+            aug_prefix = adapt_text_var(pi.pivot_prefix, old_var, new_var)
+            _add(aug_src_v, aug_dest_v, aug_targ_v, aug_prefix)
 
     N = len(aug_src_prompts)
     if N == 0:
@@ -494,8 +502,8 @@ def augment_pivot_caches(
         dest_chunk = aug_dest_prompts[i : i + cache_batch_size]
         B = len(src_chunk)
         combined_o = get_o_proj_inputs_batch(mt, src_chunk + dest_chunk, layers)
-        src_o  = {l: combined_o[l][:B] for l in layers}
-        dest_o = {l: combined_o[l][B:] for l in layers}
+        src_o  = {ly: combined_o[ly][:B] for ly in layers}
+        dest_o = {ly: combined_o[ly][B:] for ly in layers}
         delta_chunks.append(precompute_per_head_deltas_batch(mt, src_o, dest_o, layers))
         del combined_o, src_o, dest_o
         free_gpu_cache()
