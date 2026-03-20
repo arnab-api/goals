@@ -25,8 +25,9 @@ Mask parameterization (from paper):
 
 from __future__ import annotations
 
-import logging
 import dataclasses
+import logging
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,12 +43,34 @@ from src.goals.augment import _VAR_VOCAB, adapt_text_var
 from src.goals.head_loc_data import HeadLocDataset, PivotInstance, PredicatePair
 from src.goals.head_loc_pivot import (
     build_cpp_prompt,
+    build_haskell_prompt,
+    build_java_prompt,
+    build_prolog_prompt,
     build_python_prompt,
+    build_rust_prompt,
     get_next_token_probs_batch,
 )
 from src.tokens import prepare_input
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Augmentation constants
+# ---------------------------------------------------------------------------
+
+# Source language builders (excluding Python, which is always the destination).
+# "cpp" is the original — alts are the other four.
+_SOURCE_LANG_BUILDERS: dict[str, Any] = {
+    "cpp":     build_cpp_prompt,
+    "java":    build_java_prompt,
+    "rust":    build_rust_prompt,
+    "haskell": build_haskell_prompt,
+    "prolog":  build_prolog_prompt,
+}
+_SOURCE_LANG_ALTS = [k for k in _SOURCE_LANG_BUILDERS if k != "cpp"]
+
+_AUG_TYPES   = ["toggle_type_hints", "variable_rename", "source_lang"]
+_AUG_WEIGHTS = [0.10, 0.35, 0.55]
 
 
 # ---------------------------------------------------------------------------
@@ -371,61 +394,71 @@ def augment_pivot_caches(
     pivot_caches: list[PivotCache],
     pivot_instances: list[tuple[PredicatePair, PivotInstance]],
     ds: HeadLocDataset,
-    layers: list[int],
     include_docstring: bool = False,
     cache_batch_size: int = 64,
+    rng: random.Random | None = None,
 ) -> list[PivotCache]:
-    """Generate semantics-preserving augmented variants of existing pivot caches.
+    """Return one randomly-augmented PivotCache per input cache (1× expansion).
 
-    Applies surface-form augmentations that are guaranteed not to change the pivot
-    position or invalidate the target token, then recomputes prompts, log_p_target,
-    and per_head_deltas for each variant.
+    For each instance one augmentation type is sampled from
+    ``["toggle_type_hints", "variable_rename", "source_lang"]`` with weights
+    ``[0.10, 0.35, 0.55]``.
 
-    Safe augmentations applied:
+    ``"source_lang"`` (55%)
+        Replaces the C++ source prompt with a randomly chosen alternative
+        language (Java, Rust, Haskell, or Prolog).  Only ``src_prompt``
+        changes — ``dest_prompt`` and ``log_p_target`` are reused from the
+        original cache unchanged.
 
-    ``toggle_type_hints`` (all instances)
-        Strips parameter type annotations from the Python ``def`` line of dest and
-        target.  The C++ src is also toggled (Python-side only).  Never touches
-        the ``return <pivot_prefix>`` line, so the pivot position is unchanged.
+    ``"variable_rename"`` (35%)
+        Renames the variable to a random alternative from ``_VAR_VOCAB``.
+        Updates ``src_prompt``, ``dest_prompt``, the pivot_prefix in
+        ``PivotInstance``, and recomputes ``log_p_target``.  Falls back to
+        ``"source_lang"`` if the variable has no alternatives in ``_VAR_VOCAB``.
 
-    ``variable_rename``
-        Renames the variable throughout src, dest, and target using the same new
-        name.  The pivot_prefix string is also rewritten via word-boundary regex
-        (``adapt_text_var``), which handles the common cases where the variable
-        appears in the prefix: ``n % 2``, ``lst[0]``, ``timeout > 0``, etc.
-        Skipped silently if the variable name does not appear in the prefix at all
-        (i.e., the rename is a no-op on the prefix — still applied to the code).
+    ``"toggle_type_hints"`` (10%)
+        Strips Python param type annotations from the ``def`` line of both
+        dest and target.  Updates ``src_prompt``, ``dest_prompt``, and
+        recomputes ``log_p_target``.
 
-    The returned caches always have ``per_head_deltas`` precomputed (not lazy),
-    regardless of whether the originals are lazy.  If you mix augmented caches
-    with lazy originals in ``train_head_mask``, convert all originals to eager
-    first by re-running ``cache_pivot_data`` with ``precompute_deltas=True``.
+    The input ``pivot_caches`` is **never mutated**.  Returned caches are
+    always lazy (``per_head_deltas=None``, ``src_prompt`` populated) so they
+    work directly with the lazy-delta path in ``train_head_mask``.
 
     Args:
         mt: ModelandTokenizer (frozen).
-        pivot_caches: Original caches from ``cache_pivot_data()``.
+        pivot_caches: Original caches — read-only.
         pivot_instances: Corresponding ``(PredicatePair, PivotInstance)`` list;
-            must have the same length and order as ``pivot_caches``.
+            same length and order as ``pivot_caches``.
         ds: HeadLocDataset for sample look-up.
-        layers: Layer indices for delta precomputation.
-        include_docstring: Passed to prompt builders.
-        cache_batch_size: Max prompts per forward pass (bounds GPU activation
-            memory the same way as in ``cache_pivot_data``).
+        include_docstring: Passed to all prompt builders.
+        cache_batch_size: Max prompts per forward pass for log_p_target
+            recomputation (only triggered for variable_rename / toggle_type_hints).
+        rng: Optional ``random.Random`` instance for reproducibility.  If None
+            a fresh instance is created (non-reproducible).
 
     Returns:
-        List of additional ``PivotCache`` objects (augmented variants only —
-        originals are not repeated).
+        List of ``PivotCache`` objects, same length as ``pivot_caches``.
     """
     assert len(pivot_caches) == len(pivot_instances), (
         "pivot_caches and pivot_instances must have the same length"
     )
+    if rng is None:
+        rng = random.Random()
 
-    aug_src_prompts:  list[str]           = []
-    aug_dest_prompts: list[str]           = []
-    aug_targ_prompts: list[str]           = []
-    aug_pis:          list[PivotInstance] = []
+    N = len(pivot_caches)
 
-    for _cache, (pair, pi) in zip(pivot_caches, pivot_instances):
+    # Accumulators — indexed by position in the output list.
+    aug_src_prompts:  list[str]                = []
+    aug_dest_prompts: list[str]                = []
+    aug_pis:          list[PivotInstance]      = []
+    # log_p_target per output: either reused from original or needs recompute.
+    aug_log_p: list[torch.Tensor | None]       = []
+    # (output_idx, targ_prompt) for those that need a forward pass.
+    recompute_idx:    list[int]                = []
+    recompute_targ:   list[str]               = []
+
+    for cache, (pair, pi) in zip(pivot_caches, pivot_instances):
         src_sample  = ds.get_sample(pair.source_predicate)
         dest_sample = ds.get_sample(pair.destination_predicate)
         targ_sample = ds.get_sample(pair.source_predicate)  # target == source
@@ -433,96 +466,106 @@ def augment_pivot_caches(
         if src_sample is None or dest_sample is None or targ_sample is None:
             logger.warning(
                 f"augment_pivot_caches: missing sample for "
-                f"{pair.source_predicate} → {pair.destination_predicate} — skipping"
+                f"{pair.source_predicate} → {pair.destination_predicate} — using original"
             )
+            aug_src_prompts.append(cache.src_prompt or build_cpp_prompt(mt, src_sample, include_docstring=include_docstring))
+            aug_dest_prompts.append(cache.dest_prompt)
+            aug_pis.append(pi)
+            aug_log_p.append(cache.log_p_target)
             continue
 
-        def _add(aug_src, aug_dest, aug_targ, pivot_prefix: str):
+        aug_type = rng.choices(_AUG_TYPES, weights=_AUG_WEIGHTS, k=1)[0]
+
+        # --- source_lang: only src_prompt changes, log_p_target reused ---
+        if aug_type == "source_lang":
+            lang = rng.choice(_SOURCE_LANG_ALTS)
             aug_src_prompts.append(
-                build_cpp_prompt(mt, aug_src, include_docstring=include_docstring)
+                _SOURCE_LANG_BUILDERS[lang](mt, src_sample, include_docstring=include_docstring)
+            )
+            aug_dest_prompts.append(cache.dest_prompt)
+            aug_pis.append(pi)
+            aug_log_p.append(cache.log_p_target)
+
+        # --- variable_rename: all prompts change, log_p_target recomputed ---
+        elif aug_type == "variable_rename":
+            old_var = dest_sample.variable_name
+            alts = [v for v in _VAR_VOCAB.get(old_var, []) if v != old_var]
+            if not alts:
+                # Fallback: source_lang (no vocab entry for this variable)
+                lang = rng.choice(_SOURCE_LANG_ALTS)
+                aug_src_prompts.append(
+                    _SOURCE_LANG_BUILDERS[lang](mt, src_sample, include_docstring=include_docstring)
+                )
+                aug_dest_prompts.append(cache.dest_prompt)
+                aug_pis.append(pi)
+                aug_log_p.append(cache.log_p_target)
+            else:
+                new_var = rng.choice(alts)
+                cfg = {"new_var": new_var}
+                aug_dest_s, aug_targ_s = augment_pair(dest_sample, targ_sample, "variable_rename", cfg)
+                aug_src_s  = augment_source(src_sample, "variable_rename", cfg)
+                aug_prefix = adapt_text_var(pi.pivot_prefix, old_var, new_var)
+                aug_src_prompts.append(
+                    build_cpp_prompt(mt, aug_src_s, include_docstring=include_docstring)
+                )
+                aug_dest_prompts.append(
+                    build_python_prompt(mt, aug_dest_s, pivot_prefix=aug_prefix, include_docstring=include_docstring)
+                )
+                aug_pis.append(
+                    dataclasses.replace(pi, pivot_prefix=aug_prefix)
+                    if aug_prefix != pi.pivot_prefix else pi
+                )
+                aug_log_p.append(None)  # placeholder
+                recompute_idx.append(len(aug_log_p) - 1)
+                recompute_targ.append(
+                    build_python_prompt(mt, aug_targ_s, pivot_prefix=aug_prefix, include_docstring=include_docstring)
+                )
+
+        # --- toggle_type_hints: all prompts change, log_p_target recomputed ---
+        else:  # "toggle_type_hints"
+            aug_dest_s, aug_targ_s = augment_pair(dest_sample, targ_sample, "toggle_type_hints")
+            aug_src_s  = augment_source(src_sample, "toggle_type_hints")
+            aug_src_prompts.append(
+                build_cpp_prompt(mt, aug_src_s, include_docstring=include_docstring)
             )
             aug_dest_prompts.append(
-                build_python_prompt(
-                    mt, aug_dest, pivot_prefix=pivot_prefix,
-                    include_docstring=include_docstring,
-                )
+                build_python_prompt(mt, aug_dest_s, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
             )
-            aug_targ_prompts.append(
-                build_python_prompt(
-                    mt, aug_targ, pivot_prefix=pivot_prefix,
-                    include_docstring=include_docstring,
-                )
-            )
-            aug_pis.append(
-                dataclasses.replace(pi, pivot_prefix=pivot_prefix)
-                if pivot_prefix != pi.pivot_prefix
-                else pi
+            aug_pis.append(pi)
+            aug_log_p.append(None)  # placeholder
+            recompute_idx.append(len(aug_log_p) - 1)
+            recompute_targ.append(
+                build_python_prompt(mt, aug_targ_s, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
             )
 
-        # 1. toggle_type_hints — always safe (only changes the def line, not the prefix)
-        aug_dest_th, aug_targ_th = augment_pair(dest_sample, targ_sample, "toggle_type_hints")
-        aug_src_th = augment_source(src_sample, "toggle_type_hints")
-        _add(aug_src_th, aug_dest_th, aug_targ_th, pi.pivot_prefix)
+    # Batch-recompute log_p_target for instances that need it.
+    if recompute_targ:
+        logger.debug(f"augment_pivot_caches: recomputing log_p_target for {len(recompute_targ)}/{N} instances")
+        computed: list[torch.Tensor] = []
+        for i in range(0, len(recompute_targ), cache_batch_size):
+            chunk = recompute_targ[i : i + cache_batch_size]
+            p = get_next_token_probs_batch(mt, chunk)
+            computed.append(torch.log(p.clamp(min=1e-10)))
+            free_gpu_cache()
+        log_p_recomputed = torch.cat(computed, dim=0)  # (n_recompute, vocab)
+        for slot, log_p_row in zip(recompute_idx, log_p_recomputed.unbind(0)):
+            aug_log_p[slot] = log_p_row
 
-        # 2. variable_rename — apply adapt_text_var to pivot_prefix as well
-        #    Uses \b word-boundary regex, handles: "n % 2", "lst[0]", "timeout > 0", ...
-        old_var = dest_sample.variable_name
-        for new_var in _VAR_VOCAB.get(old_var, [])[:3]:
-            if new_var == old_var:
-                continue
-            cfg = {"new_var": new_var}
-            aug_dest_v, aug_targ_v = augment_pair(
-                dest_sample, targ_sample, "variable_rename", cfg
-            )
-            aug_src_v = augment_source(src_sample, "variable_rename", cfg)
-            aug_prefix = adapt_text_var(pi.pivot_prefix, old_var, new_var)
-            _add(aug_src_v, aug_dest_v, aug_targ_v, aug_prefix)
+    logger.info(
+        f"augment_pivot_caches: {N} caches augmented "
+        f"({len(recompute_targ)} log_p recomputed, {N - len(recompute_targ)} reused)"
+    )
 
-    N = len(aug_src_prompts)
-    if N == 0:
-        logger.info("augment_pivot_caches: no variants generated")
-        return []
-
-    logger.info(f"augment_pivot_caches: computing {N} augmented caches")
-
-    # Target log-probs — chunked to bound GPU memory
-    log_p_chunks: list[torch.Tensor] = []
-    for i in range(0, N, cache_batch_size):
-        chunk = aug_targ_prompts[i : i + cache_batch_size]
-        p = get_next_token_probs_batch(mt, chunk)
-        log_p_chunks.append(torch.log(p.clamp(min=1e-10)))
-        free_gpu_cache()
-        logger.debug(f"  aug targ probs: {min(i + cache_batch_size, N)}/{N}")
-    log_p_target = torch.cat(log_p_chunks, dim=0)  # (N, vocab)
-
-    # Per-head deltas — always precomputed, chunked
-    delta_chunks: list[torch.Tensor] = []
-    for i in range(0, N, cache_batch_size):
-        src_chunk  = aug_src_prompts[i : i + cache_batch_size]
-        dest_chunk = aug_dest_prompts[i : i + cache_batch_size]
-        B = len(src_chunk)
-        combined_o = get_o_proj_inputs_batch(mt, src_chunk + dest_chunk, layers)
-        src_o  = {ly: combined_o[ly][:B] for ly in layers}
-        dest_o = {ly: combined_o[ly][B:] for ly in layers}
-        delta_chunks.append(precompute_per_head_deltas_batch(mt, src_o, dest_o, layers))
-        del combined_o, src_o, dest_o
-        free_gpu_cache()
-        logger.debug(f"  aug deltas: {min(i + cache_batch_size, N)}/{N}")
-    all_deltas = torch.cat(delta_chunks, dim=0)  # (N, L, H, E)
-
-    aug_caches = [
+    return [
         PivotCache(
             pivot_instance=aug_pis[i],
             dest_prompt=aug_dest_prompts[i],
-            log_p_target=log_p_target[i],
-            per_head_deltas=all_deltas[i],
-            src_prompt=None,
+            log_p_target=aug_log_p[i],
+            per_head_deltas=None,
+            src_prompt=aug_src_prompts[i],
         )
         for i in range(N)
     ]
-
-    logger.info(f"augment_pivot_caches: done — {N} augmented caches generated")
-    return aug_caches
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +681,12 @@ def train_head_mask(
     batch_size: int = 8,
     checkpoint_dir: str | None = None,
     checkpoint_every: int = 10,
+    augment: bool = False,
+    augment_instances: list[tuple[PredicatePair, PivotInstance]] | None = None,
+    augment_ds: HeadLocDataset | None = None,
+    augment_include_docstring: bool = False,
+    augment_cache_batch_size: int = 64,
+    augment_seed: int | None = None,
 ) -> tuple[HeadMask, MaskTrainingHistory]:
     """Learn a sparse head mask via projected gradient descent.
 
@@ -656,6 +705,11 @@ def train_head_mask(
     per epoch using one combined src+dest forward pass — same positional alignment
     as the eager path, at the cost of extra compute.
 
+    When ``augment=True``, a fresh random surface-form augmentation is applied to
+    every instance at the start of each epoch (via ``augment_pivot_caches``).
+    This requires ``precompute_deltas=False`` in ``cache_pivot_data`` because the
+    source prompt changes every epoch — precomputed deltas would be stale.
+
     Args:
         mt: ModelandTokenizer (frozen — only mask params are updated).
         pivot_caches: Pre-cached data from cache_pivot_data().
@@ -664,6 +718,15 @@ def train_head_mask(
         lr: AdamW learning rate (default 1e-2, from paper).
         lambda_sparse: L1 sparsity coefficient (default 1e-2, from paper).
         batch_size: Instances per optimizer step (default 8).
+        augment: If True, re-augment all instances at the start of every epoch.
+            Requires lazy deltas (cache_pivot_data called with precompute_deltas=False).
+        augment_instances: Required when augment=True. (PredicatePair, PivotInstance)
+            list — same length and order as pivot_caches.
+        augment_ds: Required when augment=True. HeadLocDataset for sample look-up.
+        augment_include_docstring: Passed to prompt builders during augmentation.
+        augment_cache_batch_size: Batch size for log_p_target recomputation during
+            augmentation (default 64).
+        augment_seed: Seed for the augmentation RNG. If None, non-reproducible.
 
     Returns:
         (trained HeadMask, MaskTrainingHistory)
@@ -671,6 +734,22 @@ def train_head_mask(
     n_layers_tested = len(layers)
     n_heads = mt.model.config.num_attention_heads
     N = len(pivot_caches)
+
+    lazy_deltas = pivot_caches[0].per_head_deltas is None
+
+    if augment:
+        assert lazy_deltas, (
+            "augment=True requires lazy deltas — call cache_pivot_data with "
+            "precompute_deltas=False. Precomputed deltas would be stale after "
+            "per-epoch source-prompt augmentation."
+        )
+        assert augment_instances is not None and augment_ds is not None, (
+            "augment=True requires augment_instances and augment_ds"
+        )
+        assert len(augment_instances) == N, (
+            f"augment_instances length {len(augment_instances)} != pivot_caches length {N}"
+        )
+        _aug_rng = random.Random(augment_seed)
 
     mask = HeadMask(n_layers_tested, n_heads)
     optimizer = AdamW(mask.parameters(), lr=lr)
@@ -680,35 +759,34 @@ def train_head_mask(
     for param in mt._model.parameters():
         param.requires_grad_(False)
 
-    lazy_deltas = pivot_caches[0].per_head_deltas is None
     batch_groups = [pivot_caches[i : i + batch_size] for i in range(0, N, batch_size)]
 
     # Pre-build everything that is cheap to cache outside the epoch loop.
-    # When lazy_deltas=True, src_prompts are stored per batch instead of stacked
-    # delta tensors — deltas are recomputed on every optimizer step.
-    batch_log_p_list = [
-        torch.stack([c.log_p_target for c in grp])
-        for grp in batch_groups  # (B, vocab) CPU
-    ]
-    if lazy_deltas:
-        batch_src_prompts_list = [[c.src_prompt for c in grp] for grp in batch_groups]
-        batch_dest_prompts_list = [[c.dest_prompt for c in grp] for grp in batch_groups]
-    else:
-        batch_inputs_list = [
-            prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
-            for grp in batch_groups
+    # When augment=True the batch lists are rebuilt per epoch — skip precomputation.
+    if not augment:
+        batch_log_p_list = [
+            torch.stack([c.log_p_target for c in grp])
+            for grp in batch_groups  # (B, vocab) CPU
         ]
-        # Do NOT pre-stack deltas here: torch.stack would copy all N × (L, H, E)
-        # float32 tensors that already live in pivot_caches[*].per_head_deltas,
-        # doubling CPU RAM (~14 GB for N=512 on Qwen-32B).  Stack on-the-fly per
-        # batch inside the epoch loop instead (negligible cost: 16 tensors × 28 MB).
+        if lazy_deltas:
+            batch_src_prompts_list = [[c.src_prompt for c in grp] for grp in batch_groups]
+            batch_dest_prompts_list = [[c.dest_prompt for c in grp] for grp in batch_groups]
+        else:
+            batch_inputs_list = [
+                prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
+                for grp in batch_groups
+            ]
+            # Do NOT pre-stack deltas here: torch.stack would copy all N × (L, H, E)
+            # float32 tensors that already live in pivot_caches[*].per_head_deltas,
+            # doubling CPU RAM (~14 GB for N=512 on Qwen-32B).  Stack on-the-fly per
+            # batch inside the epoch loop instead (negligible cost: 16 tensors × 28 MB).
 
     logger.info(
         f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
         f"{n_layers_tested * n_heads} mask params | "
         f"{N} instances | batch_size={batch_size} ({len(batch_groups)} batches/epoch) | "
         f"{n_epochs} epochs | lr={lr} λ={lambda_sparse} | "
-        f"lazy_deltas={lazy_deltas}"
+        f"lazy_deltas={lazy_deltas} | augment={augment}"
     )
 
     for epoch in range(n_epochs):
@@ -716,25 +794,39 @@ def train_head_mask(
         epoch_sparse = 0.0
         n_steps = 0
 
-        for bi, batch_log_p in enumerate(batch_log_p_list):
+        # Per-epoch augmentation: build fresh batch lists from augmented caches.
+        # Always lazy (augment_pivot_caches returns per_head_deltas=None).
+        if augment:
+            _aug_caches = augment_pivot_caches(
+                mt, pivot_caches, augment_instances, augment_ds,
+                include_docstring=augment_include_docstring,
+                cache_batch_size=augment_cache_batch_size,
+                rng=_aug_rng,
+            )
+            _aug_groups = [_aug_caches[i : i + batch_size] for i in range(0, N, batch_size)]
+            _batch_log_p_ep  = [torch.stack([c.log_p_target for c in g]) for g in _aug_groups]
+            _batch_src_ep    = [[c.src_prompt for c in g] for g in _aug_groups]
+            _batch_dest_ep   = [[c.dest_prompt for c in g] for g in _aug_groups]
+        else:
+            _batch_log_p_ep  = batch_log_p_list
+            _batch_src_ep    = batch_src_prompts_list if lazy_deltas else None
+            _batch_dest_ep   = batch_dest_prompts_list if lazy_deltas else None
+
+        for bi, batch_log_p in enumerate(_batch_log_p_ep):
             if lazy_deltas:
                 # Recompute deltas for this batch: one combined forward pass so
                 # src and dest share the same sequence length (no positional shift).
-                src_ps = batch_src_prompts_list[bi]
-                dest_ps = batch_dest_prompts_list[bi]
+                src_ps  = _batch_src_ep[bi]
+                dest_ps = _batch_dest_ep[bi]
                 B = len(src_ps)
                 with torch.inference_mode():
                     combined_o = get_o_proj_inputs_batch(mt, src_ps + dest_ps, layers)
-                src_o_b = {layer: combined_o[layer][:B] for layer in layers}
+                src_o_b  = {layer: combined_o[layer][:B] for layer in layers}
                 dest_o_b = {layer: combined_o[layer][B:] for layer in layers}
                 batch_deltas = precompute_per_head_deltas_batch(
                     mt, src_o_b, dest_o_b, layers
                 )
-                del (
-                    combined_o,
-                    src_o_b,
-                    dest_o_b,
-                )  # free CPU tensors before forward pass
+                del combined_o, src_o_b, dest_o_b  # free CPU tensors before forward pass
                 free_gpu_cache()  # flush nnsight trace residuals before the grad pass
                 batch_inputs = prepare_input(dest_ps, tokenizer=mt)
             else:
