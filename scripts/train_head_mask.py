@@ -107,6 +107,21 @@ def main() -> None:
         default=5,
         help="Save a mask checkpoint every K epochs (default: 10). 0 = disabled.",
     )
+    parser.add_argument(
+        "--augment",
+        action="store_true",
+        help=(
+            "Re-augment all instances at the start of every epoch "
+            "(source_lang 55%%, variable_rename 35%%, toggle_type_hints 10%%). "
+            "Requires --lazy-deltas."
+        ),
+    )
+    parser.add_argument(
+        "--augment-seed",
+        type=int,
+        default=123456,
+        help="Random seed for per-epoch augmentation (default: non-reproducible).",
+    )
     add_logging_args(parser)
     args = parser.parse_args()
     configure(args)
@@ -123,6 +138,7 @@ def main() -> None:
     logger.info(f"lambda_sparse: {args.lambda_sparse}")
     logger.info(f"batch_size:    {args.batch_size}")
     logger.info(f"lazy_deltas:   {args.lazy_deltas}")
+    logger.info(f"augment:       {args.augment}")
     logger.info(f"cache_batch_size: {args.cache_batch_size}")
     logger.info(f"checkpoint_every: {args.checkpoint_every}")
 
@@ -162,6 +178,10 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Cache pivot data
     # ------------------------------------------------------------------
+    if args.augment and not args.lazy_deltas:
+        logger.warning("--augment requires lazy deltas; forcing --lazy-deltas on.")
+        args.lazy_deltas = True
+
     logger.info("=== Caching pivot data ===")
     pivot_caches = cache_pivot_data(
         mt,
@@ -189,6 +209,11 @@ def main() -> None:
         batch_size=args.batch_size,
         checkpoint_dir=checkpoint_dir if args.checkpoint_every > 0 else None,
         checkpoint_every=args.checkpoint_every,
+        augment=args.augment,
+        augment_instances=pivot_instances if args.augment else None,
+        augment_ds=ds if args.augment else None,
+        augment_cache_batch_size=args.cache_batch_size,
+        augment_seed=args.augment_seed,
     )
 
     # ------------------------------------------------------------------
@@ -208,6 +233,8 @@ def main() -> None:
             "loss_sparse": history.loss_sparse,
             "loss_total": history.loss_total,
             "n_active": history.n_active,
+            "val_recall": history.val_recall,
+            "val_epochs": history.val_epochs,
         },
         "config": {
             "model": args.model_key,
@@ -217,6 +244,8 @@ def main() -> None:
             "lambda_sparse": args.lambda_sparse,
             "batch_size": args.batch_size,
             "precompute_deltas": not args.lazy_deltas,
+            "augment": args.augment,
+            "augment_seed": args.augment_seed,
         },
     }
     torch.save(checkpoint, save_path)
@@ -237,6 +266,12 @@ def main() -> None:
     table.add_row("Final KL", f"{final_kl:.4f}")
     table.add_row("N selected heads", str(len(selected_heads)))
     table.add_row("Selected heads", str(selected_heads))
+    if history.val_recall:
+        last_rec = history.val_recall[-1]
+        table.add_row(
+            "Val recall (last)",
+            "  ".join(f"@{k+1}={v:.3f}" for k, v in enumerate(last_rec)),
+        )
     table.add_row("Saved to", save_path)
     console.print(table)
 

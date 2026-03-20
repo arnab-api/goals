@@ -38,6 +38,7 @@ from torch import nn
 from torch.optim import AdamW
 
 from src.functional import free_gpu_cache, get_module_nnsight
+from src.utils.metrics import recall as recall_metric
 from src.goals.head_loc_augment import augment_pair, augment_source
 from src.goals.augment import _VAR_VOCAB, adapt_text_var
 from src.goals.head_loc_data import HeadLocDataset, PivotInstance, PredicatePair
@@ -669,6 +670,48 @@ class MaskTrainingHistory:
     loss_sparse: list[float] = field(default_factory=list)
     loss_total: list[float] = field(default_factory=list)
     n_active: list[int] = field(default_factory=list)
+    val_recall: list[list[float]] = field(default_factory=list)  # recall@1..K per val epoch
+    val_epochs: list[int] = field(default_factory=list)          # epoch indices of val evals
+
+
+@torch.inference_mode()
+def _evaluate_val(
+    mt,
+    val_caches: list[PivotCache],
+    mask: "HeadMask",
+    layers: list[int],
+    k: int = 5,
+) -> list[float]:
+    """Compute recall@1..k on the val set using the current mask.
+
+    For each instance runs a masked patched forward pass and records the top-k
+    predicted tokens.  Compares against ``pivot_instance.target_top_token``.
+
+    Returns:
+        ``[recall@1, recall@2, ..., recall@k]`` floats.
+    """
+    all_predictions: list[list[str]] = []
+    all_targets: list[str] = []
+
+    for cache in val_caches:
+        if cache.per_head_deltas is not None:
+            delta = cache.per_head_deltas  # (L, H, E) — eager path
+        else:
+            combined = get_o_proj_inputs_batch(
+                mt, [cache.src_prompt, cache.dest_prompt], layers
+            )
+            src_o  = {ly: combined[ly][:1] for ly in layers}
+            dest_o = {ly: combined[ly][1:] for ly in layers}
+            delta = precompute_per_head_deltas_batch(mt, src_o, dest_o, layers)[0]
+
+        dest_inputs = prepare_input([cache.dest_prompt], tokenizer=mt)
+        logits = forward_with_masked_patch(mt, dest_inputs, delta, mask, layers)  # (vocab,)
+        top_k_ids = logits.topk(k).indices.tolist()
+        top_k_toks = [mt.tokenizer.decode([i]) for i in top_k_ids]
+        all_predictions.append(top_k_toks)
+        all_targets.append(cache.pivot_instance.target_top_token)
+
+    return recall_metric(all_predictions, all_targets)
 
 
 def train_head_mask(
@@ -733,7 +776,6 @@ def train_head_mask(
     """
     n_layers_tested = len(layers)
     n_heads = mt.model.config.num_attention_heads
-    N = len(pivot_caches)
 
     lazy_deltas = pivot_caches[0].per_head_deltas is None
 
@@ -746,10 +788,19 @@ def train_head_mask(
         assert augment_instances is not None and augment_ds is not None, (
             "augment=True requires augment_instances and augment_ds"
         )
-        assert len(augment_instances) == N, (
-            f"augment_instances length {len(augment_instances)} != pivot_caches length {N}"
+        assert len(augment_instances) == len(pivot_caches), (
+            f"augment_instances length {len(augment_instances)} != pivot_caches length {len(pivot_caches)}"
         )
         _aug_rng = random.Random(augment_seed)
+
+    # 80/20 train/val split — val is held out and never augmented.
+    val_size   = max(1, int(len(pivot_caches) * 0.2))
+    train_size = len(pivot_caches) - val_size
+    train_caches = pivot_caches[:train_size]
+    val_caches   = pivot_caches[train_size:]
+    _aug_instances_train = augment_instances[:train_size] if augment else None
+
+    N = train_size  # training set size
 
     mask = HeadMask(n_layers_tested, n_heads)
     optimizer = AdamW(mask.parameters(), lr=lr)
@@ -759,7 +810,7 @@ def train_head_mask(
     for param in mt._model.parameters():
         param.requires_grad_(False)
 
-    batch_groups = [pivot_caches[i : i + batch_size] for i in range(0, N, batch_size)]
+    batch_groups = [train_caches[i : i + batch_size] for i in range(0, N, batch_size)]
 
     # Pre-build everything that is cheap to cache outside the epoch loop.
     # When augment=True the batch lists are rebuilt per epoch — skip precomputation.
@@ -777,14 +828,14 @@ def train_head_mask(
                 for grp in batch_groups
             ]
             # Do NOT pre-stack deltas here: torch.stack would copy all N × (L, H, E)
-            # float32 tensors that already live in pivot_caches[*].per_head_deltas,
+            # float32 tensors that already live in train_caches[*].per_head_deltas,
             # doubling CPU RAM (~14 GB for N=512 on Qwen-32B).  Stack on-the-fly per
             # batch inside the epoch loop instead (negligible cost: 16 tensors × 28 MB).
 
     logger.info(
         f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
         f"{n_layers_tested * n_heads} mask params | "
-        f"{N} instances | batch_size={batch_size} ({len(batch_groups)} batches/epoch) | "
+        f"train={N} val={val_size} | batch_size={batch_size} ({len(batch_groups)} batches/epoch) | "
         f"{n_epochs} epochs | lr={lr} λ={lambda_sparse} | "
         f"lazy_deltas={lazy_deltas} | augment={augment}"
     )
@@ -798,7 +849,7 @@ def train_head_mask(
         # Always lazy (augment_pivot_caches returns per_head_deltas=None).
         if augment:
             _aug_caches = augment_pivot_caches(
-                mt, pivot_caches, augment_instances, augment_ds,
+                mt, train_caches, _aug_instances_train, augment_ds,
                 include_docstring=augment_include_docstring,
                 cache_batch_size=augment_cache_batch_size,
                 rng=_aug_rng,
@@ -869,7 +920,7 @@ def train_head_mask(
                     for i in range(torch.cuda.device_count())
                 }
                 logger.debug(
-                    f"  e{epoch + 1:03d} b{bi + 1:03d}/{len(batch_log_p_list)}"
+                    f"  e{epoch + 1:03d} b{bi + 1:03d}/{len(_batch_log_p_ep)}"
                     f"  KL={loss_kl.item():.4f}  sparse={loss_sparse.item():.4f}"
                     f"  n_active={mask.n_active()}"
                     f"  gpu_alloc={mem_alloc}"
@@ -895,28 +946,38 @@ def train_head_mask(
         )
         logger.debug("-" * 100)
 
-        if checkpoint_dir is not None and (epoch + 1) % checkpoint_every == 0:
-            import os
+        if checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
+            # Val evaluation — always run when checkpointing.
+            val_rec = _evaluate_val(mt, val_caches, mask, layers)
+            history.val_recall.append(val_rec)
+            history.val_epochs.append(epoch + 1)
+            recall_str = "  ".join(f"@{k+1}={v:.3f}" for k, v in enumerate(val_rec))
+            logger.info(f"  Val recall: {recall_str}")
 
-            os.makedirs(checkpoint_dir, exist_ok=True)
-            ckpt_path = os.path.join(
-                checkpoint_dir, f"checkpoint_epoch_{epoch + 1:04d}.pt"
-            )
-            torch.save(
-                {
-                    "epoch": epoch + 1,
-                    "mask_values": mask.values.detach().cpu(),
-                    "layers": layers,
-                    "history": {
-                        "loss_causal": history.loss_causal,
-                        "loss_sparse": history.loss_sparse,
-                        "loss_total": history.loss_total,
-                        "n_active": history.n_active,
+            if checkpoint_dir is not None:
+                import os
+
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                ckpt_path = os.path.join(
+                    checkpoint_dir, f"checkpoint_epoch_{epoch + 1:04d}.pt"
+                )
+                torch.save(
+                    {
+                        "epoch": epoch + 1,
+                        "mask_values": mask.values.detach().cpu(),
+                        "layers": layers,
+                        "history": {
+                            "loss_causal": history.loss_causal,
+                            "loss_sparse": history.loss_sparse,
+                            "loss_total": history.loss_total,
+                            "n_active": history.n_active,
+                            "val_recall": history.val_recall,
+                            "val_epochs": history.val_epochs,
+                        },
                     },
-                },
-                ckpt_path,
-            )
-            logger.info(f"  Checkpoint saved → {ckpt_path}")
+                    ckpt_path,
+                )
+                logger.info(f"  Checkpoint saved → {ckpt_path}")
 
     selected = mask.selected_heads(layers)
     logger.info(f"train_head_mask done: {len(selected)} active heads → {selected}")
