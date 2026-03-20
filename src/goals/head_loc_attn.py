@@ -36,6 +36,8 @@ from torch import nn
 from torch.optim import AdamW
 
 from src.functional import free_gpu_cache, get_module_nnsight
+from src.goals.head_loc_augment import augment_pair, augment_source
+from src.goals.augment import _VAR_VOCAB
 from src.goals.head_loc_data import HeadLocDataset, PivotInstance, PredicatePair
 from src.goals.head_loc_pivot import (
     build_cpp_prompt,
@@ -360,6 +362,159 @@ def cache_pivot_data(
 
     logger.info(f"cache_pivot_data: cached {len(caches)} pivot instances")
     return caches
+
+
+@torch.inference_mode()
+def augment_pivot_caches(
+    mt,
+    pivot_caches: list[PivotCache],
+    pivot_instances: list[tuple[PredicatePair, PivotInstance]],
+    ds: HeadLocDataset,
+    layers: list[int],
+    include_docstring: bool = False,
+    cache_batch_size: int = 64,
+) -> list[PivotCache]:
+    """Generate semantics-preserving augmented variants of existing pivot caches.
+
+    Applies surface-form augmentations that are guaranteed not to change the pivot
+    position or invalidate the target token, then recomputes prompts, log_p_target,
+    and per_head_deltas for each variant.
+
+    Safe augmentations applied:
+
+    ``toggle_type_hints`` (all instances)
+        Strips parameter type annotations from the Python ``def`` line of dest and
+        target.  The C++ src is also toggled (Python-side only).  Never touches
+        the ``return <pivot_prefix>`` line, so the pivot position is unchanged.
+
+    ``variable_rename`` (pivot_prefix == "" only)
+        Renames the variable throughout src, dest, and target using the same new
+        name, so the pivot prefix tokens stay identical across dest and target.
+        Skipped for non-empty pivot prefixes because the prefix may contain the
+        old variable name.
+
+    The returned caches always have ``per_head_deltas`` precomputed (not lazy),
+    regardless of whether the originals are lazy.  If you mix augmented caches
+    with lazy originals in ``train_head_mask``, convert all originals to eager
+    first by re-running ``cache_pivot_data`` with ``precompute_deltas=True``.
+
+    Args:
+        mt: ModelandTokenizer (frozen).
+        pivot_caches: Original caches from ``cache_pivot_data()``.
+        pivot_instances: Corresponding ``(PredicatePair, PivotInstance)`` list;
+            must have the same length and order as ``pivot_caches``.
+        ds: HeadLocDataset for sample look-up.
+        layers: Layer indices for delta precomputation.
+        include_docstring: Passed to prompt builders.
+        cache_batch_size: Max prompts per forward pass (bounds GPU activation
+            memory the same way as in ``cache_pivot_data``).
+
+    Returns:
+        List of additional ``PivotCache`` objects (augmented variants only —
+        originals are not repeated).
+    """
+    assert len(pivot_caches) == len(pivot_instances), (
+        "pivot_caches and pivot_instances must have the same length"
+    )
+
+    aug_src_prompts:  list[str]           = []
+    aug_dest_prompts: list[str]           = []
+    aug_targ_prompts: list[str]           = []
+    aug_pis:          list[PivotInstance] = []
+
+    for _cache, (pair, pi) in zip(pivot_caches, pivot_instances):
+        src_sample  = ds.get_sample(pair.source_predicate)
+        dest_sample = ds.get_sample(pair.destination_predicate)
+        targ_sample = ds.get_sample(pair.source_predicate)  # target == source
+
+        if src_sample is None or dest_sample is None or targ_sample is None:
+            logger.warning(
+                f"augment_pivot_caches: missing sample for "
+                f"{pair.source_predicate} → {pair.destination_predicate} — skipping"
+            )
+            continue
+
+        def _add(aug_src, aug_dest, aug_targ):
+            aug_src_prompts.append(
+                build_cpp_prompt(mt, aug_src, include_docstring=include_docstring)
+            )
+            aug_dest_prompts.append(
+                build_python_prompt(
+                    mt, aug_dest, pivot_prefix=pi.pivot_prefix,
+                    include_docstring=include_docstring,
+                )
+            )
+            aug_targ_prompts.append(
+                build_python_prompt(
+                    mt, aug_targ, pivot_prefix=pi.pivot_prefix,
+                    include_docstring=include_docstring,
+                )
+            )
+            aug_pis.append(pi)
+
+        # 1. toggle_type_hints — always safe (only changes the def line)
+        aug_dest_th, aug_targ_th = augment_pair(dest_sample, targ_sample, "toggle_type_hints")
+        aug_src_th = augment_source(src_sample, "toggle_type_hints")
+        _add(aug_src_th, aug_dest_th, aug_targ_th)
+
+        # 2. variable_rename — only safe when pivot_prefix is empty
+        if pi.pivot_prefix == "":
+            old_var = dest_sample.variable_name
+            for new_var in _VAR_VOCAB.get(old_var, [])[:3]:
+                if new_var == old_var:
+                    continue
+                cfg = {"new_var": new_var}
+                aug_dest_v, aug_targ_v = augment_pair(
+                    dest_sample, targ_sample, "variable_rename", cfg
+                )
+                aug_src_v = augment_source(src_sample, "variable_rename", cfg)
+                _add(aug_src_v, aug_dest_v, aug_targ_v)
+
+    N = len(aug_src_prompts)
+    if N == 0:
+        logger.info("augment_pivot_caches: no variants generated")
+        return []
+
+    logger.info(f"augment_pivot_caches: computing {N} augmented caches")
+
+    # Target log-probs — chunked to bound GPU memory
+    log_p_chunks: list[torch.Tensor] = []
+    for i in range(0, N, cache_batch_size):
+        chunk = aug_targ_prompts[i : i + cache_batch_size]
+        p = get_next_token_probs_batch(mt, chunk)
+        log_p_chunks.append(torch.log(p.clamp(min=1e-10)))
+        free_gpu_cache()
+        logger.debug(f"  aug targ probs: {min(i + cache_batch_size, N)}/{N}")
+    log_p_target = torch.cat(log_p_chunks, dim=0)  # (N, vocab)
+
+    # Per-head deltas — always precomputed, chunked
+    delta_chunks: list[torch.Tensor] = []
+    for i in range(0, N, cache_batch_size):
+        src_chunk  = aug_src_prompts[i : i + cache_batch_size]
+        dest_chunk = aug_dest_prompts[i : i + cache_batch_size]
+        B = len(src_chunk)
+        combined_o = get_o_proj_inputs_batch(mt, src_chunk + dest_chunk, layers)
+        src_o  = {l: combined_o[l][:B] for l in layers}
+        dest_o = {l: combined_o[l][B:] for l in layers}
+        delta_chunks.append(precompute_per_head_deltas_batch(mt, src_o, dest_o, layers))
+        del combined_o, src_o, dest_o
+        free_gpu_cache()
+        logger.debug(f"  aug deltas: {min(i + cache_batch_size, N)}/{N}")
+    all_deltas = torch.cat(delta_chunks, dim=0)  # (N, L, H, E)
+
+    aug_caches = [
+        PivotCache(
+            pivot_instance=aug_pis[i],
+            dest_prompt=aug_dest_prompts[i],
+            log_p_target=log_p_target[i],
+            per_head_deltas=all_deltas[i],
+            src_prompt=None,
+        )
+        for i in range(N)
+    ]
+
+    logger.info(f"augment_pivot_caches: done — {N} augmented caches generated")
+    return aug_caches
 
 
 # ---------------------------------------------------------------------------
