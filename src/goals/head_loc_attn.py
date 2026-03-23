@@ -5,18 +5,25 @@ cross-language interchange (C++ source → Python destination) minimizes
 KL(P_patched ∥ P_target).
 
 Based on arxiv:2510.26784 (filter heads via differentiable causal masking),
-adapted for attention output patching and the cross-language interchange design
-from claude_reports/brainstorm_attention_head_localization.md.
+adapted for the cross-language interchange design from
+claude_reports/brainstorm_attention_head_localization.md.
 
-Pipeline:
-    1. Cache o_proj inputs for source (C++) and destination (Python) prompts.
-    2. Precompute per-head analytical deltas: W_o_h @ (src_h - dest_h).
-    3. Train mask: differentiable patched forward pass via baukit eager hooks.
-       attn_out[l][:,-1,:] += Σ_h mask[l,h] * delta[l,h]
+Pipeline (current — o_proj pre-hook replacement):
+    1. Cache o_proj inputs for source (C++) prompts per layer.
+    2. Train mask: per-head interpolation via register_forward_pre_hook on o_proj.
+       For each head h at layer l:
+           o_proj_input[:, -1, h*H:(h+1)*H] = mask[l,h]*src_h + (1-mask[l,h])*cascade_h
+       This gives true replacement semantics: mask=1 → pure source, mask=0 → pure cascade.
        Sparsity: lambda * mean(mask) — scale-invariant to number of layers tested.
-    4. Post-training threshold (mask > 0.5) → selected heads.
+    3. Post-training threshold (mask > 0.5) → selected heads.
 
-Mask parameterization (from paper):
+Pipeline (obsolete — additive delta approach, functions renamed with _obsolete suffix):
+    1. Cache o_proj inputs for both source and destination prompts.
+    2. Precompute per-head analytical deltas: W_o_h @ (src_h - dest_h).
+    3. Train mask: attn_out[l][:,-1,:] += Σ_h mask[l,h] * delta[l,h]  (via baukit hooks)
+    Note: additive delta does not give true replacement when cascade effects are present.
+
+Mask parameterization:
     - nn.Parameter initialized to all ones
     - Clamped to [0,1] after each optimizer.step() (box-constrained GD)
     - No sigmoid, no temperature — raw values as interpolation weights
@@ -38,10 +45,14 @@ from torch import nn
 from torch.optim import AdamW
 
 from src.functional import free_gpu_cache, get_module_nnsight
-from src.utils.metrics import recall as recall_metric
-from src.goals.head_loc_augment import augment_pair, augment_source
 from src.goals.augment import _VAR_VOCAB, adapt_text_var
-from src.goals.head_loc_data import HeadLocDataset, PivotInstance, PredicatePair
+from src.goals.head_loc_augment import augment_pair, augment_source
+from src.goals.head_loc_data import (
+    HeadLocDataset,
+    PivotInstance,
+    PredicatePair,
+    SinglePredicateSample,
+)
 from src.goals.head_loc_pivot import (
     build_cpp_prompt,
     build_haskell_prompt,
@@ -52,6 +63,7 @@ from src.goals.head_loc_pivot import (
     get_next_token_probs_batch,
 )
 from src.tokens import prepare_input
+from src.utils.metrics import recall as recall_metric
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +74,15 @@ logger = logging.getLogger(__name__)
 # Source language builders (excluding Python, which is always the destination).
 # "cpp" is the original — alts are the other four.
 _SOURCE_LANG_BUILDERS: dict[str, Any] = {
-    "cpp":     build_cpp_prompt,
-    "java":    build_java_prompt,
-    "rust":    build_rust_prompt,
+    "cpp": build_cpp_prompt,
+    "java": build_java_prompt,
+    "rust": build_rust_prompt,
     "haskell": build_haskell_prompt,
-    "prolog":  build_prolog_prompt,
+    "prolog": build_prolog_prompt,
 }
 _SOURCE_LANG_ALTS = [k for k in _SOURCE_LANG_BUILDERS if k != "cpp"]
 
-_AUG_TYPES   = ["toggle_type_hints", "variable_rename", "source_lang"]
+_AUG_TYPES = ["toggle_type_hints", "variable_rename", "source_lang"]
 _AUG_WEIGHTS = [0.10, 0.35, 0.55]
 
 
@@ -114,12 +126,18 @@ class HeadMask(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Utility: o_proj weight
+# Utility: o_proj weight (obsolete — used only by delta-based functions)
 # ---------------------------------------------------------------------------
 
 
-def _get_o_proj_weight(mt, layer: int) -> torch.Tensor:
-    """Return o_proj weight (n_embd, n_heads * head_dim) as float32 CPU tensor."""
+def _get_o_proj_weight_obsolete(mt, layer: int) -> torch.Tensor:
+    """Return o_proj weight (n_embd, n_heads * head_dim) as float32 CPU tensor.
+
+    .. deprecated::
+        Used only by the obsolete delta-based patching path
+        (``precompute_per_head_deltas_batch_obsolete`` /
+        ``forward_with_masked_patch_obsolete``).
+    """
     path = mt.attn_module_name_format.format(layer) + ".o_proj"
     module = get_module_nnsight(mt._model, path)
     return module.weight.detach().cpu().float()
@@ -174,13 +192,16 @@ def get_o_proj_inputs(mt, prompt: str, layers: list[int]) -> dict[int, torch.Ten
 
 
 @torch.no_grad()
-def precompute_per_head_deltas_batch(
+def precompute_per_head_deltas_batch_obsolete(
     mt,
     src_o_proj_inputs: dict[int, torch.Tensor],
     dest_o_proj_inputs: dict[int, torch.Tensor],
     layers: list[int],
 ) -> torch.Tensor:
-    """Compute per-head deltas for a batch of (src, dest) pairs.
+    """[OBSOLETE] Compute per-head deltas for a batch of (src, dest) pairs.
+
+    Superseded by ``forward_with_src_replacement`` which patches o_proj inputs
+    directly instead of using additive deltas.
 
     Args:
         src_o_proj_inputs:  ``{layer: (batch, n_embd)}`` from get_o_proj_inputs_batch.
@@ -197,7 +218,7 @@ def precompute_per_head_deltas_batch(
     deltas = torch.zeros(batch, len(layers), n_heads, mt.n_embd)
 
     for li, layer in enumerate(layers):
-        W_o = _get_o_proj_weight(mt, layer)  # (n_embd, n_embd)
+        W_o = _get_o_proj_weight_obsolete(mt, layer)  # (n_embd, n_embd)
         diff = src_o_proj_inputs[layer] - dest_o_proj_inputs[layer]  # (batch, n_embd)
         for h in range(n_heads):
             W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]  # (n_embd, head_dim)
@@ -208,17 +229,17 @@ def precompute_per_head_deltas_batch(
 
 
 @torch.no_grad()
-def precompute_per_head_deltas(
+def precompute_per_head_deltas_obsolete(
     mt,
     src_o_proj_inputs: dict[int, torch.Tensor],
     dest_o_proj_inputs: dict[int, torch.Tensor],
     layers: list[int],
 ) -> torch.Tensor:
-    """Compute W_o_h @ (src_h - dest_h) for every (layer, head) pair.
+    """[OBSOLETE] Compute W_o_h @ (src_h - dest_h) for every (layer, head) pair.
+
+    Superseded by ``forward_with_src_replacement``.
 
     Returns float32 CPU tensor of shape (n_layers_tested, n_heads, n_embd).
-    This is precomputed once per (src, dest) pair and reused at every training
-    step — the mask then linearly weights these fixed deltas.
     """
     n_heads = mt.model.config.num_attention_heads
     head_dim = mt.n_embd // n_heads
@@ -227,7 +248,7 @@ def precompute_per_head_deltas(
     deltas = torch.zeros(n_layers_tested, n_heads, mt.n_embd)
 
     for li, layer in enumerate(layers):
-        W_o = _get_o_proj_weight(mt, layer)  # (n_embd, n_embd)
+        W_o = _get_o_proj_weight_obsolete(mt, layer)  # (n_embd, n_embd)
         diff = src_o_proj_inputs[layer] - dest_o_proj_inputs[layer]  # (n_embd,)
         for h in range(n_heads):
             W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]  # (n_embd, head_dim)
@@ -246,17 +267,43 @@ def precompute_per_head_deltas(
 class PivotCache:
     """Pre-computed tensors for one PivotInstance.  Cached once, reused every epoch.
 
-    ``per_head_deltas`` may be ``None`` when ``cache_pivot_data`` is called with
-    ``precompute_deltas=False``.  In that case ``src_prompt`` is populated and
-    ``train_head_mask`` recomputes deltas lazily per batch (saves ~5 GB CPU RAM
-    for N=100, at the cost of 2 extra forward passes per optimizer step per epoch).
+    ``src_head_vals`` is the o_proj input stacked across layers for the source run.
+    When ``precompute=True`` (default) it is populated at cache time and
+    ``train_head_mask`` uses it directly.  When ``precompute=False`` (lazy) it is
+    ``None`` and ``src_prompt`` is set; ``train_head_mask`` re-runs the source
+    forward pass once per batch per epoch (saves ~1 GB CPU RAM for N=1480 Qwen-32B
+    at the cost of one extra forward pass per optimizer step per epoch).
+
+    ``per_head_deltas`` is retained for backward compatibility with the obsolete
+    delta-based training path only.  New code should use ``src_head_vals``.
     """
 
     pivot_instance: PivotInstance
-    dest_prompt: str  # raw string — batched with src_prompt for o_proj extraction
-    log_p_target: torch.Tensor  # (vocab_size,) float32 CPU — log of target dist
-    per_head_deltas: torch.Tensor | None  # (n_layers_tested, n_heads, n_embd) or None
-    src_prompt: str | None = None  # populated when precompute_deltas=False
+    dest_prompt: str  # raw string — destination prompt up to pivot prefix
+    log_p_target: (
+        torch.Tensor
+    )  # (vocab_size,) float32 CPU — log of target next-token dist
+    per_head_deltas: torch.Tensor | None  # [OBSOLETE] (n_layers_tested, n_heads, n_embd)
+    src_sample: (
+        SinglePredicateSample  # source predicate sample (targ_sample == src_sample)
+    )
+    dest_sample: SinglePredicateSample  # destination predicate sample
+    src_prompt: str | None = None        # populated when precompute=False (lazy)
+    src_head_vals: torch.Tensor | None = None
+    # (n_layers_tested, n_embd) float32 CPU — o_proj inputs from the source run,
+    # stacked across layers.  ~0.7 MB/instance for Qwen-32B; ~1 GB for N=1480.
+    # 40× smaller than the obsolete per_head_deltas (~28 MB/instance, ~42 GB total).
+
+    # Memory note: log_p_target stores the full vocabulary distribution because the
+    # training objective is KL(P_patched ∥ P_target), which requires all vocab logits.
+    # For Qwen2.5-Coder-32B (vocab=151,936) this is ~0.58 MB per instance, or ~860 MB
+    # for N=1480.  An alternative would be cross-entropy against target_top_token only
+    # (1 int64 per instance), at the cost of a sparser, harder training signal.
+    #
+    # src_sample / dest_sample store the original (or augmented) SinglePredicateSample
+    # objects so that augment_pivot_caches can rebuild prompts in any language without
+    # needing the HeadLocDataset or pivot_instances list.  Memory overhead is negligible
+    # (~2-5 KB of strings per instance, ~9 MB total for N=1480).
 
 
 @torch.inference_mode()
@@ -266,7 +313,7 @@ def cache_pivot_data(
     ds: HeadLocDataset,
     layers: list[int],
     include_docstring: bool = False,
-    precompute_deltas: bool = True,
+    precompute: bool = True,
     cache_batch_size: int = 64,
 ) -> list[PivotCache]:
     """Cache all data needed for mask training.
@@ -274,22 +321,24 @@ def cache_pivot_data(
     Builds all prompts first, then runs forward passes in chunks of
     ``cache_batch_size`` to bound peak GPU activation memory.
 
-    **``precompute_deltas=True``** (default — fastest training, most memory):
-      - src + dest o_proj: chunked combined passes (src and dest in same chunk
-        so they share sequence length → no positional shift in the delta).
+    **``precompute=True``** (default — fastest training, low memory):
+      - Runs only the **source** forward pass to extract o_proj inputs per layer.
       - target next-token probs: chunked pass.
-      - CPU RAM: ~5 GB for N=100, Qwen-32B.
+      - CPU RAM: ~1 GB for N=1480 Qwen-32B (``src_head_vals`` at ~0.7 MB/instance).
+      - The destination forward pass happens live inside ``train_head_mask``.
 
-    **``precompute_deltas=False``** (memory-efficient — lazily recomputed in training):
-      - Only target next-token probs are cached (chunked).
-      - ``src_prompt`` is stored; deltas are recomputed per batch per epoch inside
-        ``train_head_mask`` (2 extra forward passes per optimizer step).
+    **``precompute=False``** (lazy — re-runs source forward per batch per epoch):
+      - Only target next-token probs are cached.
+      - ``src_prompt`` is stored; ``src_head_vals`` are recomputed per batch inside
+        ``train_head_mask`` (one extra forward pass per optimizer step per epoch).
       - CPU RAM: negligible (only log_p_target per instance).
+      - Required when ``augment=True`` in ``train_head_mask`` (augmented prompts
+        change every epoch so precomputed values would be stale).
 
     Args:
-        cache_batch_size: Max prompts per forward pass during caching.  Each
-            targ-prob chunk runs ``cache_batch_size`` prompts; each delta chunk
-            runs ``2 × cache_batch_size`` (src + dest interleaved).  Default 64
+        precompute: Whether to precompute and cache src o_proj inputs (True)
+            or store src_prompt for lazy recomputation (False).
+        cache_batch_size: Max prompts per forward pass during caching.  Default 64
             keeps peak GPU activation memory to ~8 GB on Qwen-32B (A100 safe).
     """
     src_prompts: list[str] = []
@@ -331,7 +380,7 @@ def cache_pivot_data(
     N = len(pivot_instances)
 
     logger.info(
-        f"cache_pivot_data: {N} instances | precompute_deltas={precompute_deltas} | "
+        f"cache_pivot_data: {N} instances | precompute={precompute} | "
         f"cache_batch_size={cache_batch_size}"
     )
 
@@ -345,28 +394,36 @@ def cache_pivot_data(
         logger.debug(f"  targ probs: {min(i + cache_batch_size, N)}/{N}")
     log_p_target = torch.cat(log_p_chunks, dim=0)  # (N, vocab) CPU float32
 
-    # Per-head deltas — optionally precomputed, also chunked.
-    all_deltas: torch.Tensor | None = None
-    if precompute_deltas:
-        delta_chunks: list[torch.Tensor] = []
+    # Source o_proj inputs — precomputed when precompute=True.
+    # Only the src forward pass is needed (dest is computed live in training).
+    all_src_head_vals: torch.Tensor | None = None
+    if precompute:
+        src_val_chunks: list[torch.Tensor] = []
         for i in range(0, N, cache_batch_size):
             src_chunk = src_prompts[i : i + cache_batch_size]
-            dest_chunk = dest_prompts[i : i + cache_batch_size]
-            B = len(src_chunk)
-            # Combine src+dest so they share sequence length → no positional shift.
-            combined_o = get_o_proj_inputs_batch(
-                mt, src_chunk + dest_chunk, layers
-            )  # {layer: (2B, n_embd)}
-            src_o = {layer: combined_o[layer][:B] for layer in layers}
-            dest_o = {layer: combined_o[layer][B:] for layer in layers}
-            delta_chunks.append(
-                precompute_per_head_deltas_batch(mt, src_o, dest_o, layers)
-            )  # (B, L, H, E)
-            del combined_o, src_o, dest_o
+            src_o = get_o_proj_inputs_batch(mt, src_chunk, layers)  # {layer: (B, n_embd)}
+            # Stack layers into (B, L, n_embd)
+            src_val_chunks.append(
+                torch.stack([src_o[ly] for ly in layers], dim=1)
+            )
+            del src_o
             free_gpu_cache()
-            logger.debug(f"  deltas: {min(i + cache_batch_size, N)}/{N}")
-        all_deltas = torch.cat(delta_chunks, dim=0)  # (N, L, H, E)
-        logger.info("cache_pivot_data: deltas precomputed and cached")
+            logger.debug(f"  src head vals: {min(i + cache_batch_size, N)}/{N}")
+        all_src_head_vals = torch.cat(src_val_chunks, dim=0)  # (N, L, n_embd)
+        logger.info(
+            f"cache_pivot_data: src_head_vals precomputed and cached "
+            f"({all_src_head_vals.numel() * 4 / 1e9:.2f} GB)"
+        )
+
+    # Re-collect samples in the same order as prompts (needed for PivotCache fields).
+    samples_list: list[tuple[SinglePredicateSample, SinglePredicateSample]] = []
+    for pair, _ in pivot_instances:
+        samples_list.append(
+            (
+                ds.get_sample(pair.source_predicate),
+                ds.get_sample(pair.destination_predicate),
+            )
+        )
 
     caches: list[PivotCache] = []
     for i, (pair, pi) in enumerate(pivot_instances):
@@ -375,13 +432,17 @@ def cache_pivot_data(
             f"{pair.destination_predicate} ← {pair.source_predicate} "
             f"prefix={pi.pivot_prefix!r}"
         )
+        src_s, dest_s = samples_list[i]
         caches.append(
             PivotCache(
                 pivot_instance=pi,
                 dest_prompt=dest_prompts[i],
                 log_p_target=log_p_target[i],
-                per_head_deltas=all_deltas[i] if all_deltas is not None else None,
-                src_prompt=src_prompts[i] if not precompute_deltas else None,
+                per_head_deltas=None,
+                src_sample=src_s,
+                dest_sample=dest_s,
+                src_prompt=src_prompts[i] if not precompute else None,
+                src_head_vals=all_src_head_vals[i] if all_src_head_vals is not None else None,
             )
         )
 
@@ -393,8 +454,6 @@ def cache_pivot_data(
 def augment_pivot_caches(
     mt,
     pivot_caches: list[PivotCache],
-    pivot_instances: list[tuple[PredicatePair, PivotInstance]],
-    ds: HeadLocDataset,
     include_docstring: bool = False,
     cache_batch_size: int = 64,
     rng: random.Random | None = None,
@@ -408,149 +467,177 @@ def augment_pivot_caches(
     ``"source_lang"`` (55%)
         Replaces the C++ source prompt with a randomly chosen alternative
         language (Java, Rust, Haskell, or Prolog).  Only ``src_prompt``
-        changes — ``dest_prompt`` and ``log_p_target`` are reused from the
-        original cache unchanged.
+        changes — ``dest_prompt``, ``log_p_target``, and samples are reused.
 
     ``"variable_rename"`` (35%)
         Renames the variable to a random alternative from ``_VAR_VOCAB``.
-        Updates ``src_prompt``, ``dest_prompt``, the pivot_prefix in
-        ``PivotInstance``, and recomputes ``log_p_target``.  Falls back to
-        ``"source_lang"`` if the variable has no alternatives in ``_VAR_VOCAB``.
+        Updates ``src_prompt``, ``dest_prompt``, ``pivot_prefix``,
+        ``log_p_target``, ``target_top_token``, and stored samples.
+        Falls back to ``"source_lang"`` if the variable has no alternatives.
 
     ``"toggle_type_hints"`` (10%)
-        Strips Python param type annotations from the ``def`` line of both
-        dest and target.  Updates ``src_prompt``, ``dest_prompt``, and
-        recomputes ``log_p_target``.
+        Strips Python param type annotations from the ``def`` line.
+        Updates ``src_prompt``, ``dest_prompt``, ``log_p_target``,
+        ``target_top_token``, and stored samples.
 
     The input ``pivot_caches`` is **never mutated**.  Returned caches are
-    always lazy (``per_head_deltas=None``, ``src_prompt`` populated) so they
-    work directly with the lazy-delta path in ``train_head_mask``.
+    always lazy (``per_head_deltas=None``, ``src_prompt`` populated) and carry
+    the augmented ``src_sample``/``dest_sample`` so they can be re-augmented
+    without the original dataset.
 
     Args:
         mt: ModelandTokenizer (frozen).
-        pivot_caches: Original caches — read-only.
-        pivot_instances: Corresponding ``(PredicatePair, PivotInstance)`` list;
-            same length and order as ``pivot_caches``.
-        ds: HeadLocDataset for sample look-up.
+        pivot_caches: Original caches — read-only.  Must have ``src_sample``
+            and ``dest_sample`` populated (set by ``cache_pivot_data``).
         include_docstring: Passed to all prompt builders.
         cache_batch_size: Max prompts per forward pass for log_p_target
             recomputation (only triggered for variable_rename / toggle_type_hints).
-        rng: Optional ``random.Random`` instance for reproducibility.  If None
-            a fresh instance is created (non-reproducible).
+        rng: Optional ``random.Random`` for reproducibility; created fresh if None.
 
     Returns:
         List of ``PivotCache`` objects, same length as ``pivot_caches``.
     """
-    assert len(pivot_caches) == len(pivot_instances), (
-        "pivot_caches and pivot_instances must have the same length"
-    )
     if rng is None:
         rng = random.Random()
 
     N = len(pivot_caches)
 
-    # Accumulators — indexed by position in the output list.
-    aug_src_prompts:  list[str]                = []
-    aug_dest_prompts: list[str]                = []
-    aug_pis:          list[PivotInstance]      = []
-    # log_p_target per output: either reused from original or needs recompute.
-    aug_log_p: list[torch.Tensor | None]       = []
-    # (output_idx, targ_prompt) for those that need a forward pass.
-    recompute_idx:    list[int]                = []
-    recompute_targ:   list[str]               = []
+    # Accumulators — one entry per output cache.
+    aug_src_prompts: list[str] = []
+    aug_dest_prompts: list[str] = []
+    aug_pis: list[PivotInstance] = []
+    aug_src_samples: list[SinglePredicateSample] = []
+    aug_dest_samples: list[SinglePredicateSample] = []
+    aug_log_p: list[torch.Tensor | None] = []
+    recompute_idx: list[int] = []
+    recompute_targ: list[str] = []
 
-    for cache, (pair, pi) in zip(pivot_caches, pivot_instances):
-        src_sample  = ds.get_sample(pair.source_predicate)
-        dest_sample = ds.get_sample(pair.destination_predicate)
-        targ_sample = ds.get_sample(pair.source_predicate)  # target == source
-
-        if src_sample is None or dest_sample is None or targ_sample is None:
-            logger.warning(
-                f"augment_pivot_caches: missing sample for "
-                f"{pair.source_predicate} → {pair.destination_predicate} — using original"
-            )
-            aug_src_prompts.append(cache.src_prompt or build_cpp_prompt(mt, src_sample, include_docstring=include_docstring))
-            aug_dest_prompts.append(cache.dest_prompt)
-            aug_pis.append(pi)
-            aug_log_p.append(cache.log_p_target)
-            continue
+    for cache in pivot_caches:
+        src_sample = cache.src_sample
+        dest_sample = cache.dest_sample
+        targ_sample = cache.src_sample  # target == source by construction
+        pi = cache.pivot_instance
 
         aug_type = rng.choices(_AUG_TYPES, weights=_AUG_WEIGHTS, k=1)[0]
 
-        # --- source_lang: only src_prompt changes, log_p_target reused ---
+        # --- source_lang: only src_prompt changes ---
         if aug_type == "source_lang":
             lang = rng.choice(_SOURCE_LANG_ALTS)
             aug_src_prompts.append(
-                _SOURCE_LANG_BUILDERS[lang](mt, src_sample, include_docstring=include_docstring)
+                _SOURCE_LANG_BUILDERS[lang](
+                    mt, src_sample, include_docstring=include_docstring
+                )
             )
             aug_dest_prompts.append(cache.dest_prompt)
             aug_pis.append(pi)
+            aug_src_samples.append(src_sample)
+            aug_dest_samples.append(dest_sample)
             aug_log_p.append(cache.log_p_target)
 
-        # --- variable_rename: all prompts change, log_p_target recomputed ---
+        # --- variable_rename: all prompts + samples change ---
         elif aug_type == "variable_rename":
             old_var = dest_sample.variable_name
             alts = [v for v in _VAR_VOCAB.get(old_var, []) if v != old_var]
             if not alts:
-                # Fallback: source_lang (no vocab entry for this variable)
+                # Fallback: source_lang
                 lang = rng.choice(_SOURCE_LANG_ALTS)
                 aug_src_prompts.append(
-                    _SOURCE_LANG_BUILDERS[lang](mt, src_sample, include_docstring=include_docstring)
+                    _SOURCE_LANG_BUILDERS[lang](
+                        mt, src_sample, include_docstring=include_docstring
+                    )
                 )
                 aug_dest_prompts.append(cache.dest_prompt)
                 aug_pis.append(pi)
+                aug_src_samples.append(src_sample)
+                aug_dest_samples.append(dest_sample)
                 aug_log_p.append(cache.log_p_target)
             else:
                 new_var = rng.choice(alts)
                 cfg = {"new_var": new_var}
-                aug_dest_s, aug_targ_s = augment_pair(dest_sample, targ_sample, "variable_rename", cfg)
-                aug_src_s  = augment_source(src_sample, "variable_rename", cfg)
+                aug_dest_s, aug_targ_s = augment_pair(
+                    dest_sample, targ_sample, "variable_rename", cfg
+                )
+                aug_src_s = augment_source(src_sample, "variable_rename", cfg)
                 aug_prefix = adapt_text_var(pi.pivot_prefix, old_var, new_var)
                 aug_src_prompts.append(
                     build_cpp_prompt(mt, aug_src_s, include_docstring=include_docstring)
                 )
                 aug_dest_prompts.append(
-                    build_python_prompt(mt, aug_dest_s, pivot_prefix=aug_prefix, include_docstring=include_docstring)
+                    build_python_prompt(
+                        mt,
+                        aug_dest_s,
+                        pivot_prefix=aug_prefix,
+                        include_docstring=include_docstring,
+                    )
                 )
                 aug_pis.append(
                     dataclasses.replace(pi, pivot_prefix=aug_prefix)
-                    if aug_prefix != pi.pivot_prefix else pi
+                    if aug_prefix != pi.pivot_prefix
+                    else pi
                 )
-                aug_log_p.append(None)  # placeholder
+                aug_src_samples.append(aug_src_s)
+                aug_dest_samples.append(aug_dest_s)
+                aug_log_p.append(None)
                 recompute_idx.append(len(aug_log_p) - 1)
                 recompute_targ.append(
-                    build_python_prompt(mt, aug_targ_s, pivot_prefix=aug_prefix, include_docstring=include_docstring)
+                    build_python_prompt(
+                        mt,
+                        aug_targ_s,
+                        pivot_prefix=aug_prefix,
+                        include_docstring=include_docstring,
+                    )
                 )
 
-        # --- toggle_type_hints: all prompts change, log_p_target recomputed ---
-        else:  # "toggle_type_hints"
-            aug_dest_s, aug_targ_s = augment_pair(dest_sample, targ_sample, "toggle_type_hints")
-            aug_src_s  = augment_source(src_sample, "toggle_type_hints")
+        # --- toggle_type_hints: all prompts + samples change ---
+        else:
+            aug_dest_s, aug_targ_s = augment_pair(
+                dest_sample, targ_sample, "toggle_type_hints"
+            )
+            aug_src_s = augment_source(src_sample, "toggle_type_hints")
             aug_src_prompts.append(
                 build_cpp_prompt(mt, aug_src_s, include_docstring=include_docstring)
             )
             aug_dest_prompts.append(
-                build_python_prompt(mt, aug_dest_s, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
+                build_python_prompt(
+                    mt,
+                    aug_dest_s,
+                    pivot_prefix=pi.pivot_prefix,
+                    include_docstring=include_docstring,
+                )
             )
             aug_pis.append(pi)
-            aug_log_p.append(None)  # placeholder
+            aug_src_samples.append(aug_src_s)
+            aug_dest_samples.append(aug_dest_s)
+            aug_log_p.append(None)
             recompute_idx.append(len(aug_log_p) - 1)
             recompute_targ.append(
-                build_python_prompt(mt, aug_targ_s, pivot_prefix=pi.pivot_prefix, include_docstring=include_docstring)
+                build_python_prompt(
+                    mt,
+                    aug_targ_s,
+                    pivot_prefix=pi.pivot_prefix,
+                    include_docstring=include_docstring,
+                )
             )
 
-    # Batch-recompute log_p_target for instances that need it.
+    # Batch-recompute log_p_target for variable_rename / toggle_type_hints instances.
     if recompute_targ:
-        logger.debug(f"augment_pivot_caches: recomputing log_p_target for {len(recompute_targ)}/{N} instances")
+        logger.debug(
+            f"augment_pivot_caches: recomputing log_p_target for {len(recompute_targ)}/{N} instances"
+        )
         computed: list[torch.Tensor] = []
         for i in range(0, len(recompute_targ), cache_batch_size):
             chunk = recompute_targ[i : i + cache_batch_size]
             p = get_next_token_probs_batch(mt, chunk)
             computed.append(torch.log(p.clamp(min=1e-10)))
             free_gpu_cache()
-        log_p_recomputed = torch.cat(computed, dim=0)  # (n_recompute, vocab)
+        log_p_recomputed = torch.cat(computed, dim=0)
         for slot, log_p_row in zip(recompute_idx, log_p_recomputed.unbind(0)):
             aug_log_p[slot] = log_p_row
+            # target_top_token may shift after augmentation — overwrite from new distribution.
+            new_tgt_tok = mt.tokenizer.decode([log_p_row.argmax().item()])
+            aug_pis[slot] = dataclasses.replace(
+                aug_pis[slot], target_top_token=new_tgt_tok
+            )
 
     logger.info(
         f"augment_pivot_caches: {N} caches augmented "
@@ -563,6 +650,8 @@ def augment_pivot_caches(
             dest_prompt=aug_dest_prompts[i],
             log_p_target=aug_log_p[i],
             per_head_deltas=None,
+            src_sample=aug_src_samples[i],
+            dest_sample=aug_dest_samples[i],
             src_prompt=aug_src_prompts[i],
         )
         for i in range(N)
@@ -574,14 +663,17 @@ def augment_pivot_caches(
 # ---------------------------------------------------------------------------
 
 
-def forward_with_masked_patch(
+def forward_with_masked_patch_obsolete(
     mt,
     dest_inputs: Any,
     per_head_deltas: torch.Tensor,
     mask: HeadMask,
     layers: list[int],
 ) -> torch.Tensor:
-    """Run dest_inputs with mask-weighted head patching via baukit eager hooks.
+    """[OBSOLETE] Run dest_inputs with mask-weighted head patching via baukit eager hooks.
+
+    Superseded by ``forward_with_src_replacement`` which intercepts the o_proj
+    input for true per-head replacement rather than additive delta injection.
 
     For each layer l (index li in layers):
         attn_out[l][:, -1, :] += Σ_h mask.values[li, h] * per_head_deltas[:, li, h]
@@ -659,6 +751,100 @@ def forward_with_masked_patch(
     return logits[0] if squeeze_output else logits
 
 
+def forward_with_src_replacement(
+    mt,
+    dest_inputs: Any,
+    src_head_vals: torch.Tensor,
+    mask: HeadMask,
+    layers: list[int],
+) -> torch.Tensor:
+    """Run dest_inputs with mask-weighted per-head o_proj input replacement.
+
+    For each layer l (index li in layers) and head h at the last token position:
+        o_proj_input[:, -1, h*head_dim:(h+1)*head_dim] =
+            mask[li,h] * src_h + (1 - mask[li,h]) * cascade_h
+
+    where ``cascade_h`` is the live dest attention output for head h at that layer
+    (after cascading patches from all earlier layers), and ``src_h`` is the
+    corresponding head output from the source (C++) forward pass.
+
+    True replacement semantics:
+        mask=1 → pure source head output (full goal transfer)
+        mask=0 → pure cascade dest output (no patching)
+
+    Implemented via ``register_forward_pre_hook`` on o_proj — fully compatible with
+    ``torch.autograd`` (unlike nnsight's thread-based SWAP which breaks the graph).
+
+    Args:
+        mt: ModelandTokenizer (frozen).
+        dest_inputs: Tokenized destination prompt(s).
+        src_head_vals: Source o_proj inputs stacked across layers.
+            Shape ``(batch, n_layers_tested, n_embd)`` for batch, or
+            ``(n_layers_tested, n_embd)`` for a single instance.
+        mask: HeadMask with learnable values (requires_grad=True).
+        layers: Layer indices matching src_head_vals axis -2.
+
+    Returns:
+        ``(vocab_size,)`` float32 logits for 2D input (single instance), or
+        ``(batch, vocab_size)`` float32 logits for 3D input (batch).
+        Differentiable w.r.t. mask.values.
+    """
+    if src_head_vals.dim() == 2:
+        src_head_vals = src_head_vals.unsqueeze(0)  # (1, L, n_embd)
+        squeeze_output = True
+    else:
+        squeeze_output = False
+
+    n_heads = mt.model.config.num_attention_heads
+    n_embd = mt.n_embd
+    head_dim = n_embd // n_heads
+    mask_vals = mask.values  # (n_layers_tested, n_heads) requires_grad
+    src_batch = src_head_vals  # (batch, L, n_embd) float32 CPU
+
+    handles = []
+    try:
+        for li, layer in enumerate(layers):
+            attn_name = mt.attn_module_name_format.format(layer)
+            o_proj = get_module_nnsight(mt._model, attn_name + ".o_proj")
+
+            def make_hook(li_: int):
+                def pre_hook(module, args):
+                    x = args[0]  # (batch, seq, n_embd) bfloat16 — live cascade input
+                    dev = x.device
+                    dtype = x.dtype
+                    B_ = x.shape[0]
+
+                    # Source vals for this layer — float32 for gradient precision
+                    src = src_batch[:, li_].to(dev)  # (batch, n_embd) float32
+                    src_3d = src.view(B_, n_heads, head_dim)
+
+                    # Cascade (live dest) at last token
+                    cas_3d = x[:, -1, :].float().view(B_, n_heads, head_dim)
+
+                    # Per-head interpolation; m has requires_grad through mask_vals
+                    m = mask_vals[li_].to(dev).view(1, n_heads, 1)
+                    new_last = (m * src_3d + (1 - m) * cas_3d).view(B_, n_embd)  # (B, n_embd)
+
+                    # Splice into sequence — torch.cat keeps gradient graph lean:
+                    # only the last-token slice is live in autograd, not the full seq tensor.
+                    new_seq = torch.cat(
+                        [x[:, :-1, :], new_last.to(dtype).unsqueeze(1)], dim=1
+                    )  # (batch, seq, n_embd)
+                    return (new_seq,)
+
+                return pre_hook
+
+            handles.append(o_proj.register_forward_pre_hook(make_hook(li)))
+
+        output = mt._model(**dest_inputs)
+    finally:
+        for h in handles:
+            h.remove()
+
+    logits = output.logits[:, -1, :].float()  # (batch, vocab)
+    return logits[0] if squeeze_output else logits
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
@@ -670,8 +856,10 @@ class MaskTrainingHistory:
     loss_sparse: list[float] = field(default_factory=list)
     loss_total: list[float] = field(default_factory=list)
     n_active: list[int] = field(default_factory=list)
-    val_recall: list[list[float]] = field(default_factory=list)  # recall@1..K per val epoch
-    val_epochs: list[int] = field(default_factory=list)          # epoch indices of val evals
+    val_recall: list[list[float]] = field(
+        default_factory=list
+    )  # recall@1..K per val epoch
+    val_epochs: list[int] = field(default_factory=list)  # epoch indices of val evals
 
 
 @torch.inference_mode()
@@ -681,31 +869,49 @@ def _evaluate_val(
     mask: "HeadMask",
     layers: list[int],
     k: int = 5,
+    aug_rng: random.Random | None = None,
+    aug_cache_batch_size: int = 64,
 ) -> list[float]:
     """Compute recall@1..k on the val set using the current mask.
 
     For each instance runs a masked patched forward pass and records the top-k
     predicted tokens.  Compares against ``pivot_instance.target_top_token``.
 
+    Args:
+        aug_rng: If provided, val caches are augmented via ``augment_pivot_caches``
+            before evaluation (same augmentation policy as training).  The rng is
+            advanced in-place so each call produces a different augmentation.
+
     Returns:
         ``[recall@1, recall@2, ..., recall@k]`` floats.
     """
+    if aug_rng is not None:
+        val_caches = augment_pivot_caches(
+            mt, val_caches, cache_batch_size=aug_cache_batch_size, rng=aug_rng
+        )
+
     all_predictions: list[list[str]] = []
     all_targets: list[str] = []
 
     for cache in val_caches:
-        if cache.per_head_deltas is not None:
-            delta = cache.per_head_deltas  # (L, H, E) — eager path
-        else:
-            combined = get_o_proj_inputs_batch(
-                mt, [cache.src_prompt, cache.dest_prompt], layers
-            )
-            src_o  = {ly: combined[ly][:1] for ly in layers}
-            dest_o = {ly: combined[ly][1:] for ly in layers}
-            delta = precompute_per_head_deltas_batch(mt, src_o, dest_o, layers)[0]
-
         dest_inputs = prepare_input([cache.dest_prompt], tokenizer=mt)
-        logits = forward_with_masked_patch(mt, dest_inputs, delta, mask, layers)  # (vocab,)
+
+        if cache.per_head_deltas is not None:
+            # Obsolete delta path — kept for backward compat
+            logits = forward_with_masked_patch_obsolete(
+                mt, dest_inputs, cache.per_head_deltas, mask, layers
+            )  # (vocab,)
+        else:
+            # New src-replacement path (eager or lazy)
+            if cache.src_head_vals is not None:
+                src_hv = cache.src_head_vals  # (L, n_embd) — precomputed
+            else:
+                src_o = get_o_proj_inputs_batch(mt, [cache.src_prompt], layers)
+                src_hv = torch.stack([src_o[ly][0] for ly in layers])  # (L, n_embd)
+            logits = forward_with_src_replacement(
+                mt, dest_inputs, src_hv, mask, layers
+            )  # (vocab,)
+
         top_k_ids = logits.topk(k).indices.tolist()
         top_k_toks = [mt.tokenizer.decode([i]) for i in top_k_ids]
         all_predictions.append(top_k_toks)
@@ -725,8 +931,6 @@ def train_head_mask(
     checkpoint_dir: str | None = None,
     checkpoint_every: int = 10,
     augment: bool = False,
-    augment_instances: list[tuple[PredicatePair, PivotInstance]] | None = None,
-    augment_ds: HeadLocDataset | None = None,
     augment_include_docstring: bool = False,
     augment_cache_batch_size: int = 64,
     augment_seed: int | None = None,
@@ -743,29 +947,37 @@ def train_head_mask(
     (``reduction="batchmean"`` keeps the KL loss scale consistent with the old
     per-instance ``reduction="sum"`` regardless of batch size).
 
-    If ``pivot_caches[0].per_head_deltas is None`` (i.e., ``cache_pivot_data`` was
-    called with ``precompute_deltas=False``), deltas are recomputed lazily per batch
-    per epoch using one combined src+dest forward pass — same positional alignment
-    as the eager path, at the cost of extra compute.
+    Path detection (automatic, based on first cache):
+    - ``per_head_deltas is not None`` → obsolete eager delta path (backward compat)
+    - ``src_head_vals is not None``   → new eager path (default; src forward cached)
+    - neither                         → new lazy path (src-only forward per batch/epoch)
+
+    The new eager path (``cache_pivot_data(..., precompute=True)``) only runs the
+    source forward pass at cache time.  The destination forward happens live inside
+    the training loop via ``forward_with_src_replacement``.
+
+    The new lazy path (``cache_pivot_data(..., precompute=False)``) runs a
+    src-only forward pass per batch per epoch — one extra forward pass per step.
+    Required when ``augment=True`` because source prompts change each epoch.
 
     When ``augment=True``, a fresh random surface-form augmentation is applied to
     every instance at the start of each epoch (via ``augment_pivot_caches``).
-    This requires ``precompute_deltas=False`` in ``cache_pivot_data`` because the
-    source prompt changes every epoch — precomputed deltas would be stale.
+    Requires ``cache_pivot_data(precompute=False)`` — precomputed ``src_head_vals``
+    would be stale after per-epoch source-prompt augmentation.
 
     Args:
         mt: ModelandTokenizer (frozen — only mask params are updated).
         pivot_caches: Pre-cached data from cache_pivot_data().
-        layers: Layer indices (must match pivot_caches[*].per_head_deltas axis 0).
+        layers: Layer indices (must match pivot_caches[*].src_head_vals / per_head_deltas axis 0).
         n_epochs: Training epochs (default 20, from paper).
         lr: AdamW learning rate (default 1e-2, from paper).
         lambda_sparse: L1 sparsity coefficient (default 1e-2, from paper).
         batch_size: Instances per optimizer step (default 8).
-        augment: If True, re-augment all instances at the start of every epoch.
-            Requires lazy deltas (cache_pivot_data called with precompute_deltas=False).
-        augment_instances: Required when augment=True. (PredicatePair, PivotInstance)
-            list — same length and order as pivot_caches.
-        augment_ds: Required when augment=True. HeadLocDataset for sample look-up.
+        augment: If True, re-augment train and val instances at the start of every
+            epoch.  Requires ``cache_pivot_data(precompute=False)`` — src prompts
+            change every epoch so precomputed ``src_head_vals`` would be stale.
+            pivot_caches must have src_sample/dest_sample populated (always true when
+            built by cache_pivot_data).
         augment_include_docstring: Passed to prompt builders during augmentation.
         augment_cache_batch_size: Batch size for log_p_target recomputation during
             augmentation (default 64).
@@ -777,28 +989,22 @@ def train_head_mask(
     n_layers_tested = len(layers)
     n_heads = mt.model.config.num_attention_heads
 
-    lazy_deltas = pivot_caches[0].per_head_deltas is None
+    _has_deltas = pivot_caches[0].per_head_deltas is not None   # obsolete eager delta path
+    _has_src_vals = pivot_caches[0].src_head_vals is not None   # new eager src-val path
+    _use_new_path = not _has_deltas                             # True for all new caches
 
     if augment:
-        assert lazy_deltas, (
-            "augment=True requires lazy deltas — call cache_pivot_data with "
-            "precompute_deltas=False. Precomputed deltas would be stale after "
-            "per-epoch source-prompt augmentation."
-        )
-        assert augment_instances is not None and augment_ds is not None, (
-            "augment=True requires augment_instances and augment_ds"
-        )
-        assert len(augment_instances) == len(pivot_caches), (
-            f"augment_instances length {len(augment_instances)} != pivot_caches length {len(pivot_caches)}"
+        assert _use_new_path, (
+            "augment=True requires the new src-replacement path — call cache_pivot_data "
+            "with precompute=False. The old delta path does not support augmentation."
         )
         _aug_rng = random.Random(augment_seed)
 
-    # 80/20 train/val split — val is held out and never augmented.
-    val_size   = max(1, int(len(pivot_caches) * 0.2))
+    # 80/20 train/val split.  When augment=True both splits are re-augmented each epoch.
+    val_size = max(1, int(len(pivot_caches) * 0.2))
     train_size = len(pivot_caches) - val_size
     train_caches = pivot_caches[:train_size]
-    val_caches   = pivot_caches[train_size:]
-    _aug_instances_train = augment_instances[:train_size] if augment else None
+    val_caches = pivot_caches[train_size:]
 
     N = train_size  # training set size
 
@@ -819,10 +1025,26 @@ def train_head_mask(
             torch.stack([c.log_p_target for c in grp])
             for grp in batch_groups  # (B, vocab) CPU
         ]
-        if lazy_deltas:
-            batch_src_prompts_list = [[c.src_prompt for c in grp] for grp in batch_groups]
-            batch_dest_prompts_list = [[c.dest_prompt for c in grp] for grp in batch_groups]
+        if _has_src_vals:
+            # New eager path: precomputed src_head_vals; dest forward runs live.
+            batch_src_hv_list = [
+                torch.stack([c.src_head_vals for c in grp])
+                for grp in batch_groups  # (B, L, n_embd) CPU float32
+            ]
+            batch_inputs_list = [
+                prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
+                for grp in batch_groups
+            ]
+        elif _use_new_path:
+            # New lazy path: recompute src_head_vals per batch per epoch.
+            batch_src_prompts_list = [
+                [c.src_prompt for c in grp] for grp in batch_groups
+            ]
+            batch_dest_prompts_list = [
+                [c.dest_prompt for c in grp] for grp in batch_groups
+            ]
         else:
+            # Obsolete eager delta path.
             batch_inputs_list = [
                 prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
                 for grp in batch_groups
@@ -832,12 +1054,15 @@ def train_head_mask(
             # doubling CPU RAM (~14 GB for N=512 on Qwen-32B).  Stack on-the-fly per
             # batch inside the epoch loop instead (negligible cost: 16 tensors × 28 MB).
 
+    _path_desc = (
+        "new-eager" if _has_src_vals else "new-lazy" if _use_new_path else "delta-obsolete"
+    )
     logger.info(
         f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
         f"{n_layers_tested * n_heads} mask params | "
         f"train={N} val={val_size} | batch_size={batch_size} ({len(batch_groups)} batches/epoch) | "
         f"{n_epochs} epochs | lr={lr} λ={lambda_sparse} | "
-        f"lazy_deltas={lazy_deltas} | augment={augment}"
+        f"path={_path_desc} | augment={augment}"
     )
 
     for epoch in range(n_epochs):
@@ -849,38 +1074,47 @@ def train_head_mask(
         # Always lazy (augment_pivot_caches returns per_head_deltas=None).
         if augment:
             _aug_caches = augment_pivot_caches(
-                mt, train_caches, _aug_instances_train, augment_ds,
+                mt,
+                train_caches,
                 include_docstring=augment_include_docstring,
                 cache_batch_size=augment_cache_batch_size,
                 rng=_aug_rng,
             )
-            _aug_groups = [_aug_caches[i : i + batch_size] for i in range(0, N, batch_size)]
-            _batch_log_p_ep  = [torch.stack([c.log_p_target for c in g]) for g in _aug_groups]
-            _batch_src_ep    = [[c.src_prompt for c in g] for g in _aug_groups]
-            _batch_dest_ep   = [[c.dest_prompt for c in g] for g in _aug_groups]
+            _aug_groups = [
+                _aug_caches[i : i + batch_size] for i in range(0, N, batch_size)
+            ]
+            _batch_log_p_ep = [
+                torch.stack([c.log_p_target for c in g]) for g in _aug_groups
+            ]
+            _batch_src_ep = [[c.src_prompt for c in g] for g in _aug_groups]
+            _batch_dest_ep = [[c.dest_prompt for c in g] for g in _aug_groups]
+            _batch_src_hv_ep = None  # augmented caches are always lazy
         else:
-            _batch_log_p_ep  = batch_log_p_list
-            _batch_src_ep    = batch_src_prompts_list if lazy_deltas else None
-            _batch_dest_ep   = batch_dest_prompts_list if lazy_deltas else None
+            _batch_log_p_ep = batch_log_p_list
+            _batch_src_hv_ep = batch_src_hv_list if _has_src_vals else None
+            _batch_src_ep = batch_src_prompts_list if _use_new_path and not _has_src_vals else None
+            _batch_dest_ep = batch_dest_prompts_list if _use_new_path and not _has_src_vals else None
 
         for bi, batch_log_p in enumerate(_batch_log_p_ep):
-            if lazy_deltas:
-                # Recompute deltas for this batch: one combined forward pass so
-                # src and dest share the same sequence length (no positional shift).
-                src_ps  = _batch_src_ep[bi]
+            if _batch_src_hv_ep is not None:
+                # New eager path: src_head_vals precomputed — just look them up.
+                batch_src_hv = _batch_src_hv_ep[bi]  # (B, L, n_embd) CPU float32
+                batch_inputs = batch_inputs_list[bi]
+            elif _use_new_path:
+                # New lazy path: run src-only forward pass per batch.
+                src_ps = _batch_src_ep[bi]
                 dest_ps = _batch_dest_ep[bi]
                 B = len(src_ps)
                 with torch.inference_mode():
-                    combined_o = get_o_proj_inputs_batch(mt, src_ps + dest_ps, layers)
-                src_o_b  = {layer: combined_o[layer][:B] for layer in layers}
-                dest_o_b = {layer: combined_o[layer][B:] for layer in layers}
-                batch_deltas = precompute_per_head_deltas_batch(
-                    mt, src_o_b, dest_o_b, layers
-                )
-                del combined_o, src_o_b, dest_o_b  # free CPU tensors before forward pass
-                free_gpu_cache()  # flush nnsight trace residuals before the grad pass
+                    src_o = get_o_proj_inputs_batch(mt, src_ps, layers)
+                batch_src_hv = torch.stack(
+                    [torch.stack([src_o[ly][i_] for ly in layers]) for i_ in range(B)]
+                )  # (B, L, n_embd) float32 CPU
+                del src_o
+                free_gpu_cache()
                 batch_inputs = prepare_input(dest_ps, tokenizer=mt)
             else:
+                # Obsolete eager delta path.
                 batch_inputs = batch_inputs_list[bi]
                 # Stack on-the-fly — avoids the ~14 GB duplicate that pre-stacking would create.
                 batch_deltas = torch.stack(
@@ -889,9 +1123,14 @@ def train_head_mask(
 
             optimizer.zero_grad()
 
-            logits = forward_with_masked_patch(
-                mt, batch_inputs, batch_deltas, mask, layers
-            )  # (B, vocab)
+            if _use_new_path:
+                logits = forward_with_src_replacement(
+                    mt, batch_inputs, batch_src_hv, mask, layers
+                )  # (B, vocab)
+            else:
+                logits = forward_with_masked_patch_obsolete(
+                    mt, batch_inputs, batch_deltas, mask, layers
+                )  # (B, vocab)
 
             # KL(P_patched ∥ P_target) — batchmean: sum over vocab / batch_size
             # Consistent loss scale with old per-instance reduction="sum"
@@ -947,11 +1186,18 @@ def train_head_mask(
         logger.debug("-" * 100)
 
         if checkpoint_every > 0 and (epoch + 1) % checkpoint_every == 0:
-            # Val evaluation — always run when checkpointing.
-            val_rec = _evaluate_val(mt, val_caches, mask, layers)
+            # Val evaluation — augmented when augment=True.
+            val_rec = _evaluate_val(
+                mt,
+                val_caches,
+                mask,
+                layers,
+                aug_rng=_aug_rng if augment else None,
+                aug_cache_batch_size=augment_cache_batch_size,
+            )
             history.val_recall.append(val_rec)
             history.val_epochs.append(epoch + 1)
-            recall_str = "  ".join(f"@{k+1}={v:.3f}" for k, v in enumerate(val_rec))
+            recall_str = "  ".join(f"@{k + 1}={v:.3f}" for k, v in enumerate(val_rec))
             logger.info(f"  Val recall: {recall_str}")
 
             if checkpoint_dir is not None:

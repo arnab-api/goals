@@ -1,13 +1,28 @@
 """Train a sparse attention head mask for the head localization experiment.
 
-Runs the full cache → train pipeline on the finished pivot-instance dataset
-for a given model, then saves the trained mask to disk.
+Uses the o_proj pre-hook replacement approach: for each head h at layer l,
+the o_proj input at the last token is interpolated as:
+    mask[l,h]*src_h + (1-mask[l,h])*cascade_h
+
+This gives true per-head replacement semantics (mask=1 → pure source,
+mask=0 → pure cascade dest), as opposed to the obsolete additive-delta approach.
+
+Memory: caches only src_head_vals (L, n_embd) per instance — ~1 GB for
+N=1480, Qwen-32B, layers 6–40 (40× smaller than the old per_head_deltas).
 
 Usage:
     conda run -n goals python scripts/train_head_mask.py \\
         --model-key Qwen/Qwen2.5-Coder-32B-Instruct \\
         --layers-start 6 --layers-end 40 \\
         --n-epochs 100 --lambda-sparse 20 --batch-size 16
+
+    # Lazy mode (no precomputed src_head_vals; one extra src fwd pass per batch):
+    conda run -n goals python scripts/train_head_mask.py \\
+        --model-key Qwen/Qwen2.5-Coder-32B-Instruct --lazy
+
+    # With per-epoch surface-form augmentation (requires --lazy):
+    conda run -n goals python scripts/train_head_mask.py \\
+        --model-key Qwen/Qwen2.5-Coder-32B-Instruct --lazy --augment
 
 Outputs:
     results/localization/<model-short-name>/head_mask.pt
@@ -85,11 +100,11 @@ def main() -> None:
         help="Cap the number of pivot instances (useful for smoke-tests).",
     )
     parser.add_argument(
-        "--lazy-deltas",
+        "--lazy",
         action="store_true",
         help=(
-            "Skip delta precomputation (saves ~5 GB RAM at the cost of "
-            "2 extra forward passes per optimizer step per epoch)"
+            "Skip src_head_vals precomputation. Recomputes per batch per epoch "
+            "(one extra src forward pass per optimizer step). Required for --augment."
         ),
     )
     parser.add_argument(
@@ -105,7 +120,7 @@ def main() -> None:
         "--checkpoint-every",
         type=int,
         default=5,
-        help="Save a mask checkpoint every K epochs (default: 10). 0 = disabled.",
+        help="Save a mask checkpoint every K epochs (default: 5). 0 = disabled.",
     )
     parser.add_argument(
         "--augment",
@@ -113,15 +128,21 @@ def main() -> None:
         help=(
             "Re-augment all instances at the start of every epoch "
             "(source_lang 55%%, variable_rename 35%%, toggle_type_hints 10%%). "
-            "Requires --lazy-deltas."
+            "Requires --lazy."
         ),
     )
     parser.add_argument(
         "--augment-seed",
         type=int,
         default=123456,
-        help="Random seed for per-epoch augmentation (default: non-reproducible).",
+        help="Random seed for per-epoch augmentation (default: 123456).",
     )
+    parser.add_argument(
+        "--no-docstring",
+        action="store_true",
+        help="Exclude docstring from prompts (default: include).",
+    )
+
     add_logging_args(parser)
     args = parser.parse_args()
     configure(args)
@@ -129,16 +150,16 @@ def main() -> None:
     model_short_name = args.model_key.split("/")[-1]
     layers = list(range(args.layers_start, args.layers_end))
 
-    logger.info(f"model:         {args.model_key}")
+    logger.info(f"model:            {args.model_key}")
     logger.info(
-        f"layers:        {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)"
+        f"layers:           {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)"
     )
-    logger.info(f"n_epochs:      {args.n_epochs}")
-    logger.info(f"lr:            {args.lr}")
-    logger.info(f"lambda_sparse: {args.lambda_sparse}")
-    logger.info(f"batch_size:    {args.batch_size}")
-    logger.info(f"lazy_deltas:   {args.lazy_deltas}")
-    logger.info(f"augment:       {args.augment}")
+    logger.info(f"n_epochs:         {args.n_epochs}")
+    logger.info(f"lr:               {args.lr}")
+    logger.info(f"lambda_sparse:    {args.lambda_sparse}")
+    logger.info(f"batch_size:       {args.batch_size}")
+    logger.info(f"lazy:             {args.lazy}")
+    logger.info(f"augment:          {args.augment}")
     logger.info(f"cache_batch_size: {args.cache_batch_size}")
     logger.info(f"checkpoint_every: {args.checkpoint_every}")
 
@@ -178,9 +199,9 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Cache pivot data
     # ------------------------------------------------------------------
-    if args.augment and not args.lazy_deltas:
-        logger.warning("--augment requires lazy deltas; forcing --lazy-deltas on.")
-        args.lazy_deltas = True
+    if args.augment and not args.lazy:
+        logger.warning("--augment requires lazy caching; forcing --lazy on.")
+        args.lazy = True
 
     logger.info("=== Caching pivot data ===")
     pivot_caches = cache_pivot_data(
@@ -188,8 +209,9 @@ def main() -> None:
         pivot_instances,
         ds,
         layers=layers,
-        precompute_deltas=not args.lazy_deltas,
+        precompute=not args.lazy,
         cache_batch_size=args.cache_batch_size,
+        include_docstring=not args.no_docstring,
     )
 
     # ------------------------------------------------------------------
@@ -210,10 +232,9 @@ def main() -> None:
         checkpoint_dir=checkpoint_dir if args.checkpoint_every > 0 else None,
         checkpoint_every=args.checkpoint_every,
         augment=args.augment,
-        augment_instances=pivot_instances if args.augment else None,
-        augment_ds=ds if args.augment else None,
         augment_cache_batch_size=args.cache_batch_size,
         augment_seed=args.augment_seed,
+        augment_include_docstring=not args.no_docstring,
     )
 
     # ------------------------------------------------------------------
@@ -243,9 +264,10 @@ def main() -> None:
             "lr": args.lr,
             "lambda_sparse": args.lambda_sparse,
             "batch_size": args.batch_size,
-            "precompute_deltas": not args.lazy_deltas,
+            "precompute": not args.lazy,
             "augment": args.augment,
             "augment_seed": args.augment_seed,
+            "approach": "src_replacement",
         },
     }
     torch.save(checkpoint, save_path)
@@ -270,7 +292,7 @@ def main() -> None:
         last_rec = history.val_recall[-1]
         table.add_row(
             "Val recall (last)",
-            "  ".join(f"@{k+1}={v:.3f}" for k, v in enumerate(last_rec)),
+            "  ".join(f"@{k + 1}={v:.3f}" for k, v in enumerate(last_rec)),
         )
     table.add_row("Saved to", save_path)
     console.print(table)
