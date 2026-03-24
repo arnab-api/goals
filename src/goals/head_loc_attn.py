@@ -433,6 +433,11 @@ def cache_pivot_data(
             f"prefix={pi.pivot_prefix!r}"
         )
         src_s, dest_s = samples_list[i]
+        # Update target_top_token from current model's distribution so that
+        # recall eval is correct even when pivot instances were mined on a
+        # different model (the full log_p_target was already computed above).
+        new_tgt_tok = mt.tokenizer.decode([log_p_target[i].argmax().item()])
+        pi = dataclasses.replace(pi, target_top_token=new_tgt_tok)
         caches.append(
             PivotCache(
                 pivot_instance=pi,

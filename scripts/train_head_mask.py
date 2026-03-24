@@ -60,14 +60,14 @@ def main() -> None:
     parser.add_argument(
         "--layers-start",
         type=int,
-        default=6,
+        default=0,
         help="First layer index, inclusive (default: 6)",
     )
     parser.add_argument(
         "--layers-end",
         type=int,
-        default=40,
-        help="Last layer index, exclusive (default: 40)",
+        default=-1,
+        help="Last layer index, exclusive (default: -1, meaning all layers to the end)",
     )
     parser.add_argument(
         "--n-epochs",
@@ -166,16 +166,32 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Load dataset
     # ------------------------------------------------------------------
+    _FALLBACK_MODEL = "Qwen2.5-Coder-32B-Instruct"
+
     logger.info(f"Loading dataset for {model_short_name} ...")
     ds = HeadLocDataset.load(model_name=model_short_name)
     pivot_instances = ds.pivot_instances
 
     if not pivot_instances:
-        logger.error(
+        if model_short_name == _FALLBACK_MODEL:
+            logger.error(
+                f"No pivot instances found for {_FALLBACK_MODEL}. "
+                "Run scripts/mine_pivot_instances.py first."
+            )
+            sys.exit(1)
+        logger.warning(
             f"No pivot instances found for {model_short_name}. "
-            "Run scripts/mine_pivot_instances.py first."
+            f"Falling back to {_FALLBACK_MODEL} pivot instances — "
+            "target_top_token will be recalculated for the current model inside cache_pivot_data."
         )
-        sys.exit(1)
+        ds = HeadLocDataset.load(model_name=_FALLBACK_MODEL)
+        pivot_instances = ds.pivot_instances
+        if not pivot_instances:
+            logger.error(
+                f"Fallback dataset {_FALLBACK_MODEL} also has no pivot instances. "
+                "Run scripts/mine_pivot_instances.py first."
+            )
+            sys.exit(1)
 
     if args.max_instances is not None:
         pivot_instances = pivot_instances[: args.max_instances]
@@ -202,6 +218,9 @@ def main() -> None:
     if args.augment and not args.lazy:
         logger.warning("--augment requires lazy caching; forcing --lazy on.")
         args.lazy = True
+
+    if args.layers_end == -1:
+        args.layers_end = mt.n_layer
 
     logger.info("=== Caching pivot data ===")
     pivot_caches = cache_pivot_data(
