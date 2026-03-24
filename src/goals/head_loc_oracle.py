@@ -30,6 +30,8 @@ are kept as utilities for notebook inspection.
 
 from __future__ import annotations
 
+import builtins
+import keyword
 import logging
 import re
 
@@ -284,6 +286,7 @@ def parse_oracle_pair_response(response: str) -> list[str]:
     Returns:
         List of prefix strings (deduplicated, order-preserved).
     """
+
     def _strip_delimiters(s: str) -> str:
         s = s.strip()
         if len(s) >= 2 and s[0] in ('"', "'", "`") and s[0] == s[-1]:
@@ -296,7 +299,7 @@ def parse_oracle_pair_response(response: str) -> list[str]:
         for line in block.splitlines():
             line = line.strip()
             if line.startswith("PREFIX:"):
-                current_prefix = _strip_delimiters(line[len("PREFIX:"):].strip())
+                current_prefix = _strip_delimiters(line[len("PREFIX:") :].strip())
             elif line.startswith("DIVERGES:") and current_prefix:
                 logger.debug(
                     f"  Oracle DIVERGES hint for prefix={current_prefix!r}: {line}"
@@ -521,7 +524,10 @@ def case3_pivot_instances(
 
         for lcp in oracle_lcps:
             pi = _validate_candidate(
-                mt, dest_sample, targ_sample, lcp,
+                mt,
+                dest_sample,
+                targ_sample,
+                lcp,
                 include_docstring=include_docstring,
                 max_completion_tokens=max_completion_tokens,
             )
@@ -553,8 +559,8 @@ def _mine_case3b_raw(
 
     Queries the oracle independently for dest and target implementations, then
     computes token-level LCPs across all (dest_impl, targ_impl) pairs. Filters by
-    minimum prefix length, prefix-relationship check, and ``_is_meaningful_token``
-    on both diverging tokens.
+    minimum prefix length, prefix-relationship check, and ``_tokens_differ_meaningfully``
+    on the diverging token pair.
 
     Args:
         mt: ModelandTokenizer (tokenizer used for LCP computation).
@@ -601,10 +607,10 @@ def _mine_case3b_raw(
             div_tok_dest = mt.tokenizer.decode([tok_dest[n]])
             div_tok_targ = mt.tokenizer.decode([tok_targ[n]])
 
-            if not (_is_meaningful_token(div_tok_dest) and _is_meaningful_token(div_tok_targ)):
+            if not _tokens_differ_meaningfully(div_tok_dest, div_tok_targ):
                 logger.debug(
-                    f"  Skipping lcp={lcp!r}: diverging tokens not meaningful"
-                    f" ({div_tok_dest!r} / {div_tok_targ!r})"
+                    f"  Skipping lcp={lcp!r}: diverging tokens differ only in naming"
+                    f" ({div_tok_dest!r} vs {div_tok_targ!r})"
                 )
                 continue
 
@@ -680,18 +686,46 @@ def _validate_candidate(
     )
 
     if dest_tok != targ_tok:
-        return PivotInstance(pivot_prefix=lcp, dest_top_token=dest_tok, target_top_token=targ_tok)
+        return PivotInstance(
+            pivot_prefix=lcp, dest_top_token=dest_tok, target_top_token=targ_tok
+        )
     return None
 
 
-def _is_meaningful_token(token: str) -> bool:
-    """True if ``token`` encodes a semantic difference (not just a variable name).
+_KEYWORDS_AND_BUILTINS: frozenset[str] = frozenset(
+    keyword.kwlist + dir(builtins)
+)
+_IDENTIFIER_RE = re.compile(r"[a-zA-Z_]\w*")
 
-    Rejects single-letter alpha tokens (e.g. ``c``, ``s``, ``i``) that are
-    likely variable names rather than operators or method names.
+
+def _normalize_token(token: str) -> str:
+    """Replace non-keyword, non-builtin identifiers with a placeholder.
+
+    ``len``, ``not``, ``True`` etc. are preserved; bare variable names like
+    ``s``, ``c``, ``result`` are replaced with ``VAR``.
     """
-    t = token.strip()
-    return not (len(t) == 1 and t.isalpha())
+    return _IDENTIFIER_RE.sub(
+        lambda m: m.group(0) if m.group(0) in _KEYWORDS_AND_BUILTINS else "VAR",
+        token,
+    )
+
+
+def _tokens_differ_meaningfully(tok_dest: str, tok_targ: str) -> bool:
+    """True if the two diverging tokens encode a real semantic difference.
+
+    Normalizes both tokens by replacing variable-name identifiers with ``VAR``,
+    then checks whether they still differ.  Tokens that differ only in variable
+    naming convention (e.g. ``(s`` vs ``(c``, ``[item`` vs ``[elem``) become
+    identical after normalization and are rejected.
+
+    Examples:
+        ``(s``  vs ``(c``   → both → ``(VAR``        → False  (naming only)
+        ``<``   vs ``>``    → unchanged               → True   (operator)
+        ``[-``  vs ``[``    → unchanged               → True   (index structure)
+        ``not`` vs ``len(`` → ``not`` vs ``len(``     → True   (keyword vs builtin)
+        ``(len(`` vs ``(s`` → ``(len(`` vs ``(VAR``  → True   (meaningful)
+    """
+    return _normalize_token(tok_dest) != _normalize_token(tok_targ)
 
 
 def case3b_pivot_instances(
@@ -712,7 +746,7 @@ def case3b_pivot_instances(
          LCPs via ``_lcp_tokens``.
       3. Filter: LCP must be at least ``min_prefix_len`` characters.
       4. Extract diverging tokens at position ``len(tokenized_lcp)``; both must
-         pass ``_is_meaningful_token`` (rejects single-letter variable names).
+         pass ``_tokens_differ_meaningfully`` (rejects naming-only divergences).
       5. Deduplicate LCPs across cross-product pairs.
       6. Completion gate + divergence gate (same as Case 3).
       7. Emit ``PivotInstance`` for passing pairs.
@@ -751,7 +785,9 @@ def case3b_pivot_instances(
         )
 
         candidate_lcps = _mine_case3b_raw(
-            mt, dest_sample, targ_sample,
+            mt,
+            dest_sample,
+            targ_sample,
             n_implementations=n_implementations,
             oracle_temperature=oracle_temperature,
             min_prefix_len=min_prefix_len,
@@ -759,7 +795,10 @@ def case3b_pivot_instances(
 
         for lcp in candidate_lcps:
             pi = _validate_candidate(
-                mt, dest_sample, targ_sample, lcp,
+                mt,
+                dest_sample,
+                targ_sample,
+                lcp,
                 include_docstring=include_docstring,
                 max_completion_tokens=max_completion_tokens,
             )
@@ -857,11 +896,15 @@ def augment_pivot_instances(
 
             # Gate 2: divergence (also retrieves the token values)
             dest_prompt = build_python_prompt(
-                mt, dest_sample, pivot_prefix=aug_prefix,
+                mt,
+                dest_sample,
+                pivot_prefix=aug_prefix,
                 include_docstring=include_docstring,
             )
             targ_prompt = build_python_prompt(
-                mt, targ_sample, pivot_prefix=aug_prefix,
+                mt,
+                targ_sample,
+                pivot_prefix=aug_prefix,
                 include_docstring=include_docstring,
             )
             try:
@@ -877,10 +920,16 @@ def augment_pivot_instances(
             targ_tok = get_top_token(mt, p_targ)
 
             if dest_tok != targ_tok:
-                augmented.append((
-                    pair,
-                    PivotInstance(pivot_prefix=aug_prefix, dest_top_token=dest_tok, target_top_token=targ_tok),
-                ))
+                augmented.append(
+                    (
+                        pair,
+                        PivotInstance(
+                            pivot_prefix=aug_prefix,
+                            dest_top_token=dest_tok,
+                            target_top_token=targ_tok,
+                        ),
+                    )
+                )
                 logger.info(
                     f"  ✓ Augmented pivot: {pair.destination_predicate} ->"
                     f" {pair.source_predicate} prefix={aug_prefix!r}"
@@ -912,7 +961,7 @@ def get_oracle_pivot_instances(
     include_case3b: bool = True,
     include_augmentation: bool = True,
     wrappers: list[str] | None = None,
-    include_docstring: bool = False,
+    include_docstring: bool = True,
     oracle_include_docstring: bool = True,
     # Case 3 params
     n_oracle: int = 5,
@@ -995,7 +1044,9 @@ def get_oracle_pivot_instances(
 
         if include_case3b:
             case3b_lcps = _mine_case3b_raw(
-                mt, dest_sample, targ_sample,
+                mt,
+                dest_sample,
+                targ_sample,
                 n_implementations=n_implementations,
                 oracle_temperature=oracle_temperature,
                 min_prefix_len=min_prefix_len,
@@ -1030,7 +1081,10 @@ def get_oracle_pivot_instances(
 
         for lcp in lcps:
             pi = _validate_candidate(
-                mt, dest_sample, targ_sample, lcp,
+                mt,
+                dest_sample,
+                targ_sample,
+                lcp,
                 include_docstring=include_docstring,
                 max_completion_tokens=max_completion_tokens,
             )
@@ -1087,7 +1141,9 @@ def get_oracle_pivot_instances(
             pair.pivot_instances.append(pi)
         model_name = mt.name.split("/")[-1]
         ds.save_pairs(model_name)
-        logger.info(f"Saved {len(combined)} pivot instances into pairs/{model_name}.json")
+        logger.info(
+            f"Saved {len(combined)} pivot instances into pairs/{model_name}.json"
+        )
 
     return combined
 
@@ -1178,8 +1234,9 @@ def generate_global_pairs(
     Returns:
         List of oracle-verified ``PredicatePair`` objects (both directions).
     """
-    from itertools import combinations
     from collections import defaultdict
+    from itertools import combinations
+
     from src.goals.head_loc_data import HEAD_LOC_DATA_DIR
 
     if dir_path is None:
@@ -1197,7 +1254,7 @@ def generate_global_pairs(
     for var_type, samples in by_type.items():
         logger.info(
             f"Type '{var_type}': {len(samples)} predicates → "
-            f"{len(samples)*(len(samples)-1)//2} oracle calls"
+            f"{len(samples) * (len(samples) - 1) // 2} oracle calls"
         )
         for sample_a, sample_b in combinations(samples, 2):
             call_num += 1
@@ -1208,7 +1265,9 @@ def generate_global_pairs(
             verified, reason = _oracle_verify_pair(
                 sample_a, sample_b, temperature=oracle_temperature
             )
-            logger.info(f"    → {'YES' if verified else 'NO'}  {reason.splitlines()[0]}")
+            logger.info(
+                f"    → {'YES' if verified else 'NO'}  {reason.splitlines()[0]}"
+            )
 
             if verified:
                 for src, dest in [(sample_a, sample_b), (sample_b, sample_a)]:
@@ -1223,7 +1282,7 @@ def generate_global_pairs(
 
     logger.info(
         f"generate_global_pairs: {call_num} oracle calls → "
-        f"{len(verified_pairs)//2} verified pairs ({len(verified_pairs)} directed)"
+        f"{len(verified_pairs) // 2} verified pairs ({len(verified_pairs)} directed)"
     )
 
     if save:
