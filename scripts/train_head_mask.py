@@ -148,12 +148,8 @@ def main() -> None:
     configure(args)
 
     model_short_name = args.model_key.split("/")[-1]
-    layers = list(range(args.layers_start, args.layers_end))
 
     logger.info(f"model:            {args.model_key}")
-    logger.info(
-        f"layers:           {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)"
-    )
     logger.info(f"n_epochs:         {args.n_epochs}")
     logger.info(f"lr:               {args.lr}")
     logger.info(f"lambda_sparse:    {args.lambda_sparse}")
@@ -221,6 +217,10 @@ def main() -> None:
 
     if args.layers_end == -1:
         args.layers_end = mt.n_layer
+    layers = list(range(args.layers_start, args.layers_end))
+    logger.info(
+        f"layers:           {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)"
+    )
 
     logger.info("=== Caching pivot data ===")
     pivot_caches = cache_pivot_data(
