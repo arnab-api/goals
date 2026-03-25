@@ -283,12 +283,14 @@ class PivotCache:
     log_p_target: (
         torch.Tensor
     )  # (vocab_size,) float32 CPU — log of target next-token dist
-    per_head_deltas: torch.Tensor | None  # [OBSOLETE] (n_layers_tested, n_heads, n_embd)
+    per_head_deltas: (
+        torch.Tensor | None
+    )  # [OBSOLETE] (n_layers_tested, n_heads, n_embd)
     src_sample: (
         SinglePredicateSample  # source predicate sample (targ_sample == src_sample)
     )
     dest_sample: SinglePredicateSample  # destination predicate sample
-    src_prompt: str | None = None        # populated when precompute=False (lazy)
+    src_prompt: str | None = None  # populated when precompute=False (lazy)
     src_head_vals: torch.Tensor | None = None
     # (n_layers_tested, n_embd) float32 CPU — o_proj inputs from the source run,
     # stacked across layers.  ~0.7 MB/instance for Qwen-32B; ~1 GB for N=1480.
@@ -401,11 +403,11 @@ def cache_pivot_data(
         src_val_chunks: list[torch.Tensor] = []
         for i in range(0, N, cache_batch_size):
             src_chunk = src_prompts[i : i + cache_batch_size]
-            src_o = get_o_proj_inputs_batch(mt, src_chunk, layers)  # {layer: (B, n_embd)}
+            src_o = get_o_proj_inputs_batch(
+                mt, src_chunk, layers
+            )  # {layer: (B, n_embd)}
             # Stack layers into (B, L, n_embd)
-            src_val_chunks.append(
-                torch.stack([src_o[ly] for ly in layers], dim=1)
-            )
+            src_val_chunks.append(torch.stack([src_o[ly] for ly in layers], dim=1))
             del src_o
             free_gpu_cache()
             logger.debug(f"  src head vals: {min(i + cache_batch_size, N)}/{N}")
@@ -447,7 +449,9 @@ def cache_pivot_data(
                 src_sample=src_s,
                 dest_sample=dest_s,
                 src_prompt=src_prompts[i] if not precompute else None,
-                src_head_vals=all_src_head_vals[i] if all_src_head_vals is not None else None,
+                src_head_vals=all_src_head_vals[i]
+                if all_src_head_vals is not None
+                else None,
             )
         )
 
@@ -762,6 +766,7 @@ def forward_with_src_replacement(
     src_head_vals: torch.Tensor,
     mask: HeadMask,
     layers: list[int],
+    alpha: float = 1.0,
 ) -> torch.Tensor:
     """Run dest_inputs with mask-weighted per-head o_proj input replacement.
 
@@ -828,7 +833,9 @@ def forward_with_src_replacement(
 
                     # Per-head interpolation; m has requires_grad through mask_vals
                     m = mask_vals[li_].to(dev).view(1, n_heads, 1)
-                    new_last = (m * src_3d + (1 - m) * cas_3d).view(B_, n_embd)  # (B, n_embd)
+                    new_last = (alpha * m * src_3d + (1 - m) * cas_3d).view(
+                        B_, n_embd
+                    )  # (B, n_embd)
 
                     # Splice into sequence — torch.cat keeps gradient graph lean:
                     # only the last-token slice is live in autograd, not the full seq tensor.
@@ -994,9 +1001,11 @@ def train_head_mask(
     n_layers_tested = len(layers)
     n_heads = mt.model.config.num_attention_heads
 
-    _has_deltas = pivot_caches[0].per_head_deltas is not None   # obsolete eager delta path
-    _has_src_vals = pivot_caches[0].src_head_vals is not None   # new eager src-val path
-    _use_new_path = not _has_deltas                             # True for all new caches
+    _has_deltas = (
+        pivot_caches[0].per_head_deltas is not None
+    )  # obsolete eager delta path
+    _has_src_vals = pivot_caches[0].src_head_vals is not None  # new eager src-val path
+    _use_new_path = not _has_deltas  # True for all new caches
 
     if augment:
         assert _use_new_path, (
@@ -1060,7 +1069,11 @@ def train_head_mask(
             # batch inside the epoch loop instead (negligible cost: 16 tensors × 28 MB).
 
     _path_desc = (
-        "new-eager" if _has_src_vals else "new-lazy" if _use_new_path else "delta-obsolete"
+        "new-eager"
+        if _has_src_vals
+        else "new-lazy"
+        if _use_new_path
+        else "delta-obsolete"
     )
     logger.info(
         f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
@@ -1097,8 +1110,12 @@ def train_head_mask(
         else:
             _batch_log_p_ep = batch_log_p_list
             _batch_src_hv_ep = batch_src_hv_list if _has_src_vals else None
-            _batch_src_ep = batch_src_prompts_list if _use_new_path and not _has_src_vals else None
-            _batch_dest_ep = batch_dest_prompts_list if _use_new_path and not _has_src_vals else None
+            _batch_src_ep = (
+                batch_src_prompts_list if _use_new_path and not _has_src_vals else None
+            )
+            _batch_dest_ep = (
+                batch_dest_prompts_list if _use_new_path and not _has_src_vals else None
+            )
 
         for bi, batch_log_p in enumerate(_batch_log_p_ep):
             if _batch_src_hv_ep is not None:

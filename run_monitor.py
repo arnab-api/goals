@@ -6,13 +6,14 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 MODELS = [
-    "Qwen/Qwen2.5-Coder-32B-Instruct",
-    "facebook/cwm",
-    "allenai/Olmo-3.1-32B-Instruct",
-    # "Qwen/Qwen3.5-27B",
-    # "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-    "Qwen/Qwen2.5-72B-Instruct",
-    "meta-llama/Llama-3.3-70B-Instruct"
+    "Qwen/Qwen2.5-Coder-14B-Instruct",
+    # "Qwen/Qwen2.5-Coder-32B-Instruct",
+    # "facebook/cwm",
+    # "allenai/Olmo-3.1-32B-Instruct",
+    # # "Qwen/Qwen3.5-27B",
+    # # "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    # "Qwen/Qwen2.5-72B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct",
 ]
 JOBS = [
     {

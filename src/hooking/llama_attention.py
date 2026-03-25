@@ -58,7 +58,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 @dataclass(frozen=True)
 class AttentionEdge:
-    #! q_idx *attends* to the k_idx
+    # * q_idx *attends* to the k_idx
 
     q_idx: int
     k_idx: int

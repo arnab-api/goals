@@ -250,7 +250,7 @@ def pretty_print_eval_results(
     summary = eval_results.summary
     console.print(results_table)
     console.print(
-        f"\n[bold]Summary:[/bold] {summary.pass_count}/{summary.total} passed, {summary.fail_count}/{summary.total} failed"
+        f"\n[bold]Summary:[/bold] [bright_green]{summary.pass_count}[/bright_green]/[white]{summary.total}[/white] passed, [bright_red]{summary.fail_count}[/bright_red]/[white]{summary.total}[/white] failed"
     )
 
     # Export to file or print to stdout
