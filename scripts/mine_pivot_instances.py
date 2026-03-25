@@ -58,23 +58,29 @@ console = Console(width=120, highlight=False)
 # Step 1 — Global pairs
 # ---------------------------------------------------------------------------
 
+
 def ensure_global_pairs(ds: HeadLocDataset, force: bool = False) -> None:
     """Generate global_pairs.json if absent (or if --regen-global-pairs is set)."""
     path = os.path.join(HEAD_LOC_DATA_DIR, GLOBAL_PAIRS_FILENAME)
     if os.path.isfile(path) and not force:
-        logger.info("global_pairs.json already exists — skipping (use --regen-global-pairs to force)")
+        logger.info(
+            "global_pairs.json already exists — skipping (use --regen-global-pairs to force)"
+        )
         return
 
     action = "Regenerating" if os.path.isfile(path) else "Generating"
     logger.info(f"=== Step 1: {action} global_pairs.json ===")
     pairs = generate_global_pairs(ds, save=True)
     n_unordered = len(pairs) // 2
-    logger.info(f"Done: {n_unordered} verified unordered pairs → {len(pairs)} directed pairs")
+    logger.info(
+        f"Done: {n_unordered} verified unordered pairs → {len(pairs)} directed pairs"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Step 2 — Model-specific pairs
 # ---------------------------------------------------------------------------
+
 
 def ensure_model_pairs(ds: HeadLocDataset, model_name: str) -> HeadLocDataset:
     """Bootstrap pairs/{model_name}.json from global_pairs.json if absent.
@@ -98,6 +104,7 @@ def ensure_model_pairs(ds: HeadLocDataset, model_name: str) -> HeadLocDataset:
 # Step 3 — Pivot mining
 # ---------------------------------------------------------------------------
 
+
 def run_pivot_mining(mt, ds: HeadLocDataset, pairs_subset=None) -> None:
     """Run Case 3 + Case 3b + augmentation and save to pairs/{model_name}.json."""
     logger.info("=== Step 3: Mining pivot instances ===")
@@ -109,7 +116,7 @@ def run_pivot_mining(mt, ds: HeadLocDataset, pairs_subset=None) -> None:
         include_case3b=True,
         include_augmentation=True,
         oracle_include_docstring=True,
-        include_docstring=False,
+        include_docstring=True,
         save=True,
     )
 
@@ -135,6 +142,7 @@ def run_pivot_mining(mt, ds: HeadLocDataset, pairs_subset=None) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -179,6 +187,7 @@ def main() -> None:
     # Load model (GPU required for Step 3)
     logger.info(f"Loading model {args.model_key} ...")
     from src.models import ModelandTokenizer
+
     mt = ModelandTokenizer(
         model_key=args.model_key,
         dtype=torch.bfloat16,

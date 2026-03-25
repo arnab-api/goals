@@ -1,26 +1,25 @@
 import subprocess
-import time
 import sys
+import time
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-lmdas = [
-    # 0,
-    2e-5,
-    2e-4,
-    2e-3,
-    2e-2,
-    2e-1,
-    # 1.0
+MODELS = [
+    "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "facebook/cwm",
+    "allenai/Olmo-3.1-32B-Instruct",
+    # "Qwen/Qwen3.5-27B",
+    # "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "Qwen/Qwen2.5-72B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct"
 ]
-
 JOBS = [
     {
-        "name": f"lambda_{lmda}",
-        "command": f'python -m scripts.locate_selection_heads --model=""allenai/Olmo-3-1125-32B"" --train_limit=2048 --validation_limit=1024 --n_epochs=10 --category="objects" --option_config="distinct" --task="select_one" --prompt_temp_idx=3 --save_dir="selection/lamb_search/{lmda}" --sparsity_lambda={lmda} --load_dataset_from="results/selection/optimized_heads/Olmo-3-1125-32B/distinct_options/select_one/legacy/samples" -v 2>&1 | tee logs/lamb_{lmda}.log',
+        "name": f"{model}",
+        "command": f'CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 python -m scripts.train_head_mask --model-key="{model}" --n-epochs=50 --batch-size=64 --augment --lazy --checkpoint-every=5 -v 2>&1 | tee logs/{model.split("/")[-1]}.log',
     }
-    for lmda in lmdas
+    for model in MODELS
 ]
 
 ################################################################################################################################################################

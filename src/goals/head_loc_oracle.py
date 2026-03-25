@@ -686,6 +686,12 @@ def _validate_candidate(
     )
 
     if dest_tok != targ_tok:
+        if not _tokens_differ_meaningfully(dest_tok, targ_tok):
+            logger.debug(
+                f"  Skipping lcp={lcp!r}: diverging tokens differ only in naming"
+                f" ({dest_tok!r} vs {targ_tok!r})"
+            )
+            return None
         return PivotInstance(
             pivot_prefix=lcp, dest_top_token=dest_tok, target_top_token=targ_tok
         )
