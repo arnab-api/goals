@@ -6,7 +6,7 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 MODELS = [
-    "Qwen/Qwen2.5-Coder-14B-Instruct",
+    # "Qwen/Qwen2.5-Coder-14B-Instruct",
     # "Qwen/Qwen2.5-Coder-32B-Instruct",
     # "facebook/cwm",
     # "allenai/Olmo-3.1-32B-Instruct",

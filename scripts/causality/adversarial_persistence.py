@@ -172,14 +172,16 @@ def _eval_with_timeout(
 def run_evaluation_timed(
     result: CodeGenerations,
     function_name: str | None,
-    code_stop_tag: str,
-    eval_timeout: int,
-    eval_timeout_log: str | None,
-    context: dict,
+    code_stop_tag: str = "\n",
+    eval_timeout: int = 5,
+    eval_timeout_log: str | None = None,
+    context: dict = {},
 ) -> CodeGenerations:
     """Like run_evaluation but with per-code SIGALRM timeout."""
     sample = result.sample
-    base_code = sample.code
+    base_code = (
+        sample.code if hasattr(sample, "code") else sample.python_incomplete_code
+    )
     unit_tests = list(sample.unit_tests)
     target_function = (
         function_name or result.function_name or sample.function_name or "func"
@@ -188,6 +190,8 @@ def run_evaluation_timed(
 
     for code_entry in result.generations:
         prefill = code_entry.prefill or ""
+        if base_code.endswith(" ") is False:
+            prefill = " " + prefill
         out = code_entry.lm_generation
         if code_stop_tag:
             cur_stop_tag = code_stop_tag if code_stop_tag in out else "\n"

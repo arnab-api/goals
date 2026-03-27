@@ -181,7 +181,11 @@ def pretty_print_eval_results(
     results_table.add_column("Unit Tests", style="white")
     results_table.add_column("Logs", style="dim", overflow="fold")
 
-    code = eval_results.sample.code
+    code = (
+        eval_results.sample.code
+        if hasattr(eval_results.sample, "code")
+        else eval_results.sample.python_incomplete_code
+    )
     function_name = eval_results.function_name or "func"
 
     console.print('"""' + code + '"""')
