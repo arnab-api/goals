@@ -47,7 +47,7 @@ Prefills: `""` / `"n &"` / `"not"` / `"1+"` etc. The model must adapt its implem
 
 ---
 
-### Track 2 — Attention Head Localization (Notebooks 05–06) ← active
+### Track 2 — Attention Head Localization (Notebooks 05–08) ← active
 
 **Motivation:** Instead of training a linear probe over all hidden states, identify *which attention heads* are causally responsible for the instrumental goal representation. This gives a more mechanistic and interpretable answer.
 
@@ -81,9 +81,10 @@ Prefills: `""` / `"n &"` / `"not"` / `"1+"` etc. The model must adapt its implem
 ## Setup
 
 ```bash
-conda env create -f conda_env.yml
-pip install git+https://github.com/davidbau/baukit  # Required, not in conda
+bash setup_env.sh
 ```
+
+This creates the `goals` conda environment with all dependencies (including `baukit` from source). Requires conda and CUDA 12.x drivers. See comments inside `setup_env.sh` to change the CUDA version.
 
 Create `env.yml` in root (see `env_demo.yml` for template) with API keys and directory paths.
 
@@ -122,7 +123,8 @@ conda run -n goals python scripts/train_head_mask.py \
 │   ├── 03.1_multi_probe.ipynb
 │   ├── 04.1_multi_causality.ipynb     # Causality / steering experiments
 │   ├── 05_loc_data.ipynb              # Head loc: pivot instance mining
-│   └── 06_loc_head.ipynb              # Head loc: mask training + analysis
+│   ├── 06_loc_head.ipynb              # Head loc: mask training + ablation experiments
+│   └── 08_clock.ipynb                 # Two-signal hypothesis: per-step attention GIF viz
 ├── scripts/
 │   ├── goal_dir.py                    # Track 1: probe training
 │   ├── test_causality.py              # Track 1: steering experiments
@@ -155,8 +157,7 @@ conda run -n goals python scripts/train_head_mask.py \
 │       ├── global_pairs.json          # Oracle-verified contrastive predicate pairs
 │       └── pairs/<model>.json         # Model-specific pairs + pivot instances
 ├── claude_reports/                    # Analysis notes and design documents
-├── claude_memory/                     # Claude's working memory across sessions
-├── conda_env.yml
+├── setup_env.sh                       # One-shot environment setup script
 └── env.yml                            # API keys + paths (create from env_demo.yml)
 ```
 

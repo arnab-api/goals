@@ -46,14 +46,15 @@ The original methodology uses **prefill probing** with MCTS exploration:
 1. `scripts/mine_pivot_instances.py` — oracle-based pivot mining (Case 3 + Case 3b + augmentation)
 2. `scripts/train_head_mask.py` — cache o_proj inputs + train differentiable head mask
 
-**Current state:** 1480 pivot instances mined for Qwen2.5-Coder-32B-Instruct. Head mask training script exists but is still being smoke-tested end-to-end.
+**Current state:** 1480 pivot instances mined for Qwen2.5-Coder-32B-Instruct. Head mask trained (layers 6–40, λ=20, 100 epochs). Ablation experiments running in `06_loc_head.ipynb` — three conditions: skyline / selected heads ablated via attention sink / random heads baseline.
 
 ## Setup
 
 ```bash
-conda env create -f conda_env.yml
-pip install git+https://github.com/davidbau/baukit  # Required, not installed by conda
+bash setup_env.sh
 ```
+
+This creates the `goals` conda environment with all dependencies (including `baukit` from source). Requires conda and CUDA 12.x. See comments inside `setup_env.sh` to adjust the CUDA version.
 
 Create `env.yml` in root (see `env_demo.yml` for template) with API keys and directory paths.
 
@@ -66,7 +67,8 @@ Create `env.yml` in root (see `env_demo.yml` for template) with API keys and dir
 
 ### Track 2
 - `notebooks/05_loc_data.ipynb` - Pivot instance mining + inspection
-- `notebooks/06_loc_head.ipynb` - Head mask training + patched generation analysis
+- `notebooks/06_loc_head.ipynb` - Head mask training + ablation experiments
+- `notebooks/08_clock.ipynb` - Two-signal (g+c) hypothesis exploration; per-step attention GIF visualization
 - `data/head_loc/predicates/` - 25 predicate JSONs (Python + C++)
 - `data/head_loc/global_pairs.json` - Oracle-verified contrastive pairs
 - `data/head_loc/pairs/<model>.json` - Model-specific pairs + 1480 pivot instances
@@ -140,10 +142,15 @@ Create `env.yml` in root (see `env_demo.yml` for template) with API keys and dir
 - `precompute_per_head_deltas_batch(mt, src_o, dest_o, layers)` - `(batch, n_layers, n_heads, n_embd)` deltas
 - `PivotCache` - `(pivot_instance, dest_prompt, log_p_target, per_head_deltas, src_prompt)` — pre-computed per instance
 - `cache_pivot_data(mt, pivot_instances, ds, layers, precompute_deltas)` - 2–3 batched forward passes → list of `PivotCache`
+- `augment_pivot_caches(mt, caches, ds, ...)` - applies one random augmentation per cache entry for data augmentation
 - `HeadMask` - `nn.Module` with `values (n_layers_tested, n_heads)`, `clamp_()`, `selected_heads(layers, threshold=0.5)`
 - `forward_with_masked_patch(mt, dest_inputs, per_head_deltas, mask, layers)` - baukit-based differentiable patched forward
 - `MaskTrainingHistory` - dataclass with `loss_causal`, `loss_sparse`, `loss_total`, `n_active` lists
 - `train_head_mask(mt, pivot_caches, layers, n_epochs, lr, lambda_sparse, batch_size)` - projected GD → `(HeadMask, MaskTrainingHistory)`
+
+**Attention Knockout** (defined in `notebooks/06_loc_head.ipynb`):
+- `forward_with_attn_knockout(mt, inputs, knockout_edges, save_attn_pattern_for_heads)` - hooks `nn_functional_softmax_0.input` to add `-inf` to specified (layer, head, q→k) edges; returns `(logits, metadata)`
+- `ablate_heads_attn_sink(mt, inputs, selected_heads, sink_pos, ...)` - convenience wrapper: cuts all attention from last query to every key except `sink_pos`
 
 **Predicate Augmentation** (`src/goals/head_loc_augment.py`):
 - Generates augmented predicate variants (variable rename, fn rename, type-hint toggle, predicate swap) for additional pivot instances
@@ -217,4 +224,6 @@ When implementing new features (evals, utils, classes, etc.):
 
 - **Intermittent `UnboundLocalError` in nnsight steering** (Track 1): `generate_with_patch()` occasionally raises `UnboundLocalError` for specific configs (observed: sample_idx=4, prefill="1 -", coeff=0.12, layers 40-50). Errors are logged to `errors.log` in `scripts/test_causality.py`. TODO: implement baukit-based version of `generate_with_patch` for debugging.
 
-- **`train_head_mask.py` smoke-test pending** (Track 2): The full end-to-end script exists but has not been run on the complete N=1480 dataset yet. Use `--max-instances 100 --n-epochs 1` for a smoke-test before the full run.
+- **Ablation effect is weak** (Track 2): Suppressing the selected heads via attention sink doesn't clearly reduce pass rate relative to random-head baseline. Possible causes: threshold/head-count, self-sink preserving goal signal, or the mask-identified heads not being the causal bottleneck for Python-only generation. See `claude_reports/goal_completion_signal_brainstorm.md` for the g+c two-signal hypothesis and proposed diagnostics (multi-predicate function test, sink_pos=0 sanity check).
+
+- **`run_evaluation_timed` verdict is `"PASSED"`** (not `"pass"`): Any code directly calling `evaluate_single_code` and checking `verdict == "pass"` should be migrated to `run_evaluation_timed` (from `scripts/causality/adversarial_persistence.py`) which handles timeouts and corner cases.
