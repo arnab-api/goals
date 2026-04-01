@@ -1,0 +1,788 @@
+"""Clock signal (c) probe utilities — two-signal hypothesis.
+
+Three-stage pipeline (each stage is a separate function):
+
+    Stage 1 — Augmentation
+        augment_sample_for_probe(tp, sample, harmless_prefills)
+            → list[(MultiPredicateSample, prefill_str)]
+        Generates a cross-product of structural augmentations (variable rename,
+        type-hint toggle, predicate-order swap) × prefill variants (empty +
+        harmless prefills like "True and ", "False or ").
+
+    Stage 2 — Generation + evaluation
+        generate_and_evaluate_sample(mt, prompt, sample, prefill, ...)
+            → (prompt_ids, gen_ids) | None
+        Generates greedily from a pre-built prompt, evaluates the completion
+        against unit tests, returns token ids on pass or None on failure/timeout.
+
+    Stage 3 — Latent caching
+        cache_latents_for_sequence(mt, prompt_ids, gen_ids, layers, ...)
+            → SequenceLatents
+        Runs a single nnsight forward pass over the full sequence to extract
+        residual / MLP / attn activations at every token position.
+
+Convenience wrapper:
+    generate_and_cache_latents(mt, sample, prefill, prompt, layers, ...)
+        Calls stages 2 and 3 in sequence; returns SequenceLatents | None.
+
+Probe utilities:
+    find_in_progress_mask, collect_probe_examples, train_probe, eval_probe.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import signal
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import balanced_accuracy_score, classification_report
+from sklearn.preprocessing import StandardScaler
+
+from src.functional import get_module_nnsight
+from src.goals.augment import (
+    _FN_PREFIXES,
+    _VAR_VOCAB,
+    extract_short_descriptions,
+    extract_var_names_from_code,
+    rename_function,
+    rename_variable,
+    swap_predicate_order,
+    toggle_type_hints,
+)
+from src.goals.data import SingleCodeEval
+from src.goals.eval import evaluate_single_code
+from src.goals.predicate_data import MultiPredicateSample, TargetPredicate
+from src.tokens import find_token_range, prepare_input
+
+# ---------------------------------------------------------------------------
+# Default harmless prefills for the clock probe
+# These are appended after "return " in the code stub.
+# They do not commit to a specific implementation of either predicate.
+# ---------------------------------------------------------------------------
+
+DEFAULT_HARMLESS_PREFILLS: list[str] = [
+    "",  # empty — model chooses freely
+    "True and ",
+    "False or ",
+    "bool(",
+]
+
+
+# ---------------------------------------------------------------------------
+# SequenceLatents dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SequenceLatents:
+    """Activations for one greedy-generated sequence.
+
+    residual[l] has shape (seq_len, hidden_dim) — the output of transformer
+    block l (residual stream after full block).  mlp and attn follow the same
+    convention.  All tensors are float32 on CPU.
+
+    Only token positions >= prompt_len are used during probe training (the
+    generated tokens); prompt tokens are retained for context.
+    """
+
+    prompt_len: int  # number of prompt tokens
+    gen_ids: list[int]  # generated token ids (not including prompt)
+    full_text: str  # decoded full sequence (prompt + generated)
+    residual: dict[int, torch.Tensor]  # layer → (seq_len, hidden_dim) float32 CPU
+    mlp: dict[int, torch.Tensor] = field(default_factory=dict)
+    attn: dict[int, torch.Tensor] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _untuple(x: Any) -> torch.Tensor:
+    """Return x[0] if x is a tuple/list, else x (handles LLM layer output tuples)."""
+    if isinstance(x, (tuple, list)):
+        return x[0]
+    return x
+
+
+class _EvalTimeout(Exception):
+    pass
+
+
+def _eval_with_timeout(
+    full_code: str,
+    unit_tests: list,
+    function_name: str,
+    timeout_secs: int,
+) -> SingleCodeEval:
+    """evaluate_single_code with SIGALRM-based timeout (Linux main-thread only)."""
+
+    def _handler(_signum, _frame):
+        raise _EvalTimeout()
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(timeout_secs)
+    try:
+        result = evaluate_single_code(full_code, unit_tests, function_name)
+    except _EvalTimeout:
+        result = SingleCodeEval(
+            code=full_code,
+            verdict="TIMEOUT",
+            warnings=[],
+            unit_test_results=[],
+            error_message=f"timed out after {timeout_secs}s",
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 — Augmentation
+# ---------------------------------------------------------------------------
+
+
+def augment_sample_for_probe(
+    tp: TargetPredicate,
+    sample: MultiPredicateSample,
+    harmless_prefills: list[str] | None = None,
+) -> list[tuple[MultiPredicateSample, str]]:
+    """Generate (augmented_sample, prefill) pairs for probe training data.
+
+    Structural augmentations applied to the sample:
+      - Original (no change)
+      - Variable rename: up to 3 alternatives from _VAR_VOCAB
+      - Type-hint toggle: remove param annotations from def line
+      - Predicate-order swap: swap the two predicate clauses in the docstring
+
+    Each structural variant is then combined with every entry in harmless_prefills
+    (appended after "return " in the code stub).
+
+    anchor_patterns remain in the TargetPredicate (not the sample), so they are
+    valid across all augmented variants — the generated *code* pattern for the
+    predicate does not depend on the docstring wording or variable name.
+
+    Args:
+        tp: The TargetPredicate owning the sample (needed for extract_short_descriptions).
+        sample: The original MultiPredicateSample.
+        harmless_prefills: Prefill strings to append after "return ".
+            Defaults to DEFAULT_HARMLESS_PREFILLS.
+
+    Returns:
+        List of (augmented_sample, prefill) pairs.  Original is always included.
+    """
+    if harmless_prefills is None:
+        harmless_prefills = DEFAULT_HARMLESS_PREFILLS
+
+    if not sample.is_original:
+        # Only augment originals to avoid combinatorial blowup
+        return [(sample, pf) for pf in harmless_prefills]
+
+    # Ensure short_descriptions are populated (needed for swap_predicate_order)
+    extract_short_descriptions(tp)
+
+    structural_variants: list[MultiPredicateSample] = [sample]  # original first
+
+    # Variable rename
+    var_names = extract_var_names_from_code(sample.code)
+    primary_var = var_names[0] if var_names else None
+    if primary_var is not None:
+        for new_var in _VAR_VOCAB.get(primary_var, [])[:3]:
+            structural_variants.append(rename_variable(sample, primary_var, new_var))
+
+    # Type-hint toggle
+    structural_variants.append(toggle_type_hints(sample))
+
+    # Function rename (only if fn starts with "is_")
+    fn = sample.function_name or ""
+    if fn.startswith("is_"):
+        suffix = fn[len("is_") :]
+        for prefix in _FN_PREFIXES:
+            structural_variants.append(rename_function(sample, prefix + suffix))
+
+    # Predicate-order swap (requires short_descriptions to be set)
+    swapped = swap_predicate_order(sample)
+    if swapped is not None:
+        structural_variants.append(swapped)
+
+    return [(samp, pf) for samp in structural_variants for pf in harmless_prefills]
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — Generation + evaluation
+# ---------------------------------------------------------------------------
+
+
+def generate_and_evaluate_sample(
+    mt,
+    prompt: str,
+    sample: MultiPredicateSample,
+    prefill: str = "",
+    max_new_tokens: int = 150,
+    eval_timeout: int = 5,
+    code_stop_tag: str | None = "</code>",
+) -> tuple[list[int], list[int]] | None:
+    """Generate greedily from prompt, evaluate against unit tests.
+
+    The generated text is evaluated as:
+        full_code = sample.code + (" " if needed) + prefill + stripped_generation
+
+    This matches the logic in run_evaluation_timed (adversarial_persistence.py).
+
+    Args:
+        mt: ModelandTokenizer.
+        prompt: Full prompt string (already built, e.g. via apply_chat_template).
+        sample: MultiPredicateSample — provides unit_tests, code stub, function_name.
+        prefill: The prefill string that was appended to sample.code when building
+            the prompt. Used to reconstruct full_code for evaluation.
+        max_new_tokens: Maximum tokens to generate.
+        stop_ids: Token IDs that trigger early stopping (EOS, </code>, etc.).
+        eval_timeout: SIGALRM timeout in seconds for evaluate_single_code.
+        code_stop_tag: The stop tag to use for extracting the generated code.
+    Returns:
+        (prompt_ids, gen_ids) if the generation passes all unit tests.
+        None if generation fails evaluation or times out.
+    """
+    prompt_inputs = prepare_input([prompt], tokenizer=mt)
+    prompt_ids: list[int] = prompt_inputs["input_ids"][0].tolist()
+
+    input_ids_tensor = torch.tensor([prompt_ids]).to(mt.device)
+
+    with torch.no_grad():
+        generated = mt._model.generate(
+            input_ids=input_ids_tensor,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=(
+                mt.tokenizer.pad_token_id
+                if mt.tokenizer.pad_token_id is not None
+                else mt.tokenizer.eos_token_id
+            ),
+        )
+
+    gen_ids: list[int] = generated[0].tolist()[len(prompt_ids) :]
+    # print(f"Generated token IDs: {gen_ids}")
+    lm_completion = mt.tokenizer.decode(gen_ids, skip_special_tokens=False)
+    if code_stop_tag:
+        cur_stop_tag = code_stop_tag if code_stop_tag in lm_completion else "\n"
+        lm_completion = lm_completion.split(cur_stop_tag)[0].rstrip()
+
+    incomplete_prefix = sample.code + prefill
+    if incomplete_prefix.endswith(" ") is False:
+        incomplete_prefix += " "
+    full_code = incomplete_prefix + lm_completion
+    # print(f"Evaluating generated code:\n{full_code}")
+
+    eval_result = _eval_with_timeout(
+        full_code,
+        list(sample.unit_tests),
+        sample.function_name or "func",
+        eval_timeout,
+    )
+
+    if eval_result.verdict == "PASSED":
+        return prompt_ids, gen_ids
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — Latent caching
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def cache_latents_for_sequence(
+    mt,
+    prompt_ids: list[int],
+    gen_ids: list[int],
+    layers: list[int],
+    include_mlp: bool = True,
+    include_attn: bool = True,
+) -> SequenceLatents:
+    """Cache residual / MLP / attn activations for a complete generated sequence.
+
+    Runs a single nnsight forward pass over prompt_ids + gen_ids.  Saves
+    activations at every token position for each requested layer.
+
+    Args:
+        mt: ModelandTokenizer.
+        prompt_ids: Prompt token ids (from prepare_input).
+        gen_ids: Generated token ids (from generate_and_evaluate_sample).
+        layers: Layer indices to cache.
+        include_mlp: Whether to cache MLP module outputs.
+        include_attn: Whether to cache attention module outputs.
+
+    Returns:
+        SequenceLatents with tensors of shape (seq_len, hidden_dim) per layer.
+    """
+    full_ids = prompt_ids + gen_ids
+    full_text: str = mt.tokenizer.decode(full_ids, skip_special_tokens=False)
+
+    full_inputs = {
+        "input_ids": torch.tensor([full_ids]),
+        "attention_mask": torch.ones(1, len(full_ids), dtype=torch.long),
+    }
+
+    res_saves: dict[int, Any] = {}
+    mlp_saves: dict[int, Any] = {}
+    attn_saves: dict[int, Any] = {}
+
+    with mt.trace(full_inputs, scan=False, validate=False):
+        for layer_idx in layers:
+            if include_attn:
+                attn_mod = get_module_nnsight(
+                    mt, mt.attn_module_name_format.format(layer_idx)
+                )
+                attn_saves[layer_idx] = attn_mod.output.save()
+
+            if include_mlp:
+                mlp_mod = get_module_nnsight(
+                    mt, mt.mlp_module_name_format.format(layer_idx)
+                )
+                mlp_saves[layer_idx] = mlp_mod.output.save()
+
+            layer_mod = get_module_nnsight(mt, mt.layer_name_format.format(layer_idx))
+            res_saves[layer_idx] = layer_mod.output.save()
+
+    def _materialise(saves: dict[int, Any]) -> dict[int, torch.Tensor]:
+        result = {}
+        for idx, saved in saves.items():
+            t = _untuple(saved)
+            if t.ndim == 3:
+                t = t.squeeze(0)  # (1, seq, hidden) → (seq, hidden)
+            result[idx] = t.half().cpu()  # float16 — halves disk footprint vs float32
+        return result
+
+    return SequenceLatents(
+        prompt_len=len(prompt_ids),
+        gen_ids=gen_ids,
+        full_text=full_text,
+        residual=_materialise(res_saves),
+        mlp=_materialise(mlp_saves) if include_mlp else {},
+        attn=_materialise(attn_saves) if include_attn else {},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrapper
+# ---------------------------------------------------------------------------
+
+
+def generate_and_cache_latents(
+    mt,
+    sample: MultiPredicateSample,
+    prefill: str,
+    prompt: str,
+    layers: list[int],
+    max_new_tokens: int = 150,
+    stop_ids: set[int] | None = None,
+    eval_timeout: int = 5,
+    include_mlp: bool = True,
+    include_attn: bool = True,
+) -> SequenceLatents | None:
+    """Stage 2 + 3 combined: generate, evaluate, then cache latents.
+
+    Returns SequenceLatents if the generation passes unit tests, else None.
+
+    Args:
+        sample: Used for unit test evaluation and full_code reconstruction.
+        prefill: The prefill string that was appended to sample.code when building prompt.
+        prompt: Full prompt string (from apply_chat_template).
+        (other args forwarded to generate_and_evaluate_sample / cache_latents_for_sequence)
+    """
+    ids = generate_and_evaluate_sample(
+        mt=mt,
+        prompt=prompt,
+        sample=sample,
+        prefill=prefill,
+        max_new_tokens=max_new_tokens,
+        eval_timeout=eval_timeout,
+    )
+    if ids is None:
+        return None
+    prompt_ids, gen_ids = ids
+    return cache_latents_for_sequence(
+        mt=mt,
+        prompt_ids=prompt_ids,
+        gen_ids=gen_ids,
+        layers=layers,
+        include_mlp=include_mlp,
+        include_attn=include_attn,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Span labeling
+# ---------------------------------------------------------------------------
+
+
+def find_in_progress_mask(
+    latents: SequenceLatents,
+    anchor_patterns: list[str],
+    tokenizer,
+) -> np.ndarray:
+    """Boolean mask over generated tokens: True = currently implementing predicate.
+
+    Applies each regex in anchor_patterns to latents.full_text (the decoded
+    full sequence).  Matched character spans are mapped to token indices via
+    find_token_range, then adjusted to be relative to the generated tokens
+    (index 0 = first generated token).
+
+    Args:
+        latents: SequenceLatents from cache_latents_for_sequence.
+        anchor_patterns: Variable-agnostic regex patterns from PredicateSpec.anchor_patterns.
+        tokenizer: The model tokenizer (for find_token_range).
+
+    Returns:
+        Boolean np.ndarray of shape (len(latents.gen_ids),).
+        True at positions where the model is writing code for the predicate.
+    """
+    n_gen = len(latents.gen_ids)
+    mask = np.zeros(n_gen, dtype=bool)
+
+    for pattern in anchor_patterns:
+        for m in re.finditer(pattern, latents.full_text):
+            matched = latents.full_text[m.start() : m.end()]
+            if not matched:
+                continue
+            try:
+                tok_start, tok_end = find_token_range(
+                    string=latents.full_text,
+                    substring=matched,
+                    tokenizer=tokenizer,
+                )
+                # Convert absolute token indices → relative to generated tokens
+                rel_start = max(tok_start - latents.prompt_len, 0)
+                rel_end = min(tok_end - latents.prompt_len, n_gen)
+                if rel_start < rel_end:
+                    mask[rel_start:rel_end] = True
+            except (ValueError, Exception):
+                pass
+
+    return mask
+
+
+# ---------------------------------------------------------------------------
+# Oracle-based span labeling
+# ---------------------------------------------------------------------------
+
+
+def find_in_progress_mask_oracle(
+    latents: SequenceLatents,
+    p_plus_description: str,
+    p_minus_description: str,
+    tokenizer,
+    prefill: str = "",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Boolean masks over generated tokens using Claude as oracle span labeler.
+
+    The oracle is shown the generated text and asked to return the exact
+    substrings implementing P+ and P- separately.  When both predicates are
+    inseparably interleaved (e.g. ``s.lower() == s[::-1]`` implements both
+    "is lowercase" and "is palindrome" as a combined expression), the same
+    full span is returned for both.
+
+    This is the preferred labeling method over find_in_progress_mask (regex),
+    because anchor_patterns are too broad and produce noisy labels.  Oracle
+    calls are cached on disk (via ask_claude's MD5 cache), so re-labeling
+    the same text is free.
+
+    Args:
+        latents: SequenceLatents from cache_latents_for_sequence.
+        p_plus_description: Natural-language description of the target predicate.
+        p_minus_description: Description of the other predicate (context for oracle).
+        tokenizer: The model tokenizer (for find_token_range).
+        prefill: Harmless prefill that was appended before generation (for context).
+
+    Returns:
+        (p_plus_mask, p_minus_mask): Two boolean np.ndarrays of shape
+        (len(latents.gen_ids),).  p_plus_mask is True at positions where the
+        model is writing code for P+; p_minus_mask likewise for P-.
+        When P+ and P- are inseparable the same span is marked True in both.
+    """
+    from src.utils.oracle_llms import ask_claude
+
+    gen_text: str = tokenizer.decode(latents.gen_ids, skip_special_tokens=True)
+
+    prefill_note = (
+        f'\nNote: generation was prefixed with "{prefill}".' if prefill else ""
+    )
+
+    oracle_prompt = f"""You are a code analysis assistant. A language model generated the following code:{prefill_note}
+
+<generated_code>
+{gen_text}
+</generated_code>
+
+The function implements two predicates:
+- P+ (target): {p_plus_description}
+- P- (other):  {p_minus_description}
+
+Task: identify the exact substrings implementing each predicate.
+
+Rules:
+1. Wrap P+ implementing code in <p_plus>…</p_plus> tags.
+2. Wrap P- implementing code in <p_minus>…</p_minus> tags.
+3. If P+ and P- are inseparably interleaved in a single expression
+   (e.g. `s.lower() == s[::-1]` simultaneously checks both lowercase and palindrome),
+   wrap the SAME full expression in BOTH <p_plus>…</p_plus> AND <p_minus>…</p_minus>.
+4. Copy each substring EXACTLY as it appears — character-perfect match required.
+5. Focus on the core expression (comparison, membership test, arithmetic check, etc.).
+   Do NOT include the `return` keyword, leading indentation, or unrelated code.
+6. If a predicate is not implemented in the generated code, omit its tag entirely.
+
+Examples:
+  Separate predicates (s == s[::-1] and s.islower()):
+    <p_plus>s == s[::-1]</p_plus>
+    <p_minus>s.islower()</p_minus>
+
+  Interleaved (single expression covers both):
+    <p_plus>s.lower() == s[::-1]</p_plus>
+    <p_minus>s.lower() == s[::-1]</p_minus>"""
+
+    response: str = ask_claude(
+        oracle_prompt, max_tokens=1024, temperature=0.0, use_cache=True
+    )
+    print(f"\nOracle response:\n{response}")
+
+    n_gen = len(latents.gen_ids)
+
+    def _spans_to_mask(tag: str) -> np.ndarray:
+        mask = np.zeros(n_gen, dtype=bool)
+        for span_text in re.findall(rf"<{tag}>(.*?)</{tag}>", response, re.DOTALL):
+            span_text = span_text.strip()
+            if not span_text:
+                continue
+            try:
+                tok_start, tok_end = find_token_range(
+                    string=latents.full_text,
+                    substring=span_text,
+                    tokenizer=tokenizer,
+                )
+                rel_start = max(tok_start - latents.prompt_len, 0)
+                rel_end = min(tok_end - latents.prompt_len, n_gen)
+                if rel_start < rel_end:
+                    mask[rel_start:rel_end] = True
+            except (ValueError, Exception):
+                # Span not found in full_text — search generated portion only
+                try:
+                    tok_start, tok_end = find_token_range(
+                        string=gen_text,
+                        substring=span_text,
+                        tokenizer=tokenizer,
+                    )
+                    rel_end = min(tok_end, n_gen)
+                    if tok_start < rel_end:
+                        mask[tok_start:rel_end] = True
+                except (ValueError, Exception):
+                    pass
+        return mask
+
+    return _spans_to_mask("p_plus"), _spans_to_mask("p_minus")
+
+
+# ---------------------------------------------------------------------------
+# Probe dataset: save / load
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProbeRecord:
+    """One labeled sequence for clock probe training.
+
+    Stores everything needed to reconstruct the probe example:
+    - Predicate metadata (name, description, prefill)
+    - The original prompt string
+    - The full SequenceLatents (residual / mlp / attn per layer)
+    - p_plus_mask / p_minus_mask: oracle-identified token spans per predicate
+
+    in_progress_mask is a computed property: p_plus_mask | p_minus_mask.
+    Both masks are required (use all-False arrays when oracle finds nothing).
+    """
+
+    predicate_name: str
+    predicate_description: str
+    prefill: str
+    prompt: str
+    latents: SequenceLatents
+    p_plus_mask: np.ndarray  # shape (n_gen_tokens,), dtype bool
+    p_minus_mask: np.ndarray  # shape (n_gen_tokens,), dtype bool
+
+    @property
+    def in_progress_mask(self) -> np.ndarray:
+        """Union of P+ and P- spans — tokens implementing either predicate."""
+        return self.p_plus_mask | self.p_minus_mask
+
+
+def save_probe_dataset(
+    records: list[ProbeRecord],
+    directory: str | os.PathLike,
+) -> None:
+    """Save ProbeRecords as one self-contained .pt file per record.
+
+    Layout::
+
+        <directory>/
+            0000.pt     # metadata + masks + float16 tensors for record 0
+            0001.pt
+            ...
+
+    Each file is a flat dict readable with torch.load; no separate index file.
+
+    Args:
+        records: List of ProbeRecord instances.
+        directory: Output directory (created if it does not exist).
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    for i, r in enumerate(records):
+        torch.save(
+            {
+                "predicate_name": r.predicate_name,
+                "predicate_description": r.predicate_description,
+                "prefill": r.prefill,
+                "prompt": r.prompt,
+                "prompt_len": r.latents.prompt_len,
+                "gen_ids": r.latents.gen_ids,
+                "p_plus_mask": r.p_plus_mask,
+                "p_minus_mask": r.p_minus_mask,
+                "residual": r.latents.residual,
+                "mlp": r.latents.mlp,
+                "attn": r.latents.attn,
+            },
+            directory / f"{i:04d}.pt",
+        )
+
+
+def load_probe_dataset(directory: str | os.PathLike) -> list[ProbeRecord]:
+    """Load ProbeRecords from a directory written by save_probe_dataset.
+
+    Each .pt file is self-contained (metadata + masks + tensors).
+    Files are loaded in filename order (0000.pt, 0001.pt, …).
+
+    Returns:
+        List of ProbeRecord instances with float16 latent tensors.
+        (SequenceLatents.full_text is not stored; it is empty on load.)
+    """
+    directory = Path(directory)
+    pt_files = sorted(directory.glob("*.pt"))
+
+    records: list[ProbeRecord] = []
+    for pt_file in pt_files:
+        d = torch.load(pt_file, weights_only=False)
+        latents = SequenceLatents(
+            prompt_len=d["prompt_len"],
+            gen_ids=d["gen_ids"],
+            full_text="",
+            residual={int(k): v for k, v in d["residual"].items()},
+            mlp={int(k): v for k, v in d.get("mlp", {}).items()},
+            attn={int(k): v for k, v in d.get("attn", {}).items()},
+        )
+        records.append(
+            ProbeRecord(
+                predicate_name=d["predicate_name"],
+                predicate_description=d["predicate_description"],
+                prefill=d["prefill"],
+                prompt=d["prompt"],
+                latents=latents,
+                p_plus_mask=np.asarray(d["p_plus_mask"], dtype=bool),
+                p_minus_mask=np.asarray(d["p_minus_mask"], dtype=bool),
+            )
+        )
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Probe utilities
+# ---------------------------------------------------------------------------
+
+
+def collect_probe_examples(
+    latents: SequenceLatents,
+    in_progress_mask: np.ndarray,
+    layer: int,
+    rep_type: str = "residual",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract (X, y) feature-label pairs for one sequence and one layer.
+
+    Only uses generated token positions (indices prompt_len: in the sequence).
+
+    Args:
+        latents: SequenceLatents from cache_latents_for_sequence.
+        in_progress_mask: Boolean array (len = n_gen_tokens) from find_in_progress_mask.
+        layer: Layer index to extract features from.
+        rep_type: "residual", "mlp", or "attn".
+
+    Returns:
+        X: (n_gen_tokens, hidden_dim) float32 numpy array.
+        y: (n_gen_tokens,) int32 array (0 = not in progress, 1 = in progress).
+    """
+    rep_dict: dict[int, torch.Tensor] = getattr(latents, rep_type)
+    rep = rep_dict[layer]  # (seq_len, hidden_dim) — may be float16
+    gen_rep = rep[latents.prompt_len :].float().numpy()  # cast to float32 for sklearn
+    y = in_progress_mask.astype(np.int32)
+    return gen_rep, y
+
+
+def train_probe(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    C: float = 1.0,
+) -> tuple[LogisticRegression, StandardScaler]:
+    """Fit a balanced logistic regression probe.
+
+    Uses class_weight='balanced' to handle the minority "in progress" class.
+
+    Args:
+        X_train: (n, hidden_dim) float32 feature matrix.
+        y_train: (n,) int array — 0 = not in progress, 1 = in progress.
+        C: Inverse regularization strength.
+
+    Returns:
+        (probe, scaler): fitted LogisticRegression and StandardScaler.
+    """
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_train)
+    probe = LogisticRegression(
+        class_weight="balanced",
+        max_iter=1000,
+        C=C,
+        solver="lbfgs",
+    )
+    probe.fit(X_scaled, y_train)
+    return probe, scaler
+
+
+def eval_probe(
+    probe: LogisticRegression,
+    scaler: StandardScaler,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> dict:
+    """Score a trained probe on test data.
+
+    Returns:
+        dict with "balanced_accuracy", "accuracy", "report"
+        (classification_report string with per-class precision/recall/F1).
+    """
+    X_scaled = scaler.transform(X_test)
+    y_pred = probe.predict(X_scaled)
+    return {
+        "balanced_accuracy": balanced_accuracy_score(y_test, y_pred),
+        "accuracy": float((y_pred == y_test).mean()),
+        "report": classification_report(
+            y_test,
+            y_pred,
+            target_names=["not_in_progress", "in_progress"],
+            zero_division=0,
+        ),
+    }
