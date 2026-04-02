@@ -83,25 +83,76 @@ DEFAULT_HARMLESS_PREFILLS: list[str] = [
 class SequenceLatents:
     """Activations for one greedy-generated sequence.
 
-    residual[l] has shape (seq_len, hidden_dim) — the output of transformer
-    block l (residual stream after full block).  mlp and attn follow the same
-    convention.  All tensors are float32 on CPU.
+    Two sets of activation tensors are stored per layer (all float16, CPU):
 
-    Only token positions >= prompt_len are used during probe training (the
-    generated tokens); prompt tokens are retained for context.
+    Generated tokens  — shape (n_gen, hidden_dim):
+        residual, mlp, attn
+        Index 0 corresponds to absolute token position ``prompt_len``.
+
+    Code stub tokens  — shape (n_code, hidden_dim), where n_code = prompt_len - code_start:
+        code_residual, code_mlp, code_attn
+        Index 0 corresponds to absolute token position ``code_start``
+        (the ``<code>\\ndef`` token in the prompt).
+
+    Offset summary::
+
+        absolute position = code_start + code_tensor_index       (code span)
+        absolute position = prompt_len  + gen_tensor_index        (gen span)
+
+    ``code_start == prompt_len`` is the sentinel for "code pattern not found"
+    (produces empty code dicts).  prompt_len and prompt_ids are retained for
+    span-labeling bookkeeping (find_token_range offsets).
     """
 
     prompt_len: int  # number of prompt tokens
+    prompt_ids: list[int]  # tokenized prompt (not including generated tokens)
     gen_ids: list[int]  # generated token ids (not including prompt)
     full_text: str  # decoded full sequence (prompt + generated)
-    residual: dict[int, torch.Tensor]  # layer → (seq_len, hidden_dim) float32 CPU
+    residual: dict[int, torch.Tensor]  # layer → (n_gen, hidden_dim) float16 CPU
+    code_start: int = 0  # absolute token index of <code>\ndef; sentinel=prompt_len
+    code_residual: dict[int, torch.Tensor] = field(default_factory=dict)  # (n_code, hidden_dim)
+    code_mlp: dict[int, torch.Tensor] = field(default_factory=dict)
+    code_attn: dict[int, torch.Tensor] = field(default_factory=dict)
     mlp: dict[int, torch.Tensor] = field(default_factory=dict)
     attn: dict[int, torch.Tensor] = field(default_factory=dict)
+
+
+# Pattern that uniquely identifies the code stub in the prompt.
+# The instruction also contains a bare <code> tag, but only the code stub
+# starts with <code>\ndef — so this two-token pattern is unambiguous.
+_CODE_SPAN_RE = re.compile(r"<code>\ndef")
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _find_code_token_start(full_text: str, tokenizer, prompt_len: int) -> int:
+    """Return the absolute token index where the code stub begins in full_text.
+
+    Searches for ``<code>\\ndef``, which uniquely marks the start of the code
+    stub (the bare ``<code>`` in the instruction is never followed by ``\\ndef``).
+    Returns ``prompt_len`` as a sentinel when the pattern is not found,
+    which produces an empty code span (n_code = prompt_len - code_start = 0).
+
+    Args:
+        full_text: Decoded full sequence (prompt + generated).
+        tokenizer: Model tokenizer for find_token_range.
+        prompt_len: Number of prompt tokens — upper bound and fallback.
+    """
+    m = _CODE_SPAN_RE.search(full_text)
+    if m is None:
+        return prompt_len
+    try:
+        tok_start, _ = find_token_range(
+            string=full_text,
+            substring=full_text[m.start() : m.end()],
+            tokenizer=tokenizer,
+        )
+        return min(tok_start, prompt_len)
+    except Exception:
+        return prompt_len
 
 
 def _untuple(x: Any) -> torch.Tensor:
@@ -292,6 +343,110 @@ def generate_and_evaluate_sample(
     return None
 
 
+def evaluate_gen_ids(
+    gen_ids: list[int],
+    sample: MultiPredicateSample,
+    prefill: str,
+    tokenizer,
+    eval_timeout: int = 5,
+    code_stop_tag: str | None = "</code>",
+) -> bool:
+    """Evaluate generated token ids against sample unit tests.
+
+    Mirrors the evaluation logic in generate_and_evaluate_sample, decoupled
+    from generation so it can be used after batched generation.
+
+    Args:
+        gen_ids: Generated token ids (e.g., from batch_generate).
+        sample: MultiPredicateSample providing unit_tests, code, function_name.
+        prefill: Prefill string appended to sample.code before generation.
+        tokenizer: Model tokenizer for decoding gen_ids.
+        eval_timeout: SIGALRM timeout in seconds.
+        code_stop_tag: String tag to truncate lm_completion at.
+
+    Returns:
+        True if all unit tests pass, False otherwise (including timeouts).
+    """
+    lm_completion = tokenizer.decode(gen_ids, skip_special_tokens=False)
+    if code_stop_tag:
+        cur_stop_tag = code_stop_tag if code_stop_tag in lm_completion else "\n"
+        lm_completion = lm_completion.split(cur_stop_tag)[0].rstrip()
+
+    incomplete_prefix = sample.code + prefill
+    if not incomplete_prefix.endswith(" "):
+        incomplete_prefix += " "
+    full_code = incomplete_prefix + lm_completion
+
+    eval_result = _eval_with_timeout(
+        full_code,
+        list(sample.unit_tests),
+        sample.function_name or "func",
+        eval_timeout,
+    )
+    return eval_result.verdict == "PASSED"
+
+
+def batch_generate(
+    mt,
+    prompts: list[str],
+    max_new_tokens: int = 150,
+) -> list[tuple[list[int], list[int]]]:
+    """Batched greedy generation for a list of prompts.
+
+    Tokenizes all prompts with left-padding (via prepare_input) and runs a
+    single batched HuggingFace generate call — much faster than sequential
+    single-prompt generation when len(prompts) > 1.
+
+    Args:
+        mt: ModelandTokenizer.
+        prompts: List of prompt strings.
+        max_new_tokens: Maximum new tokens per sequence.
+
+    Returns:
+        List of (prompt_ids, gen_ids) one per prompt.  prompt_ids is the
+        unpadded tokenization of the prompt.  gen_ids may include the EOS
+        token — callers strip it as needed (evaluate_gen_ids does this via
+        code_stop_tag string matching).
+    """
+    if not prompts:
+        return []
+
+    # Batch tokenize with left-padding; recover per-sequence real lengths
+    # from the attention mask (1 = real token, 0 = left-pad).
+    batch_inputs = prepare_input(prompts, tokenizer=mt)
+    padded_input_len: int = batch_inputs["input_ids"].shape[1]
+    input_lens: list[int] = batch_inputs["attention_mask"].sum(dim=1).tolist()
+
+    input_ids = batch_inputs["input_ids"].to(mt.device)
+    attention_mask = batch_inputs["attention_mask"].to(mt.device)
+
+    pad_token_id = (
+        mt.tokenizer.pad_token_id
+        if mt.tokenizer.pad_token_id is not None
+        else mt.tokenizer.eos_token_id
+    )
+
+    with torch.no_grad():
+        outputs = mt._model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=pad_token_id,
+        )
+
+    # outputs: (batch, padded_input_len + n_gen) — slice out gen tokens per seq
+    results: list[tuple[list[int], list[int]]] = []
+    for i, real_len in enumerate(input_lens):
+        # Recover unpadded prompt_ids: left-padding puts real tokens at the end
+        start_idx = padded_input_len - real_len
+        prompt_ids = batch_inputs["input_ids"][i, start_idx:].tolist()
+        gen_ids = outputs[i][padded_input_len:].tolist()
+        results.append((prompt_ids, gen_ids))
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Stage 3 — Latent caching
 # ---------------------------------------------------------------------------
@@ -351,23 +506,153 @@ def cache_latents_for_sequence(
             layer_mod = get_module_nnsight(mt, mt.layer_name_format.format(layer_idx))
             res_saves[layer_idx] = layer_mod.output.save()
 
-    def _materialise(saves: dict[int, Any]) -> dict[int, torch.Tensor]:
+    n_prompt = len(prompt_ids)
+    code_start = _find_code_token_start(full_text, mt.tokenizer, n_prompt)
+    has_code = code_start < n_prompt
+
+    def _slice(saves: dict[int, Any], start: int, end: int) -> dict[int, torch.Tensor]:
         result = {}
         for idx, saved in saves.items():
             t = _untuple(saved)
             if t.ndim == 3:
                 t = t.squeeze(0)  # (1, seq, hidden) → (seq, hidden)
-            result[idx] = t.half().cpu()  # float16 — halves disk footprint vs float32
+            # .half() on a slice creates a new tensor with its own storage
+            result[idx] = t[start:end].half().cpu()
         return result
 
     return SequenceLatents(
-        prompt_len=len(prompt_ids),
+        prompt_len=n_prompt,
+        prompt_ids=prompt_ids,
         gen_ids=gen_ids,
         full_text=full_text,
-        residual=_materialise(res_saves),
-        mlp=_materialise(mlp_saves) if include_mlp else {},
-        attn=_materialise(attn_saves) if include_attn else {},
+        residual=_slice(res_saves, n_prompt, None),
+        code_start=code_start,
+        code_residual=_slice(res_saves, code_start, n_prompt) if has_code else {},
+        code_mlp=_slice(mlp_saves, code_start, n_prompt) if (has_code and include_mlp) else {},
+        code_attn=_slice(attn_saves, code_start, n_prompt) if (has_code and include_attn) else {},
+        mlp=_slice(mlp_saves, n_prompt, None) if include_mlp else {},
+        attn=_slice(attn_saves, n_prompt, None) if include_attn else {},
     )
+
+
+@torch.no_grad()
+def cache_latents_batch(
+    mt,
+    sequences: list[tuple[list[int], list[int]]],
+    layers: list[int],
+    include_mlp: bool = True,
+    include_attn: bool = True,
+) -> list[SequenceLatents]:
+    """Cache activations for a batch of sequences in a single forward pass.
+
+    Sequences are right-padded to the same length.  Activations at padded
+    positions are discarded; only real token positions are returned.
+    Right-padding is safe because causal attention prevents pad tokens (at the
+    end) from contaminating activations at earlier real token positions.
+
+    Throughput scales roughly linearly with batch size up to memory limits.
+    Keep batch size modest (8–16) for full-layer runs (64 layers × 3 types)
+    to avoid OOM on the GPU activation saves.
+
+    Args:
+        mt: ModelandTokenizer.
+        sequences: List of (prompt_ids, gen_ids) pairs.
+        layers: Layer indices to cache.
+        include_mlp: Whether to cache MLP outputs.
+        include_attn: Whether to cache attention outputs.
+
+    Returns:
+        List of SequenceLatents, one per input sequence, in the same order.
+    """
+    if not sequences:
+        return []
+
+    pad_id = (
+        mt.tokenizer.pad_token_id
+        if mt.tokenizer.pad_token_id is not None
+        else mt.tokenizer.eos_token_id
+    )
+
+    full_ids_list = [p + g for p, g in sequences]
+    max_len = max(len(f) for f in full_ids_list)
+
+    padded_ids: list[list[int]] = []
+    attention_masks: list[list[int]] = []
+    for full_ids in full_ids_list:
+        pad_len = max_len - len(full_ids)
+        padded_ids.append(full_ids + [pad_id] * pad_len)
+        attention_masks.append([1] * len(full_ids) + [0] * pad_len)
+
+    batch_inputs = {
+        "input_ids": torch.tensor(padded_ids, dtype=torch.long),
+        "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
+    }
+
+    res_saves: dict[int, Any] = {}
+    mlp_saves: dict[int, Any] = {}
+    attn_saves: dict[int, Any] = {}
+
+    with mt.trace(batch_inputs, scan=False, validate=False):
+        for layer_idx in layers:
+            if include_attn:
+                attn_mod = get_module_nnsight(
+                    mt, mt.attn_module_name_format.format(layer_idx)
+                )
+                attn_saves[layer_idx] = attn_mod.output.save()
+            if include_mlp:
+                mlp_mod = get_module_nnsight(
+                    mt, mt.mlp_module_name_format.format(layer_idx)
+                )
+                mlp_saves[layer_idx] = mlp_mod.output.save()
+            layer_mod = get_module_nnsight(mt, mt.layer_name_format.format(layer_idx))
+            res_saves[layer_idx] = layer_mod.output.save()
+
+    # Materialise all saves to CPU float16 before splitting per sequence.
+    # Shape: (batch, max_len, hidden_dim) — do NOT squeeze the batch dim.
+    def _to_cpu(saves: dict[int, Any], layer_idx: int) -> torch.Tensor:
+        t = _untuple(saves[layer_idx])
+        return t.half().cpu()
+
+    batch_res: dict[int, torch.Tensor] = {li: _to_cpu(res_saves, li) for li in layers}
+    batch_mlp: dict[int, torch.Tensor] = (
+        {li: _to_cpu(mlp_saves, li) for li in layers} if include_mlp else {}
+    )
+    batch_attn: dict[int, torch.Tensor] = (
+        {li: _to_cpu(attn_saves, li) for li in layers} if include_attn else {}
+    )
+
+    latents_list: list[SequenceLatents] = []
+    for i, (prompt_ids, gen_ids) in enumerate(sequences):
+        n_prompt = len(prompt_ids)
+        seq_len = n_prompt + len(gen_ids)
+        full_text = mt.tokenizer.decode(prompt_ids + gen_ids, skip_special_tokens=False)
+
+        code_start = _find_code_token_start(full_text, mt.tokenizer, n_prompt)
+        has_code = code_start < n_prompt
+
+        # .clone() gives each slice its own storage — without it, slices are
+        # views of the (batch, max_len, hidden) batch tensor and torch.save
+        # would serialize the full batch storage (~8x bloat).
+        def _cloned(batch_dict: dict, row: int, start: int, end: int) -> dict:
+            return {li: batch_dict[li][row, start:end, :].clone() for li in layers}
+
+        latents_list.append(
+            SequenceLatents(
+                prompt_len=n_prompt,
+                prompt_ids=prompt_ids,
+                gen_ids=gen_ids,
+                full_text=full_text,
+                residual=_cloned(batch_res, i, n_prompt, seq_len),
+                code_start=code_start,
+                code_residual=_cloned(batch_res, i, code_start, n_prompt) if has_code else {},
+                code_mlp=_cloned(batch_mlp, i, code_start, n_prompt) if (has_code and include_mlp) else {},
+                code_attn=_cloned(batch_attn, i, code_start, n_prompt) if (has_code and include_attn) else {},
+                mlp=_cloned(batch_mlp, i, n_prompt, seq_len) if include_mlp else {},
+                attn=_cloned(batch_attn, i, n_prompt, seq_len) if include_attn else {},
+            )
+        )
+
+    return latents_list
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +835,7 @@ Examples:
     response: str = ask_claude(
         oracle_prompt, max_tokens=1024, temperature=0.0, use_cache=True
     )
-    print(f"\nOracle response:\n{response}")
+    # print(f"\nOracle response:\n{response}")
 
     n_gen = len(latents.gen_ids)
 
@@ -651,18 +936,24 @@ def save_probe_dataset(
                 "prefill": r.prefill,
                 "prompt": r.prompt,
                 "prompt_len": r.latents.prompt_len,
+                "prompt_ids": r.latents.prompt_ids,
                 "gen_ids": r.latents.gen_ids,
+                "full_text": r.latents.full_text,
+                "code_start": r.latents.code_start,
                 "p_plus_mask": r.p_plus_mask,
                 "p_minus_mask": r.p_minus_mask,
                 "residual": r.latents.residual,
+                "code_residual": r.latents.code_residual,
                 "mlp": r.latents.mlp,
+                "code_mlp": r.latents.code_mlp,
                 "attn": r.latents.attn,
+                "code_attn": r.latents.code_attn,
             },
             directory / f"{i:04d}.pt",
         )
 
 
-def load_probe_dataset(directory: str | os.PathLike) -> list[ProbeRecord]:
+def load_probe_dataset(directory: str | os.PathLike, limit: int = None) -> list[ProbeRecord]:
     """Load ProbeRecords from a directory written by save_probe_dataset.
 
     Each .pt file is self-contained (metadata + masks + tensors).
@@ -670,19 +961,25 @@ def load_probe_dataset(directory: str | os.PathLike) -> list[ProbeRecord]:
 
     Returns:
         List of ProbeRecord instances with float16 latent tensors.
-        (SequenceLatents.full_text is not stored; it is empty on load.)
     """
     directory = Path(directory)
     pt_files = sorted(directory.glob("*.pt"))
+    if limit is not None:
+        pt_files = pt_files[:limit]
 
     records: list[ProbeRecord] = []
     for pt_file in pt_files:
         d = torch.load(pt_file, weights_only=False)
         latents = SequenceLatents(
             prompt_len=d["prompt_len"],
+            prompt_ids=d.get("prompt_ids", []),
             gen_ids=d["gen_ids"],
-            full_text="",
+            full_text=d.get("full_text", ""),
             residual={int(k): v for k, v in d["residual"].items()},
+            code_start=d.get("code_start", d["prompt_len"]),
+            code_residual={int(k): v for k, v in d.get("code_residual", {}).items()},
+            code_mlp={int(k): v for k, v in d.get("code_mlp", {}).items()},
+            code_attn={int(k): v for k, v in d.get("code_attn", {}).items()},
             mlp={int(k): v for k, v in d.get("mlp", {}).items()},
             attn={int(k): v for k, v in d.get("attn", {}).items()},
         )
@@ -714,7 +1011,15 @@ def collect_probe_examples(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract (X, y) feature-label pairs for one sequence and one layer.
 
-    Only uses generated token positions (indices prompt_len: in the sequence).
+    **Off-by-one correction**: the residual stream at position t is the input
+    that produces token t+1.  So to predict whether generated token i is
+    "in progress", we should use the latent from position i-1:
+
+        label[i]  →  feature from gen_rep[i-1]   (for i >= 1)
+        label[0]  →  feature from code_rep[-1]    (last code-stub token, e.g. `return`)
+
+    If code latents are unavailable (old files), gen_rep[0] is used as a
+    fallback for label[0] (slight imprecision for only the very first token).
 
     Args:
         latents: SequenceLatents from cache_latents_for_sequence.
@@ -726,11 +1031,20 @@ def collect_probe_examples(
         X: (n_gen_tokens, hidden_dim) float32 numpy array.
         y: (n_gen_tokens,) int32 array (0 = not in progress, 1 = in progress).
     """
-    rep_dict: dict[int, torch.Tensor] = getattr(latents, rep_type)
-    rep = rep_dict[layer]  # (seq_len, hidden_dim) — may be float16
-    gen_rep = rep[latents.prompt_len :].float().numpy()  # cast to float32 for sklearn
+    gen_rep = getattr(latents, rep_type)[layer].float().numpy()  # (n_gen, hidden)
     y = in_progress_mask.astype(np.int32)
-    return gen_rep, y
+
+    # Feature for label[0]: last token of the code stub (typically `return` / prefill end)
+    code_rep_dict: dict[int, torch.Tensor] = getattr(latents, f"code_{rep_type}")
+    if layer in code_rep_dict and len(code_rep_dict[layer]) > 0:
+        first_feat = code_rep_dict[layer][-1:].float().numpy()  # (1, hidden)
+    else:
+        # Fallback: use gen_rep[0] itself (no shift for the very first token)
+        first_feat = gen_rep[:1]
+
+    # Shift: gen_rep[i-1] predicts label[i] for i in 1..n-1
+    X = np.concatenate([first_feat, gen_rep[:-1]], axis=0)  # (n_gen, hidden)
+    return X, y
 
 
 def train_probe(

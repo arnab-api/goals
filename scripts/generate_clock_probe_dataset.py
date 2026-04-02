@@ -59,9 +59,10 @@ from src.goals.clock_probe import (
     DEFAULT_HARMLESS_PREFILLS,
     ProbeRecord,
     augment_sample_for_probe,
-    cache_latents_for_sequence,
+    batch_generate,
+    cache_latents_batch,
+    evaluate_gen_ids,
     find_in_progress_mask_oracle,
-    generate_and_evaluate_sample,
 )
 from src.goals.functional import apply_chat_template
 from src.goals.predicate_data import MultiPredicateDataset
@@ -194,6 +195,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable structural augmentation on the train split (only originals × prefills).",
     )
 
+    # Batch sizes
+    parser.add_argument(
+        "--gen-batch-size",
+        type=int,
+        default=32,
+        metavar="N",
+        help="Number of prompts per batched generate call.",
+    )
+    parser.add_argument(
+        "--lat-batch-size",
+        type=int,
+        default=16,
+        metavar="N",
+        help=(
+            "Max sequences per batched latent-caching call. "
+            "Keep smaller than --gen-batch-size to limit GPU peak memory "
+            "during the nnsight trace."
+        ),
+    )
+
     # Smoke-test shortcut
     parser.add_argument(
         "--smoke-test",
@@ -214,8 +235,8 @@ def apply_smoke_test_defaults(args: argparse.Namespace) -> None:
     args.max_predicates = args.max_predicates or 1
     if args.n_p_minus_per_tp == 0:
         args.n_p_minus_per_tp = 1  # smoke: just 1 P- per TP
-    args.layers_start = args.layers_start if args.layers_start != 0 else 20
-    args.layers_end = args.layers_end if args.layers_end != -1 else 26
+    args.layers_start = args.layers_start if args.layers_start != 0 else 0
+    args.layers_end = args.layers_end if args.layers_end != -1 else -1
     args.no_mlp = True
     args.no_attn = True
     args.no_augment = True
@@ -237,15 +258,32 @@ def _save_record_pt(record: ProbeRecord, idx: int, directory: Path) -> None:
             "prefill": record.prefill,
             "prompt": record.prompt,
             "prompt_len": record.latents.prompt_len,
+            "prompt_ids": record.latents.prompt_ids,
             "gen_ids": record.latents.gen_ids,
+            "full_text": record.latents.full_text,
+            "code_start": record.latents.code_start,
             "p_plus_mask": record.p_plus_mask,
             "p_minus_mask": record.p_minus_mask,
             "residual": record.latents.residual,
+            "code_residual": record.latents.code_residual,
             "mlp": record.latents.mlp,
+            "code_mlp": record.latents.code_mlp,
             "attn": record.latents.attn,
+            "code_attn": record.latents.code_attn,
         },
         directory / f"{idx:04d}.pt",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _chunk(lst: list, size: int):
+    """Yield successive non-overlapping chunks of `size` from `lst`."""
+    for i in range(0, len(lst), size):
+        yield lst[i : i + size]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,12 +304,21 @@ def generate_split(
     include_attn: bool,
     out_dir: Path,
     augment: bool = True,
+    gen_batch_size: int = 32,
+    lat_batch_size: int = 16,
 ) -> list[ProbeRecord]:
     """Run the 3-stage pipeline for a list of predicates.
 
-    Each passing record is written immediately as a self-contained .pt file
-    (metadata + masks + tensors) so a mid-run crash loses at most the current
-    in-progress variant, not entire completed predicates.
+    Generation and latent caching are batched for throughput; oracle labeling
+    and saving remain sequential.  Each passing record is written immediately
+    as a self-contained .pt file so a mid-run crash loses at most the current
+    in-progress batch, not entire completed predicates.
+
+    Args:
+        gen_batch_size: Prompts per batched generate call.
+        lat_batch_size: Max sequences per batched latent-caching call (keep
+            smaller than gen_batch_size to limit GPU peak memory during the
+            nnsight trace).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     records: list[ProbeRecord] = []
@@ -318,8 +365,18 @@ def generate_split(
                 f"  [cyan]{tp.name}[/cyan]", total=len(all_variants)
             )
 
-            for aug_sample, prefill, p_minus_desc in all_variants:
-                # ── Stage 2: generate + evaluate ────────────────────────────
+            for gen_batch in _chunk(all_variants, gen_batch_size):
+                # ── Build prompts ────────────────────────────────────────────
+                batch_prompts: list[str] = [
+                    apply_chat_template(
+                        mt=mt,
+                        user_query=aug_sample.instruction.strip(),
+                        incomplete_code=aug_sample.code + prefill,
+                    )
+                    for aug_sample, prefill, _ in gen_batch
+                ]
+
+                # ── Stage 2a: Batched generation ─────────────────────────────
                 progress.update(
                     var_task,
                     description=(
@@ -327,83 +384,89 @@ def generate_split(
                         f"pass=[green]{pred_pass}[/green] "
                         f"skip_eval=[yellow]{pred_skip_eval}[/yellow] "
                         f"no_span=[red]{pred_skip_span}[/red]  "
-                        f"prefill=[dim]{repr(prefill)[:12]}[/dim]"
+                        f"[dim]generating {len(gen_batch)}[/dim]"
                     ),
                 )
+                gen_results = batch_generate(mt, batch_prompts, max_gen_tokens)
 
-                prompt = apply_chat_template(
-                    mt=mt,
-                    user_query=aug_sample.instruction.strip(),
-                    incomplete_code=aug_sample.code + prefill,
-                )
-                ids = generate_and_evaluate_sample(
-                    mt=mt,
-                    prompt=prompt,
-                    sample=aug_sample,
-                    prefill=prefill,
-                    max_new_tokens=max_gen_tokens,
-                    eval_timeout=eval_timeout,
-                )
-                if ids is None:
-                    pred_skip_eval += 1
+                # ── Stage 2b: Sequential evaluation ─────────────────────────
+                survivors: list[tuple] = []
+                for (aug_sample, prefill, p_minus_desc), prompt, (prompt_ids, gen_ids) in zip(
+                    gen_batch, batch_prompts, gen_results
+                ):
+                    passed = evaluate_gen_ids(
+                        gen_ids=gen_ids,
+                        sample=aug_sample,
+                        prefill=prefill,
+                        tokenizer=mt.tokenizer,
+                        eval_timeout=eval_timeout,
+                    )
+                    if passed:
+                        logger.info(
+                            f"{tp.name} prefill={prefill!r}  gen_len={len(gen_ids)} eval=PASS"
+                        )
+                        survivors.append(
+                            (aug_sample, prefill, p_minus_desc, prompt, prompt_ids, gen_ids)
+                        )
+                    else:
+                        pred_skip_eval += 1
                     progress.advance(var_task)
-                    continue
 
-                prompt_ids, gen_ids = ids
-                logger.debug(
-                    "%s prefill=%r  gen_len=%d tokens  eval=PASS",
-                    tp.name,
-                    prefill,
-                    len(gen_ids),
-                )
+                # ── Stage 3: Batched latent caching ──────────────────────────
+                for lat_batch in _chunk(survivors, lat_batch_size):
+                    seqs = [(item[4], item[5]) for item in lat_batch]
+                    progress.update(
+                        var_task,
+                        description=(
+                            f"  [cyan]{tp.name}[/cyan]  "
+                            f"pass=[green]{pred_pass}[/green] "
+                            f"skip_eval=[yellow]{pred_skip_eval}[/yellow] "
+                            f"no_span=[red]{pred_skip_span}[/red]  "
+                            f"[dim]caching {len(lat_batch)}[/dim]"
+                        ),
+                    )
+                    latents_list = cache_latents_batch(
+                        mt=mt,
+                        sequences=seqs,
+                        layers=layers,
+                        include_mlp=include_mlp,
+                        include_attn=include_attn,
+                    )
 
-                # ── Stage 3: cache latents ───────────────────────────────────
-                lat = cache_latents_for_sequence(
-                    mt=mt,
-                    prompt_ids=prompt_ids,
-                    gen_ids=gen_ids,
-                    layers=layers,
-                    include_mlp=include_mlp,
-                    include_attn=include_attn,
-                )
+                    # ── Oracle span labeling + incremental save ───────────────
+                    for item, lat in zip(lat_batch, latents_list):
+                        aug_sample, prefill, p_minus_desc, prompt, _, gen_ids = item
 
-                # ── Oracle span labeling ────────────────────────────────────
-                p_plus_mask, p_minus_mask = find_in_progress_mask_oracle(
-                    latents=lat,
-                    p_plus_description=p_plus_desc,
-                    p_minus_description=p_minus_desc,
-                    tokenizer=mt.tokenizer,
-                    prefill=prefill,
-                )
-                if p_plus_mask.sum() == 0:
-                    pred_skip_span += 1
-                    logger.debug("No P+ span found for %s prefill=%r", tp.name, prefill)
-                    progress.advance(var_task)
-                    continue
+                        p_plus_mask, p_minus_mask = find_in_progress_mask_oracle(
+                            latents=lat,
+                            p_plus_description=p_plus_desc,
+                            p_minus_description=p_minus_desc,
+                            tokenizer=mt.tokenizer,
+                            prefill=prefill,
+                        )
+                        if p_plus_mask.sum() == 0:
+                            pred_skip_span += 1
+                            logger.info(
+                                f"No P+ span found for {tp.name} prefill={prefill!r}"
+                            )
+                            continue
 
-                logger.debug(
-                    "%s prefill=%r  p_plus_tokens=%d/%d  p_minus=%s",
-                    tp.name,
-                    prefill,
-                    int(p_plus_mask.sum()),
-                    len(gen_ids),
-                    int(p_minus_mask.sum()) if p_minus_mask is not None else "–",
-                )
+                        logger.info(
+                            f"{tp.name} prefill={prefill!r}  p_plus_tokens={int(p_plus_mask.sum())}/{len(gen_ids)}  p_minus={int(p_minus_mask.sum())}"
+                        )
 
-                # ── Incremental save ────────────────────────────────────────
-                record = ProbeRecord(
-                    predicate_name=tp.name,
-                    predicate_description=p_plus_desc,
-                    prefill=prefill,
-                    prompt=prompt,
-                    latents=lat,
-                    p_plus_mask=p_plus_mask,
-                    p_minus_mask=p_minus_mask,
-                )
-                _save_record_pt(record, len(records), out_dir)
-                records.append(record)
-                pred_pass += 1
-                progress.advance(var_task)
+                        record = ProbeRecord(
+                            predicate_name=tp.name,
+                            predicate_description=p_plus_desc,
+                            prefill=prefill,
+                            prompt=prompt,
+                            latents=lat,
+                            p_plus_mask=p_plus_mask,
+                            p_minus_mask=p_minus_mask,
+                        )
+                        _save_record_pt(record, len(records), out_dir)
+                        records.append(record)
+                        pred_pass += 1
 
             elapsed = time.time() - t0
             progress.update(var_task, visible=False)
@@ -418,7 +481,6 @@ def generate_split(
                 pred_skip_span,
                 elapsed,
             )
-
             logger.info("Running total: %d records saved to %s/", len(records), out_dir)
 
     return records
@@ -508,6 +570,8 @@ def main() -> None:
         include_attn=include_attn,
         out_dir=train_dir,
         augment=not args.no_augment,
+        gen_batch_size=args.gen_batch_size,
+        lat_batch_size=args.lat_batch_size,
     )
     logger.info("Train split: %d records → %s/", len(train_records), train_dir)
 
@@ -526,6 +590,8 @@ def main() -> None:
         include_attn=include_attn,
         out_dir=test_dir,
         augment=False,  # no augmentation on test split
+        gen_batch_size=args.gen_batch_size,
+        lat_batch_size=args.lat_batch_size,
     )
     logger.info("Test split:  %d records → %s/", len(test_records), test_dir)
 
