@@ -391,9 +391,10 @@ def generate_split(
 
                 # ── Stage 2b: Sequential evaluation ─────────────────────────
                 survivors: list[tuple] = []
-                for (aug_sample, prefill, p_minus_desc), prompt, (prompt_ids, gen_ids) in zip(
-                    gen_batch, batch_prompts, gen_results
-                ):
+                for (aug_sample, prefill, p_minus_desc), prompt, (
+                    prompt_ids,
+                    gen_ids,
+                ) in zip(gen_batch, batch_prompts, gen_results):
                     passed = evaluate_gen_ids(
                         gen_ids=gen_ids,
                         sample=aug_sample,
@@ -406,7 +407,14 @@ def generate_split(
                             f"{tp.name} prefill={prefill!r}  gen_len={len(gen_ids)} eval=PASS"
                         )
                         survivors.append(
-                            (aug_sample, prefill, p_minus_desc, prompt, prompt_ids, gen_ids)
+                            (
+                                aug_sample,
+                                prefill,
+                                p_minus_desc,
+                                prompt,
+                                prompt_ids,
+                                gen_ids,
+                            )
                         )
                     else:
                         pred_skip_eval += 1

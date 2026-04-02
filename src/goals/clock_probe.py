@@ -131,33 +131,37 @@ _CODE_SPAN_RE = re.compile(r"<code>\ndef")
 # ---------------------------------------------------------------------------
 
 
-def _find_code_token_start(full_text: str, tokenizer, prompt_len: int) -> int:
-    """Return the absolute token index where the code stub begins in full_text.
+def _find_code_token_start(prompt_text: str, tokenizer, prompt_len: int) -> int:
+    """Return the absolute token index where the code stub begins in the prompt.
 
     Searches for ``<code>\\ndef``, which uniquely marks the start of the code
     stub (the bare ``<code>`` in the instruction is never followed by ``\\ndef``).
     Returns ``prompt_len`` as a sentinel when the pattern is not found,
     which produces an empty code span (n_code = prompt_len - code_start = 0).
 
+    Must be called with the decoded *prompt only* (not prompt + generation) to
+    avoid matching a second ``<code>\\ndef`` that the model may regenerate in
+    its completion.
+
     Args:
-        full_text: Decoded full sequence (prompt + generated).
+        prompt_text: Decoded prompt tokens (NOT including generated tokens).
         tokenizer: Model tokenizer for find_token_range.
         prompt_len: Number of prompt tokens — upper bound and fallback.
     """
-    m = _CODE_SPAN_RE.search(full_text)
+    m = _CODE_SPAN_RE.search(prompt_text)
     if m is None:
-        return prompt_len
+        return prompt_len - 1
     try:
         tok_start, _ = find_token_range(
-            string=full_text,
-            substring=full_text[m.start() : m.end()],
+            string=prompt_text,
+            substring=prompt_text[m.start() : m.end()],
             tokenizer=tokenizer,
             occurrence=-1,
         )
         # print(tok_start, _)
-        return min(tok_start, prompt_len)
+        return min(tok_start, prompt_len - 1)
     except Exception:
-        return prompt_len
+        return prompt_len - 1  # immediate left token should be at least in the cache
 
 
 def _untuple(x: Any) -> torch.Tensor:
@@ -512,7 +516,11 @@ def cache_latents_for_sequence(
             res_saves[layer_idx] = layer_mod.output.save()
 
     n_prompt = len(prompt_ids)
-    code_start = _find_code_token_start(full_text, mt.tokenizer, n_prompt)
+    code_start = _find_code_token_start(
+        mt.tokenizer.decode(prompt_ids, skip_special_tokens=False),
+        mt.tokenizer,
+        n_prompt,
+    )
     has_code = code_start < n_prompt
 
     def _slice(saves: dict[int, Any], start: int, end: int) -> dict[int, torch.Tensor]:
@@ -636,7 +644,11 @@ def cache_latents_batch(
         seq_len = n_prompt + len(gen_ids)
         full_text = mt.tokenizer.decode(prompt_ids + gen_ids, skip_special_tokens=False)
 
-        code_start = _find_code_token_start(full_text, mt.tokenizer, n_prompt)
+        code_start = _find_code_token_start(
+            mt.tokenizer.decode(prompt_ids, skip_special_tokens=False),
+            mt.tokenizer,
+            n_prompt,
+        )
         has_code = code_start < n_prompt
 
         # .clone() gives each slice its own storage — without it, slices are
@@ -1064,6 +1076,97 @@ def collect_probe_examples(
     return X, y
 
 
+def _contiguous_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Return (start, end) inclusive index pairs for each True run in mask."""
+    runs: list[tuple[int, int]] = []
+    in_run = False
+    start = 0
+    for i, v in enumerate(mask):
+        if v and not in_run:
+            start = i
+            in_run = True
+        elif not v and in_run:
+            runs.append((start, i - 1))
+            in_run = False
+    if in_run:
+        runs.append((start, len(mask) - 1))
+    return runs
+
+
+def collect_regression_examples(
+    latents: SequenceLatents,
+    p_plus_mask: np.ndarray,
+    p_minus_mask: np.ndarray,
+    layer: int,
+    rep_type: str = "residual",
+    rng: np.random.Generator | None = None,
+    end_value: float = 0.1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Extract (X, y) for the regression probe — continuous progress labels.
+
+    For each contiguous run in p_plus_mask and p_minus_mask (handled separately),
+    assigns a linearly decreasing label from 1.0 (first token of run) to 0.0
+    (last token of run).  Background tokens (outside in_progress_mask) are
+    randomly sampled and labeled 0.0.
+
+    Same off-by-one shift as collect_probe_examples: the latent at position t-1
+    is used as the feature for gen token t (code_rep[-1] for t=0).
+
+    Args:
+        latents: SequenceLatents from cache_latents_for_sequence.
+        p_plus_mask: Boolean array (n_gen_tokens,) marking the p_plus span.
+        p_minus_mask: Boolean array (n_gen_tokens,) marking the p_minus span.
+        layer: Layer index to extract features from.
+        rep_type: "residual", "mlp", or "attn".
+        rng: Optional random generator for reproducible background sampling.
+
+    Returns:
+        X: (n, hidden_dim) float tensor.
+        y: (n,) float tensor with values in [0.0, 1.0].
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    gen_rep = getattr(latents, rep_type)[layer].float()  # (n_gen, hidden)
+
+    # Build shifted feature matrix (latent at i-1 predicts gen token i)
+    code_rep_dict: dict[int, torch.Tensor] = getattr(latents, f"code_{rep_type}")
+    if layer in code_rep_dict and len(code_rep_dict[layer]) > 0:
+        first_feat = code_rep_dict[layer][-1:].float()
+    else:
+        first_feat = gen_rep[:1]
+    shifted_rep = torch.cat([first_feat, gen_rep[:-1]], dim=0)  # (n_gen, hidden)
+
+    in_progress_mask = p_plus_mask | p_minus_mask
+    X_parts: list[torch.Tensor] = []
+    y_parts: list[torch.Tensor] = []
+    total_span_tokens = 0
+
+    # Linear 1 → 0 ramp per contiguous run, for p_plus and p_minus independently
+    for mask in (p_plus_mask, p_minus_mask):
+        for start, end in _contiguous_runs(mask):
+            L = end - start + 1
+            labels = torch.from_numpy(np.linspace(1.0, end_value, L, dtype=np.float32))
+            X_parts.append(shifted_rep[start : end + 1])
+            y_parts.append(labels)
+            total_span_tokens += L
+
+    if not X_parts:
+        return torch.zeros((0, gen_rep.shape[1])), torch.zeros((0,))
+
+    # Random background sample labeled 0.0
+    bg_indices = np.where(~in_progress_mask)[0]
+    n_bg = max(1, total_span_tokens // 2)
+    if len(bg_indices) > 0:
+        chosen = rng.choice(bg_indices, size=min(n_bg, len(bg_indices)), replace=False)
+        X_parts.append(shifted_rep[chosen])
+        y_parts.append(
+            torch.zeros(len(chosen), dtype=torch.float32)
+        )  #! not inside span, strictly zero label
+
+    return torch.cat(X_parts, dim=0), torch.cat(y_parts, dim=0)
+
+
 class LinearProbe(nn.Module):
     """Balanced binary linear probe trained with weighted cross-entropy.
 
@@ -1223,3 +1326,141 @@ def eval_probe(
             zero_division=0,
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Regression probe — continuous progress signal
+# ---------------------------------------------------------------------------
+
+
+class LinearRegressionProbe(nn.Module):
+    """Linear probe that regresses a continuous progress value in [0, 1].
+
+    Labels are 1.0 at the first token of an in-progress span, decrease
+    linearly to 0.0 at the last token, and are 0.0 for background tokens.
+
+    Same normalization design as LinearProbe: feat_mean / feat_std stored as
+    buffers so the probe is fully self-contained.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        add_bias: bool = False,
+        z_normalize: bool = False,
+        x_unit_normalize: bool = True,
+    ) -> None:
+        super().__init__()
+        self.linear = nn.Linear(input_dim, 1, bias=add_bias)
+        nn.init.kaiming_normal_(self.linear.weight)
+        self.z_normalize = z_normalize
+        self.x_unit_normalize = x_unit_normalize
+        self.register_buffer("feat_mean", torch.zeros(input_dim))
+        self.register_buffer("feat_std", torch.ones(input_dim))
+
+    def _z_norm(self, x: torch.Tensor) -> torch.Tensor:
+        return (x - self.feat_mean) / self.feat_std
+
+    @staticmethod
+    def _x_unit_norm(x: torch.Tensor) -> torch.Tensor:
+        return x / x.norm(dim=1, keepdim=True).clamp(min=1e-8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return predicted progress values (n,)."""
+        x = x.to(self.feat_mean.device).float()
+        if self.x_unit_normalize:
+            x = self._x_unit_norm(x)
+        if self.z_normalize:
+            x = self._z_norm(x)
+        return self.linear(x).squeeze(-1)
+
+    @torch.inference_mode()
+    def predict(self, x: torch.Tensor) -> np.ndarray:
+        """Return predicted progress values as a numpy float32 array."""
+        self.eval()
+        return self.forward(x).cpu().numpy()
+
+
+def train_regression_probe(
+    X_train: torch.Tensor,
+    y_train: torch.Tensor,
+    n_epochs: int = 300,
+    lr: float = 0.01,
+    weight_decay: float = 1e-4,
+    device: str | torch.device = "cuda",
+    add_bias: bool = False,
+    z_normalize: bool = False,
+    x_unit_normalize: bool = True,
+) -> LinearRegressionProbe:
+    """Fit a linear regression probe on GPU using MSE loss.
+
+    Args:
+        X_train: (n, hidden_dim) float tensor.
+        y_train: (n,) float tensor with values in [0, 1].
+        n_epochs: Number of Adam steps.
+        lr: Adam learning rate.
+        weight_decay: L2 regularization strength.
+        device: Training device.
+        add_bias: Whether to include a bias term.
+        z_normalize: Whether to z-score features before the linear layer.
+        x_unit_normalize: Whether to L2-normalise each input vector (row-wise)
+            before the linear layer.
+
+    Returns:
+        Trained LinearRegressionProbe with normalization buffers populated.
+    """
+    X = X_train.float()
+    y = y_train.float()
+
+    mean = X.mean(dim=0)
+    std = X.std(dim=0).clamp(min=1e-8)
+
+    probe = LinearRegressionProbe(
+        X.shape[1],
+        add_bias=add_bias,
+        z_normalize=z_normalize,
+        x_unit_normalize=x_unit_normalize,
+    )
+    probe.feat_mean.copy_(mean)
+    probe.feat_std.copy_(std)
+    probe = probe.to(device)
+
+    if x_unit_normalize:
+        X = LinearRegressionProbe._x_unit_norm(X)
+    X = X.to(device)
+    y = y.to(device)
+
+    optimizer = torch.optim.Adam(probe.parameters(), lr=lr, weight_decay=weight_decay)
+    criterion = nn.MSELoss()
+
+    probe.train()
+    for _ in range(n_epochs):
+        optimizer.zero_grad()
+        loss = criterion(probe(X), y)
+        loss.backward()
+        optimizer.step()
+
+    probe.eval()
+    return probe
+
+
+def eval_regression_probe(
+    probe: LinearRegressionProbe,
+    X_test: torch.Tensor,
+    y_test: torch.Tensor,
+) -> dict:
+    """Score a trained regression probe on test data.
+
+    Returns:
+        dict with "mse", "mae", "r2".
+    """
+    y_pred = probe.predict(X_test)
+    y_np = y_test.numpy() if isinstance(y_test, torch.Tensor) else y_test
+
+    mse = float(((y_pred - y_np) ** 2).mean())
+    mae = float(np.abs(y_pred - y_np).mean())
+    ss_res = float(((y_pred - y_np) ** 2).sum())
+    ss_tot = float(((y_np - y_np.mean()) ** 2).sum())
+    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+
+    return {"mse": mse, "mae": mae, "r2": r2}
