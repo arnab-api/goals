@@ -40,9 +40,9 @@ from typing import Any
 
 import numpy as np
 import torch
-from sklearn.linear_model import LogisticRegression
+import torch.nn as nn
 from sklearn.metrics import balanced_accuracy_score, classification_report
-from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 from src.functional import get_module_nnsight
 from src.goals.augment import (
@@ -110,7 +110,9 @@ class SequenceLatents:
     full_text: str  # decoded full sequence (prompt + generated)
     residual: dict[int, torch.Tensor]  # layer → (n_gen, hidden_dim) float16 CPU
     code_start: int = 0  # absolute token index of <code>\ndef; sentinel=prompt_len
-    code_residual: dict[int, torch.Tensor] = field(default_factory=dict)  # (n_code, hidden_dim)
+    code_residual: dict[int, torch.Tensor] = field(
+        default_factory=dict
+    )  # (n_code, hidden_dim)
     code_mlp: dict[int, torch.Tensor] = field(default_factory=dict)
     code_attn: dict[int, torch.Tensor] = field(default_factory=dict)
     mlp: dict[int, torch.Tensor] = field(default_factory=dict)
@@ -528,8 +530,12 @@ def cache_latents_for_sequence(
         residual=_slice(res_saves, n_prompt, None),
         code_start=code_start,
         code_residual=_slice(res_saves, code_start, n_prompt) if has_code else {},
-        code_mlp=_slice(mlp_saves, code_start, n_prompt) if (has_code and include_mlp) else {},
-        code_attn=_slice(attn_saves, code_start, n_prompt) if (has_code and include_attn) else {},
+        code_mlp=_slice(mlp_saves, code_start, n_prompt)
+        if (has_code and include_mlp)
+        else {},
+        code_attn=_slice(attn_saves, code_start, n_prompt)
+        if (has_code and include_attn)
+        else {},
         mlp=_slice(mlp_saves, n_prompt, None) if include_mlp else {},
         attn=_slice(attn_saves, n_prompt, None) if include_attn else {},
     )
@@ -644,9 +650,15 @@ def cache_latents_batch(
                 full_text=full_text,
                 residual=_cloned(batch_res, i, n_prompt, seq_len),
                 code_start=code_start,
-                code_residual=_cloned(batch_res, i, code_start, n_prompt) if has_code else {},
-                code_mlp=_cloned(batch_mlp, i, code_start, n_prompt) if (has_code and include_mlp) else {},
-                code_attn=_cloned(batch_attn, i, code_start, n_prompt) if (has_code and include_attn) else {},
+                code_residual=_cloned(batch_res, i, code_start, n_prompt)
+                if has_code
+                else {},
+                code_mlp=_cloned(batch_mlp, i, code_start, n_prompt)
+                if (has_code and include_mlp)
+                else {},
+                code_attn=_cloned(batch_attn, i, code_start, n_prompt)
+                if (has_code and include_attn)
+                else {},
                 mlp=_cloned(batch_mlp, i, n_prompt, seq_len) if include_mlp else {},
                 attn=_cloned(batch_attn, i, n_prompt, seq_len) if include_attn else {},
             )
@@ -953,7 +965,9 @@ def save_probe_dataset(
         )
 
 
-def load_probe_dataset(directory: str | os.PathLike, limit: int = None) -> list[ProbeRecord]:
+def load_probe_dataset(
+    directory: str | os.PathLike, limit: int = None
+) -> list[ProbeRecord]:
     """Load ProbeRecords from a directory written by save_probe_dataset.
 
     Each .pt file is self-contained (metadata + masks + tensors).
@@ -968,7 +982,7 @@ def load_probe_dataset(directory: str | os.PathLike, limit: int = None) -> list[
         pt_files = pt_files[:limit]
 
     records: list[ProbeRecord] = []
-    for pt_file in pt_files:
+    for pt_file in tqdm(pt_files):
         d = torch.load(pt_file, weights_only=False)
         latents = SequenceLatents(
             prompt_len=d["prompt_len"],
@@ -1031,56 +1045,120 @@ def collect_probe_examples(
         X: (n_gen_tokens, hidden_dim) float32 numpy array.
         y: (n_gen_tokens,) int32 array (0 = not in progress, 1 = in progress).
     """
-    gen_rep = getattr(latents, rep_type)[layer].float().numpy()  # (n_gen, hidden)
-    y = in_progress_mask.astype(np.int32)
+    gen_rep = getattr(latents, rep_type)[layer].float()  # (n_gen, hidden)
+    y = torch.from_numpy(in_progress_mask.astype(np.int64))
 
     # Feature for label[0]: last token of the code stub (typically `return` / prefill end)
     code_rep_dict: dict[int, torch.Tensor] = getattr(latents, f"code_{rep_type}")
     if layer in code_rep_dict and len(code_rep_dict[layer]) > 0:
-        first_feat = code_rep_dict[layer][-1:].float().numpy()  # (1, hidden)
+        first_feat = code_rep_dict[layer][-1:].float()  # (1, hidden)
     else:
         # Fallback: use gen_rep[0] itself (no shift for the very first token)
         first_feat = gen_rep[:1]
 
     # Shift: gen_rep[i-1] predicts label[i] for i in 1..n-1
-    X = np.concatenate([first_feat, gen_rep[:-1]], axis=0)  # (n_gen, hidden)
+    X = torch.cat([first_feat, gen_rep[:-1]], dim=0)  # (n_gen, hidden)
     return X, y
 
 
-def train_probe(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    C: float = 1.0,
-) -> tuple[LogisticRegression, StandardScaler]:
-    """Fit a balanced logistic regression probe.
+class LinearProbe(nn.Module):
+    """Balanced binary linear probe trained with weighted cross-entropy.
 
-    Uses class_weight='balanced' to handle the minority "in progress" class.
+    Feature normalization (mean / std) is stored as buffers so the probe
+    is fully self-contained — no separate scaler object needed.
+    """
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, 2, bias=True)
+        nn.init.kaiming_normal_(self.linear.weight)
+        self.register_buffer("feat_mean", torch.zeros(input_dim))
+        self.register_buffer("feat_std", torch.ones(input_dim))
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        return (x.to(self.feat_mean.device).float() - self.feat_mean) / self.feat_std
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return logits (n, 2)."""
+        return self.linear(self._normalize(x))
+
+    @torch.inference_mode()
+    def predict(self, x: torch.Tensor) -> np.ndarray:
+        """Return predicted class indices as a numpy int array."""
+        self.eval()
+        return self.forward(x).argmax(dim=-1).cpu().numpy()
+
+
+def train_probe(
+    X_train: torch.Tensor,
+    y_train: torch.Tensor,
+    n_epochs: int = 300,
+    lr: float = 0.01,
+    weight_decay: float = 1e-4,
+    device: str | torch.device = "cuda",
+) -> LinearProbe:
+    """Fit a balanced binary linear probe on GPU.
+
+    Class imbalance is handled via weighted cross-entropy:
+        weight[c] = N / (2 * N_c)
+
+    Normalization statistics (mean / std) are computed once on the training
+    data and stored in the probe's buffers.
 
     Args:
-        X_train: (n, hidden_dim) float32 feature matrix.
-        y_train: (n,) int array — 0 = not in progress, 1 = in progress.
-        C: Inverse regularization strength.
+        X_train: (n, hidden_dim) float tensor (CPU is fine; moved to device here).
+        y_train: (n,) int tensor — 0 = not in progress, 1 = in progress.
+        n_epochs: Number of Adam steps.
+        lr: Adam learning rate.
+        weight_decay: L2 regularization strength.
+        device: Training device.
 
     Returns:
-        (probe, scaler): fitted LogisticRegression and StandardScaler.
+        Trained LinearProbe with normalization buffers populated.
     """
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_train)
-    probe = LogisticRegression(
-        class_weight="balanced",
-        max_iter=1000,
-        C=C,
-        solver="lbfgs",
-    )
-    probe.fit(X_scaled, y_train)
-    return probe, scaler
+    X = X_train.float()
+    y = y_train.long()
+
+    # Compute normalization on CPU before moving to device
+    mean = X.mean(dim=0)
+    std = X.std(dim=0).clamp(min=1e-8)
+
+    # Balanced class weights
+    n = len(y)
+    n_pos = int(y.sum().item())
+    n_neg = n - n_pos
+    if n_pos == 0 or n_neg == 0:
+        class_weights = torch.ones(2)
+    else:
+        class_weights = torch.tensor([n / (2.0 * n_neg), n / (2.0 * n_pos)])
+
+    probe = LinearProbe(X.shape[1])
+    probe.feat_mean.copy_(mean)
+    probe.feat_std.copy_(std)
+    probe = probe.to(device)
+
+    X = X.to(device)
+    y = y.to(device)
+    class_weights = class_weights.to(device)
+
+    optimizer = torch.optim.Adam(probe.parameters(), lr=lr, weight_decay=weight_decay)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    probe.train()
+    for _ in range(n_epochs):
+        optimizer.zero_grad()
+        loss = criterion(probe(X), y)
+        loss.backward()
+        optimizer.step()
+
+    probe.eval()
+    return probe
 
 
 def eval_probe(
-    probe: LogisticRegression,
-    scaler: StandardScaler,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
+    probe: LinearProbe,
+    X_test: torch.Tensor,
+    y_test: torch.Tensor,
 ) -> dict:
     """Score a trained probe on test data.
 
@@ -1088,13 +1166,13 @@ def eval_probe(
         dict with "balanced_accuracy", "accuracy", "report"
         (classification_report string with per-class precision/recall/F1).
     """
-    X_scaled = scaler.transform(X_test)
-    y_pred = probe.predict(X_scaled)
+    y_pred = probe.predict(X_test)
+    y_np = y_test.numpy() if isinstance(y_test, torch.Tensor) else y_test
     return {
-        "balanced_accuracy": balanced_accuracy_score(y_test, y_pred),
-        "accuracy": float((y_pred == y_test).mean()),
+        "balanced_accuracy": balanced_accuracy_score(y_np, y_pred),
+        "accuracy": float((y_pred == y_np).mean()),
         "report": classification_report(
-            y_test,
+            y_np,
             y_pred,
             target_names=["not_in_progress", "in_progress"],
             zero_division=0,
