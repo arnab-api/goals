@@ -123,6 +123,7 @@ class SequenceLatents:
 # The instruction also contains a bare <code> tag, but only the code stub
 # starts with <code>\ndef — so this two-token pattern is unambiguous.
 _CODE_SPAN_RE = re.compile(r"<code>\ndef")
+# _CODE_SPAN_RE = re.compile(r"<code>")
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +152,9 @@ def _find_code_token_start(full_text: str, tokenizer, prompt_len: int) -> int:
             string=full_text,
             substring=full_text[m.start() : m.end()],
             tokenizer=tokenizer,
+            occurrence=-1,
         )
+        # print(tok_start, _)
         return min(tok_start, prompt_len)
     except Exception:
         return prompt_len
@@ -847,7 +850,7 @@ Examples:
     response: str = ask_claude(
         oracle_prompt, max_tokens=1024, temperature=0.0, use_cache=True
     )
-    # print(f"\nOracle response:\n{response}")
+    print(f"\nOracle response:\n{response}")
 
     n_gen = len(latents.gen_ids)
 
@@ -1068,19 +1071,38 @@ class LinearProbe(nn.Module):
     is fully self-contained — no separate scaler object needed.
     """
 
-    def __init__(self, input_dim: int):
+    def __init__(
+        self,
+        input_dim: int,
+        num_classes: int,
+        add_bias: bool = False,
+        z_normalize: bool = False,
+        x_unit_normalize: bool = False,
+    ) -> None:
         super().__init__()
-        self.linear = nn.Linear(input_dim, 2, bias=True)
+        self.linear = nn.Linear(input_dim, num_classes, bias=add_bias)
+        self.metadata = {"input_dim": input_dim, "num_classes": num_classes}
+        self.z_normalize = z_normalize
+        self.x_unit_normalize = x_unit_normalize
         nn.init.kaiming_normal_(self.linear.weight)
         self.register_buffer("feat_mean", torch.zeros(input_dim))
         self.register_buffer("feat_std", torch.ones(input_dim))
 
-    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+    def _z_norm(self, x: torch.Tensor) -> torch.Tensor:
         return (x.to(self.feat_mean.device).float() - self.feat_mean) / self.feat_std
 
+    @staticmethod
+    def _x_unit_norm(x: torch.Tensor) -> torch.Tensor:
+        return x / x.norm(dim=1, keepdim=True).clamp(min=1e-8)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return logits (n, 2)."""
-        return self.linear(self._normalize(x))
+        """Return logits (n, num_classes)."""
+        x = x.to(self.feat_mean.device).float()
+        if self.x_unit_normalize:
+            x = self._x_unit_norm(x)
+        if self.z_normalize:
+            x = self._z_norm(x)
+        return self.linear(x)
 
     @torch.inference_mode()
     def predict(self, x: torch.Tensor) -> np.ndarray:
@@ -1096,6 +1118,10 @@ def train_probe(
     lr: float = 0.01,
     weight_decay: float = 1e-4,
     device: str | torch.device = "cuda",
+    add_bias: bool = False,
+    z_normalize: bool = False,
+    unit_normalize: bool = True,
+    lambda_unit: float = 0.1,
 ) -> LinearProbe:
     """Fit a balanced binary linear probe on GPU.
 
@@ -1112,6 +1138,13 @@ def train_probe(
         lr: Adam learning rate.
         weight_decay: L2 regularization strength.
         device: Training device.
+        add_bias: Whether to include a bias term in the linear layer.
+        z_normalize: Whether to z-score features before the linear layer.
+        unit_normalize: If True, add a penalty that encourages each row of
+            the weight matrix to be a unit vector:
+                loss_unit = mean((||w_c|| - 1)^2  for c in classes)
+        lambda_unit: Weight of the unit-norm penalty (only used when
+            unit_normalize=True).
 
     Returns:
         Trained LinearProbe with normalization buffers populated.
@@ -1132,11 +1165,19 @@ def train_probe(
     else:
         class_weights = torch.tensor([n / (2.0 * n_neg), n / (2.0 * n_pos)])
 
-    probe = LinearProbe(X.shape[1])
+    probe = LinearProbe(
+        X.shape[1],
+        num_classes=2,
+        add_bias=add_bias,
+        z_normalize=z_normalize,
+        x_unit_normalize=unit_normalize,
+    )
     probe.feat_mean.copy_(mean)
     probe.feat_std.copy_(std)
     probe = probe.to(device)
 
+    if unit_normalize:
+        X = LinearProbe._x_unit_norm(X)
     X = X.to(device)
     y = y.to(device)
     class_weights = class_weights.to(device)
@@ -1148,6 +1189,10 @@ def train_probe(
     for _ in range(n_epochs):
         optimizer.zero_grad()
         loss = criterion(probe(X), y)
+        if unit_normalize:
+            # Penalise deviation of each weight-row norm from 1
+            row_norms = probe.linear.weight.norm(dim=1)  # (num_classes,)
+            loss = loss + lambda_unit * ((row_norms - 1) ** 2).mean()
         loss.backward()
         optimizer.step()
 
