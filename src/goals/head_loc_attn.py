@@ -62,7 +62,7 @@ from src.goals.head_loc_pivot import (
     build_rust_prompt,
     get_next_token_probs_batch,
 )
-from src.tokens import prepare_input
+from src.tokens import TokenizerOutput, prepare_input
 from src.utils.metrics import recall as recall_metric
 
 logger = logging.getLogger(__name__)
@@ -150,24 +150,48 @@ def _get_o_proj_weight_obsolete(mt, layer: int) -> torch.Tensor:
 
 @torch.inference_mode()
 def get_o_proj_inputs_batch(
-    mt, prompts: list[str], layers: list[int]
+    mt,
+    prompts: list[str] | TokenizerOutput,
+    layers: list[int],
+    token_positions: list[int] | None = None,
 ) -> dict[int, torch.Tensor]:
-    """Extract o_proj input at last token for each layer, for a batch of prompts.
+    """Extract o_proj input for each layer, for a batch of prompts.
 
     Left-padding (from prepare_input) ensures ``[:, -1, :]`` is the last real
     token for every sequence in the batch.
 
+    Args:
+        token_positions: Token positions to extract.  When ``None`` (default),
+            extracts only the last position, returning ``(batch, n_embd)``.
+            When a list of ints is given, extracts those positions and returns
+            ``(batch, len(token_positions), n_embd)``.
+
     Returns:
-        ``{layer: (batch, n_embd) float32 CPU tensor}``
+        ``{layer: tensor}`` where tensor shape is ``(batch, n_embd)`` for the
+        default single-position case, or ``(batch, n_positions, n_embd)`` when
+        ``token_positions`` is specified.
     """
-    inputs = prepare_input(prompts=prompts, tokenizer=mt)
+    if isinstance(prompts, list) and all(isinstance(p, str) for p in prompts):
+        inputs = prepare_input(prompts=prompts, tokenizer=mt)
+    elif isinstance(prompts, TokenizerOutput):
+        inputs = prompts
+    else:
+        error_msg = f"prompts must be list of strings or TokenizerOutput.\nGot type {type(prompts)}."
+        if isinstance(prompts, list):
+            error_msg += f"\nList element types: {[type(p) for p in prompts]}"
+        raise ValueError(error_msg)
     saves: dict[int, Any] = {}
 
     with mt.trace(inputs, scan=False, validate=False):
         for layer in layers:
             attn_name = mt.attn_module_name_format.format(layer)
             o_proj = get_module_nnsight(mt, attn_name + ".o_proj")
-            saves[layer] = o_proj.input[:, -1, :].save()  # (batch, n_embd)
+            if token_positions is None:
+                saves[layer] = o_proj.input[:, -1, :].save()  # (batch, n_embd)
+            else:
+                saves[layer] = o_proj.input[
+                    :, token_positions, :
+                ].save()  # (batch, n_pos, n_embd)
 
     return {layer: saves[layer].float().cpu() for layer in layers}
 
