@@ -271,7 +271,11 @@ def render_patchscope_html(
     """
     spans = []
     for r in results:
-        tok_html = _html.escape(r["token"])
+        raw = r["token"]
+        # Newline tokens render as invisible line breaks — replace \n with a
+        # visible glyph (↵) so the span is hoverable, then emit the real \n
+        # after it so indentation is preserved.
+        tok_html = _html.escape(raw).replace("\n", "↵\n")
         tip_html = _html.escape(r["patched_gen"].strip() or "(empty)")
         cls = ("ps-tok " + _prism_class(r["token"])).strip()
         spans.append(
