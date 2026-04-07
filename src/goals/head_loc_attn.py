@@ -215,6 +215,65 @@ def get_o_proj_inputs(mt, prompt: str, layers: list[int]) -> dict[int, torch.Ten
     return {layer: saves[layer].float().cpu() for layer in layers}
 
 
+@torch.inference_mode()
+def collect_head_steering_vecs(
+    mt,
+    src_tokenized: TokenizerOutput,
+    selected_heads: list[tuple[int, int]],
+    token_positions: list[int],
+) -> torch.Tensor:
+    """Compute the summed residual-stream contribution of selected heads at each token position.
+
+    For a linear o_proj, head h's contribution to the residual stream is:
+        o_proj_input[:, pos, h*hd:(h+1)*hd] @ W_o[:, h*hd:(h+1)*hd].T
+
+    This sums those contributions across all selected heads.
+
+    Args:
+        mt: ModelandTokenizer.
+        src_tokenized: Tokenized source prompt (batch=1).
+        selected_heads: List of (layer, head_idx) pairs identifying which heads to include.
+        token_positions: Token positions to extract (absolute indices into src_tokenized).
+
+    Returns:
+        Float32 CPU tensor of shape ``(n_positions, n_embd)`` — one steering vector per position.
+    """
+    from collections import defaultdict
+
+    n_embd = mt.n_embd
+    n_heads = mt.model.config.num_attention_heads
+    head_dim = n_embd // n_heads
+
+    # Group heads by layer to minimise forward passes
+    heads_per_layer: dict[int, list[int]] = defaultdict(list)
+    for layer, head in selected_heads:
+        heads_per_layer[layer].append(head)
+
+    layers = list(heads_per_layer.keys())
+
+    # Single forward pass — extract o_proj inputs at all requested positions
+    o_proj_inputs = get_o_proj_inputs_batch(
+        mt, src_tokenized, layers, token_positions=token_positions
+    )  # {layer: (1, n_positions, n_embd)}
+
+    n_pos = len(token_positions)
+    steering_vecs = torch.zeros(n_pos, n_embd, dtype=torch.float32)
+
+    for layer, heads in heads_per_layer.items():
+        attn_name = mt.attn_module_name_format.format(layer)
+        o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
+        W_o = o_proj.weight.detach().float().cpu()  # (n_embd, n_embd)
+
+        inp = o_proj_inputs[layer][0]  # (n_positions, n_embd) float32 CPU
+
+        for h in heads:
+            h_inp = inp[:, h * head_dim : (h + 1) * head_dim]      # (n_pos, head_dim)
+            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]      # (n_embd, head_dim)
+            steering_vecs += h_inp @ W_o_h.t()                      # (n_pos, n_embd)
+
+    return steering_vecs  # (n_positions, n_embd) float32 CPU
+
+
 @torch.no_grad()
 def precompute_per_head_deltas_batch_obsolete(
     mt,
