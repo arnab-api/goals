@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from dataclasses_json import DataClassJsonMixin
+from dataclasses_json import DataClassJsonMixin, config
 
 from src.utils.env_utils import DEFAULT_DATA_DIR
 from src.utils.typing import PathLike
@@ -25,26 +25,18 @@ class IncompleteCodeSample(DataClassJsonMixin):
     prefills: dict[str, list[str]] = field(default_factory=dict)
     function_name: str | None = None
     augmentation: list[dict] | None = None
-    lang: str = "python"
     without_comments: bool = False
-    no_comment_str: str = field(default_factory=lambda: _NO_COMMENT_STR)
+    no_comment_str: str = field(
+        default=_NO_COMMENT_STR,
+        metadata=config(exclude=lambda v: v == _NO_COMMENT_STR),
+    )
 
     @property
     def full_instruction(self) -> str:
-        """Instruction with language and optional no-comment suffix appended.
-
-        If ``lang`` is not already mentioned in ``instruction``, it is appended
-        as "in {lang}."  If ``without_comments`` is True, ``no_comment_str``
-        is appended at the end.
-        """
-        instr = self.instruction.rstrip(". ")
-        if self.lang.lower() not in instr.lower():
-            instr = f"{instr} in {self.lang.capitalize()}."
-        else:
-            instr += "."
+        """Instruction with optional no-comment suffix appended."""
         if self.without_comments:
-            instr += " " + self.no_comment_str
-        return instr
+            return self.instruction.rstrip(". ") + ". " + self.no_comment_str
+        return self.instruction
 
     @property
     def is_original(self) -> bool:
