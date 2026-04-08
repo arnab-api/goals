@@ -12,6 +12,11 @@ from src.utils.typing import PathLike
 logger = logging.getLogger(__name__)
 
 
+_NO_COMMENT_STR = (
+    "Write your code without any comments or explanations, just the implementation."
+)
+
+
 @dataclass
 class IncompleteCodeSample(DataClassJsonMixin):
     instruction: str
@@ -20,6 +25,26 @@ class IncompleteCodeSample(DataClassJsonMixin):
     prefills: dict[str, list[str]] = field(default_factory=dict)
     function_name: str | None = None
     augmentation: list[dict] | None = None
+    lang: str = "python"
+    without_comments: bool = False
+    no_comment_str: str = field(default_factory=lambda: _NO_COMMENT_STR)
+
+    @property
+    def full_instruction(self) -> str:
+        """Instruction with language and optional no-comment suffix appended.
+
+        If ``lang`` is not already mentioned in ``instruction``, it is appended
+        as "in {lang}."  If ``without_comments`` is True, ``no_comment_str``
+        is appended at the end.
+        """
+        instr = self.instruction.rstrip(". ")
+        if self.lang.lower() not in instr.lower():
+            instr = f"{instr} in {self.lang.capitalize()}."
+        else:
+            instr += "."
+        if self.without_comments:
+            instr += " " + self.no_comment_str
+        return instr
 
     @property
     def is_original(self) -> bool:
