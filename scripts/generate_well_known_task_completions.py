@@ -42,7 +42,6 @@ from src.goals.clock_probe import batch_generate
 from src.goals.data import IncompleteCodeSample
 from src.goals.functional import apply_chat_template, supports_chat_template
 from src.models import ModelandTokenizer
-from src.tokens import prepare_input
 from src.utils.env_utils import DEFAULT_DATA_DIR, DEFAULT_RESULTS_DIR
 from src.utils.logging_utils import add_logging_args, configure
 
@@ -124,7 +123,9 @@ def _load_samples(task_names: list[str] | None) -> list[IncompleteCodeSample]:
         paths = [p for p in paths if p.stem in task_set]
         missing = task_set - {p.stem for p in paths}
         if missing:
-            logger.warning("Tasks not found in %s: %s", TASKS_DIR, ", ".join(sorted(missing)))
+            logger.warning(
+                "Tasks not found in %s: %s", TASKS_DIR, ", ".join(sorted(missing))
+            )
 
     samples = []
     for path in paths:
@@ -161,7 +162,9 @@ def main() -> None:
         attn_implementation="eager",
     )
     model_short = args.model_key.split("/")[-1]
-    logger.info("Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd)
+    logger.info(
+        "Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd
+    )
 
     # ── Output directory ──────────────────────────────────────────────────────
     out_dir = (
@@ -178,16 +181,21 @@ def main() -> None:
 
     if not args.overwrite:
         before = len(samples)
-        samples = [s for s in samples if not (out_dir / f"{s.function_name}.json").exists()]
+        samples = [
+            s for s in samples if not (out_dir / f"{s.function_name}.json").exists()
+        ]
         skipped = before - len(samples)
         if skipped:
-            logger.info("Skipping %d already-generated tasks (use --overwrite to redo)", skipped)
+            logger.info(
+                "Skipping %d already-generated tasks (use --overwrite to redo)", skipped
+            )
 
     if not samples:
         console.print("[green]All tasks already generated. Done.[/green]")
         return
 
     # ── Build prompts ─────────────────────────────────────────────────────────
+    logger.info("Building prompts...")
     prompts: list[str] = []
     for sample in samples:
         if supports_chat_template(mt):
@@ -217,6 +225,7 @@ def main() -> None:
     with progress:
         for chunk in _chunk(list(zip(samples, prompts)), args.batch_size):
             chunk_samples, chunk_prompts = zip(*chunk)
+            logger.info(f"current batch: {[s.function_name for s in chunk_samples]}")
             chunk_results = batch_generate(mt, list(chunk_prompts), args.max_new_tokens)
             results.extend(chunk_results)
             progress.advance(gen_task, len(chunk))

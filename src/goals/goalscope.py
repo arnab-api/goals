@@ -15,7 +15,6 @@ import torch
 
 from src.goals.head_loc_attn import forward_with_src_replacement
 
-
 # ---------------------------------------------------------------------------
 # Greedy generation helpers
 # ---------------------------------------------------------------------------
@@ -40,7 +39,7 @@ def greedy_continue(
     Returns:
         Decoded generated string (prompt stripped).
     """
-    _stop = stop_ids or set()
+    _stop = stop_ids or [mt.tokenizer.eos_token_id]
     generated = []
     with torch.no_grad():
         for _ in range(max_new_tokens):
@@ -94,7 +93,9 @@ def patched_generate(
     with torch.no_grad():
         for _ in range(max_new_tokens):
             inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
-            logits = forward_with_src_replacement(mt, inputs, src_head_vals, mask, layers)
+            logits = forward_with_src_replacement(
+                mt, inputs, src_head_vals, mask, layers
+            )
             next_tok = int(logits.argmax())
             generated.append(next_tok)
             if next_tok in _stop:
@@ -176,7 +177,9 @@ def patched_generate_batch(
                 dim=1,
             )
 
-    return [mt.tokenizer.decode(g, skip_special_tokens=True).rstrip() for g in generated]
+    return [
+        mt.tokenizer.decode(g, skip_special_tokens=True).rstrip() for g in generated
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -220,18 +223,60 @@ _CSS = """
 
 _PY_KEYWORDS = set(_kw.kwlist) | {"True", "False", "None"}
 _PY_BUILTINS = {
-    "print", "len", "range", "int", "str", "float", "list",
-    "dict", "set", "tuple", "bool", "type", "isinstance",
+    "print",
+    "len",
+    "range",
+    "int",
+    "str",
+    "float",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "bool",
+    "type",
+    "isinstance",
 }
 _OPERATORS = {
-    "+", "-", "*", "/", "//", "**", "%", "=", "==", "!=",
-    "<", ">", "<=", ">=", "+=", "-=", "&", "|", "^", "~",
-    "<<", ">>", "->", "...",
+    "+",
+    "-",
+    "*",
+    "/",
+    "//",
+    "**",
+    "%",
+    "=",
+    "==",
+    "!=",
+    "<",
+    ">",
+    "<=",
+    ">=",
+    "+=",
+    "-=",
+    "&",
+    "|",
+    "^",
+    "~",
+    "<<",
+    ">>",
+    "->",
+    "...",
 }
 _PUNCTUATION = {"(", ")", "[", "]", "{", "}", ",", ":", ";", "."}
 _STR_PREFIXES = (
-    '"', "'", 'f"', "f'", 'b"', "b'", 'r"', "r'",
-    '"""', "'''", 'f"""', "f'''",
+    '"',
+    "'",
+    'f"',
+    "f'",
+    'b"',
+    "b'",
+    'r"',
+    "r'",
+    '"""',
+    "'''",
+    'f"""',
+    "f'''",
 )
 
 
