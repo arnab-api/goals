@@ -1,15 +1,16 @@
 # GoalScope: Decoding Sub-Goal Intent from Code-LM Latents
 
 **Status:** Brainstorm / early design  
-**Last updated:** 2026-04-09
+**Last updated:** 2026-04-09  
+**Changelog:** 2026-04-09 — statements added as first-class intent blocks (L4)
 
 ---
 
 ## Research Question
 
-When a human programmer opens a code block (`while`, `if`, `for`, list comprehension, etc.), they already know *why* they are opening it — they have a pre-formed intent for what that block should accomplish relative to the overall task. Does a code-LM have an analogous representation?
+When a human programmer writes a line of code — whether opening a block (`while`, `if`, `for`) or writing a simple statement (`visited = set()`) — they already know *why* they are writing it: they have a pre-formed intent for what that unit should accomplish relative to the overall task. Does a code-LM have an analogous representation?
 
-More precisely: **at the moment a code-LM generates the opening token of a code block, is the block's sub-goal already linearly encoded in the residual stream — strongly enough to be decoded or verbalized?**
+More precisely: **at the moment a code-LM generates the first token of any intent block (statement or control-flow construct), is the block's sub-goal already linearly encoded in the residual stream — strongly enough to be decoded or verbalized?**
 
 ---
 
@@ -29,29 +30,34 @@ An intent block is the code-level counterpart of an instrumental goal in the `g`
 ```python
 def bfs(graph, start):
     """Perform BFS on a graph starting from a given node."""
-    visited = set()
-    queue = [start]
+    visited = set()                       # intent: "initialize the visited set"
+    queue = [start]                       # intent: "seed the BFS frontier with the start node"
     while queue:                          # intent: "iterate until frontier empty"
-        vertex = queue.pop(0)
+        vertex = queue.pop(0)             # intent: "process the frontmost element of the queue"
         if vertex not in visited:         # intent: "guard against revisiting"
-            visited.add(vertex)
+            visited.add(vertex)           # intent: "mark vertex as visited"
             queue.extend(
                 [node for node in         # intent: "collect unvisited neighbors"
                  graph[vertex]
                  if node not in visited]  # intent: "filter already-visited nodes"
             )
-    return visited
+    return visited                        # intent: "return the set of all visited nodes"
 ```
 
 Intent blocks are **hierarchical** — a token can belong to multiple nested blocks simultaneously. For any probing/training task the **innermost** block label is used by default, but the full ancestor chain is preserved.
+
+Every statement has its own intent, even simple ones (`visited = set()` → "initialize the visited set"). Statements are first-class intent blocks, not just containers for other blocks.
 
 Hierarchy for the `if node not in visited` token inside the comprehension:
 ```
 function: bfs
   └─ while: iterate until frontier empty
+       └─ stmt: process the frontmost element of the queue  [vertex = queue.pop(0)]
        └─ if: guard against revisiting
-            └─ listcomp: collect unvisited neighbors
-                 └─ listcomp_if: filter already-visited
+            └─ stmt: mark vertex as visited  [visited.add(vertex)]
+            └─ stmt: expand frontier with unvisited neighbors  [queue.extend(...)]
+                 └─ listcomp: collect unvisited neighbors
+                      └─ listcomp_if: filter already-visited
 ```
 
 ---
@@ -78,7 +84,7 @@ Use Python's `ast` module post-hoc on completed generations. Character offsets (
 | L1 — function | `FunctionDef`, `AsyncFunctionDef` |
 | L2 — control flow | + `If`, `While`, `For`, `With`, `Try`, `ExceptHandler` |
 | L3 — comprehensions | + `ListComp`, `SetComp`, `DictComp`, `GeneratorExp` |
-| L4 — statements | + `Assign`, `AugAssign`, `Return`, `Expr`, `Call` |
+| L4 — statements | + `Assign`, `AugAssign`, `Return`, `Expr`, `Call` — each statement has its own intent even without sub-blocks |
 | L5 — sub-expression | + `BoolOp` operands, `Compare` chains, `IfExp` |
 
 Within L2 and above, **condition** and **body** are treated as separate sub-blocks (different goals). Example: `while queue:` (condition: "check if frontier non-empty") vs the while body (goal: "process next node").
