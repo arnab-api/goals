@@ -2,7 +2,7 @@
 
 For each IncompleteCodeSample in data/well-known-tasks/, builds a chat-template
 prompt and runs batched greedy generation.  Results are saved as JSON files
-under results/well-known-task-generations/<model-short-name>/<task-name>.json.
+under results/well-known-tasks/generations/<model-short-name>/<task-name>.json.
 
 Each output file is a JSON dict with keys:
     function_name  : str
@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help=(
             "Root output directory. "
-            "Defaults to results/well-known-task-generations/<model-short-name>/."
+            "Defaults to results/well-known-tasks/generations/<model-short-name>/."
         ),
     )
     parser.add_argument(
@@ -170,7 +170,7 @@ def main() -> None:
     out_dir = (
         Path(args.output_dir)
         if args.output_dir
-        else Path(DEFAULT_RESULTS_DIR) / "well-known-task-generations" / model_short
+        else Path(DEFAULT_RESULTS_DIR) / "well-known-tasks" / "generations" / model_short
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Output directory: %s", out_dir)
