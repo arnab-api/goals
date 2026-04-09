@@ -15,12 +15,13 @@ def ask_claude(
     max_tokens: int = 6000,
     temperature: float = 0.6,
     use_cache: bool = True,
+    model_name: str = "claude-sonnet-4-6",
+    system_prompt: str = "You are a helpful assistant.",
 ) -> str:
     ##################################################
     client = Anthropic(
         api_key=load_env_var("CLAUDE_KEY"),
     )
-    MODEL_NAME = "claude-sonnet-4-6"
     ##################################################
     hash_val = hashlib.md5(
         f"{prompt}__{temperature=}__{max_tokens=}".encode()
@@ -34,10 +35,10 @@ def ask_claude(
                 return json_data["response"]
 
     response = client.messages.create(
-        model=MODEL_NAME,
+        model=model_name,
         max_tokens=max_tokens,
         temperature=temperature,
-        system="You are a helpful assistant.",
+        system=system_prompt,
         messages=[
             {
                 "role": "user",
@@ -57,9 +58,10 @@ def ask_claude(
             {
                 "prompt": prompt,
                 "response": response,
-                "model": MODEL_NAME,
+                "model": model_name,
                 "hash": hash_val,
                 "temperature": temperature,
+                "system_prompt": system_prompt,
             },
             f,
         )
