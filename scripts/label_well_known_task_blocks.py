@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=60,
+        default=512,
         help="Maximum tokens for the oracle to generate per label.",
     )
     parser.add_argument(
@@ -182,7 +182,9 @@ def main() -> None:
     configure(args)
 
     model_short = args.model_key.split("/")[-1]
-    oracle_short = args.oracle.split("/")[-1]   # "claude-sonnet-4-6" or "Qwen2.5-Coder-7B-Instruct"
+    oracle_short = args.oracle.split("/")[
+        -1
+    ]  # "claude-sonnet-4-6" or "Qwen2.5-Coder-7B-Instruct"
 
     # ── Directories ───────────────────────────────────────────────────────────
     gen_dir = (
@@ -206,6 +208,7 @@ def main() -> None:
     mt = None
     if not _is_claude_oracle(args.oracle):
         import torch
+
         from src.models import ModelandTokenizer
 
         logger.info("Loading oracle LM: %s", args.oracle)
@@ -217,7 +220,9 @@ def main() -> None:
         )
         logger.info(
             "Oracle LM loaded: %s  (%d layers, d_model=%d)",
-            oracle_short, mt.n_layer, mt.n_embd,
+            oracle_short,
+            mt.n_layer,
+            mt.n_embd,
         )
 
     # ── Load generation paths ─────────────────────────────────────────────────
@@ -262,8 +267,12 @@ def main() -> None:
             with open(gen_path) as f:
                 gen_data = json.load(f)
 
-            raw_gen = gen_data.get("generation", "")
-            code = extract_code_from_tags(raw_gen) or raw_gen
+            raw_gen = gen_data["generation"]
+            code_prefill = gen_data["prompt"].split("<code>")[-1]
+            code_generation = code_prefill + raw_gen
+            if "</code>" in code_generation:
+                code_generation = code_generation.split("</code>")[0]
+            code = extract_code_from_tags(code_generation) or code_generation
 
             # ── Identify intent blocks ────────────────────────────────────────
             try:
