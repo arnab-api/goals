@@ -8,17 +8,25 @@ results/well-known-tasks/labels/<model>/<oracle>/<task>.json.
 Oracle options
 ──────────────
 claude-*   — calls ``ask_claude`` (disk-cached; no GPU required)
-gpt-*      — calls ``ask_openai`` (disk-cached; not yet implemented)
+<HF key>   — loads a local ModelandTokenizer and uses batched LM generation
 
 Typical usage
 ─────────────
+# Claude oracle (default, no GPU needed)
 conda run -n goals python scripts/label_well_known_task_blocks.py \\
     --model-key Qwen/Qwen2.5-Coder-32B-Instruct
 
+# Cheaper Claude model, subset of tasks
 conda run -n goals python scripts/label_well_known_task_blocks.py \\
     --model-key Qwen/Qwen2.5-Coder-32B-Instruct \\
     --oracle claude-haiku-4-5-20251001 \\
     --tasks bfs dfs dijkstra
+
+# Local LM oracle (loads the model onto GPU)
+conda run -n goals python scripts/label_well_known_task_blocks.py \\
+    --model-key Qwen/Qwen2.5-Coder-32B-Instruct \\
+    --oracle Qwen/Qwen2.5-Coder-7B-Instruct \\
+    --batch-size 16
 """
 
 import argparse
@@ -71,8 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="claude-sonnet-4-6",
         metavar="MODEL",
         help=(
-            "Oracle model name for labeling.  "
-            "Claude models (claude-*) use ask_claude with disk caching."
+            "Oracle for labeling. "
+            "claude-* → ask_claude (disk-cached, no GPU). "
+            "Any other value is treated as a HuggingFace model key and loaded locally."
         ),
     )
     parser.add_argument(
@@ -99,6 +108,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum tokens for the oracle to generate per label.",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        metavar="N",
+        help="Prompts per batch (LM oracle only; ignored for Claude).",
+    )
+    parser.add_argument(
         "--generations-dir",
         default=None,
         metavar="DIR",
@@ -113,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help=(
             "Override output directory for labeled-tree JSONs.  "
-            "Defaults to results/well-known-tasks/labels/<model-short-name>/<oracle>/."
+            "Defaults to results/well-known-tasks/labels/<model-short-name>/<oracle-short-name>/."
         ),
     )
     parser.add_argument(
@@ -128,6 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _is_claude_oracle(oracle: str) -> bool:
+    return oracle.startswith("claude-")
 
 
 def _load_generation_paths(
@@ -162,7 +182,7 @@ def main() -> None:
     configure(args)
 
     model_short = args.model_key.split("/")[-1]
-    oracle_short = args.oracle  # e.g. "claude-sonnet-4-6"
+    oracle_short = args.oracle.split("/")[-1]   # "claude-sonnet-4-6" or "Qwen2.5-Coder-7B-Instruct"
 
     # ── Directories ───────────────────────────────────────────────────────────
     gen_dir = (
@@ -179,8 +199,26 @@ def main() -> None:
 
     logger.info("Generations dir : %s", gen_dir)
     logger.info("Output dir      : %s", out_dir)
-    logger.info("Oracle          : %s", oracle_short)
+    logger.info("Oracle          : %s", args.oracle)
     logger.info("Level           : L%d", args.level)
+
+    # ── Load oracle (LM path only) ────────────────────────────────────────────
+    mt = None
+    if not _is_claude_oracle(args.oracle):
+        import torch
+        from src.models import ModelandTokenizer
+
+        logger.info("Loading oracle LM: %s", args.oracle)
+        mt = ModelandTokenizer(
+            model_key=args.oracle,
+            dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="eager",
+        )
+        logger.info(
+            "Oracle LM loaded: %s  (%d layers, d_model=%d)",
+            oracle_short, mt.n_layer, mt.n_embd,
+        )
 
     # ── Load generation paths ─────────────────────────────────────────────────
     gen_paths = _load_generation_paths(gen_dir, args.tasks)
@@ -236,14 +274,16 @@ def main() -> None:
                 progress.advance(label_task)
                 continue
 
-            # ── Label (oracle = Claude by default) ───────────────────────────
-            # mt=None → ask_claude; responses are disk-cached automatically.
+            # ── Label ─────────────────────────────────────────────────────────
+            # mt=None  → ask_claude (disk-cached)
+            # mt=<lm>  → batched local LM generation
             label_all_blocks(
                 root,
                 code,
-                mt=None,
+                mt=mt,
+                batch_size=args.batch_size,
                 max_new_tokens=args.max_tokens,
-                claude_model=oracle_short,
+                claude_model=args.oracle,
                 show_progress=False,
             )
 
@@ -256,7 +296,7 @@ def main() -> None:
                 metadata={
                     "function_name": gen_data.get("function_name", task_name),
                     "model": model_short,
-                    "oracle": oracle_short,
+                    "oracle": args.oracle,
                     "level": args.level,
                 },
             )
