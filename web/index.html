@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoalScope</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --sidebar-w: 240px;
+    --bg-sidebar:  #0f0f1b;
+    --bg-main:     #0a0a13;
+    --bg-item:     transparent;
+    --bg-item-hover: rgba(124, 106, 247, 0.08);
+    --bg-item-sel:   rgba(124, 106, 247, 0.18);
+    --border:      #1c1c2e;
+    --accent:      #7c6af7;
+    --accent-dim:  #5548c0;
+    --text-hi:     #d4d4f0;
+    --text-mid:    #8888aa;
+    --text-lo:     #44445a;
+    --input-bg:    #16162a;
+    --select-bg:   #16162a;
+    --font-ui: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    --font-mono: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-main);
+    color: var(--text-hi);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* ── Layout ── */
+  #layout {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  /* ── Sidebar ── */
+  #sidebar {
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .sb-header {
+    padding: 18px 16px 14px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .sb-logo {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-hi);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .sb-logo-icon {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+  }
+
+  .sb-logo-sub {
+    font-family: var(--font-ui);
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-lo);
+    margin-top: 2px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .sb-section {
+    padding: 12px 16px 0;
+    flex-shrink: 0;
+  }
+
+  .sb-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-lo);
+    margin-bottom: 6px;
+  }
+
+  /* ── Model select ── */
+  #model-select {
+    width: 100%;
+    background: var(--select-bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-hi);
+    font-size: 12px;
+    font-family: var(--font-ui);
+    padding: 6px 8px;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2344445a'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 24px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  #model-select:focus { border-color: var(--accent-dim); }
+  #model-select option { background: #1a1a2e; }
+
+  /* ── Task section ── */
+  .sb-tasks {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    padding: 12px 16px 0;
+    min-height: 0;
+  }
+
+  /* ── Search input ── */
+  .sb-search-wrap {
+    position: relative;
+    margin-bottom: 8px;
+    flex-shrink: 0;
+  }
+
+  .sb-search-icon {
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-lo);
+    pointer-events: none;
+  }
+
+  #task-filter {
+    width: 100%;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-hi);
+    font-size: 12px;
+    font-family: var(--font-ui);
+    padding: 6px 8px 6px 28px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  #task-filter::placeholder { color: var(--text-lo); }
+  #task-filter:focus { border-color: var(--accent-dim); }
+
+  /* ── Task count badge ── */
+  #task-count {
+    font-size: 10px;
+    color: var(--text-lo);
+    margin-bottom: 5px;
+    flex-shrink: 0;
+    padding-left: 1px;
+  }
+
+  /* ── Task list ── */
+  #task-list {
+    list-style: none;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+    padding-bottom: 12px;
+    /* thin scrollbar */
+    scrollbar-width: thin;
+    scrollbar-color: #2a2a3e transparent;
+  }
+  #task-list::-webkit-scrollbar { width: 4px; }
+  #task-list::-webkit-scrollbar-track { background: transparent; }
+  #task-list::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 2px; }
+
+  #task-list li {
+    padding: 5px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text-mid);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    transition: background 0.1s, color 0.1s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 1px;
+    user-select: none;
+  }
+  #task-list li:hover {
+    background: var(--bg-item-hover);
+    color: var(--text-hi);
+  }
+  #task-list li.selected {
+    background: var(--bg-item-sel);
+    color: var(--accent);
+    font-weight: 500;
+  }
+  #task-list li.hidden { display: none; }
+
+  /* ── Sidebar footer ── */
+  .sb-footer {
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--text-lo);
+    letter-spacing: 0.04em;
+  }
+
+  /* ── Main / iframe ── */
+  #main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-main);
+    position: relative;
+  }
+
+  #viewer {
+    flex: 1;
+    border: none;
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: var(--bg-main);
+  }
+
+  /* ── Empty state ── */
+  #empty-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--text-lo);
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 0.2s;
+  }
+  #empty-state.hidden { opacity: 0; }
+  #empty-state svg { opacity: 0.3; }
+  #empty-state p { font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="layout">
+
+  <!-- ── Sidebar ── -->
+  <aside id="sidebar">
+    <div class="sb-header">
+      <div class="sb-logo">
+        <!-- scope/eye icon -->
+        <svg class="sb-logo-icon" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="9" cy="9" r="7.5" stroke="#7c6af7" stroke-width="1.2"/>
+          <circle cx="9" cy="9" r="3.5" stroke="#7c6af7" stroke-width="1.2"/>
+          <circle cx="9" cy="9" r="1.2" fill="#7c6af7"/>
+          <line x1="1.5" y1="9" x2="4" y2="9" stroke="#7c6af7" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="14" y1="9" x2="16.5" y2="9" stroke="#7c6af7" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        GoalScope
+      </div>
+      <div class="sb-logo-sub">head-output steering</div>
+    </div>
+
+    <div class="sb-section">
+      <div class="sb-label">Model</div>
+      <select id="model-select"></select>
+    </div>
+
+    <div class="sb-tasks">
+      <div class="sb-label">Task</div>
+      <div class="sb-search-wrap">
+        <svg class="sb-search-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <circle cx="5" cy="5" r="3.5" stroke="currentColor" stroke-width="1.3"/>
+          <line x1="7.8" y1="7.8" x2="10.5" y2="10.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        <input id="task-filter" type="search" placeholder="filter tasks…" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="task-count"></div>
+      <ul id="task-list"></ul>
+    </div>
+
+    <div class="sb-footer">
+      goalscope · patchscope viz
+    </div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main id="main">
+    <div id="empty-state">
+      <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+        <circle cx="24" cy="24" r="20" stroke="#7c6af7" stroke-width="1.5"/>
+        <circle cx="24" cy="24" r="9" stroke="#7c6af7" stroke-width="1.5"/>
+        <circle cx="24" cy="24" r="3" fill="#7c6af7"/>
+      </svg>
+      <p>Select a task to view its GoalScope visualization</p>
+    </div>
+    <iframe id="viewer" src="about:blank"></iframe>
+  </main>
+
+</div>
+
+<script>
+(function () {
+  const modelSel  = document.getElementById('model-select');
+  const taskList  = document.getElementById('task-list');
+  const taskFilter = document.getElementById('task-filter');
+  const taskCount = document.getElementById('task-count');
+  const viewer    = document.getElementById('viewer');
+  const empty     = document.getElementById('empty-state');
+
+  let manifest = {};
+  let currentModel = null;
+  let currentTask  = null;
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  function taskDisplay(t) {
+    return t.replace(/_/g, ' ');
+  }
+
+  function iframeUrl(model, task) {
+    return `../results/well-known-tasks/goalscope/${encodeURIComponent(model)}/${encodeURIComponent(task)}.html`;
+  }
+
+  function setHash(model, task) {
+    const h = encodeURIComponent(model) + '/' + encodeURIComponent(task);
+    history.replaceState(null, '', '#' + h);
+  }
+
+  function parseHash() {
+    const raw = window.location.hash.slice(1);
+    if (!raw) return null;
+    const slash = raw.indexOf('/');
+    if (slash === -1) return null;
+    return {
+      model: decodeURIComponent(raw.slice(0, slash)),
+      task:  decodeURIComponent(raw.slice(slash + 1)),
+    };
+  }
+
+  // ── Load task ─────────────────────────────────────────────────────────────
+
+  function loadTask(model, task) {
+    currentModel = model;
+    currentTask  = task;
+    viewer.src = iframeUrl(model, task);
+    empty.classList.add('hidden');
+    setHash(model, task);
+    // highlight list item
+    document.querySelectorAll('#task-list li').forEach(li => {
+      li.classList.toggle('selected', li.dataset.task === task);
+    });
+    // scroll selected into view
+    const sel = taskList.querySelector('.selected');
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
+
+  // ── Populate tasks ────────────────────────────────────────────────────────
+
+  function populateTasks(model, selectTask) {
+    const tasks = manifest[model] || [];
+    taskList.innerHTML = '';
+    tasks.forEach(t => {
+      const li = document.createElement('li');
+      li.dataset.task = t;
+      li.textContent = taskDisplay(t);
+      li.title = t;
+      li.addEventListener('click', () => loadTask(model, t));
+      taskList.appendChild(li);
+    });
+    updateFilter();
+    const target = selectTask && tasks.includes(selectTask) ? selectTask : tasks[0];
+    if (target) loadTask(model, target);
+  }
+
+  // ── Filter ────────────────────────────────────────────────────────────────
+
+  function updateFilter() {
+    const q = taskFilter.value.trim().toLowerCase();
+    let visible = 0;
+    taskList.querySelectorAll('li').forEach(li => {
+      const match = !q || li.dataset.task.toLowerCase().includes(q);
+      li.classList.toggle('hidden', !match);
+      if (match) visible++;
+    });
+    const total = taskList.querySelectorAll('li').length;
+    taskCount.textContent = q ? `${visible} / ${total} tasks` : `${total} tasks`;
+  }
+
+  // ── Populate model select ─────────────────────────────────────────────────
+
+  function populateModels(initialModel, initialTask) {
+    modelSel.innerHTML = '';
+    Object.keys(manifest).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      modelSel.appendChild(opt);
+    });
+    const targetModel = initialModel && manifest[initialModel] ? initialModel : Object.keys(manifest)[0];
+    modelSel.value = targetModel;
+    currentModel = targetModel;
+    populateTasks(targetModel, initialTask);
+  }
+
+  // ── Events ────────────────────────────────────────────────────────────────
+
+  modelSel.addEventListener('change', () => {
+    populateTasks(modelSel.value, null);
+  });
+
+  taskFilter.addEventListener('input', updateFilter);
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+
+  fetch('manifest.json')
+    .then(r => r.json())
+    .then(data => {
+      manifest = data;
+      const saved = parseHash();
+      populateModels(saved?.model, saved?.task);
+    })
+    .catch(err => {
+      console.error('Failed to load manifest.json', err);
+      empty.querySelector('p').textContent = 'Could not load manifest.json';
+    });
+
+})();
+</script>
+</body>
+</html>

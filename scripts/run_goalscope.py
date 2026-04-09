@@ -45,8 +45,8 @@ sys.path.append(".")
 from src.functional import PatchSpec, generate_with_patch
 from src.goals.goalscope import render_patchscope_html
 from src.goals.head_loc_attn import HeadMask, collect_head_steering_vecs
-from src.tokens import TokenizerOutput, find_token_range, prepare_input
 from src.models import ModelandTokenizer
+from src.tokens import TokenizerOutput, find_token_range, prepare_input
 from src.utils.env_utils import DEFAULT_RESULTS_DIR
 from src.utils.logging_utils import add_logging_args, configure
 
@@ -113,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
+        default=0.9,
         help="Mask value threshold for selecting active heads.",
     )
     parser.add_argument(
@@ -191,8 +191,7 @@ def _load_mask(model_short: str, n_heads: int) -> tuple[HeadMask, list[int]]:
     mask_path = LOCALIZATION_DIR / model_short / "head_mask.pt"
     if not mask_path.exists():
         raise FileNotFoundError(
-            f"Head mask not found: {mask_path}\n"
-            "Run scripts/train_head_mask.py first."
+            f"Head mask not found: {mask_path}\nRun scripts/train_head_mask.py first."
         )
     ckpt = torch.load(mask_path, map_location="cpu")
     layers: list[int] = ckpt["layers"]
@@ -206,8 +205,6 @@ def _load_mask(model_short: str, n_heads: int) -> tuple[HeadMask, list[int]]:
 def _build_source_prompt(gen_data: dict) -> str:
     """Reconstruct the full source text (prompt + generation), trimmed at </code>."""
     full = gen_data["prompt"] + gen_data["generation"]
-    if "</code>" in full:
-        full = full[: full.index("</code>") + len("</code>")]
     return full
 
 
@@ -287,7 +284,9 @@ def main() -> None:
     )
     logger.info(
         "Model loaded: %s  (%d layers, d_model=%d, n_heads=%d)",
-        model_short, mt.n_layer, mt.n_embd,
+        model_short,
+        mt.n_layer,
+        mt.n_embd,
         mt._model.config.num_attention_heads,
     )
 
@@ -297,7 +296,9 @@ def main() -> None:
     selected_heads = mask.selected_heads(layers, threshold=args.threshold)
     logger.info(
         "Mask loaded: %d layers tested, %d heads selected (threshold=%.2f)",
-        len(layers), len(selected_heads), args.threshold,
+        len(layers),
+        len(selected_heads),
+        args.threshold,
     )
 
     # ── Destination prompt ────────────────────────────────────────────────────
@@ -308,8 +309,11 @@ def main() -> None:
     steer_layers = list(range(args.steer_layer_range[0], args.steer_layer_range[1]))
     logger.info(
         "Steer layers: %d–%d  |  alpha=%.2f  |  batch=%d  |  max_new_tokens=%d",
-        steer_layers[0], steer_layers[-1],
-        args.alpha, args.batch_size, args.max_new_tokens,
+        steer_layers[0],
+        steer_layers[-1],
+        args.alpha,
+        args.batch_size,
+        args.max_new_tokens,
     )
 
     # ── Generation paths ──────────────────────────────────────────────────────
@@ -375,7 +379,9 @@ def main() -> None:
                 )
             except Exception as exc:
                 logger.warning(
-                    "Could not find <code> in %s — using full source: %s", task_name, exc
+                    "Could not find <code> in %s — using full source: %s",
+                    task_name,
+                    exc,
                 )
                 code_start, src_len = 0, len(src_ids)
 
@@ -384,7 +390,11 @@ def main() -> None:
 
             logger.info(
                 "%s: %d source tokens, code segment [%d:%d] (%d positions)",
-                task_name, src_len, code_start, src_len, len(seg_positions),
+                task_name,
+                src_len,
+                code_start,
+                src_len,
+                len(seg_positions),
             )
 
             # ── Collect steering vectors ──────────────────────────────────────
@@ -405,7 +415,9 @@ def main() -> None:
                 chunk_end = min(chunk_start + args.batch_size, n_seg)
                 B = chunk_end - chunk_start
 
-                sv_batch = args.alpha * steering_vecs[chunk_start:chunk_end]  # (B, n_embd)
+                sv_batch = (
+                    args.alpha * steering_vecs[chunk_start:chunk_end]
+                )  # (B, n_embd)
 
                 tiled_inputs = TokenizerOutput(
                     data=dict(
@@ -454,7 +466,9 @@ def main() -> None:
             out_path.write_text(html_str, encoding="utf-8")
             logger.info(
                 "Saved %s  (%d positions, %d batches)",
-                out_path.name, n_seg, math.ceil(n_seg / args.batch_size),
+                out_path.name,
+                n_seg,
+                math.ceil(n_seg / args.batch_size),
             )
             saved += 1
             task_progress.advance(outer_task)
@@ -464,9 +478,7 @@ def main() -> None:
         f"[green]Done.[/green] Saved {saved} HTML files → [bold]{out_dir}[/bold]"
     )
     if errors:
-        console.print(
-            f"[red]Skipped {len(errors)} tasks:[/red] " + ", ".join(errors)
-        )
+        console.print(f"[red]Skipped {len(errors)} tasks:[/red] " + ", ".join(errors))
 
 
 if __name__ == "__main__":
