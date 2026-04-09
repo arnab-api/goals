@@ -2,7 +2,9 @@
 
 **Status:** Brainstorm / early design  
 **Last updated:** 2026-04-09  
-**Changelog:** 2026-04-09 — statements added as first-class intent blocks (L4)
+**Changelog:**
+- 2026-04-09 — statements added as first-class intent blocks (L4)
+- 2026-04-09 — scope identification design decisions finalised (see section below)
 
 ---
 
@@ -70,6 +72,38 @@ Standard control-flow boundaries miss sub-expression intent. Two examples:
 - `return len(s) > 0 and all(c.isdigit() for c in s)` — length check goal vs digit-membership goal on one line.
 
 At granularity level L5 (see below), `BoolOp` operands and `Compare` chains are treated as separate intent blocks.
+
+---
+
+## Scope Identification — Design Decisions
+
+These decisions were confirmed before implementation.
+
+**D1 — Input is clean Python code only.**
+The scope identification module accepts a well-formed Python string. Extraction of code from model output (e.g. stripping everything outside `<code>…</code>` tags) is a separate, decoupled pre-processing step.
+
+**D2 — Output is a typed dataclass tree.**
+The primary output is a root `IntentBlock` dataclass with explicit `parent` / `children` pointers. A helper function `get_blocks_at_char(root, pos)` returns the flat ancestor chain (root → innermost) for any character position, making it easy to iterate during probing.
+
+**D3 — Option A: no condition sub-scopes.**
+For control-flow constructs (`while`, `if`, `for`, etc.), the condition/test expression tokens belong to the enclosing scope directly — they do **not** get a dedicated `while_condition` or `if_condition` sub-scope. Only the *body* of a construct can contain nested intent blocks.
+
+Concretely, in `while queue:` the token `queue` is annotated as belonging to the `while` scope. The first sub-scope appears at the first statement inside the body.
+
+**D4 — `else`/`elif` are siblings, not children.**
+An `else` or `elif` block is its own `IntentBlock` at the same depth as the parent `if`, not nested inside it. In the AST, `elif` is an `If` node in `orelse` and `else` is a statement list in `orelse` — both are lifted to sibling depth.
+
+**D5 — Statements are first-class intent blocks.**
+Every statement (`Assign`, `AugAssign`, `Return`, `Expr`, etc.) is an `IntentBlock` in its own right, even when it contains no nested sub-blocks. `vertex = queue.pop(0)` is as much an intent block as `while queue:`.
+
+**D6 — Hierarchy is always preserved; innermost is the default.**
+A token belongs to *all* ancestor scopes simultaneously. The full chain is stored. For probing and training, the innermost block label is used by default, but the complete hierarchy is available.
+
+**D7 — Character spans only; no tokenizer dependency.**
+`IntentBlock` stores `char_start` / `char_end` offsets into the source string. Mapping to model token indices is a post-hoc operation left to the caller (via `find_token_range` or offset mapping).
+
+**D8 — All granularity levels implemented together.**
+No phased roll-out; L1–L5 are all handled in one implementation, controlled by a `level` parameter.
 
 ---
 
