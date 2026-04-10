@@ -438,7 +438,10 @@
     .then(data => {
       manifest = data;
       const saved = parseHash();
-      populateModels(saved?.model, saved?.task);
+      populateModels(
+        saved?.model ?? 'Qwen2.5-Coder-32B-Instruct',
+        saved?.task  ?? 'atoi',
+      );
     })
     .catch(err => {
       console.error('Failed to load manifest.json', err);
