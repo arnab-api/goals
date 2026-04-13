@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument(
+        "--ckpt-every",
+        type=int,
+        default=1,
+        help="Save a checkpoint every N epochs (default: 1). Set to 0 to disable mid-run checkpoints.",
+    )
     add_logging_args(p)
     return p
 
@@ -201,11 +207,18 @@ def main() -> None:
     )
 
     # ── Training loop ─────────────────────────────────────────────────────────
+    n_train = len(train_caches)
+    logger.info("Starting training: %d epochs, %d instances/epoch, batch_size=%d",
+                args.epochs, n_train, args.batch_size)
+
     for epoch in range(args.epochs):
         random.shuffle(train_caches)
         epoch_ce = epoch_ortho = epoch_total = 0.0
+        batch_ce = batch_ortho = batch_total = 0.0
         n_steps = 0
+        n_seen = 0
 
+        logger.info("── Epoch %d / %d ─────────────────────────────", epoch, args.epochs - 1)
         optimizer.zero_grad()
         for i, sc in enumerate(train_caches):
             label_ids = torch.tensor(
@@ -214,6 +227,7 @@ def main() -> None:
                 dtype=torch.long,
             )
             if label_ids.numel() == 0:
+                logger.debug("  [%d/%d] skipped (empty label): task=%s", i + 1, n_train, sc.task)
                 continue
 
             logits = patched_lm_forward(
@@ -227,9 +241,18 @@ def main() -> None:
             total, ce, ortho = compute_loss(logits, label_ids, probe)
             # Gradient accumulation
             (total / args.batch_size).backward()
-            epoch_ce += ce.item()
+            epoch_ce    += ce.item()
             epoch_ortho += ortho.item()
             epoch_total += total.item()
+            batch_ce    += ce.item()
+            batch_ortho += ortho.item()
+            batch_total += total.item()
+            n_seen += 1
+
+            logger.debug(
+                "  [%d/%d] task=%-20s  ce=%.4f  ortho=%.4f  total=%.4f",
+                i + 1, n_train, sc.task, ce.item(), ortho.item(), total.item(),
+            )
 
             if (i + 1) % args.batch_size == 0 or (i + 1) == len(train_caches):
                 torch.nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
@@ -237,15 +260,24 @@ def main() -> None:
                 probe.reorthogonalize()
                 optimizer.zero_grad()
                 n_steps += 1
+                b = max(n_seen - (n_steps - 1) * args.batch_size, 1)
+                logger.info(
+                    "  step %4d  [%d/%d]  batch_ce=%.4f  batch_ortho=%.4f  batch_total=%.4f",
+                    n_steps, i + 1, n_train,
+                    batch_ce / b, batch_ortho / b, batch_total / b,
+                )
+                batch_ce = batch_ortho = batch_total = 0.0
 
-        n = max(len(train_caches), 1)
+        n = max(n_seen, 1)
         history.train_ce.append(epoch_ce / n)
         history.train_ortho.append(epoch_ortho / n)
         history.train_total.append(epoch_total / n)
 
         # ── Validation every 5 epochs ─────────────────────────────────────────
         if (epoch + 1) % 5 == 0 or epoch == 0:
+            logger.info("  Running validation on %d test instances…", len(test_caches))
             val_ce = 0.0
+            n_val = 0
             with torch.no_grad():
                 for sc in test_caches:
                     label_ids = torch.tensor(
@@ -263,34 +295,54 @@ def main() -> None:
                         label_ids,
                         src_residuals=sc.src_residuals,
                     )
-                    val_ce += torch.nn.functional.cross_entropy(
+                    loss = torch.nn.functional.cross_entropy(
                         logits, label_ids.to(logits.device)
                     ).item()
-            val_ce /= max(len(test_caches), 1)
+                    logger.debug("  val  task=%-20s  ce=%.4f", sc.task, loss)
+                    val_ce += loss
+                    n_val += 1
+            val_ce /= max(n_val, 1)
             history.val_ce.append(val_ce)
             history.val_epochs.append(epoch)
             logger.info(
-                "Epoch %3d  train_total=%.4f  train_ce=%.4f  val_ce=%.4f",
-                epoch,
-                epoch_total / n,
-                epoch_ce / n,
-                val_ce,
+                "Epoch %3d/%d  train_total=%.4f  train_ce=%.4f  train_ortho=%.4f  val_ce=%.4f"
+                "  (%d steps)",
+                epoch, args.epochs - 1,
+                epoch_total / n, epoch_ce / n, epoch_ortho / n,
+                val_ce, n_steps,
             )
         else:
             logger.info(
-                "Epoch %3d  train_total=%.4f  train_ce=%.4f",
-                epoch,
-                epoch_total / n,
-                epoch_ce / n,
+                "Epoch %3d/%d  train_total=%.4f  train_ce=%.4f  train_ortho=%.4f"
+                "  (%d steps)",
+                epoch, args.epochs - 1,
+                epoch_total / n, epoch_ce / n, epoch_ortho / n,
+                n_steps,
             )
 
-    # ── Save checkpoint ───────────────────────────────────────────────────────
+        # ── Per-epoch checkpoint ──────────────────────────────────────────────
+        if args.ckpt_every > 0 and (epoch + 1) % args.ckpt_every == 0:
+            ckpt_path = probe_dir / f"probe_epoch{epoch:04d}.pt"
+            torch.save(
+                {
+                    "config": cfg,
+                    "W": probe.W.detach().cpu(),
+                    "soft_tokens": probe.soft_tokens.detach().cpu(),
+                    "layers": layers,
+                    "epoch": epoch,
+                },
+                ckpt_path,
+            )
+            logger.info("  Checkpoint saved → %s", ckpt_path)
+
+    # ── Save final checkpoint ─────────────────────────────────────────────────
     torch.save(
         {
             "config": cfg,
             "W": probe.W.detach().cpu(),
             "soft_tokens": probe.soft_tokens.detach().cpu(),
             "layers": layers,
+            "epoch": args.epochs - 1,
         },
         probe_path,
     )
