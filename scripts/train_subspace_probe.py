@@ -186,7 +186,9 @@ def main() -> None:
         optimizer.zero_grad()
         for i, sc in enumerate(train_caches):
             label_ids = torch.tensor(
-                mt.tokenizer.encode(sc.label, add_special_tokens=False), dtype=torch.long
+                mt.tokenizer.encode(sc.label, add_special_tokens=False)
+                + [mt.tokenizer.eos_token_id],
+                dtype=torch.long,
             )
             if label_ids.numel() == 0:
                 continue
@@ -221,7 +223,9 @@ def main() -> None:
             with torch.no_grad():
                 for sc in test_caches:
                     label_ids = torch.tensor(
-                        mt.tokenizer.encode(sc.label, add_special_tokens=False), dtype=torch.long
+                        mt.tokenizer.encode(sc.label, add_special_tokens=False)
+                        + [mt.tokenizer.eos_token_id],
+                        dtype=torch.long,
                     )
                     if label_ids.numel() == 0:
                         continue

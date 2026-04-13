@@ -350,9 +350,12 @@ def patched_lm_forward(
                 hidden = output[0] if isinstance(output, tuple) else output
                 rest = output[1:] if isinstance(output, tuple) else ()
 
+                dev, dtype = hidden.device, hidden.dtype
                 region = hidden[:, patch_start:, :]  # (1, n_patch, d)
-                src_exp = src_h_.view(1, 1, -1).expand_as(region)  # broadcast
-                patched_region = region + (src_exp - region) @ probe.W[li_].T @ probe.W[li_]
+                src_h_dev = src_h_.to(device=dev, dtype=dtype)
+                W = probe.W[li_].to(device=dev, dtype=dtype)
+                src_exp = src_h_dev.view(1, 1, -1).expand_as(region)  # broadcast
+                patched_region = region + (src_exp - region) @ W.T @ W
 
                 new_hidden = torch.cat(
                     [hidden[:, :patch_start, :], patched_region], dim=1

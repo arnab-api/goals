@@ -162,5 +162,4 @@ python scripts/train_subspace_probe.py \
 
 - **Does $r = 256$ provide enough capacity?** If val CE plateaus high, try $r = 512$ or $r = 1024$.
 - **Is the soft prompt sufficient?** If the model consistently ignores the patched subspace, consider adding a small learned linear head on top of the destination's last hidden state to extract the verbalization, bypassing the need for natural-language generation.
-- **Cross-model transfer?** A direction trained on Qwen-32B should ideally transfer to Llama-70B (same sub-goal, different model). This would be strong evidence for universality.
 - **Causal test**: after training, does steering along $W_l^T s$ in the source run (instead of patching) shift the generated code toward the intended sub-goal? This would connect the probe back to Track 1's causality question.
