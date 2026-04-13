@@ -140,7 +140,9 @@ def main() -> None:
         )
         sys.exit(1)
 
-    all_caches: list[SubspaceCache] = torch.load(cache_path, map_location="cpu", weights_only=False)
+    all_caches: list[SubspaceCache] = torch.load(
+        cache_path, map_location="cpu", weights_only=False
+    )
     logger.info("Loaded %d cache entries from %s", len(all_caches), cache_path)
 
     # ── Train / test split by task ────────────────────────────────────────────
@@ -208,8 +210,12 @@ def main() -> None:
 
     # ── Training loop ─────────────────────────────────────────────────────────
     n_train = len(train_caches)
-    logger.info("Starting training: %d epochs, %d instances/epoch, batch_size=%d",
-                args.epochs, n_train, args.batch_size)
+    logger.info(
+        "Starting training: %d epochs, %d instances/epoch, batch_size=%d",
+        args.epochs,
+        n_train,
+        args.batch_size,
+    )
 
     for epoch in range(args.epochs):
         random.shuffle(train_caches)
@@ -218,7 +224,9 @@ def main() -> None:
         n_steps = 0
         n_seen = 0
 
-        logger.info("── Epoch %d / %d ─────────────────────────────", epoch, args.epochs - 1)
+        logger.info(
+            "── Epoch %d / %d ─────────────────────────────", epoch, args.epochs - 1
+        )
         optimizer.zero_grad()
         for i, sc in enumerate(train_caches):
             label_ids = torch.tensor(
@@ -227,7 +235,9 @@ def main() -> None:
                 dtype=torch.long,
             )
             if label_ids.numel() == 0:
-                logger.debug("  [%d/%d] skipped (empty label): task=%s", i + 1, n_train, sc.task)
+                logger.debug(
+                    "  [%d/%d] skipped (empty label): task=%s", i + 1, n_train, sc.task
+                )
                 continue
 
             logits = patched_lm_forward(
@@ -241,18 +251,18 @@ def main() -> None:
             total, ce, ortho = compute_loss(logits, label_ids, probe)
             # Gradient accumulation
             (total / args.batch_size).backward()
-            epoch_ce    += ce.item()
+            epoch_ce += ce.item()
             epoch_ortho += ortho.item()
             epoch_total += total.item()
-            batch_ce    += ce.item()
+            batch_ce += ce.item()
             batch_ortho += ortho.item()
             batch_total += total.item()
             n_seen += 1
 
-            logger.debug(
-                "  [%d/%d] task=%-20s  ce=%.4f  ortho=%.4f  total=%.4f",
-                i + 1, n_train, sc.task, ce.item(), ortho.item(), total.item(),
-            )
+            # logger.debug(
+            #     "  [%d/%d] task=%-20s  ce=%.4f  ortho=%.4f  total=%.4f",
+            #     i + 1, n_train, sc.task, ce.item(), ortho.item(), total.item(),
+            # )
 
             if (i + 1) % args.batch_size == 0 or (i + 1) == len(train_caches):
                 torch.nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
@@ -263,8 +273,12 @@ def main() -> None:
                 b = max(n_seen - (n_steps - 1) * args.batch_size, 1)
                 logger.info(
                     "  step %4d  [%d/%d]  batch_ce=%.4f  batch_ortho=%.4f  batch_total=%.4f",
-                    n_steps, i + 1, n_train,
-                    batch_ce / b, batch_ortho / b, batch_total / b,
+                    n_steps,
+                    i + 1,
+                    n_train,
+                    batch_ce / b,
+                    batch_ortho / b,
+                    batch_total / b,
                 )
                 batch_ce = batch_ortho = batch_total = 0.0
 
@@ -307,16 +321,23 @@ def main() -> None:
             logger.info(
                 "Epoch %3d/%d  train_total=%.4f  train_ce=%.4f  train_ortho=%.4f  val_ce=%.4f"
                 "  (%d steps)",
-                epoch, args.epochs - 1,
-                epoch_total / n, epoch_ce / n, epoch_ortho / n,
-                val_ce, n_steps,
+                epoch,
+                args.epochs - 1,
+                epoch_total / n,
+                epoch_ce / n,
+                epoch_ortho / n,
+                val_ce,
+                n_steps,
             )
         else:
             logger.info(
                 "Epoch %3d/%d  train_total=%.4f  train_ce=%.4f  train_ortho=%.4f"
                 "  (%d steps)",
-                epoch, args.epochs - 1,
-                epoch_total / n, epoch_ce / n, epoch_ortho / n,
+                epoch,
+                args.epochs - 1,
+                epoch_total / n,
+                epoch_ce / n,
+                epoch_ortho / n,
                 n_steps,
             )
 

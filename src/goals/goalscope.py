@@ -201,15 +201,14 @@ _CSS = """
     white-space: pre-wrap;
 }
 .ps-tok {
-    position: relative; cursor: default;
+    cursor: default;
     border-radius: 3px; padding: 1px 0;
     transition: background 0.12s;
 }
 .ps-tok:hover { background: rgba(255,210,80,0.22); outline: 1px solid rgba(255,210,80,0.4); }
-.ps-tok .ps-tip {
+#ps-tooltip {
     display: none;
-    position: absolute;
-    bottom: 130%; left: 50%; transform: translateX(-50%);
+    position: fixed;
     background: #1a1a2e; border: 1px solid #555;
     color: #e8e8e8; font-size: 12px;
     padding: 6px 10px; border-radius: 5px;
@@ -217,8 +216,35 @@ _CSS = """
     z-index: 9999; box-shadow: 0 4px 14px rgba(0,0,0,0.6);
     pointer-events: none;
 }
-.ps-tok:hover .ps-tip { display: block; }
 .ps-legend { font-size: 11px; color: #777; margin-bottom: 8px; }
+"""
+
+_JS = """
+<div id="ps-tooltip"></div>
+<script>
+(function() {
+    var tip = document.getElementById('ps-tooltip');
+    document.querySelectorAll('.ps-tok').forEach(function(tok) {
+        tok.addEventListener('mouseenter', function(e) {
+            tip.textContent = tok.dataset.tip;
+            tip.style.display = 'block';
+            _moveTip(e);
+        });
+        tok.addEventListener('mousemove', _moveTip);
+        tok.addEventListener('mouseleave', function() {
+            tip.style.display = 'none';
+        });
+    });
+    function _moveTip(e) {
+        var x = e.clientX + 14, y = e.clientY - 36;
+        var tw = tip.offsetWidth, th = tip.offsetHeight;
+        if (x + tw > window.innerWidth  - 8) x = e.clientX - tw - 14;
+        if (y - th < 8)                      y = e.clientY + 20;
+        tip.style.left = x + 'px';
+        tip.style.top  = y + 'px';
+    }
+})();
+</script>
 """
 
 _PY_KEYWORDS = set(_kw.kwlist) | {"True", "False", "None"}
@@ -317,18 +343,13 @@ def render_patchscope_html(
     spans = []
     for r in results:
         raw = r["token"]
-        # Newline tokens render as invisible line breaks — replace \n with a
-        # visible glyph (↵) so the span is hoverable, then emit the real \n
-        # after it so indentation is preserved.
+        # Newline tokens render as invisible — replace \n with a visible glyph
+        # (↵) so the span is hoverable, then emit the real \n for indentation.
         tok_html = _html.escape(raw).replace("\n", "↵\n")
-        tip_html = _html.escape(r["patched_gen"].strip() or "(empty)")
+        tip_text = f'pos {r["pos"]} {r["token"]!r}: {r["patched_gen"].strip() or "(empty)"}'
+        tip_attr = _html.escape(tip_text, quote=True)
         cls = ("ps-tok " + _prism_class(r["token"])).strip()
-        spans.append(
-            f'<span class="{cls}">'
-            + tok_html
-            + f'<span class="ps-tip">pos {r["pos"]}[{r["token"]!r}]: {tip_html}</span>'
-            + "</span>"
-        )
+        spans.append(f'<span class="{cls}" data-tip="{tip_attr}">{tok_html}</span>')
     return (
         "<!DOCTYPE html>\n<html>\n<head>\n"
         '<meta charset="utf-8">\n'
@@ -340,7 +361,7 @@ def render_patchscope_html(
         f'<div class="ps-legend">{_html.escape(title)}'
         " &mdash; hover a token to see the patched verbalization</div>"
         + "".join(spans)
-        + "\n</div>\n</body>\n</html>"
+        + f"\n</div>\n{_JS}\n</body>\n</html>"
     )
 
 
