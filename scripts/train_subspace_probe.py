@@ -44,17 +44,27 @@ logger = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model-key", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    p.add_argument("--layer-range", type=int, nargs=2, default=[35, 46], metavar=("START", "STOP"))
+    p.add_argument(
+        "--layer-range", type=int, nargs=2, default=[35, 46], metavar=("START", "STOP")
+    )
     p.add_argument("--r", type=int, default=256, help="Subspace rank.")
-    p.add_argument("--n-soft-tokens", type=int, default=4)
+    p.add_argument("--n-soft-tokens", type=int, default=3)
     p.add_argument("--lambda-ortho", type=float, default=0.1)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=1e-2)
-    p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch-size", type=int, default=4,
-                   help="Accumulate this many instances before an optimizer step.")
-    p.add_argument("--n-test-tasks", type=int, default=20,
-                   help="Number of tasks to hold out for testing.")
+    p.add_argument("--epochs", type=int, default=10)
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Accumulate this many instances before an optimizer step.",
+    )
+    p.add_argument(
+        "--n-test-tasks",
+        type=int,
+        default=20,
+        help="Number of tasks to hold out for testing.",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--overwrite", action="store_true")
     add_logging_args(p)
@@ -68,13 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 @dataclass
 class ProbeTrainingHistory:
-    train_ce:    list[float] = field(default_factory=list)
+    train_ce: list[float] = field(default_factory=list)
     train_ortho: list[float] = field(default_factory=list)
     train_total: list[float] = field(default_factory=list)
-    val_ce:      list[float] = field(default_factory=list)
-    val_epochs:  list[int]   = field(default_factory=list)
-    train_tasks: list[str]   = field(default_factory=list)
-    test_tasks:  list[str]   = field(default_factory=list)
+    val_ce: list[float] = field(default_factory=list)
+    val_epochs: list[int] = field(default_factory=list)
+    train_tasks: list[str] = field(default_factory=list)
+    test_tasks: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -102,39 +112,45 @@ def main() -> None:
     from src.utils.env_utils import DEFAULT_RESULTS_DIR
 
     model_short = args.model_key.split("/")[-1]
-    layers      = list(range(args.layer_range[0], args.layer_range[1]))
+    layers = list(range(args.layer_range[0], args.layer_range[1]))
 
     probe_dir = Path(DEFAULT_RESULTS_DIR) / "subspace_probe" / model_short
     probe_dir.mkdir(parents=True, exist_ok=True)
-    probe_path   = probe_dir / "probe.pt"
+    probe_path = probe_dir / "probe.pt"
     history_path = probe_dir / "history.pt"
-    cache_path   = probe_dir / "cache.pt"
+    cache_path = probe_dir / "cache.pt"
 
     if probe_path.exists() and not args.overwrite:
-        logger.info("Probe checkpoint exists at %s — pass --overwrite to retrain.", probe_path)
+        logger.info(
+            "Probe checkpoint exists at %s — pass --overwrite to retrain.", probe_path
+        )
         return
 
     # ── Load cache ────────────────────────────────────────────────────────────
     if not cache_path.exists():
         logger.error(
-            "Cache not found at %s — run scripts/cache_subspace_data.py first.", cache_path
+            "Cache not found at %s — run scripts/cache_subspace_data.py first.",
+            cache_path,
         )
         sys.exit(1)
 
-    all_caches: list[SubspaceCache] = torch.load(cache_path, map_location="cpu")
+    all_caches: list[SubspaceCache] = torch.load(cache_path, map_location="cpu", weights_only=False)
     logger.info("Loaded %d cache entries from %s", len(all_caches), cache_path)
 
     # ── Train / test split by task ────────────────────────────────────────────
     all_tasks = sorted({sc.task for sc in all_caches})
     random.shuffle(all_tasks)
-    test_tasks  = set(all_tasks[: args.n_test_tasks])
+    test_tasks = set(all_tasks[: args.n_test_tasks])
     train_tasks = set(all_tasks[args.n_test_tasks :])
 
     train_caches = [sc for sc in all_caches if sc.task in train_tasks]
-    test_caches  = [sc for sc in all_caches if sc.task in test_tasks]
+    test_caches = [sc for sc in all_caches if sc.task in test_tasks]
     logger.info(
         "Train: %d tasks (%d entries)  |  Test: %d tasks (%d entries)",
-        len(train_tasks), len(train_caches), len(test_tasks), len(test_caches),
+        len(train_tasks),
+        len(train_caches),
+        len(test_tasks),
+        len(test_caches),
     )
 
     # ── Load model ────────────────────────────────────────────────────────────
@@ -144,7 +160,9 @@ def main() -> None:
         device_map="auto",
         attn_implementation="eager",
     )
-    logger.info("Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd)
+    logger.info(
+        "Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd
+    )
 
     device = next(mt._model.parameters()).device
 
@@ -152,7 +170,9 @@ def main() -> None:
     before_soft_ids, after_soft_ids = build_dest_template_parts(mt)
     logger.info(
         "Dest template: before=%d tokens, after=%d tokens, soft=%d tokens",
-        before_soft_ids.shape[0], after_soft_ids.shape[0], args.n_soft_tokens,
+        before_soft_ids.shape[0],
+        after_soft_ids.shape[0],
+        args.n_soft_tokens,
     )
 
     # ── Initialise probe ──────────────────────────────────────────────────────
@@ -167,12 +187,15 @@ def main() -> None:
     probe.reorthogonalize()
     logger.info(
         "Probe: %d layers × (%d × %d) + %d soft tokens  |  total params: %d",
-        len(layers), args.r, mt.n_embd, args.n_soft_tokens,
+        len(layers),
+        args.r,
+        mt.n_embd,
+        args.n_soft_tokens,
         sum(p.numel() for p in probe.parameters()),
     )
 
     optimizer = AdamW(probe.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    history   = ProbeTrainingHistory(
+    history = ProbeTrainingHistory(
         train_tasks=sorted(train_tasks),
         test_tasks=sorted(test_tasks),
     )
@@ -194,14 +217,17 @@ def main() -> None:
                 continue
 
             logits = patched_lm_forward(
-                mt, probe,
-                before_soft_ids, after_soft_ids, label_ids,
+                mt,
+                probe,
+                before_soft_ids,
+                after_soft_ids,
+                label_ids,
                 src_residuals=sc.src_residuals,
             )
             total, ce, ortho = compute_loss(logits, label_ids, probe)
             # Gradient accumulation
             (total / args.batch_size).backward()
-            epoch_ce    += ce.item()
+            epoch_ce += ce.item()
             epoch_ortho += ortho.item()
             epoch_total += total.item()
 
@@ -230,8 +256,11 @@ def main() -> None:
                     if label_ids.numel() == 0:
                         continue
                     logits = patched_lm_forward(
-                        mt, probe,
-                        before_soft_ids, after_soft_ids, label_ids,
+                        mt,
+                        probe,
+                        before_soft_ids,
+                        after_soft_ids,
+                        label_ids,
                         src_residuals=sc.src_residuals,
                     )
                     val_ce += torch.nn.functional.cross_entropy(
@@ -242,12 +271,17 @@ def main() -> None:
             history.val_epochs.append(epoch)
             logger.info(
                 "Epoch %3d  train_total=%.4f  train_ce=%.4f  val_ce=%.4f",
-                epoch, epoch_total / n, epoch_ce / n, val_ce,
+                epoch,
+                epoch_total / n,
+                epoch_ce / n,
+                val_ce,
             )
         else:
             logger.info(
                 "Epoch %3d  train_total=%.4f  train_ce=%.4f",
-                epoch, epoch_total / n, epoch_ce / n,
+                epoch,
+                epoch_total / n,
+                epoch_ce / n,
             )
 
     # ── Save checkpoint ───────────────────────────────────────────────────────

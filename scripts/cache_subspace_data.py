@@ -31,7 +31,11 @@ import torch
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from src.goals.scope_labeler import load_labeled_tree
-from src.goals.subspace_probe import SubspaceCache, cache_source_residuals, find_block_pivot_positions
+from src.goals.subspace_probe import (
+    SubspaceCache,
+    cache_source_residuals,
+    find_block_pivot_positions,
+)
 from src.tokens import prepare_input
 from src.utils.env_utils import DEFAULT_RESULTS_DIR
 from src.utils.logging_utils import add_logging_args, configure
@@ -52,9 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--layer-range",
         type=int,
         nargs=2,
-        default=[35, 46],
+        default=[0, -1],
         metavar=("START", "STOP"),
-        help="Layer range [start, stop) to cache (default: 35 46).",
+        help="Layer range [start, stop) to cache (default: 0 -1, all layers).",
     )
     p.add_argument(
         "--tasks",
@@ -76,29 +80,31 @@ def main() -> None:
     args = build_parser().parse_args()
     configure(args)
 
-    model_short  = args.model_key.split("/")[-1]
+    model_short = args.model_key.split("/")[-1]
     oracle_short = args.oracle.split("/")[-1]
-    layers       = list(range(args.layer_range[0], args.layer_range[1]))
 
     results_root = Path(DEFAULT_RESULTS_DIR)
-    gen_dir   = results_root / "well-known-tasks" / "generations" / model_short
-    label_dir = results_root / "well-known-tasks" / "labels"     / model_short / oracle_short
-    out_dir   = results_root / "subspace_probe" / model_short
+    gen_dir = results_root / "well-known-tasks" / "generations" / model_short
+    label_dir = (
+        results_root / "well-known-tasks" / "labels" / model_short / oracle_short
+    )
+    out_dir = results_root / "subspace_probe" / model_short
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path  = out_dir / "cache.pt"
+    out_path = out_dir / "cache.pt"
 
     if out_path.exists() and not args.overwrite:
-        logger.info("Cache already exists at %s — pass --overwrite to regenerate.", out_path)
+        logger.info(
+            "Cache already exists at %s — pass --overwrite to regenerate.", out_path
+        )
         return
 
     # Enumerate tasks
     label_files = sorted(label_dir.glob("*.json"))
     if args.tasks:
         label_files = [f for f in label_files if f.stem in args.tasks]
-    logger.info("Processing %d task(s)  layers=%s", len(label_files), layers)
+    logger.info("Processing %d task(s)", len(label_files))
 
     # Lazy model load (only after arg validation)
-    import torch
 
     from src.models import ModelandTokenizer
 
@@ -108,7 +114,14 @@ def main() -> None:
         device_map="auto",
         attn_implementation="eager",
     )
-    logger.info("Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd)
+    logger.info(
+        "Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd
+    )
+    start_layer, stop_layer = args.layer_range
+    if stop_layer == -1:
+        stop_layer = mt.n_layer
+    layers = list(range(start_layer, stop_layer))
+    logger.info("Caching layers: %s", layers)
 
     all_caches: list[SubspaceCache] = []
     skipped = []
@@ -122,7 +135,7 @@ def main() -> None:
 
         for label_path in label_files:
             task_name = label_path.stem
-            gen_path  = gen_dir / f"{task_name}.json"
+            gen_path = gen_dir / f"{task_name}.json"
             progress.update(task_bar, description=f"[bold]{task_name}[/bold]")
 
             if not gen_path.exists():
@@ -135,16 +148,18 @@ def main() -> None:
                 with open(gen_path) as f:
                     gen_data = json.load(f)
 
-                raw_gen       = gen_data["generation"]
-                code_prefill  = gen_data["prompt"].split("<code>")[-1]
-                code_gen      = code_prefill + raw_gen
+                raw_gen = gen_data["generation"]
+                code_prefill = gen_data["prompt"].split("<code>")[-1]
+                code_gen = code_prefill + raw_gen
                 if "</code>" in code_gen:
                     code_gen = code_gen.split("</code>")[0]
-                source_text   = gen_data["prompt"] + gen_data["generation"]
+                source_text = gen_data["prompt"] + gen_data["generation"]
 
                 root_block, full_code, _ = load_labeled_tree(label_path)
 
-                tokenized = prepare_input(source_text, return_offsets_mapping=True, tokenizer=mt)
+                tokenized = prepare_input(
+                    source_text, return_offsets_mapping=True, tokenizer=mt
+                )
                 offset_map = tokenized["offset_mapping"][0]
 
                 pivots = find_block_pivot_positions(
@@ -165,18 +180,22 @@ def main() -> None:
 
                 for block, first_tok, prev_tok in pivots:
                     for tok_pos, is_prec in [(first_tok, False), (prev_tok, True)]:
-                        all_caches.append(SubspaceCache(
-                            task=task_name,
-                            block_kind=block.kind,
-                            label=block.label,
-                            src_residuals=residuals[tok_pos],
-                            token_pos=tok_pos,
-                            is_preceding=is_prec,
-                        ))
+                        all_caches.append(
+                            SubspaceCache(
+                                task=task_name,
+                                block_kind=block.kind,
+                                label=block.label,
+                                src_residuals=residuals[tok_pos],
+                                token_pos=tok_pos,
+                                is_preceding=is_prec,
+                            )
+                        )
 
                 logger.info(
                     "%s: %d blocks → %d cache entries",
-                    task_name, len(pivots), len(pivots) * 2,
+                    task_name,
+                    len(pivots),
+                    len(pivots) * 2,
                 )
 
             except Exception as exc:
@@ -188,7 +207,9 @@ def main() -> None:
     torch.save(all_caches, out_path)
     logger.info(
         "Saved %d cache entries → %s  (skipped: %s)",
-        len(all_caches), out_path, skipped or "none",
+        len(all_caches),
+        out_path,
+        skipped or "none",
     )
 
 
