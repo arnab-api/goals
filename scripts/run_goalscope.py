@@ -76,11 +76,13 @@ _DEST_MESSAGES = [
 ]
 
 
-def _build_dest_prompt(mt: ModelandTokenizer) -> str:
+def _build_dest_prompt(
+    mt: ModelandTokenizer, messages: list[dict] = _DEST_MESSAGES
+) -> str:
     """Build the destination prompt using the model's chat template."""
     try:
         return mt.tokenizer.apply_chat_template(
-            _DEST_MESSAGES,
+            messages,
             add_generation_prompt=False,
             continue_final_message=True,
             tokenize=False,
@@ -88,7 +90,7 @@ def _build_dest_prompt(mt: ModelandTokenizer) -> str:
         )
     except TypeError:
         return mt.tokenizer.apply_chat_template(
-            _DEST_MESSAGES,
+            messages,
             add_generation_prompt=False,
             continue_final_message=True,
             tokenize=False,

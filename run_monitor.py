@@ -7,21 +7,54 @@ sys.stderr.reconfigure(line_buffering=True)
 
 MODELS = [
     # "Qwen/Qwen2.5-Coder-14B-Instruct",
-    # "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "Qwen/Qwen2.5-Coder-32B-Instruct",
     # "facebook/cwm",
     # "allenai/Olmo-3.1-32B-Instruct",
     # # "Qwen/Qwen3.5-27B",
     # # "Qwen/Qwen3-Coder-30B-A3B-Instruct",
     # "Qwen/Qwen2.5-72B-Instruct",
-    "meta-llama/Llama-3.3-70B-Instruct",
+    # "meta-llama/Llama-3.3-70B-Instruct",
 ]
-JOBS = [
+# JOBS = [
+#     {
+#         "name": f"{model}",
+#         "command": f'CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 python -m scripts.train_head_mask --model-key="{model}" --n-epochs=50 --batch-size=64 --augment --lazy --checkpoint-every=5 -v 2>&1 | tee logs/{model.split("/")[-1]}.log',
+#     }
+#     for model in MODELS
+# ]
+
+SUBSPACE_PROBE_CONFIGS = [
     {
-        "name": f"{model}",
-        "command": f'CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 python -m scripts.train_head_mask --model-key="{model}" --n-epochs=50 --batch-size=64 --augment --lazy --checkpoint-every=5 -v 2>&1 | tee logs/{model.split("/")[-1]}.log',
-    }
-    for model in MODELS
+        "rank": 64,
+        "layer_range": (35, 46),
+    },
+    {
+        "rank": 64,
+        "layer_range": (45, 56),
+    },
+    {
+        "rank": 64,
+        "layer_range": (1, 11),
+    },
+    {
+        "rank": 128,
+        "layer_range": (45, 56),
+    },
+    {
+        "rank": 128,
+        "layer_range": (1, 11),
+    },
 ]
+
+JOBS = []
+for conf in SUBSPACE_PROBE_CONFIGS:
+    rank = conf["rank"]
+    layer_start, layer_stop = conf["layer_range"]
+    job_name = f"rank={rank}__layer={layer_start}_{layer_stop}"
+
+    command = f"""CUDA_VISIBLE_DEVICES=0,1,2 python -m scripts.train_subspace_probe --model-key="Qwen/Qwen2.5-Coder-32B-Instruct" --layer-range {layer_start} {layer_stop} --r={rank} --batch-size=32 --epochs=5 2>&1 | tee logs/train_subspace/rank={rank}__layer={layer_start}_{layer_stop}.log"""
+    JOBS.append({"name": job_name, "command": command})
+
 
 ################################################################################################################################################################
 # Memory threshold in GB

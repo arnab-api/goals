@@ -390,6 +390,109 @@ def compute_loss(
 
 
 # ---------------------------------------------------------------------------
+# Batched verbalization (inference only)
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def verbalize_batch(
+    mt: ModelandTokenizer,
+    probe: SubspaceProbe,
+    before_soft_ids: torch.Tensor,   # (n_before,) int64 CPU
+    after_soft_ids: torch.Tensor,    # (n_after,)  int64 CPU
+    src_residuals_list: list[dict[int, torch.Tensor]],  # B × {layer → (d,)}
+    max_new_tokens: int = 32,
+    chunk_size: int = 16,
+) -> list[str]:
+    """Greedy-decode verbalizations for B source positions in parallel chunks.
+
+    Each item in src_residuals_list provides the source residuals for one token
+    position. The destination prefix (soft prompt) is shared and tiled B times.
+    The patch r_dest + W_l^T W_l (h_src[b] - r_dest) is applied per batch item.
+
+    Parameters
+    ----------
+    src_residuals_list : list of length B, each a {layer: (d,) CPU tensor} dict.
+    chunk_size : number of positions processed in one model.generate() call.
+        Reduce if VRAM is tight (each item in a chunk runs a full generation).
+
+    Returns
+    -------
+    list[str] of length B — decoded verbalizations, one per source position.
+    """
+    dev   = next(probe.parameters()).device
+    dtype = next(mt._model.parameters()).dtype
+
+    embed_fn = baukit.get_module(mt._model, mt.embedder_name)
+    before_emb = embed_fn(before_soft_ids.to(dev)).to(dtype)   # (n_before, d)
+    after_emb  = embed_fn(after_soft_ids.to(dev)).to(dtype)    # (n_after,  d)
+    soft_emb   = probe.soft_tokens.to(dtype)                   # (n_soft,   d)
+
+    prefix_emb = torch.cat([before_emb, soft_emb, after_emb], dim=0)  # (P, d)
+    prefix_len  = prefix_emb.shape[0]
+    patch_start = prefix_len - 1
+
+    layer_to_idx = {l: i for i, l in enumerate(probe.config.layers)}
+    results: list[str] = []
+
+    for chunk_start in range(0, len(src_residuals_list), chunk_size):
+        chunk = src_residuals_list[chunk_start : chunk_start + chunk_size]
+        B = len(chunk)
+
+        # Stack per-layer source residuals: {layer: (B, d)}
+        src_batch = {
+            l: torch.stack([chunk[b][l] for b in range(B)])  # (B, d)
+            for l in probe.config.layers
+        }
+
+        prefix_emb_batch = prefix_emb.unsqueeze(0).expand(B, -1, -1)  # (B, P, d)
+
+        handles = []
+        for l in probe.config.layers:
+            li    = layer_to_idx[l]
+            lname = mt.layer_name_format.format(l)
+            module = baukit.get_module(mt._model, lname)
+            src_h_batch = src_batch[l]  # (B, d) CPU — cast inside hook
+
+            def _make_hook(li_: int, src_h_batch_: torch.Tensor):
+                def hook(mod, inp, output):
+                    hidden = output[0] if isinstance(output, tuple) else output
+                    rest   = output[1:] if isinstance(output, tuple) else ()
+                    dev_, dtype_ = hidden.device, hidden.dtype
+                    # Full prefix pass: patch from patch_start
+                    # KV-cached step:  hidden.shape[1]==1, patch that one token
+                    cur_ps = patch_start if hidden.shape[1] >= prefix_len else 0
+                    region = hidden[:, cur_ps:, :]                          # (B, n, d)
+                    src_h  = src_h_batch_.to(device=dev_, dtype=dtype_)     # (B, d)
+                    W      = probe.W[li_].to(device=dev_, dtype=dtype_)     # (r, d)
+                    src_exp = src_h.unsqueeze(1).expand_as(region)          # (B, n, d)
+                    patched = region + (src_exp - region) @ W.T @ W
+                    new_h   = torch.cat([hidden[:, :cur_ps, :], patched], dim=1)
+                    return (new_h,) + rest if rest else new_h
+                return hook
+
+            handles.append(module.register_forward_hook(_make_hook(li, src_h_batch)))
+
+        try:
+            gen_out = mt._model.generate(
+                inputs_embeds=prefix_emb_batch,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=mt.tokenizer.eos_token_id,
+            )
+        finally:
+            for h in handles:
+                h.remove()
+
+        for b in range(B):
+            results.append(
+                mt.tokenizer.decode(gen_out[b], skip_special_tokens=True).strip()
+            )
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
 

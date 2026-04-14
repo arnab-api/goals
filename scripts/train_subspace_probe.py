@@ -120,11 +120,12 @@ def main() -> None:
     model_short = args.model_key.split("/")[-1]
     layers = list(range(args.layer_range[0], args.layer_range[1]))
 
-    probe_dir = Path(DEFAULT_RESULTS_DIR) / "subspace_probe" / model_short
+    run_tag = f"r={args.r}__layer={args.layer_range[0]}_{args.layer_range[1]}"
+    probe_dir = Path(DEFAULT_RESULTS_DIR) / "subspace_probe" / model_short / run_tag
     probe_dir.mkdir(parents=True, exist_ok=True)
     probe_path = probe_dir / "probe.pt"
     history_path = probe_dir / "history.pt"
-    cache_path = probe_dir / "cache.pt"
+    cache_path = probe_dir.parent / "cache.pt"
 
     if probe_path.exists() and not args.overwrite:
         logger.info(
@@ -259,10 +260,15 @@ def main() -> None:
             batch_total += total.item()
             n_seen += 1
 
-            # logger.debug(
-            #     "  [%d/%d] task=%-20s  ce=%.4f  ortho=%.4f  total=%.4f",
-            #     i + 1, n_train, sc.task, ce.item(), ortho.item(), total.item(),
-            # )
+            logger.debug(
+                "  [%d/%d] task=%-20s  ce=%.4f  ortho=%.4f  total=%.4f",
+                i + 1,
+                n_train,
+                sc.task,
+                ce.item(),
+                ortho.item(),
+                total.item(),
+            )
 
             if (i + 1) % args.batch_size == 0 or (i + 1) == len(train_caches):
                 torch.nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
