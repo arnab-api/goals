@@ -50,6 +50,9 @@ console = Console(width=120, highlight=False)
 
 TASKS_DIR = Path(DEFAULT_DATA_DIR) / "well-known-tasks"
 
+# Known source subdirectories (order determines processing order)
+_ALL_SOURCES = ["custom", "humaneval", "mbpp"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -99,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--source",
+        default=None,
+        metavar="SRC",
+        help=(
+            "Task source subdirectory to process (e.g. custom, humaneval, mbpp). "
+            "Defaults to all sources found under data/well-known-tasks/."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Re-generate tasks that already have an output file.",
@@ -112,30 +124,39 @@ def build_parser() -> argparse.ArgumentParser:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _load_samples(task_names: list[str] | None) -> list[IncompleteCodeSample]:
-    """Load IncompleteCodeSamples from data/well-known-tasks/."""
+def _load_samples(
+    source: str | None,
+    task_names: list[str] | None,
+) -> list[tuple[str, IncompleteCodeSample]]:
+    """Load (source_name, IncompleteCodeSample) pairs from data/well-known-tasks/<source>/."""
     if not TASKS_DIR.exists():
         raise FileNotFoundError(f"Tasks directory not found: {TASKS_DIR}")
 
-    paths = sorted(TASKS_DIR.glob("*.json"))
-    if task_names:
-        task_set = set(task_names)
-        paths = [p for p in paths if p.stem in task_set]
-        missing = task_set - {p.stem for p in paths}
-        if missing:
-            logger.warning(
-                "Tasks not found in %s: %s", TASKS_DIR, ", ".join(sorted(missing))
-            )
+    if source:
+        source_dirs = [TASKS_DIR / source]
+    else:
+        source_dirs = sorted(d for d in TASKS_DIR.iterdir() if d.is_dir())
 
-    samples = []
-    for path in paths:
-        with open(path) as f:
-            d = json.load(f)
-        sample = IncompleteCodeSample.from_dict(d)
-        sample.without_comments = True
-        samples.append(sample)
+    results = []
+    for src_dir in source_dirs:
+        src_name = src_dir.name
+        paths = sorted(src_dir.glob("*.json"))
+        if task_names:
+            task_set = set(task_names)
+            paths = [p for p in paths if p.stem in task_set]
+            missing = task_set - {p.stem for p in paths}
+            if missing:
+                logger.warning(
+                    "Tasks not found in %s: %s", src_dir, ", ".join(sorted(missing))
+                )
+        for path in paths:
+            with open(path) as f:
+                d = json.load(f)
+            sample = IncompleteCodeSample.from_dict(d)
+            sample.without_comments = True
+            results.append((src_name, sample))
 
-    return samples
+    return results
 
 
 def _chunk(lst: list, size: int):
@@ -166,38 +187,38 @@ def main() -> None:
         "Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd
     )
 
-    # ── Output directory ──────────────────────────────────────────────────────
-    out_dir = (
+    # ── Base output directory (override or default) ───────────────────────────
+    base_out_dir = (
         Path(args.output_dir)
         if args.output_dir
         else Path(DEFAULT_RESULTS_DIR) / "well-known-tasks" / "generations" / model_short
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Output directory: %s", out_dir)
 
-    # ── Load samples ──────────────────────────────────────────────────────────
-    samples = _load_samples(args.tasks)
-    logger.info("Loaded %d tasks from %s", len(samples), TASKS_DIR)
+    # ── Load samples (list of (source_name, IncompleteCodeSample)) ───────────
+    source_samples = _load_samples(args.source, args.tasks)
+    logger.info("Loaded %d tasks from %s", len(source_samples), TASKS_DIR)
 
     if not args.overwrite:
-        before = len(samples)
-        samples = [
-            s for s in samples if not (out_dir / f"{s.function_name}.json").exists()
+        before = len(source_samples)
+        source_samples = [
+            (src, s)
+            for src, s in source_samples
+            if not (base_out_dir / src / f"{s.function_name}.json").exists()
         ]
-        skipped = before - len(samples)
+        skipped = before - len(source_samples)
         if skipped:
             logger.info(
                 "Skipping %d already-generated tasks (use --overwrite to redo)", skipped
             )
 
-    if not samples:
+    if not source_samples:
         console.print("[green]All tasks already generated. Done.[/green]")
         return
 
     # ── Build prompts ─────────────────────────────────────────────────────────
     logger.info("Building prompts...")
     prompts: list[str] = []
-    for sample in samples:
+    for _, sample in source_samples:
         if supports_chat_template(mt):
             prompt = apply_chat_template(
                 mt,
@@ -219,12 +240,13 @@ def main() -> None:
         console=console,
         transient=False,
     )
-    gen_task = progress.add_task("generating", total=len(samples))
+    gen_task = progress.add_task("generating", total=len(source_samples))
 
     results: list[tuple[list[int], list[int]]] = []
     with progress:
-        for chunk in _chunk(list(zip(samples, prompts)), args.batch_size):
-            chunk_samples, chunk_prompts = zip(*chunk)
+        for chunk in _chunk(list(zip(source_samples, prompts)), args.batch_size):
+            chunk_src_samples, chunk_prompts = zip(*chunk)
+            chunk_samples = [s for _, s in chunk_src_samples]
             logger.info(f"current batch: {[s.function_name for s in chunk_samples]}")
             chunk_results = batch_generate(mt, list(chunk_prompts), args.max_new_tokens)
             results.extend(chunk_results)
@@ -232,21 +254,24 @@ def main() -> None:
 
     # ── Decode and save ───────────────────────────────────────────────────────
     saved = 0
-    for sample, prompt, (_, gen_ids) in zip(samples, prompts, results):
+    for (src_name, sample), prompt, (_, gen_ids) in zip(source_samples, prompts, results):
+        out_dir = base_out_dir / src_name
+        out_dir.mkdir(parents=True, exist_ok=True)
         generation = mt.tokenizer.decode(gen_ids, skip_special_tokens=True)
         out = {
             "function_name": sample.function_name,
             "prompt": prompt,
             "generation": generation,
+            "source": src_name,
         }
         out_path = out_dir / f"{sample.function_name}.json"
         with open(out_path, "w") as f:
             json.dump(out, f, indent=2)
-        logger.info("Saved %s  (gen_len=%d tokens)", out_path.name, len(gen_ids))
+        logger.info("Saved %s/%s  (gen_len=%d tokens)", src_name, out_path.name, len(gen_ids))
         saved += 1
 
     console.print(
-        f"[green]Done.[/green] Saved {saved} generations to [bold]{out_dir}[/bold]"
+        f"[green]Done.[/green] Saved {saved} generations under [bold]{base_out_dir}[/bold]"
     )
 
 

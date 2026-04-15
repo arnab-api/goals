@@ -153,6 +153,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Subset of task names to run. Defaults to all tasks.",
     )
     parser.add_argument(
+        "--source",
+        default=None,
+        metavar="SRC",
+        help=(
+            "Task source subdirectory to process (e.g. custom, humaneval, mbpp). "
+            "Defaults to all source subdirs found under the generations directory."
+        ),
+    )
+    parser.add_argument(
         "--generations-dir",
         default=None,
         metavar="DIR",
@@ -261,20 +270,30 @@ def main() -> None:
     model_short = args.model_key.split("/")[-1]
 
     # ── Directories ───────────────────────────────────────────────────────────
-    gen_dir = (
+    base_gen_dir = (
         Path(args.generations_dir)
         if args.generations_dir
         else WELL_KNOWN_DIR / "generations" / model_short
     )
-    out_dir = (
+    base_out_dir = (
         Path(args.output_dir)
         if args.output_dir
         else WELL_KNOWN_DIR / "goalscope" / model_short
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Generations dir : %s", gen_dir)
-    logger.info("Output dir      : %s", out_dir)
+    # Resolve source subdirs
+    if args.source:
+        source_dirs = [(args.source, base_gen_dir / args.source, base_out_dir / args.source)]
+    else:
+        source_dirs = [
+            (d.name, d, base_out_dir / d.name)
+            for d in sorted(base_gen_dir.iterdir())
+            if d.is_dir()
+        ] if base_gen_dir.exists() else []
+
+    logger.info("Base generations dir : %s", base_gen_dir)
+    logger.info("Base output dir      : %s", base_out_dir)
+    logger.info("Sources         : %s", [s for s, _, _ in source_dirs])
 
     # ── Model ─────────────────────────────────────────────────────────────────
     logger.info("Loading model: %s", args.model_key)
@@ -318,20 +337,33 @@ def main() -> None:
         args.max_new_tokens,
     )
 
-    # ── Generation paths ──────────────────────────────────────────────────────
-    gen_paths = _load_generation_paths(gen_dir, args.tasks)
-    logger.info("Found %d generation files", len(gen_paths))
+    # ── Generation paths across sources ──────────────────────────────────────
+    all_gen_paths: list[tuple[Path, Path]] = []  # (gen_path, out_dir)
+    for src_name, gen_dir, out_dir in source_dirs:
+        if not gen_dir.exists():
+            logger.warning("Source dir not found, skipping: %s", gen_dir)
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        paths = _load_generation_paths(gen_dir, args.tasks)
+        logger.info("Source %-12s: %d files in %s", src_name, len(paths), gen_dir)
+        for p in paths:
+            all_gen_paths.append((p, out_dir))
+
+    logger.info("Found %d generation files total", len(all_gen_paths))
 
     if not args.overwrite:
-        before = len(gen_paths)
-        gen_paths = [p for p in gen_paths if not (out_dir / f"{p.stem}.html").exists()]
-        skipped = before - len(gen_paths)
+        before = len(all_gen_paths)
+        all_gen_paths = [
+            (p, od) for p, od in all_gen_paths
+            if not (od / f"{p.stem}.html").exists()
+        ]
+        skipped = before - len(all_gen_paths)
         if skipped:
             logger.info(
                 "Skipping %d already-processed tasks (use --overwrite to redo)", skipped
             )
 
-    if not gen_paths:
+    if not all_gen_paths:
         console.print("[green]All tasks already processed. Done.[/green]")
         return
 
@@ -346,13 +378,13 @@ def main() -> None:
         console=console,
         transient=False,
     )
-    outer_task = task_progress.add_task("tasks", total=len(gen_paths))
+    outer_task = task_progress.add_task("tasks", total=len(all_gen_paths))
 
     saved = 0
     errors: list[str] = []
 
     with task_progress:
-        for gen_path in gen_paths:
+        for gen_path, out_dir in all_gen_paths:
             task_name = gen_path.stem
             logger.info("Processing: %s", task_name)
 
@@ -477,7 +509,7 @@ def main() -> None:
 
     # ── Summary ───────────────────────────────────────────────────────────────
     console.print(
-        f"[green]Done.[/green] Saved {saved} HTML files → [bold]{out_dir}[/bold]"
+        f"[green]Done.[/green] Saved {saved} HTML files → [bold]{base_out_dir}[/bold]"
     )
     if errors:
         console.print(f"[red]Skipped {len(errors)} tasks:[/red] " + ", ".join(errors))

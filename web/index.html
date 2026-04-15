@@ -286,6 +286,11 @@
       <select id="model-select"></select>
     </div>
 
+    <div class="sb-section" style="padding-top:10px;">
+      <div class="sb-label">Source</div>
+      <select id="source-select"></select>
+    </div>
+
     <div class="sb-tasks">
       <div class="sb-label">Task</div>
       <div class="sb-search-wrap">
@@ -328,9 +333,12 @@
   const viewer    = document.getElementById('viewer');
   const empty     = document.getElementById('empty-state');
 
+  const sourceSel  = document.getElementById('source-select');
+
   let manifest = {};
-  let currentModel = null;
-  let currentTask  = null;
+  let currentModel  = null;
+  let currentSource = null;
+  let currentTask   = null;
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -338,59 +346,72 @@
     return t.replace(/_/g, ' ');
   }
 
-  function iframeUrl(model, task) {
-    return `../results/well-known-tasks/goalscope/${encodeURIComponent(model)}/${encodeURIComponent(task)}.html`;
+  function iframeUrl(model, source, task) {
+    return `../results/well-known-tasks/goalscope/${encodeURIComponent(model)}/${encodeURIComponent(source)}/${encodeURIComponent(task)}.html`;
   }
 
-  function setHash(model, task) {
-    const h = encodeURIComponent(model) + '/' + encodeURIComponent(task);
+  function setHash(model, source, task) {
+    const h = encodeURIComponent(model) + '/' + encodeURIComponent(source) + '/' + encodeURIComponent(task);
     history.replaceState(null, '', '#' + h);
   }
 
   function parseHash() {
     const raw = window.location.hash.slice(1);
     if (!raw) return null;
-    const slash = raw.indexOf('/');
-    if (slash === -1) return null;
-    return {
-      model: decodeURIComponent(raw.slice(0, slash)),
-      task:  decodeURIComponent(raw.slice(slash + 1)),
-    };
+    const parts = raw.split('/').map(decodeURIComponent);
+    if (parts.length < 3) return null;
+    return { model: parts[0], source: parts[1], task: parts[2] };
   }
 
   // ── Load task ─────────────────────────────────────────────────────────────
 
-  function loadTask(model, task) {
-    currentModel = model;
-    currentTask  = task;
-    viewer.src = iframeUrl(model, task);
+  function loadTask(model, source, task) {
+    currentModel  = model;
+    currentSource = source;
+    currentTask   = task;
+    viewer.src = iframeUrl(model, source, task);
     empty.classList.add('hidden');
-    setHash(model, task);
-    // highlight list item
+    setHash(model, source, task);
     document.querySelectorAll('#task-list li').forEach(li => {
       li.classList.toggle('selected', li.dataset.task === task);
     });
-    // scroll selected into view
     const sel = taskList.querySelector('.selected');
     if (sel) sel.scrollIntoView({ block: 'nearest' });
   }
 
   // ── Populate tasks ────────────────────────────────────────────────────────
 
-  function populateTasks(model, selectTask) {
-    const tasks = manifest[model] || [];
+  function populateTasks(model, source, selectTask) {
+    const tasks = (manifest[model] && manifest[model][source]) || [];
     taskList.innerHTML = '';
     tasks.forEach(t => {
       const li = document.createElement('li');
       li.dataset.task = t;
       li.textContent = taskDisplay(t);
       li.title = t;
-      li.addEventListener('click', () => loadTask(model, t));
+      li.addEventListener('click', () => loadTask(model, source, t));
       taskList.appendChild(li);
     });
     updateFilter();
     const target = selectTask && tasks.includes(selectTask) ? selectTask : tasks[0];
-    if (target) loadTask(model, target);
+    if (target) loadTask(model, source, target);
+  }
+
+  // ── Populate source select ────────────────────────────────────────────────
+
+  function populateSources(model, initialSource, initialTask) {
+    sourceSel.innerHTML = '';
+    const sources = Object.keys(manifest[model] || {});
+    sources.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.textContent = s;
+      sourceSel.appendChild(opt);
+    });
+    const targetSource = initialSource && sources.includes(initialSource) ? initialSource : sources[0];
+    sourceSel.value = targetSource;
+    currentSource = targetSource;
+    populateTasks(model, targetSource, initialTask);
   }
 
   // ── Filter ────────────────────────────────────────────────────────────────
@@ -409,7 +430,7 @@
 
   // ── Populate model select ─────────────────────────────────────────────────
 
-  function populateModels(initialModel, initialTask) {
+  function populateModels(initialModel, initialSource, initialTask) {
     modelSel.innerHTML = '';
     Object.keys(manifest).forEach(m => {
       const opt = document.createElement('option');
@@ -420,13 +441,17 @@
     const targetModel = initialModel && manifest[initialModel] ? initialModel : Object.keys(manifest)[0];
     modelSel.value = targetModel;
     currentModel = targetModel;
-    populateTasks(targetModel, initialTask);
+    populateSources(targetModel, initialSource, initialTask);
   }
 
   // ── Events ────────────────────────────────────────────────────────────────
 
   modelSel.addEventListener('change', () => {
-    populateTasks(modelSel.value, null);
+    populateSources(modelSel.value, null, null);
+  });
+
+  sourceSel.addEventListener('change', () => {
+    populateTasks(currentModel, sourceSel.value, null);
   });
 
   taskFilter.addEventListener('input', updateFilter);
@@ -439,8 +464,9 @@
       manifest = data;
       const saved = parseHash();
       populateModels(
-        saved?.model ?? 'Qwen2.5-Coder-32B-Instruct',
-        saved?.task  ?? 'atoi',
+        saved?.model  ?? 'Qwen2.5-Coder-32B-Instruct',
+        saved?.source ?? 'custom',
+        saved?.task   ?? 'atoi',
       );
     })
     .catch(err => {
