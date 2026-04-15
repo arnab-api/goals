@@ -256,7 +256,7 @@ def mine_mbpp(min_lines: int, overwrite: bool) -> int:
         record = {
             "instruction": instruction,
             "code": code_field,
-            "unit_tests": item.get("test_list", []),
+            "unit_tests": [],
             "prefills": {},
             "function_name": fn_name,
             "augmentation": None,

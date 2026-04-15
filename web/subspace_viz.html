@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subspace Intervention</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:       #ffffff;
+    --border:   #d4d4e8;
+    --accent:   #5b4de8;
+    --src:      #d97706;
+    --dest:     #0284c7;
+    --proj:     #059669;
+    --soft:     #be185d;
+    --text-hi:  #1a1a2e;
+    --text-mid: #555577;
+    --text-lo:  #aaaacc;
+    --mono: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    --ui: -apple-system, 'Segoe UI', system-ui, sans-serif;
+  }
+  body {
+    background: var(--bg);
+    color: var(--text-hi);
+    font-family: var(--ui);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 48px 24px 64px;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin-bottom: 6px;
+    color: var(--text-hi);
+  }
+  .sub {
+    font-size: 12px;
+    color: var(--text-mid);
+    margin-bottom: 40px;
+  }
+  .diagram-wrap {
+    width: 100%;
+    max-width: 900px;
+    overflow-x: auto;
+  }
+
+  /* param table */
+  .params {
+    margin-top: 36px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 900px;
+  }
+  .param {
+    background: #f4f4fb;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 12px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .param-name {
+    font-family: var(--mono);
+    color: var(--text-hi);
+    font-weight: 600;
+  }
+  .param-type {
+    color: var(--text-lo);
+    font-size: 10px;
+  }
+  .param-desc { color: var(--text-mid); }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 2px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Subspace Intervention</h1>
+<p class="sub">Two transformer forward passes. Source residuals projected onto the learned subspace and injected as a steering vector into the destination run.</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 900 540" width="900" height="540" xmlns="http://www.w3.org/2000/svg"
+     style="display:block;width:100%;max-width:900px;">
+
+  <defs>
+    <marker id="arr" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <polygon points="0 0, 7 3.5, 0 7" fill="#aaaacc"/>
+    </marker>
+    <marker id="arr-proj" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <polygon points="0 0, 7 3.5, 0 7" fill="#059669"/>
+    </marker>
+    <marker id="arr-src" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <polygon points="0 0, 7 3.5, 0 7" fill="#d97706"/>
+    </marker>
+    <marker id="arr-dest" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <polygon points="0 0, 7 3.5, 0 7" fill="#0284c7"/>
+    </marker>
+  </defs>
+
+  <!-- ════════════════════════════════════════════════════════
+       SOURCE TRANSFORMER  (left panel)
+       ════════════════════════════════════════════════════════ -->
+
+  <rect x="20" y="20" width="250" height="500" rx="10"
+        fill="#fafafa" stroke="#d4d4e8" stroke-width="1"/>
+
+  <text x="145" y="46" text-anchor="middle" font-size="11" font-weight="600"
+        fill="#d97706" letter-spacing="0.06em" font-family="system-ui">SOURCE RUN</text>
+
+  <!-- source tokens -->
+  <rect x="40" y="458" width="210" height="32" rx="5"
+        fill="#fff8ec" stroke="#d97706" stroke-width="1" stroke-opacity="0.5"/>
+  <text x="145" y="479" text-anchor="middle" font-size="11" fill="#d97706" opacity="0.9"
+        font-family="Fira Code, monospace">source code tokens</text>
+
+  <!-- embed -->
+  <rect x="50" y="415" width="190" height="28" rx="4"
+        fill="#f4f4fb" stroke="#c8c8e0" stroke-width="1"/>
+  <text x="145" y="433" text-anchor="middle" font-size="11" fill="#555577"
+        font-family="system-ui">Embedding</text>
+  <line x1="145" y1="458" x2="145" y2="444" stroke="#b0b0c8" stroke-width="1.2"
+        marker-end="url(#arr)"/>
+
+  <g id="src-layers">
+    <!-- L0 -->
+    <rect x="50" y="380" width="190" height="24" rx="3" fill="#eeeeF5" stroke="#d4d4e8" stroke-width="1"/>
+    <text x="145" y="396" text-anchor="middle" font-size="10" fill="#aaaacc" font-family="system-ui">Layer 0</text>
+    <line x1="145" y1="415" x2="145" y2="405" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+
+    <text x="145" y="365" text-anchor="middle" font-size="10" fill="#ccccde" font-family="system-ui">· · ·</text>
+
+    <!-- SELECTED LAYERS range -->
+    <rect x="38" y="290" width="214" height="78" rx="5"
+          fill="rgba(217,119,6,0.05)" stroke="#d97706" stroke-width="1" stroke-opacity="0.6"
+          stroke-dasharray="4 3"/>
+    <text x="37" y="287" font-size="9" fill="#d97706" opacity="0.8" font-family="system-ui"
+          letter-spacing="0.05em">layers  [ start … stop )</text>
+
+    <!-- layer l -->
+    <rect x="50" y="328" width="190" height="24" rx="3"
+          fill="#fff5e8" stroke="#d97706" stroke-width="1" stroke-opacity="0.6"/>
+    <text x="145" y="344" text-anchor="middle" font-size="10" fill="#d97706" opacity="0.85"
+          font-family="system-ui">Layer l</text>
+    <line x1="145" y1="354" x2="145" y2="380" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+
+    <!-- layer l+1 -->
+    <rect x="50" y="295" width="190" height="24" rx="3"
+          fill="#fff5e8" stroke="#d97706" stroke-width="1" stroke-opacity="0.6"/>
+    <text x="145" y="311" text-anchor="middle" font-size="10" fill="#d97706" opacity="0.85"
+          font-family="system-ui">Layer l+1</text>
+    <line x1="145" y1="328" x2="145" y2="320" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+
+    <text x="145" y="277" text-anchor="middle" font-size="10" fill="#ccccde" font-family="system-ui">· · ·</text>
+
+    <!-- L_last -->
+    <rect x="50" y="240" width="190" height="24" rx="3" fill="#eeeeF5" stroke="#d4d4e8" stroke-width="1"/>
+    <text x="145" y="256" text-anchor="middle" font-size="10" fill="#aaaacc" font-family="system-ui">Layer L</text>
+    <line x1="145" y1="295" x2="145" y2="265" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+
+    <!-- LM Head unused -->
+    <rect x="50" y="195" width="190" height="28" rx="4"
+          fill="#f8f8fc" stroke="#d4d4e8" stroke-width="1" stroke-dasharray="3 3"/>
+    <text x="145" y="213" text-anchor="middle" font-size="10" fill="#ccccde" font-family="system-ui"
+          font-style="italic">LM Head  (unused)</text>
+    <line x1="145" y1="240" x2="145" y2="224" stroke="#d4d4e8" stroke-width="1" stroke-dasharray="2 2"/>
+  </g>
+
+  <!-- EXTRACTION arrow -->
+  <line x1="240" y1="340" x2="310" y2="340" stroke="#d97706" stroke-width="1.5"
+        stroke-dasharray="5 3" marker-end="url(#arr-src)"/>
+  <text x="248" y="335" font-size="9" fill="#d97706" opacity="0.9" font-family="Fira Code, monospace">h_src</text>
+
+
+  <!-- ════════════════════════════════════════════════════════
+       PROJECTION BOX  (centre)
+       ════════════════════════════════════════════════════════ -->
+
+  <rect x="310" y="290" width="190" height="120" rx="8"
+        fill="#edfaf5" stroke="#059669" stroke-width="1.3"/>
+
+  <text x="405" y="314" text-anchor="middle" font-size="10" font-weight="600"
+        fill="#059669" letter-spacing="0.05em" font-family="system-ui">SUBSPACE PROJECTION</text>
+
+  <text x="405" y="337" text-anchor="middle" font-size="12.5" fill="#059669"
+        font-family="Fira Code, monospace">Δ = W_l&#x1D40;&#x22C5;W_l&#x22C5;h_src</text>
+
+  <line x1="326" y1="348" x2="484" y2="348" stroke="#059669" stroke-width="0.5" opacity="0.3"/>
+
+  <text x="405" y="364" text-anchor="middle" font-size="10" fill="#555577" font-family="system-ui">
+    W_l  ∈  ℝ<tspan font-size="8" dy="-2">r × d</tspan>
+  </text>
+  <text x="405" y="380" text-anchor="middle" font-size="10" fill="#aaaacc" font-family="system-ui">r ≪ d</text>
+
+  <!-- rank callout -->
+  <rect x="356" y="388" width="98" height="18" rx="4"
+        fill="rgba(91,77,232,0.08)" stroke="#5b4de8" stroke-width="0.8"/>
+  <text x="405" y="400" text-anchor="middle" font-size="9.5" fill="#5b4de8"
+        font-family="Fira Code, monospace">rank  r  ← tunable</text>
+
+  <!-- arrow out of projection box -->
+  <line x1="500" y1="350" x2="568" y2="350" stroke="#059669" stroke-width="1.5"
+        marker-end="url(#arr-proj)"/>
+  <text x="512" y="344" font-size="9" fill="#059669" opacity="0.9"
+        font-family="Fira Code, monospace">Δ</text>
+
+
+  <!-- ════════════════════════════════════════════════════════
+       DESTINATION TRANSFORMER  (right panel)
+       ════════════════════════════════════════════════════════ -->
+
+  <rect x="630" y="20" width="250" height="500" rx="10"
+        fill="#fafafa" stroke="#d4d4e8" stroke-width="1"/>
+
+  <text x="755" y="46" text-anchor="middle" font-size="11" font-weight="600"
+        fill="#0284c7" letter-spacing="0.06em" font-family="system-ui">DESTINATION RUN</text>
+
+  <!-- dest tokens -->
+  <rect x="650" y="458" width="210" height="32" rx="5"
+        fill="#eef6fc" stroke="#0284c7" stroke-width="1" stroke-opacity="0.4"/>
+  <!-- prefix -->
+  <rect x="653" y="461" width="56" height="26" rx="3"
+        fill="#daeef9" stroke="#0284c7" stroke-width="0.6" stroke-opacity="0.5"/>
+  <text x="681" y="478" text-anchor="middle" font-size="9" fill="#0284c7" opacity="0.7"
+        font-family="system-ui">prefix</text>
+  <!-- soft tokens -->
+  <rect x="713" y="461" width="62" height="26" rx="3"
+        fill="#fde8f2" stroke="#be185d" stroke-width="0.9"/>
+  <text x="744" y="474" text-anchor="middle" font-size="9" fill="#be185d"
+        font-family="system-ui">soft × k</text>
+  <!-- query -->
+  <rect x="779" y="461" width="78" height="26" rx="3"
+        fill="#daeef9" stroke="#0284c7" stroke-width="0.6" stroke-opacity="0.5"/>
+  <text x="818" y="478" text-anchor="middle" font-size="9" fill="#0284c7" opacity="0.7"
+        font-family="system-ui">"what intent?"</text>
+
+  <!-- soft token callout -->
+  <line x1="744" y1="461" x2="744" y2="445" stroke="#be185d" stroke-width="0.8"
+        stroke-dasharray="3 2" opacity="0.7"/>
+  <rect x="702" y="432" width="84" height="14" rx="3"
+        fill="rgba(190,24,93,0.07)" stroke="#be185d" stroke-width="0.7"/>
+  <text x="744" y="443" text-anchor="middle" font-size="8.5" fill="#be185d"
+        font-family="system-ui">k = n_soft_tokens</text>
+
+  <!-- embed -->
+  <rect x="660" y="400" width="190" height="28" rx="4"
+        fill="#f4f4fb" stroke="#c8c8e0" stroke-width="1"/>
+  <text x="755" y="418" text-anchor="middle" font-size="11" fill="#555577"
+        font-family="system-ui">Embedding</text>
+  <line x1="755" y1="458" x2="755" y2="429" stroke="#b0b0c8" stroke-width="1.2"
+        marker-end="url(#arr)"/>
+
+  <g id="dest-layers">
+    <!-- L0 -->
+    <rect x="660" y="363" width="190" height="24" rx="3" fill="#eeeeF5" stroke="#d4d4e8" stroke-width="1"/>
+    <text x="755" y="379" text-anchor="middle" font-size="10" fill="#aaaacc" font-family="system-ui">Layer 0</text>
+    <line x1="755" y1="400" x2="755" y2="388" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+
+    <text x="755" y="350" text-anchor="middle" font-size="10" fill="#ccccde" font-family="system-ui">· · ·</text>
+
+    <!-- selected layers range -->
+    <rect x="648" y="275" width="214" height="78" rx="5"
+          fill="rgba(2,132,199,0.05)" stroke="#0284c7" stroke-width="1" stroke-opacity="0.5"
+          stroke-dasharray="4 3"/>
+    <text x="647" y="272" font-size="9" fill="#0284c7" opacity="0.8" font-family="system-ui"
+          letter-spacing="0.05em">same  layers  [ start … stop )</text>
+
+    <!-- layer l -->
+    <rect x="660" y="311" width="190" height="24" rx="3"
+          fill="#e8f4fb" stroke="#0284c7" stroke-width="1" stroke-opacity="0.6"/>
+    <text x="755" y="327" text-anchor="middle" font-size="10" fill="#0284c7" opacity="0.85"
+          font-family="system-ui">Layer l</text>
+    <line x1="755" y1="338" x2="755" y2="363" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+
+    <!-- layer l+1 -->
+    <rect x="660" y="278" width="190" height="24" rx="3"
+          fill="#e8f4fb" stroke="#0284c7" stroke-width="1" stroke-opacity="0.6"/>
+    <text x="755" y="294" text-anchor="middle" font-size="10" fill="#0284c7" opacity="0.85"
+          font-family="system-ui">Layer l+1</text>
+    <line x1="755" y1="311" x2="755" y2="303" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+
+    <text x="755" y="262" text-anchor="middle" font-size="10" fill="#ccccde" font-family="system-ui">· · ·</text>
+
+    <!-- L_last -->
+    <rect x="660" y="224" width="190" height="24" rx="3" fill="#eeeeF5" stroke="#d4d4e8" stroke-width="1"/>
+    <text x="755" y="240" text-anchor="middle" font-size="10" fill="#aaaacc" font-family="system-ui">Layer L</text>
+    <line x1="755" y1="278" x2="755" y2="249" stroke="#b0b0c8" stroke-width="1" marker-end="url(#arr)"/>
+  </g>
+
+  <!-- LM Head + Generate -->
+  <rect x="660" y="168" width="190" height="44" rx="5"
+        fill="#e8f4fb" stroke="#0284c7" stroke-width="1" stroke-opacity="0.6"/>
+  <text x="755" y="188" text-anchor="middle" font-size="10" fill="#0284c7" opacity="0.85"
+        font-family="system-ui">LM Head + Generate</text>
+  <text x="755" y="202" text-anchor="middle" font-size="9" fill="#555577"
+        font-family="system-ui">greedy decode</text>
+  <line x1="755" y1="224" x2="755" y2="213" stroke="#b0b0c8" stroke-width="1.2"
+        marker-end="url(#arr)"/>
+
+  <!-- Output bubble -->
+  <rect x="648" y="108" width="214" height="48" rx="6"
+        fill="#e8f4fb" stroke="#0284c7" stroke-width="1" stroke-opacity="0.6"/>
+  <text x="755" y="129" text-anchor="middle" font-size="10" fill="#0284c7" opacity="0.75"
+        font-family="system-ui" font-style="italic">"BFS: process next vertex</text>
+  <text x="755" y="146" text-anchor="middle" font-size="10" fill="#0284c7" opacity="0.75"
+        font-family="system-ui" font-style="italic">from the traversal queue."</text>
+  <line x1="755" y1="168" x2="755" y2="157" stroke="#0284c7" stroke-width="1.2"
+        marker-end="url(#arr-dest)"/>
+
+
+  <!-- ════════════════════════════════════════════════════════
+       ADDITION SYMBOL at layer l in dest
+       ════════════════════════════════════════════════════════ -->
+
+  <circle cx="660" cy="323" r="10" fill="#edfaf5" stroke="#059669" stroke-width="1.3"/>
+  <text x="660" y="327" text-anchor="middle" font-size="13" fill="#059669"
+        font-family="system-ui" font-weight="600">+</text>
+
+  <line x1="568" y1="350" x2="568" y2="323" stroke="#059669" stroke-width="1.5"
+        stroke-dasharray="5 3"/>
+  <line x1="568" y1="323" x2="649" y2="323" stroke="#059669" stroke-width="1.5"
+        marker-end="url(#arr-proj)"/>
+  <text x="608" y="316" text-anchor="middle" font-size="9" fill="#059669" opacity="0.9"
+        font-family="Fira Code, monospace">+ Δ</text>
+
+  <circle cx="660" cy="290" r="10" fill="#edfaf5" stroke="#059669" stroke-width="1.3"/>
+  <text x="660" y="294" text-anchor="middle" font-size="13" fill="#059669"
+        font-family="system-ui" font-weight="600">+</text>
+  <line x1="568" y1="323" x2="568" y2="290" stroke="#059669" stroke-width="1"
+        stroke-dasharray="4 3" opacity="0.5"/>
+  <line x1="568" y1="290" x2="649" y2="290" stroke="#059669" stroke-width="1"
+        stroke-dasharray="4 3" opacity="0.5" marker-end="url(#arr-proj)"/>
+
+
+  <!-- ════════════════════════════════════════════════════════
+       ORTHOGONALITY CONSTRAINT CALLOUT
+       ════════════════════════════════════════════════════════ -->
+  <rect x="310" y="430" width="190" height="50" rx="6"
+        fill="#f0f0fb" stroke="#5b4de8" stroke-width="0.8"/>
+  <text x="405" y="451" text-anchor="middle" font-size="9.5" fill="#5b4de8"
+        font-family="system-ui" letter-spacing="0.04em">ORTHOGONALITY CONSTRAINT</text>
+  <text x="405" y="467" text-anchor="middle" font-size="11" fill="#5b4de8"
+        font-family="Fira Code, monospace">W_l W_l&#x1D40; = I_r</text>
+  <text x="405" y="480" text-anchor="middle" font-size="9" fill="#aaaacc"
+        font-family="system-ui">enforced via QR after each step</text>
+  <line x1="405" y1="430" x2="405" y2="412" stroke="#5b4de8" stroke-width="0.8"
+        stroke-dasharray="3 2" opacity="0.5"/>
+
+
+  <!-- ════════════════════════════════════════════════════════
+       LEGEND
+       ════════════════════════════════════════════════════════ -->
+  <rect x="310" y="55" width="190" height="96" rx="6"
+        fill="#f4f4fb" stroke="#d4d4e8" stroke-width="1"/>
+  <text x="405" y="73" text-anchor="middle" font-size="10" font-weight="600"
+        fill="#555577" letter-spacing="0.06em" font-family="system-ui">LEGEND</text>
+
+  <circle cx="332" cy="91" r="5" fill="#d97706"/>
+  <text x="343" y="95" font-size="10" fill="#555577" font-family="system-ui">Source residual  h_src</text>
+
+  <circle cx="332" cy="109" r="5" fill="#059669"/>
+  <text x="343" y="113" font-size="10" fill="#555577" font-family="system-ui">Projected delta  Δ = W&#x1D40;Wh</text>
+
+  <circle cx="332" cy="127" r="5" fill="#0284c7"/>
+  <text x="343" y="131" font-size="10" fill="#555577" font-family="system-ui">Destination stream</text>
+
+  <circle cx="332" cy="145" r="5" fill="#be185d"/>
+  <text x="343" y="149" font-size="10" fill="#555577" font-family="system-ui">Soft prompt tokens</text>
+
+</svg>
+</div>
+
+<!-- param table -->
+<div class="params">
+  <div class="param">
+    <div class="dot" style="background:#059669;"></div>
+    <span class="param-name">r</span>
+    <span class="param-type">int</span>
+    <span class="param-desc">rank of W_l — size of intent subspace</span>
+  </div>
+  <div class="param">
+    <div class="dot" style="background:#d97706;"></div>
+    <span class="param-name">layers</span>
+    <span class="param-type">[start, stop)</span>
+    <span class="param-desc">which layers to extract from &amp; inject into</span>
+  </div>
+  <div class="param">
+    <div class="dot" style="background:#be185d;"></div>
+    <span class="param-name">n_soft_tokens</span>
+    <span class="param-type">int</span>
+    <span class="param-desc">learned prefix embeddings k in dest prompt</span>
+  </div>
+  <div class="param">
+    <div class="dot" style="background:#5b4de8;"></div>
+    <span class="param-name">λ_ortho</span>
+    <span class="param-type">float</span>
+    <span class="param-desc">weight on ‖WW&#x1D40; − I‖² regularization</span>
+  </div>
+  <div class="param">
+    <div class="dot" style="background:#0284c7;"></div>
+    <span class="param-name">lr</span>
+    <span class="param-type">float</span>
+    <span class="param-desc">AdamW learning rate for W_l and soft tokens</span>
+  </div>
+</div>
+
+</body>
+</html>

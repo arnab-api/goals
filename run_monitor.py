@@ -7,12 +7,12 @@ sys.stderr.reconfigure(line_buffering=True)
 
 ################################################################################################################################################################
 # Memory threshold in GB
-MEM_THRESHOLD = 40
-CUDA_INDEX = 0
+MEM_THRESHOLD = 30
+CUDA_INDEX = 6
 # Check interval in seconds (10 minutes)
 CHECK_INTERVAL = 10 * 60
 AUTO_CONTINUE = False  # Set to False if you want to stop on errors instead of auto-continuing
-CUDA_DEVICES = "0,1,2,3"  # GPUs to use for jobs (e.g. "0,1,2,3")
+CUDA_DEVICES = "3,6,7"  # GPUs to use for jobs (e.g. "0,1,2,3")
 ################################################################################################################################################################
 
 
@@ -36,26 +36,38 @@ MODELS = [
 
 MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
 MODEL_SHORT = "qwen-32"
+
+# ── Smoke test ────────────────────────────────────────────────────────────────
+# Set SMOKE_TEST=True to run only a handful of tasks end-to-end before
+# committing to the full pipeline.  Tasks are drawn from the custom source.
+SMOKE_TEST = False
+SMOKE_TEST_TASKS = ["bfs", "dfs", "binary_search", "merge_sort", "atoi"]
+SMOKE_TEST_SOURCE = "custom"
+# ─────────────────────────────────────────────────────────────────────────────
+
+_tasks_flag = f"--tasks {' '.join(SMOKE_TEST_TASKS)} --source {SMOKE_TEST_SOURCE}" if SMOKE_TEST else ""
+_log_suffix  = "_smoke" if SMOKE_TEST else ""
+
 JOBS = [
     {
-        "name": f"generate_{MODEL_SHORT}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.generate_well_known_task_completions --model-key="{MODEL_NAME}" --batch-size=32 -v 2>&1 | tee logs/generate_{MODEL_SHORT}.log''',
+        "name": f"generate_{MODEL_SHORT}{_log_suffix}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.generate_well_known_task_completions --model-key="{MODEL_NAME}" --batch-size=32 {_tasks_flag} -v 2>&1 | tee logs/generate_{MODEL_SHORT}{_log_suffix}.log''',
     },
     {
-        "name": f"goalscope_{MODEL_SHORT}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.run_goalscope --model-key="{MODEL_NAME}" --batch-size=32 --overwrite -v 2>&1 | tee logs/goalscope_{MODEL_SHORT}.log''',
+        "name": f"goalscope_{MODEL_SHORT}{_log_suffix}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.run_goalscope --model-key="{MODEL_NAME}" --batch-size=32 --overwrite {_tasks_flag} -v 2>&1 | tee logs/goalscope_{MODEL_SHORT}{_log_suffix}.log''',
     },
     {
-        "name": f"label_{MODEL_SHORT}_claude",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" -v 2>&1 | tee logs/label_{MODEL_SHORT}_claude.log''',
+        "name": f"label_{MODEL_SHORT}_claude{_log_suffix}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" {_tasks_flag} -v 2>&1 | tee logs/label_{MODEL_SHORT}_claude{_log_suffix}.log''',
     },
     {
-        "name": f"label_{MODEL_SHORT}_qwen",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="Qwen/Qwen2.5-Coder-32B-Instruct" --batch-size=32 -v 2>&1 | tee logs/label_{MODEL_SHORT}_qwen.log''',
+        "name": f"label_{MODEL_SHORT}_qwen{_log_suffix}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="Qwen/Qwen2.5-Coder-32B-Instruct" --batch-size=32 {_tasks_flag} -v 2>&1 | tee logs/label_{MODEL_SHORT}_qwen{_log_suffix}.log''',
     },
     {
-        "name": f"cache_{MODEL_SHORT}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.cache_subspace_data --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" -v 2>&1 | tee logs/cache_{MODEL_SHORT}.log''',
+        "name": f"cache_{MODEL_SHORT}{_log_suffix}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.cache_subspace_data --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" {_tasks_flag} -v 2>&1 | tee logs/cache_{MODEL_SHORT}{_log_suffix}.log''',
     }
 ]
 
@@ -161,7 +173,14 @@ def run_job(job_info, job_num, total_jobs):
     print("=" * 80)
 
     try:
-        subprocess.run(command, shell=True, check=True)
+        # Wrap in `set -o pipefail` so that `python ... | tee ...` propagates
+        # the Python script's exit code instead of always returning tee's 0.
+        subprocess.run(
+            f"set -o pipefail; {command}",
+            shell=True,
+            check=True,
+            executable="/bin/bash",
+        )
         print(f"\n✓ Job {job_num}/{total_jobs} ({job_name}) completed successfully.")
         return True
     except subprocess.CalledProcessError as e:
