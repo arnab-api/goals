@@ -95,15 +95,8 @@ def main() -> None:
     results_root = Path(DEFAULT_RESULTS_DIR)
     base_gen_dir = results_root / "well-known-tasks" / "generations" / model_short
     base_label_dir = results_root / "well-known-tasks" / "labels" / model_short / oracle_short
-    out_dir = results_root / "subspace_probe" / model_short
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "cache.pt"
-
-    if out_path.exists() and not args.overwrite:
-        logger.info(
-            "Cache already exists at %s — pass --overwrite to regenerate.", out_path
-        )
-        return
+    cache_dir = results_root / "subspace_probe" / model_short / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve source subdirs
     if args.source:
@@ -149,8 +142,9 @@ def main() -> None:
     layers = list(range(start_layer, stop_layer))
     logger.info("Caching layers: %s", layers)
 
-    all_caches: list[SubspaceCache] = []
     skipped = []
+    saved_tasks = 0
+    saved_entries = 0
 
     with Progress(
         SpinnerColumn(),
@@ -160,10 +154,19 @@ def main() -> None:
         task_bar = progress.add_task("caching…", total=total)
 
         for src_name, gen_dir, label_dir, src_label_files in label_files:
+            src_cache_dir = cache_dir / src_name
+            src_cache_dir.mkdir(parents=True, exist_ok=True)
+
             for label_path in src_label_files:
                 task_name = label_path.stem
                 gen_path = gen_dir / f"{task_name}.json"
+                task_cache_path = src_cache_dir / f"{task_name}.pt"
                 progress.update(task_bar, description=f"[bold]{src_name}/{task_name}[/bold]")
+
+                if task_cache_path.exists() and not args.overwrite:
+                    logger.debug("Already cached, skipping: %s/%s", src_name, task_name)
+                    progress.advance(task_bar)
+                    continue
 
                 if not gen_path.exists():
                     logger.warning("No generation for %s — skipping", task_name)
@@ -205,9 +208,10 @@ def main() -> None:
                     positions = sorted({p for _, ft, pt in pivots for p in [ft, pt]})
                     residuals = cache_source_residuals(mt, source_text, positions, layers)
 
+                    task_caches: list[SubspaceCache] = []
                     for block, first_tok, prev_tok in pivots:
                         for tok_pos, is_prec in [(first_tok, False), (prev_tok, True)]:
-                            all_caches.append(
+                            task_caches.append(
                                 SubspaceCache(
                                     task=task_name,
                                     block_kind=block.kind,
@@ -218,12 +222,16 @@ def main() -> None:
                                 )
                             )
 
+                    torch.save(task_caches, task_cache_path)
+                    saved_tasks += 1
+                    saved_entries += len(task_caches)
                     logger.info(
-                        "%s/%s: %d blocks → %d cache entries",
+                        "%s/%s: %d blocks → %d entries → %s",
                         src_name,
                         task_name,
                         len(pivots),
-                        len(pivots) * 2,
+                        len(task_caches),
+                        task_cache_path.name,
                     )
 
                 except Exception as exc:
@@ -232,11 +240,11 @@ def main() -> None:
 
                 progress.advance(task_bar)
 
-    torch.save(all_caches, out_path)
     logger.info(
-        "Saved %d cache entries → %s  (skipped: %s)",
-        len(all_caches),
-        out_path,
+        "Saved %d entries across %d tasks → %s  (skipped: %s)",
+        saved_entries,
+        saved_tasks,
+        cache_dir,
         skipped or "none",
     )
 

@@ -5,9 +5,20 @@ import time
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+################################################################################################################################################################
+# Memory threshold in GB
+MEM_THRESHOLD = 40
+CUDA_INDEX = 0
+# Check interval in seconds (10 minutes)
+CHECK_INTERVAL = 10 * 60
+AUTO_CONTINUE = False  # Set to False if you want to stop on errors instead of auto-continuing
+CUDA_DEVICES = "0,1,2,3"  # GPUs to use for jobs (e.g. "0,1,2,3")
+################################################################################################################################################################
+
+
 MODELS = [
     # "Qwen/Qwen2.5-Coder-14B-Instruct",
-    "Qwen/Qwen2.5-Coder-32B-Instruct",
+    # "Qwen/Qwen2.5-Coder-32B-Instruct",
     # "facebook/cwm",
     # "allenai/Olmo-3.1-32B-Instruct",
     # # "Qwen/Qwen3.5-27B",
@@ -23,42 +34,69 @@ MODELS = [
 #     for model in MODELS
 # ]
 
-SUBSPACE_PROBE_CONFIGS = [
+MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
+MODEL_SHORT = "qwen-32"
+JOBS = [
     {
-        "rank": 64,
-        "layer_range": (45, 56),
+        "name": f"generate_{MODEL_SHORT}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.generate_well_known_task_completions --model-key="{MODEL_NAME}" --batch-size=32 -v 2>&1 | tee logs/generate_{MODEL_SHORT}.log''',
     },
     {
-        "rank": 64,
-        "layer_range": (1, 11),
+        "name": f"goalscope_{MODEL_SHORT}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.run_goalscope --model-key="{MODEL_NAME}" --batch-size=32 --overwrite -v 2>&1 | tee logs/goalscope_{MODEL_SHORT}.log''',
     },
     {
-        "rank": 128,
-        "layer_range": (45, 56),
+        "name": f"label_{MODEL_SHORT}_claude",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" -v 2>&1 | tee logs/label_{MODEL_SHORT}_claude.log''',
     },
     {
-        "rank": 128,
-        "layer_range": (1, 11),
+        "name": f"label_{MODEL_SHORT}_qwen",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="Qwen/Qwen2.5-Coder-32B-Instruct" --batch-size=32 -v 2>&1 | tee logs/label_{MODEL_SHORT}_qwen.log''',
     },
+    {
+        "name": f"cache_{MODEL_SHORT}",
+        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.cache_subspace_data --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" -v 2>&1 | tee logs/cache_{MODEL_SHORT}.log''',
+    }
 ]
 
-JOBS = []
-for conf in SUBSPACE_PROBE_CONFIGS:
-    rank = conf["rank"]
-    layer_start, layer_stop = conf["layer_range"]
-    job_name = f"rank={rank}__layer={layer_start}_{layer_stop}"
 
-    command = f"""CUDA_VISIBLE_DEVICES=0,1,2 python -m scripts.train_subspace_probe --model-key="Qwen/Qwen2.5-Coder-32B-Instruct" --layer-range {layer_start} {layer_stop} --r={rank} --batch-size=32 --epochs=5 2>&1 | tee logs/train_subspace/rank={rank}__layer={layer_start}_{layer_stop}.log"""
-    JOBS.append({"name": job_name, "command": command})
+# SUBSPACE_PROBE_CONFIGS = [
+#     # {
+#     #     "rank": 64,
+#     #     "layer_range": (1, 11),
+#     # },
+#     {
+#         "rank": 64,
+#         "layer_range": (35, 46),
+#     },
+#     # {
+#     #     "rank": 64,
+#     #     "layer_range": (45, 56),
+#     # },
+#     # {
+#     #     "rank": 128,
+#     #     "layer_range": (1, 11),
+#     # },
+#     {
+#         "rank": 128,
+#         "layer_range": (35, 46),
+#     },
+#     # {
+#     #     "rank": 128,
+#     #     "layer_range": (45, 56),
+#     # },
+# ]
+
+# # JOBS = []
+# for conf in SUBSPACE_PROBE_CONFIGS:
+#     rank = conf["rank"]
+#     layer_start, layer_stop = conf["layer_range"]
+#     job_name = f"rank={rank}__layer={layer_start}_{layer_stop}"
+
+#     command = f"""CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.train_subspace_probe --model-key="Qwen/Qwen2.5-Coder-32B-Instruct" --layer-range {layer_start} {layer_stop} --r={rank} --batch-size=32 --epochs=5 2>&1 | tee logs/train_subspace/rank={rank}__layer={layer_start}_{layer_stop}.log"""
+#     JOBS.append({"name": job_name, "command": command})
 
 
-################################################################################################################################################################
-# Memory threshold in GB
-MEM_THRESHOLD = 40
-CUDA_INDEX = 0
-
-# Check interval in seconds (10 minutes)
-CHECK_INTERVAL = 10 * 60
 
 
 def get_gpu_free_memory():
@@ -130,7 +168,6 @@ def run_job(job_info, job_num, total_jobs):
         print(f"\n✗ Error running job {job_num}/{total_jobs} ({job_name}): {e}")
         return False
 
-
 def main():
     print(">>> Running GPU Job Queue <<<")
     print(f"Total jobs in queue: {len(JOBS)}")
@@ -149,8 +186,12 @@ def main():
         success = run_job(job, i, len(JOBS))
 
         if not success:
-            print("\nJob failed. Auto-continuing to next job...")
-            continue
+            if AUTO_CONTINUE:
+                print("\nJob failed. Auto-continuing to next job...")
+                continue
+            else:
+                print("\nJob failed. Stopping execution.")
+                break
 
     print("\n" + "=" * 80)
     print("All jobs completed!")

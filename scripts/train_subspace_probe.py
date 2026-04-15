@@ -1,11 +1,17 @@
 """Train the SubspaceProbe on cached source residuals.
 
-Loads the cache produced by cache_subspace_data.py, holds out ~20 tasks for
-testing, and trains W_l matrices + soft-prompt token embeddings.
+Loads the per-task .pt files produced by cache_subspace_data.py (from
+results/subspace_probe/<model_short>/cache/<source>/<task>.pt), holds out
+~20 tasks for testing, and trains W_l matrices + soft-prompt token embeddings.
+
+Cache files are loaded lazily in chunks during training: at each epoch the file
+list is shuffled, then loaded in windows of --files-per-chunk files.  Entries
+within each window are also shuffled before batching.  Only the layers
+requested by --layer-range are kept in memory per window.
 
 Outputs:
-    results/subspace_probe/<model_short>/probe.pt   — checkpoint
-    results/subspace_probe/<model_short>/history.pt — training history
+    results/subspace_probe/<model_short>/<run_tag>/probe.pt   — final checkpoint
+    results/subspace_probe/<model_short>/<run_tag>/history.pt — training history
 
 Usage
 -----
@@ -17,7 +23,8 @@ conda run -n goals python scripts/train_subspace_probe.py \\
     --lambda-ortho 0.1 \\
     --lr 3e-4 \\
     --epochs 50 \\
-    --batch-size 4
+    --batch-size 16 \\
+    --files-per-chunk 10
 """
 
 from __future__ import annotations
@@ -64,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Number of tasks to hold out for testing.",
+    )
+    p.add_argument(
+        "--files-per-chunk",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Number of per-task cache files to load into RAM at once per epoch window.",
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--overwrite", action="store_true")
@@ -119,13 +133,14 @@ def main() -> None:
 
     model_short = args.model_key.split("/")[-1]
     layers = list(range(args.layer_range[0], args.layer_range[1]))
+    layer_set = set(layers)
 
     run_tag = f"r={args.r}__layer={args.layer_range[0]}_{args.layer_range[1]}"
     probe_dir = Path(DEFAULT_RESULTS_DIR) / "subspace_probe" / model_short / run_tag
     probe_dir.mkdir(parents=True, exist_ok=True)
     probe_path = probe_dir / "probe.pt"
     history_path = probe_dir / "history.pt"
-    cache_path = probe_dir.parent / "cache.pt"
+    cache_dir = probe_dir.parent / "cache"
 
     if probe_path.exists() and not args.overwrite:
         logger.info(
@@ -133,34 +148,54 @@ def main() -> None:
         )
         return
 
-    # ── Load cache ────────────────────────────────────────────────────────────
-    if not cache_path.exists():
+    # ── Discover per-task cache files ─────────────────────────────────────────
+    if not cache_dir.exists():
         logger.error(
-            "Cache not found at %s — run scripts/cache_subspace_data.py first.",
-            cache_path,
+            "Cache directory not found at %s — run scripts/cache_subspace_data.py first.",
+            cache_dir,
         )
         sys.exit(1)
 
-    all_caches: list[SubspaceCache] = torch.load(
-        cache_path, map_location="cpu", weights_only=False
-    )
-    logger.info("Loaded %d cache entries from %s", len(all_caches), cache_path)
+    all_cache_files: list[Path] = sorted(cache_dir.rglob("*.pt"))
+    if not all_cache_files:
+        logger.error("No .pt cache files found under %s", cache_dir)
+        sys.exit(1)
+
+    # Task name = file stem (unique across sources because source dirs don't overlap)
+    all_tasks = sorted({p.stem for p in all_cache_files})
+    logger.info("Found %d cache files (%d tasks) in %s", len(all_cache_files), len(all_tasks), cache_dir)
 
     # ── Train / test split by task ────────────────────────────────────────────
-    all_tasks = sorted({sc.task for sc in all_caches})
     random.shuffle(all_tasks)
-    test_tasks = set(all_tasks[: args.n_test_tasks])
-    train_tasks = set(all_tasks[args.n_test_tasks :])
+    test_task_names = set(all_tasks[: args.n_test_tasks])
+    train_task_names = set(all_tasks[args.n_test_tasks :])
 
-    train_caches = [sc for sc in all_caches if sc.task in train_tasks]
-    test_caches = [sc for sc in all_caches if sc.task in test_tasks]
+    train_files = [p for p in all_cache_files if p.stem in train_task_names]
+    test_files  = [p for p in all_cache_files if p.stem in test_task_names]
     logger.info(
-        "Train: %d tasks (%d entries)  |  Test: %d tasks (%d entries)",
-        len(train_tasks),
-        len(train_caches),
-        len(test_tasks),
-        len(test_caches),
+        "Train: %d tasks (%d files)  |  Test: %d tasks (%d files)",
+        len(train_task_names), len(train_files),
+        len(test_task_names),  len(test_files),
     )
+
+    # ── Cache loading helper ──────────────────────────────────────────────────
+
+    def _load_chunk(file_paths: list[Path]) -> list[SubspaceCache]:
+        """Load and layer-slice entries from a list of per-task .pt files."""
+        entries: list[SubspaceCache] = []
+        for p in file_paths:
+            task_caches: list[SubspaceCache] = torch.load(
+                p, map_location="cpu", weights_only=False
+            )
+            for sc in task_caches:
+                # Keep only the layers needed for this training run
+                sc.src_residuals = {l: t for l, t in sc.src_residuals.items() if l in layer_set}
+            entries.extend(task_caches)
+        return entries
+
+    # Pre-load test set (small enough to hold in RAM; loaded once)
+    test_caches = _load_chunk(test_files)
+    logger.info("Loaded %d test entries", len(test_caches))
 
     # ── Load model ────────────────────────────────────────────────────────────
     mt = ModelandTokenizer(
@@ -205,88 +240,99 @@ def main() -> None:
 
     optimizer = AdamW(probe.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     history = ProbeTrainingHistory(
-        train_tasks=sorted(train_tasks),
-        test_tasks=sorted(test_tasks),
+        train_tasks=sorted(train_task_names),
+        test_tasks=sorted(test_task_names),
     )
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    n_train = len(train_caches)
     logger.info(
-        "Starting training: %d epochs, %d instances/epoch, batch_size=%d",
+        "Starting training: %d epochs  |  %d train files  |  %d files/chunk  |  batch_size=%d",
         args.epochs,
-        n_train,
+        len(train_files),
+        args.files_per_chunk,
         args.batch_size,
     )
 
     for epoch in range(args.epochs):
-        random.shuffle(train_caches)
-        epoch_ce = epoch_ortho = epoch_total = 0.0
-        batch_ce = batch_ortho = batch_total = 0.0
-        n_steps = 0
-        n_seen = 0
-
         logger.info(
             "── Epoch %d / %d ─────────────────────────────", epoch, args.epochs - 1
         )
+
+        # Shuffle file order for this epoch
+        epoch_files = list(train_files)
+        random.shuffle(epoch_files)
+
+        epoch_ce = epoch_ortho = epoch_total = 0.0
+        n_steps = 0
+        n_seen = 0
+        n_since_step = 0
+        batch_ce = batch_ortho = batch_total = 0.0
+
         optimizer.zero_grad()
-        for i, sc in enumerate(train_caches):
-            label_ids = torch.tensor(
-                mt.tokenizer.encode(sc.label, add_special_tokens=False)
-                + [mt.tokenizer.eos_token_id],
-                dtype=torch.long,
-            )
-            if label_ids.numel() == 0:
+
+        n_chunks = (len(epoch_files) + args.files_per_chunk - 1) // args.files_per_chunk
+        for chunk_idx in range(n_chunks):
+            chunk_paths = epoch_files[
+                chunk_idx * args.files_per_chunk : (chunk_idx + 1) * args.files_per_chunk
+            ]
+            chunk_entries = _load_chunk(chunk_paths)
+            random.shuffle(chunk_entries)
+
+            is_last_chunk = chunk_idx == n_chunks - 1
+
+            for j, sc in enumerate(chunk_entries):
+                label_ids = torch.tensor(
+                    mt.tokenizer.encode(sc.label, add_special_tokens=False)
+                    + [mt.tokenizer.eos_token_id],
+                    dtype=torch.long,
+                )
+                if label_ids.numel() == 0:
+                    logger.debug("  skipped (empty label): task=%s", sc.task)
+                    continue
+
+                logits = patched_lm_forward(
+                    mt,
+                    probe,
+                    before_soft_ids,
+                    after_soft_ids,
+                    label_ids,
+                    src_residuals=sc.src_residuals,
+                )
+                total, ce, ortho = compute_loss(logits, label_ids, probe)
+                # Gradient accumulation — normalize by batch_size so LR is scale-invariant
+                (total / args.batch_size).backward()
+
+                epoch_ce += ce.item()
+                epoch_ortho += ortho.item()
+                epoch_total += total.item()
+                batch_ce += ce.item()
+                batch_ortho += ortho.item()
+                batch_total += total.item()
+                n_seen += 1
+                n_since_step += 1
+
                 logger.debug(
-                    "  [%d/%d] skipped (empty label): task=%s", i + 1, n_train, sc.task
+                    "  chunk %d/%d  [%d]  task=%-20s  ce=%.4f  ortho=%.4f  total=%.4f",
+                    chunk_idx + 1, n_chunks, n_seen,
+                    sc.task, ce.item(), ortho.item(), total.item(),
                 )
-                continue
 
-            logits = patched_lm_forward(
-                mt,
-                probe,
-                before_soft_ids,
-                after_soft_ids,
-                label_ids,
-                src_residuals=sc.src_residuals,
-            )
-            total, ce, ortho = compute_loss(logits, label_ids, probe)
-            # Gradient accumulation
-            (total / args.batch_size).backward()
-            epoch_ce += ce.item()
-            epoch_ortho += ortho.item()
-            epoch_total += total.item()
-            batch_ce += ce.item()
-            batch_ortho += ortho.item()
-            batch_total += total.item()
-            n_seen += 1
-
-            logger.debug(
-                "  [%d/%d] task=%-20s  ce=%.4f  ortho=%.4f  total=%.4f",
-                i + 1,
-                n_train,
-                sc.task,
-                ce.item(),
-                ortho.item(),
-                total.item(),
-            )
-
-            if (i + 1) % args.batch_size == 0 or (i + 1) == len(train_caches):
-                torch.nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
-                optimizer.step()
-                probe.reorthogonalize()
-                optimizer.zero_grad()
-                n_steps += 1
-                b = max(n_seen - (n_steps - 1) * args.batch_size, 1)
-                logger.info(
-                    "  step %4d  [%d/%d]  batch_ce=%.4f  batch_ortho=%.4f  batch_total=%.4f",
-                    n_steps,
-                    i + 1,
-                    n_train,
-                    batch_ce / b,
-                    batch_ortho / b,
-                    batch_total / b,
-                )
-                batch_ce = batch_ortho = batch_total = 0.0
+                is_last_entry = is_last_chunk and (j + 1 == len(chunk_entries))
+                if n_since_step >= args.batch_size or is_last_entry:
+                    torch.nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
+                    optimizer.step()
+                    probe.reorthogonalize()
+                    optimizer.zero_grad()
+                    n_steps += 1
+                    b = max(n_since_step, 1)
+                    logger.info(
+                        "  step %4d  chunk %d/%d  [seen %d]"
+                        "  batch_ce=%.4f  batch_ortho=%.4f  batch_total=%.4f",
+                        n_steps, chunk_idx + 1, n_chunks, n_seen,
+                        batch_ce / b, batch_ortho / b, batch_total / b,
+                    )
+                    batch_ce = batch_ortho = batch_total = 0.0
+                    n_since_step = 0
 
         n = max(n_seen, 1)
         history.train_ce.append(epoch_ce / n)
