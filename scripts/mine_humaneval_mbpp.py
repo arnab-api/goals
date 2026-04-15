@@ -137,18 +137,19 @@ def _extract_signature(code: str) -> tuple[str, str] | None:
 # Instruction extraction
 # ---------------------------------------------------------------------------
 
-def _extract_instruction(docstring: str | None, task_desc: str | None) -> str:
-    """Build a clean instruction string from docstring or task description."""
-    raw = (docstring or task_desc or "").strip()
-    # Take only the first sentence/paragraph
-    first = re.split(r"\n\n|\.\s", raw)[0].strip().rstrip(".")
-    if not first:
-        return "Implement the function in Python"
-    # Capitalise and add trailing period
-    first = first[0].upper() + first[1:]
-    if not first.endswith((".", "?", "!")):
-        first += " in Python"
-    return first
+def _clean_instruction(raw: str) -> str:
+    """Normalise a raw problem description into a clean instruction string."""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    # Collapse internal whitespace / newlines to single spaces
+    raw = re.sub(r"\s+", " ", raw)
+    # Capitalise first letter
+    raw = raw[0].upper() + raw[1:]
+    # Append "in Python" if the text doesn't already mention it
+    if "python" not in raw.lower():
+        raw = raw.rstrip(".") + " in Python"
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -162,13 +163,14 @@ def mine_humaneval(min_lines: int, overwrite: bool) -> int:
     out_dir = TASKS_ROOT / "humaneval"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ds = load_dataset("openai/openai_humaneval", split="test", trust_remote_code=True)
+    ds = load_dataset("openai/openai_humaneval", split="test")
     saved = skipped = filtered = 0
 
     for item in ds:
         task_id = item["task_id"].replace("/", "_").lower()  # e.g. humaneval_0
-        solution = item.get("canonical_solution", "")
+        fn_name = item["entry_point"]
         prompt = item.get("prompt", "")
+        solution = item.get("canonical_solution", "")
         full_code = prompt + solution
 
         if not _passes_filter(full_code, min_lines):
@@ -181,12 +183,12 @@ def mine_humaneval(min_lines: int, overwrite: bool) -> int:
             filtered += 1
             continue
 
-        fn_name, code_field = sig
-        docstring = item.get("prompt", "")
-        # Extract docstring text from prompt
-        doc_match = re.search(r'"""(.*?)"""', docstring, re.DOTALL)
+        _, code_field = sig  # use entry_point name, not AST-parsed name
+
+        # Extract docstring from prompt for instruction
+        doc_match = re.search(r'"""(.*?)"""', prompt, re.DOTALL)
         doc_text = doc_match.group(1).strip() if doc_match else ""
-        instruction = _extract_instruction(doc_text, None)
+        instruction = _clean_instruction(doc_text) or f"Implement {fn_name} in Python"
 
         out_path = out_dir / f"{task_id}.json"
         if out_path.exists() and not overwrite:
@@ -224,7 +226,7 @@ def mine_mbpp(min_lines: int, overwrite: bool) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Use the sanitized split which has cleaner code
-    ds = load_dataset("google-research-datasets/mbpp", "sanitized", split="test", trust_remote_code=True)
+    ds = load_dataset("google-research-datasets/mbpp", "sanitized", split="test")
     saved = skipped = filtered = 0
 
     for item in ds:
@@ -242,7 +244,9 @@ def mine_mbpp(min_lines: int, overwrite: bool) -> int:
             continue
 
         fn_name, code_field = sig
-        instruction = _extract_instruction(None, item.get("text", ""))
+        # MBPP sanitized uses "prompt" field for the problem description
+        raw_prompt = item.get("prompt", "")
+        instruction = _clean_instruction(raw_prompt) or f"Implement {fn_name} in Python"
 
         out_path = out_dir / f"{task_id}.json"
         if out_path.exists() and not overwrite:
@@ -252,7 +256,7 @@ def mine_mbpp(min_lines: int, overwrite: bool) -> int:
         record = {
             "instruction": instruction,
             "code": code_field,
-            "unit_tests": [],
+            "unit_tests": item.get("test_list", []),
             "prefills": {},
             "function_name": fn_name,
             "augmentation": None,
