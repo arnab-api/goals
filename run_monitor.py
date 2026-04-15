@@ -26,10 +26,6 @@ MODELS = [
 SUBSPACE_PROBE_CONFIGS = [
     {
         "rank": 64,
-        "layer_range": (35, 46),
-    },
-    {
-        "rank": 64,
         "layer_range": (45, 56),
     },
     {
