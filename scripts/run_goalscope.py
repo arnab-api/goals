@@ -229,14 +229,24 @@ def _find_code_segment(
 
     code_start is the token immediately after the last ``<code>`` tag.
     """
-    _, code_start = find_token_range(
+    code_start, _ = find_token_range(
         string=source_prompt,
         substring="<code>",
         tokenizer=mt.tokenizer,
-        occurrence=-1,
+        occurrence=1,
         offset_mapping=src_offsets,
     )
-    return code_start, len(src_ids)
+    if "</code>" in source_prompt:
+        _, code_end = find_token_range(
+            string=source_prompt,
+            substring="</code>",
+            tokenizer=mt.tokenizer,
+            occurrence=1,
+            offset_mapping=src_offsets,
+        )
+    else:
+        code_end = len(src_ids)
+    return code_start, code_end
 
 
 def _load_generation_paths(
