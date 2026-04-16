@@ -211,6 +211,7 @@ _CSS = """
     position: fixed;
     background: #1a1a2e; border: 1px solid #555;
     color: #e8e8e8; font-size: 12px;
+    font-family: 'Fira Code', 'Cascadia Code', monospace;
     padding: 6px 10px; border-radius: 5px;
     white-space: pre-wrap; min-width: 240px; max-width: 440px;
     z-index: 9999; box-shadow: 0 4px 14px rgba(0,0,0,0.6);
