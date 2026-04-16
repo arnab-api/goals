@@ -12,7 +12,7 @@ CUDA_INDEX = 6
 # Check interval in seconds (10 minutes)
 CHECK_INTERVAL = 10 * 60
 AUTO_CONTINUE = False  # Set to False if you want to stop on errors instead of auto-continuing
-CUDA_DEVICES = "3,6,7"  # GPUs to use for jobs (e.g. "0,1,2,3")
+CUDA_DEVICES = "2,3,6,7"  # GPUs to use for jobs (e.g. "0,1,2,3")
 ################################################################################################################################################################
 
 
@@ -48,65 +48,65 @@ SMOKE_TEST_SOURCE = "custom"
 _tasks_flag = f"--tasks {' '.join(SMOKE_TEST_TASKS)} --source {SMOKE_TEST_SOURCE}" if SMOKE_TEST else ""
 _log_suffix  = "_smoke" if SMOKE_TEST else ""
 
-JOBS = [
-    {
-        "name": f"generate_{MODEL_SHORT}{_log_suffix}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.generate_well_known_task_completions --model-key="{MODEL_NAME}" --batch-size=32 {_tasks_flag} -v 2>&1 | tee logs/generate_{MODEL_SHORT}{_log_suffix}.log''',
-    },
-    {
-        "name": f"goalscope_{MODEL_SHORT}{_log_suffix}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.run_goalscope --model-key="{MODEL_NAME}" --batch-size=32 --overwrite {_tasks_flag} -v 2>&1 | tee logs/goalscope_{MODEL_SHORT}{_log_suffix}.log''',
-    },
-    {
-        "name": f"label_{MODEL_SHORT}_claude{_log_suffix}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" {_tasks_flag} -v 2>&1 | tee logs/label_{MODEL_SHORT}_claude{_log_suffix}.log''',
-    },
-    {
-        "name": f"label_{MODEL_SHORT}_qwen{_log_suffix}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="Qwen/Qwen2.5-Coder-32B-Instruct" --batch-size=32 {_tasks_flag} -v 2>&1 | tee logs/label_{MODEL_SHORT}_qwen{_log_suffix}.log''',
-    },
-    {
-        "name": f"cache_{MODEL_SHORT}{_log_suffix}",
-        "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.cache_subspace_data --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" {_tasks_flag} -v 2>&1 | tee logs/cache_{MODEL_SHORT}{_log_suffix}.log''',
-    }
-]
-
-
-# SUBSPACE_PROBE_CONFIGS = [
-#     # {
-#     #     "rank": 64,
-#     #     "layer_range": (1, 11),
-#     # },
+# JOBS = [
 #     {
-#         "rank": 64,
-#         "layer_range": (35, 46),
+#         "name": f"generate_{MODEL_SHORT}{_log_suffix}",
+#         "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.generate_well_known_task_completions --model-key="{MODEL_NAME}" --batch-size=32 {_tasks_flag} -v 2>&1 | tee logs/generate_{MODEL_SHORT}{_log_suffix}.log''',
 #     },
-#     # {
-#     #     "rank": 64,
-#     #     "layer_range": (45, 56),
-#     # },
-#     # {
-#     #     "rank": 128,
-#     #     "layer_range": (1, 11),
-#     # },
 #     {
-#         "rank": 128,
-#         "layer_range": (35, 46),
+#         "name": f"goalscope_{MODEL_SHORT}{_log_suffix}",
+#         "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.run_goalscope --model-key="{MODEL_NAME}" --batch-size=32 --overwrite {_tasks_flag} -v 2>&1 | tee logs/goalscope_{MODEL_SHORT}{_log_suffix}.log''',
 #     },
-#     # {
-#     #     "rank": 128,
-#     #     "layer_range": (45, 56),
-#     # },
+#     {
+#         "name": f"label_{MODEL_SHORT}_claude{_log_suffix}",
+#         "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" {_tasks_flag} -v 2>&1 | tee logs/label_{MODEL_SHORT}_claude{_log_suffix}.log''',
+#     },
+#     {
+#         "name": f"label_{MODEL_SHORT}_qwen{_log_suffix}",
+#         "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.label_well_known_task_blocks --model-key="{MODEL_NAME}" --oracle="Qwen/Qwen2.5-Coder-32B-Instruct" --batch-size=32 {_tasks_flag} -v 2>&1 | tee logs/label_{MODEL_SHORT}_qwen{_log_suffix}.log''',
+#     },
+#     {
+#         "name": f"cache_{MODEL_SHORT}{_log_suffix}",
+#         "command": f'''CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.cache_subspace_data --model-key="{MODEL_NAME}" --oracle="claude-sonnet-4-6" {_tasks_flag} -v 2>&1 | tee logs/cache_{MODEL_SHORT}{_log_suffix}.log''',
+#     }
 # ]
 
-# # JOBS = []
-# for conf in SUBSPACE_PROBE_CONFIGS:
-#     rank = conf["rank"]
-#     layer_start, layer_stop = conf["layer_range"]
-#     job_name = f"rank={rank}__layer={layer_start}_{layer_stop}"
 
-#     command = f"""CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.train_subspace_probe --model-key="Qwen/Qwen2.5-Coder-32B-Instruct" --layer-range {layer_start} {layer_stop} --r={rank} --batch-size=32 --epochs=5 2>&1 | tee logs/train_subspace/rank={rank}__layer={layer_start}_{layer_stop}.log"""
-#     JOBS.append({"name": job_name, "command": command})
+SUBSPACE_PROBE_CONFIGS = [
+    {
+        "rank": 64,
+        "layer_range": (35, 46),
+    },
+    {
+        "rank": 128,
+        "layer_range": (35, 46),
+    },
+    {
+        "rank": 64,
+        "layer_range": (1, 11),
+    },
+    {
+        "rank": 64,
+        "layer_range": (45, 56),
+    },
+    {
+        "rank": 128,
+        "layer_range": (1, 11),
+    },
+    {
+        "rank": 128,
+        "layer_range": (45, 56),
+    },
+]
+
+JOBS = []
+for conf in SUBSPACE_PROBE_CONFIGS:
+    rank = conf["rank"]
+    layer_start, layer_stop = conf["layer_range"]
+    job_name = f"rank={rank}__layer={layer_start}_{layer_stop}"
+
+    command = f"""CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.train_subspace_probe --model-key="{MODEL_NAME}" --layer-range {layer_start} {layer_stop} --r={rank} --batch-size=64 --epochs=5 2>&1 | tee logs/train_subspace/rank={rank}__layer={layer_start}_{layer_stop}.log"""
+    JOBS.append({"name": job_name, "command": command})
 
 
 

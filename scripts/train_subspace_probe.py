@@ -24,7 +24,7 @@ conda run -n goals python scripts/train_subspace_probe.py \\
     --lr 3e-4 \\
     --epochs 50 \\
     --batch-size 16 \\
-    --files-per-chunk 10
+    --files-per-chunk 32
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lambda-ortho", type=float, default=0.1)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=1e-2)
-    p.add_argument("--epochs", type=int, default=10)
+    p.add_argument("--epochs", type=int, default=5)
     p.add_argument(
         "--batch-size",
         type=int,
@@ -69,13 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--n-test-tasks",
         type=int,
-        default=20,
+        default=32,
         help="Number of tasks to hold out for testing.",
     )
     p.add_argument(
         "--files-per-chunk",
         type=int,
-        default=10,
+        default=32,
         metavar="N",
         help="Number of per-task cache files to load into RAM at once per epoch window.",
     )
