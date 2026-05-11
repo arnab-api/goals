@@ -402,6 +402,7 @@ def _generate_nnsight(
     patches: list["PatchSpec"],
     max_new_tokens: int,
     do_sample: bool,
+    n_steer_tokens: Optional[int] = None,
     **kwargs,
 ) -> torch.Tensor:
     """Run mt.generate() with nnsight patching.
@@ -409,7 +410,17 @@ def _generate_nnsight(
     Uses the shape trick to differentiate the prefill step (seq_len > 1) from
     decode steps (seq_len == 1 with KV-cache).  This allows per-patch
     ``on_pass`` control inside a single ``gen_trace.all()`` context.
+
+    ``n_steer_tokens`` is not supported with the nnsight interface because
+    nnsight's proxy graph does not allow mutable Python state inside
+    ``gen_trace.all()``.  Pass ``patch_interface="baukit"`` when using
+    ``n_steer_tokens``.
     """
+    if n_steer_tokens is not None:
+        raise NotImplementedError(
+            "n_steer_tokens is not supported with patch_interface='nnsight'. "
+            "Use patch_interface='baukit' instead."
+        )
     with mt.generate(
         inputs,
         max_new_tokens=max_new_tokens,
@@ -452,12 +463,17 @@ def _generate_baukit(
     patches: list["PatchSpec"],
     max_new_tokens: int,
     do_sample: bool,
+    n_steer_tokens: Optional[int] = None,
     **kwargs,
 ) -> torch.Tensor:
     """Run mt._model.generate() with baukit forward-hook patching.
 
     Baukit hooks receive real tensors (not proxies), so the shape trick is
     unambiguous.  Use this as a fallback if nnsight's proxy graph causes issues.
+
+    ``n_steer_tokens`` limits how many decode steps patches with
+    ``on_pass="all"`` are applied.  After that many decode steps the patch is
+    silently skipped; ``on_pass="first"`` patches are unaffected.
     """
     if not patches:
         out = mt._model.generate(
@@ -472,20 +488,39 @@ def _generate_baukit(
     for p in patches:
         modules_to_patches.setdefault(p.location[0], []).append(p)
 
+    # Use the first (shallowest) hooked layer as a step-boundary sentinel:
+    # it fires exactly once per forward pass, so we increment the decode-step
+    # counter only when it fires on a decode step (is_first_pass=False).
+    sorted_layers = sorted(modules_to_patches.keys())
+    sentinel_layer = sorted_layers[0]
+    decode_step = [0]  # mutable so the closure can write to it
+
     def hook(output, layer):
+        nonlocal decode_step
         is_tuple = isinstance(output, tuple)
         actual = output[0] if is_tuple else output
         if actual.dim() == 2:
             actual = actual.unsqueeze(0)
 
-        # Real tensor — shape is always concrete here.
         is_first_pass = actual.shape[1] > 1
-        # print(f"{layer=} | {is_first_pass=}")
+
+        # Increment decode-step counter once per decode pass (at the sentinel layer).
+        if not is_first_pass and layer == sentinel_layer:
+            decode_step[0] += 1
 
         for p in modules_to_patches.get(layer, []):
-            should_apply = p.on_pass == "all" or (
-                p.on_pass == "first" and is_first_pass
-            )
+            if p.on_pass == "first":
+                should_apply = is_first_pass
+            elif p.on_pass == "all":
+                if is_first_pass:
+                    should_apply = True
+                elif n_steer_tokens is not None:
+                    should_apply = decode_step[0] <= n_steer_tokens
+                else:
+                    should_apply = True
+            else:
+                should_apply = False
+
             if should_apply:
                 _apply_patch_to_state(actual, p.location[1], p.patch, p.strategy)
 
@@ -516,6 +551,7 @@ def generate_with_patch(
     patch_interface: Literal["nnsight", "baukit"] | callable = "nnsight",
     remove_prefix: bool = False,
     skip_special_tokens: bool = True,
+    n_steer_tokens: Optional[int] = None,
     **kwargs,
 ) -> list[str]:
     """Generate text with optional activation patches.
@@ -535,6 +571,10 @@ def generate_with_patch(
                           raises proxy/UnboundLocalError issues.
         remove_prefix:    Strip the input prompt tokens from the returned strings.
         skip_special_tokens: Passed to batch_decode.
+        n_steer_tokens:   If set, patches with ``on_pass="all"`` are applied for
+                          only the first ``n_steer_tokens`` decode steps; after
+                          that the model generates freely.  Requires
+                          ``patch_interface="baukit"``.
     """
     if isinstance(inputs, TokenizerOutput):
         if "offset_mapping" in inputs:
@@ -548,6 +588,12 @@ def generate_with_patch(
 
     if patches is not None and isinstance(patches, PatchSpec):
         patches = [patches]
+
+    if n_steer_tokens is not None and patch_interface != "baukit":
+        raise ValueError(
+            "n_steer_tokens requires patch_interface='baukit'. "
+            "nnsight does not support mutable step counters inside gen_trace.all()."
+        )
 
     if patches:
         # Validate on_pass="all" constraint: KV-cache makes fixed interior
@@ -575,7 +621,8 @@ def generate_with_patch(
             )
         elif patch_interface == "baukit":
             sequences = _generate_baukit(
-                mt, inputs, patches or [], max_new_tokens, do_sample, **kwargs
+                mt, inputs, patches or [], max_new_tokens, do_sample,
+                n_steer_tokens=n_steer_tokens, **kwargs
             )
         else:
             raise ValueError(

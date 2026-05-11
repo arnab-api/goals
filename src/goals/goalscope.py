@@ -366,6 +366,150 @@ def render_patchscope_html(
     )
 
 
+def _build_goalscope_prompt(mt) -> str:
+    """Build the GoalScope destination prompt ("What are you doing at this line?")."""
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant proficient in programming."},
+        {"role": "user", "content": "What are you doing at this line of the code. Keep your answer as brief as possible."},
+        {"role": "assistant", "content": ""},
+    ]
+    try:
+        return mt.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=False,
+            continue_final_message=True,
+            tokenize=False,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+    except TypeError:
+        return mt.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=False,
+            continue_final_message=True,
+            tokenize=False,
+        )
+
+
+def apply_goalscope(
+    prompt: str,
+    *,
+    mt,
+    selected_heads: list[tuple[int, int]],
+    steer_layer_range: tuple[int, int] = (35, 46),
+    batch_size: int = 16,
+    alpha: float = 0.2,
+    max_new_tokens: int = 64,
+    title: str = "GoalScope",
+    show: bool = True,
+) -> list[dict]:
+    """Run GoalScope on a single prompt.
+
+    Extracts goal signals from the ``<code>`` segment of ``prompt`` and injects
+    them into the GoalScope probe ("What are you doing at this line?") to produce
+    a verbalization per token position.
+
+    Args:
+        prompt: Full text (prompt + generation) to analyse.
+        mt: ModelandTokenizer.
+        selected_heads: ``(layer, head_idx)`` pairs from the trained head mask.
+        steer_layer_range: ``(start, end)`` — layers ``range(start, end)`` receive
+            the additive steering injection.
+        batch_size: Token positions per ``generate_with_patch`` call.
+        alpha: Steering strength multiplier.
+        max_new_tokens: Max tokens generated per position.
+        title: HTML visualization title.
+        show: Display the HTML visualization inline when ``True``.
+
+    Returns:
+        List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` — one
+        entry per token position inside the code segment.
+    """
+    from tqdm.auto import tqdm
+
+    from src.functional import PatchSpec, generate_with_patch
+    from src.goals.head_loc_attn import collect_head_steering_vecs
+    from src.tokens import TokenizerOutput, find_token_range, prepare_input
+
+    goalscope_prompt = _build_goalscope_prompt(mt)
+
+    # Tokenize with offsets
+    src_tokenized = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
+    src_offsets = src_tokenized.pop("offset_mapping")[0]
+    src_ids = src_tokenized["input_ids"][0].tolist()
+    text_tokens = [mt.tokenizer.decode([t]) for t in src_ids]
+
+    # Find <code> … </code> segment; fall back to full sequence
+    try:
+        code_start, _ = find_token_range(
+            string=prompt, substring="<code>", tokenizer=mt.tokenizer,
+            occurrence=1, offset_mapping=src_offsets,
+        )
+        if "</code>" in prompt:
+            _, code_end = find_token_range(
+                string=prompt, substring="</code>", tokenizer=mt.tokenizer,
+                occurrence=1, offset_mapping=src_offsets,
+            )
+        else:
+            code_end = len(src_ids)
+    except Exception:
+        code_start, code_end = 0, len(src_ids)
+
+    seg_positions = list(range(code_start, code_end))
+
+    # Steering vectors: (n_seg, n_embd)
+    steering_vecs = collect_head_steering_vecs(
+        mt=mt, src_tokenized=src_tokenized,
+        selected_heads=selected_heads, token_positions=seg_positions,
+    )
+
+    # Tokenize GoalScope dest once
+    dest_tok = prepare_input(prompts=goalscope_prompt, tokenizer=mt)
+    dest_ids = dest_tok["input_ids"]
+    dest_attn = dest_tok["attention_mask"]
+
+    layer_start, layer_end = steer_layer_range
+    steer_layers = list(range(layer_start, layer_end))
+    n_seg = len(seg_positions)
+    results: list[dict] = []
+
+    for chunk_start in tqdm(range(0, n_seg, batch_size), desc="GoalScope"):
+        chunk_end = min(chunk_start + batch_size, n_seg)
+        B = chunk_end - chunk_start
+
+        sv_batch = alpha * steering_vecs[chunk_start:chunk_end]  # (B, n_embd)
+
+        tiled = TokenizerOutput(data=dict(
+            input_ids=dest_ids.expand(B, -1).clone(),
+            attention_mask=dest_attn.expand(B, -1).clone(),
+        ))
+
+        patches = [
+            PatchSpec(
+                location=(mt.layer_name_format.format(li), -1),
+                patch=sv_batch, strategy="add", on_pass="all",
+            )
+            for li in steer_layers
+        ]
+
+        gens = generate_with_patch(
+            mt, tiled, max_new_tokens=max_new_tokens, patches=patches,
+            do_sample=False, patch_interface="baukit",
+            remove_prefix=True, skip_special_tokens=True,
+        )
+
+        for i in range(B):
+            results.append({
+                "pos": seg_positions[chunk_start + i],
+                "token": text_tokens[seg_positions[chunk_start + i]],
+                "patched_gen": gens[i],
+            })
+
+    if show:
+        show_patchscope(results, title=title)
+
+    return results
+
+
 def show_patchscope(
     results: list[dict],
     title: str = "PatchScope",
