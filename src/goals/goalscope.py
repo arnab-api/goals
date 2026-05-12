@@ -444,7 +444,7 @@ def apply_goalscope(
             string=prompt, substring="<code>", tokenizer=mt.tokenizer,
             occurrence=1, offset_mapping=src_offsets,
         )
-        if "</code>" in prompt:
+        if prompt.count("</code>") > 1:
             _, code_end = find_token_range(
                 string=prompt, substring="</code>", tokenizer=mt.tokenizer,
                 occurrence=1, offset_mapping=src_offsets,
