@@ -850,6 +850,7 @@ def forward_with_src_replacement(
     mask: HeadMask,
     layers: list[int],
     alpha: float = 1.0,
+    return_past_key_values: bool = False,
 ) -> torch.Tensor:
     """Run dest_inputs with mask-weighted per-head o_proj input replacement.
 
@@ -870,17 +871,23 @@ def forward_with_src_replacement(
 
     Args:
         mt: ModelandTokenizer (frozen).
-        dest_inputs: Tokenized destination prompt(s).
+        dest_inputs: Tokenized destination prompt(s).  May include
+            ``past_key_values`` and ``use_cache`` keys for KV-cache decoding.
         src_head_vals: Source o_proj inputs stacked across layers.
             Shape ``(batch, n_layers_tested, n_embd)`` for batch, or
             ``(n_layers_tested, n_embd)`` for a single instance.
         mask: HeadMask with learnable values (requires_grad=True).
         layers: Layer indices matching src_head_vals axis -2.
+        return_past_key_values: If True, force ``use_cache=True`` and return
+            ``(logits, past_key_values)`` so callers can thread the cache into
+            the next call.  Patched K/V written into the cache during this
+            forward pass will persist there for subsequent decode steps.
 
     Returns:
         ``(vocab_size,)`` float32 logits for 2D input (single instance), or
         ``(batch, vocab_size)`` float32 logits for 3D input (batch).
         Differentiable w.r.t. mask.values.
+        If ``return_past_key_values=True``, returns ``(logits, past_key_values)``.
     """
     if src_head_vals.dim() == 2:
         src_head_vals = src_head_vals.unsqueeze(0)  # (1, L, n_embd)
@@ -931,13 +938,19 @@ def forward_with_src_replacement(
 
             handles.append(o_proj.register_forward_pre_hook(make_hook(li)))
 
-        output = mt._model(**dest_inputs)
+        call_kwargs = dict(dest_inputs)
+        if return_past_key_values:
+            call_kwargs.setdefault("use_cache", True)
+        output = mt._model(**call_kwargs)
     finally:
         for h in handles:
             h.remove()
 
     logits = output.logits[:, -1, :].float()  # (batch, vocab)
-    return logits[0] if squeeze_output else logits
+    out_logits = logits[0] if squeeze_output else logits
+    if return_past_key_values:
+        return out_logits, output.past_key_values
+    return out_logits
 
 
 # ---------------------------------------------------------------------------

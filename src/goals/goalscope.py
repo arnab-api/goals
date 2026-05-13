@@ -71,8 +71,22 @@ def patched_generate(
     layers: list[int],
     max_new_tokens: int,
     stop_ids: Optional[set[int]] = None,
+    n_steer_tokens: Optional[int] = None,
 ) -> str:
-    """Greedy generation with head-replacement patching at every token position.
+    """Greedy generation with head-replacement patching — KV-cache aware.
+
+    Decoding pattern:
+        Step 0 (prefill): full forward over the prompt, patches the last prompt
+            position; returns ``past_key_values`` so the patched K/V (at layers
+            above the patched o_proj) are written into the cache.
+        Step >= 1 (decode): 1-token forward reusing the cache.  If still inside
+            the steer window, the new token's o_proj input is patched too and
+            its K/V get cached.  Past patched K/V remain in the cache.
+
+    ``n_steer_tokens`` controls how many decode steps apply a *fresh* patch.
+    After that, plain forward passes continue, but earlier patched K/V stay in
+    the cache and keep influencing subsequent attention.  ``None`` patches
+    every step (legacy behavior, now with proper persistence).
 
     Args:
         mt: ModelandTokenizer.
@@ -82,6 +96,8 @@ def patched_generate(
         layers: Layer indices matching src_head_vals axis 0.
         max_new_tokens: Maximum tokens to generate.
         stop_ids: Token ids that halt generation.
+        n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens``
+            steps.  ``None`` (default) patches every step.
 
     Returns:
         Decoded generated string.
@@ -90,12 +106,27 @@ def patched_generate(
     input_ids = dest_inputs["input_ids"].clone()
     attention_mask = dest_inputs["attention_mask"].clone()
     generated = []
+    past_key_values = None
     with torch.no_grad():
-        for _ in range(max_new_tokens):
-            inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
-            logits = forward_with_src_replacement(
-                mt, inputs, src_head_vals, mask, layers
-            )
+        for step in range(max_new_tokens):
+            cur_input_ids = input_ids if step == 0 else input_ids[:, -1:]
+            inputs = {
+                "input_ids": cur_input_ids,
+                "attention_mask": attention_mask,
+                "past_key_values": past_key_values,
+                "use_cache": True,
+            }
+
+            if n_steer_tokens is None or step < n_steer_tokens:
+                logits, past_key_values = forward_with_src_replacement(
+                    mt, inputs, src_head_vals, mask, layers,
+                    return_past_key_values=True,
+                )
+            else:
+                out = mt._model(**inputs)
+                logits = out.logits[0, -1, :].float()  # (vocab,)
+                past_key_values = out.past_key_values
+
             next_tok = int(logits.argmax())
             generated.append(next_tok)
             if next_tok in _stop:
@@ -123,12 +154,21 @@ def patched_generate_batch(
     layers: list[int],
     max_new_tokens: int,
     stop_ids: Optional[set[int]] = None,
+    n_steer_tokens: Optional[int] = None,
 ) -> list[str]:
-    """Batched greedy generation with head-replacement patching.
+    """Batched greedy generation with head-replacement patching — KV-cache aware.
 
     Runs B independent patched generations in parallel — one per source token
     position.  Each item i in the batch uses src_head_vals_batch[i] as its patch
     while sharing the same destination prompt.
+
+    Decoding pattern:
+        Step 0 (prefill): full forward over the prompt, patches the last prompt
+            position; returns ``past_key_values`` so the patched K/V (at layers
+            above the patched o_proj) are written into the cache.
+        Step >= 1 (decode): 1-token forward reusing the cache.  If still inside
+            the steer window, the new token's o_proj input is patched too and
+            its K/V get cached.  Past patched K/V remain in the cache.
 
     Args:
         dest_inputs: Tokenized destination prompt (batch=1); tiled internally to B.
@@ -137,6 +177,10 @@ def patched_generate_batch(
         layers: Layer indices matching src_head_vals_batch axis 1.
         max_new_tokens: Maximum tokens to generate per item.
         stop_ids: Token ids that halt generation for an item.
+        n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens``
+            decode steps.  After that, plain forward passes continue, but
+            earlier patched K/V stay in the cache and keep influencing
+            subsequent attention.  ``None`` (default) patches every step.
 
     Returns:
         list[str] of length B — decoded greedy continuations.
@@ -148,15 +192,28 @@ def patched_generate_batch(
 
     generated = [[] for _ in range(B)]
     finished = [False] * B
+    past_key_values = None
 
     with torch.no_grad():
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             if all(finished):
                 break
-            inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
-            logits = forward_with_src_replacement(
-                mt, inputs, src_head_vals_batch, mask, layers
-            )  # (B, vocab)
+            cur_input_ids = input_ids if step == 0 else input_ids[:, -1:]
+            inputs = {
+                "input_ids": cur_input_ids,
+                "attention_mask": attention_mask,
+                "past_key_values": past_key_values,
+                "use_cache": True,
+            }
+            if n_steer_tokens is None or step < n_steer_tokens:
+                logits, past_key_values = forward_with_src_replacement(
+                    mt, inputs, src_head_vals_batch, mask, layers,
+                    return_past_key_values=True,
+                )  # (B, vocab)
+            else:
+                out = mt._model(**inputs)
+                logits = out.logits[:, -1, :].float()  # (B, vocab)
+                past_key_values = out.past_key_values
             next_toks = logits.argmax(dim=-1)  # (B,)
 
             for i in range(B):
