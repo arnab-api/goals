@@ -36,7 +36,7 @@ import dataclasses
 import logging
 import random
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import baukit
 import torch
@@ -227,22 +227,26 @@ def collect_head_steering_vecs(
     For a linear o_proj, head h's contribution to the residual stream is:
         o_proj_input[:, pos, h*hd:(h+1)*hd] @ W_o[:, h*hd:(h+1)*hd].T
 
-    This sums those contributions across all selected heads.
+    This sums those contributions across all selected heads, batched over the
+    batch dimension of ``src_tokenized``.
 
     Args:
         mt: ModelandTokenizer.
-        src_tokenized: Tokenized source prompt (batch=1).
+        src_tokenized: Tokenized source prompt(s); supports batch_size >= 1.
         selected_heads: List of (layer, head_idx) pairs identifying which heads to include.
         token_positions: Token positions to extract (absolute indices into src_tokenized).
 
     Returns:
-        Float32 CPU tensor of shape ``(n_positions, n_embd)`` — one steering vector per position.
+        Float32 CPU tensor of shape ``(batch_size, n_positions, n_embd)`` — one
+        steering vector per (batch element, position).
     """
     from collections import defaultdict
 
     n_embd = mt.n_embd
     n_heads = mt.model.config.num_attention_heads
     head_dim = n_embd // n_heads
+
+    batch_size = src_tokenized["input_ids"].shape[0]
 
     # Group heads by layer to minimise forward passes
     heads_per_layer: dict[int, list[int]] = defaultdict(list)
@@ -254,24 +258,24 @@ def collect_head_steering_vecs(
     # Single forward pass — extract o_proj inputs at all requested positions
     o_proj_inputs = get_o_proj_inputs_batch(
         mt, src_tokenized, layers, token_positions=token_positions
-    )  # {layer: (1, n_positions, n_embd)}
+    )  # {layer: (batch_size, n_positions, n_embd)}
 
     n_pos = len(token_positions)
-    steering_vecs = torch.zeros(n_pos, n_embd, dtype=torch.float32)
+    steering_vecs = torch.zeros(batch_size, n_pos, n_embd, dtype=torch.float32)
 
     for layer, heads in heads_per_layer.items():
         attn_name = mt.attn_module_name_format.format(layer)
         o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
         W_o = o_proj.weight.detach().float().cpu()  # (n_embd, n_embd)
 
-        inp = o_proj_inputs[layer][0]  # (n_positions, n_embd) float32 CPU
+        inp = o_proj_inputs[layer]  # (batch_size, n_positions, n_embd) float32 CPU
 
         for h in heads:
-            h_inp = inp[:, h * head_dim : (h + 1) * head_dim]      # (n_pos, head_dim)
-            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]      # (n_embd, head_dim)
-            steering_vecs += h_inp @ W_o_h.t()                      # (n_pos, n_embd)
+            h_inp = inp[:, :, h * head_dim : (h + 1) * head_dim]   # (B, n_pos, head_dim)
+            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]       # (n_embd, head_dim)
+            steering_vecs += h_inp @ W_o_h.t()                       # (B, n_pos, n_embd)
 
-    return steering_vecs  # (n_positions, n_embd) float32 CPU
+    return steering_vecs  # (batch_size, n_positions, n_embd) float32 CPU
 
 
 @torch.no_grad()
@@ -850,15 +854,17 @@ def forward_with_src_replacement(
     mask: HeadMask,
     layers: list[int],
     alpha: float = 1.0,
+    patch_positions: Optional[list[int]] = None,
     return_past_key_values: bool = False,
 ) -> torch.Tensor:
     """Run dest_inputs with mask-weighted per-head o_proj input replacement.
 
-    For each layer l (index li in layers) and head h at the last token position:
-        o_proj_input[:, -1, h*head_dim:(h+1)*head_dim] =
+    For each layer l (index li in layers), each head h, and each token position p
+    in ``patch_positions``:
+        o_proj_input[:, p, h*head_dim:(h+1)*head_dim] =
             mask[li,h] * src_h + (1 - mask[li,h]) * cascade_h
 
-    where ``cascade_h`` is the live dest attention output for head h at that layer
+    where ``cascade_h`` is the live dest attention output for head h at position p
     (after cascading patches from all earlier layers), and ``src_h`` is the
     corresponding head output from the source (C++) forward pass.
 
@@ -868,6 +874,17 @@ def forward_with_src_replacement(
 
     Implemented via ``register_forward_pre_hook`` on o_proj — fully compatible with
     ``torch.autograd`` (unlike nnsight's thread-based SWAP which breaks the graph).
+    Multi-position patching uses the same cat-based splice as single-position so
+    the autograd graph stays lean: only the patched-position slices carry
+    gradients through ``mask_vals``; the untouched inter-position slices are
+    bare views.
+
+    Limitation — single source broadcast across positions:
+        ``src_head_vals`` is a single snapshot (per layer) that is *broadcast*
+        across every position in ``patch_positions``.  Per-position source
+        variation is not supported.  This matches the project's working
+        assumption of a position-invariant goal representation, but forecloses
+        experiments that would want a distinct src per dest position.
 
     Args:
         mt: ModelandTokenizer (frozen).
@@ -878,6 +895,10 @@ def forward_with_src_replacement(
             ``(n_layers_tested, n_embd)`` for a single instance.
         mask: HeadMask with learnable values (requires_grad=True).
         layers: Layer indices matching src_head_vals axis -2.
+        patch_positions: Token positions (in the current x sequence) to patch.
+            Negative indices are allowed (e.g., ``-1`` = last position).
+            Duplicates are removed.  ``None`` defaults to ``[-1]`` — backward
+            compatible with the single-last-position behavior.
         return_past_key_values: If True, force ``use_cache=True`` and return
             ``(logits, past_key_values)`` so callers can thread the cache into
             the next call.  Patched K/V written into the cache during this
@@ -895,11 +916,15 @@ def forward_with_src_replacement(
     else:
         squeeze_output = False
 
+    if patch_positions is None:
+        patch_positions = [-1]
+
     n_heads = mt.model.config.num_attention_heads
     n_embd = mt.n_embd
     head_dim = n_embd // n_heads
     mask_vals = mask.values  # (n_layers_tested, n_heads) requires_grad
     src_batch = src_head_vals  # (batch, L, n_embd) float32 CPU
+    pos_arg = list(patch_positions)
 
     handles = []
     try:
@@ -913,25 +938,45 @@ def forward_with_src_replacement(
                     dev = x.device
                     dtype = x.dtype
                     B_ = x.shape[0]
+                    seq_len = x.shape[1]
+
+                    # Normalize negatives, de-dup, sort
+                    norm = sorted({
+                        p if p >= 0 else seq_len + p for p in pos_arg
+                    })
+                    if norm and (norm[0] < 0 or norm[-1] >= seq_len):
+                        raise IndexError(
+                            f"patch_positions out of range for seq_len={seq_len}: "
+                            f"{pos_arg} -> {norm}"
+                        )
+                    if not norm:
+                        return None  # no patching, pass through unchanged
 
                     # Source vals for this layer — float32 for gradient precision
                     src = src_batch[:, li_].to(dev)  # (batch, n_embd) float32
                     src_3d = src.view(B_, n_heads, head_dim)
 
-                    # Cascade (live dest) at last token
-                    cas_3d = x[:, -1, :].float().view(B_, n_heads, head_dim)
-
-                    # Per-head interpolation; m has requires_grad through mask_vals
+                    # Per-head interpolation weight; requires_grad via mask_vals
                     m = mask_vals[li_].to(dev).view(1, n_heads, 1)
-                    new_last = (alpha * m * src_3d + (1 - m) * cas_3d).view(
-                        B_, n_embd
-                    )  # (B, n_embd)
 
-                    # Splice into sequence — torch.cat keeps gradient graph lean:
-                    # only the last-token slice is live in autograd, not the full seq tensor.
-                    new_seq = torch.cat(
-                        [x[:, :-1, :], new_last.to(dtype).unsqueeze(1)], dim=1
-                    )  # (batch, seq, n_embd)
+                    # Splice: alternating untouched slices + per-position patched chunks.
+                    # Each untouched slice is a bare view of x (no gradient).  Each
+                    # patched chunk carries grad through m.  torch.cat routes gradients
+                    # only to pieces that have them — graph stays lean.
+                    pieces = []
+                    prev = 0
+                    for p in norm:
+                        if p > prev:
+                            pieces.append(x[:, prev:p, :])
+                        cas_3d = x[:, p, :].float().view(B_, n_heads, head_dim)
+                        new_p = (alpha * m * src_3d + (1 - m) * cas_3d).view(
+                            B_, n_embd
+                        )  # (B, n_embd)
+                        pieces.append(new_p.to(dtype).unsqueeze(1))
+                        prev = p + 1
+                    if prev < seq_len:
+                        pieces.append(x[:, prev:, :])
+                    new_seq = torch.cat(pieces, dim=1)
                     return (new_seq,)
 
                 return pre_hook
