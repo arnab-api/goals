@@ -3,12 +3,12 @@
 **Status**: living document; iterate
 **Date**: 2026-05-20
 **Companion to**:
-- [`operationalizing_proactiveness.md`](operationalizing_proactiveness.md) — interdisciplinary lit review on initiative
-- [`readings_causal_behavioral_goal_analysis.md`](readings_causal_behavioral_goal_analysis.md) — methods survey across fields
-- [`code_goal_target_concepts.md`](code_goal_target_concepts.md) — concrete fork taxonomy (A1–C2)
-- [`goal_completion_signal_brainstorm.md`](goal_completion_signal_brainstorm.md) — the `g`+`c` two-signal hypothesis
-- [`readings_goals_of_systems.md`](readings_goals_of_systems.md) — broader reading list
-- [`multi_predicate_setup_design.md`](multi_predicate_setup_design.md) — instrumental-goal probe design
+- [`1.2_operationalizing_proactiveness.md`](1.2_operationalizing_proactiveness.md) — interdisciplinary lit review on initiative
+- [`lit_review/readings_causal_behavioral_goal_analysis.md`](lit_review/readings_causal_behavioral_goal_analysis.md) — methods survey across fields
+- [`1.1_code_goal_target_concepts.md`](1.1_code_goal_target_concepts.md) — concrete fork taxonomy (A1–C2)
+- [`2_goal_completion_signal_brainstorm.md`](2_goal_completion_signal_brainstorm.md) — the `g`+`c` two-signal hypothesis
+- [`lit_review/readings_goals_of_systems.md`](lit_review/readings_goals_of_systems.md) — broader reading list
+- [`design/multi_predicate_setup_design.md`](design/multi_predicate_setup_design.md) — instrumental-goal probe design
 
 ---
 
@@ -47,7 +47,7 @@ The document is meant to be revised. Each operationalization is a candidate, not
 | **Commitment** | Bratman; Schurger et al. (2021) | A diffuse or punctate transition from "deciding" to "decided" | Aligns with the pre-fork probing setup. Maps well to the stochastic-accumulator reframe. |
 | **Disposition / preference direction** | Soligo et al. (2025) | A linear direction in activation space that biases outputs | Most empirically humble; doesn't claim a mental state, just a measurable direction. |
 | **Set-point / reference** | Cybernetics (Wiener 1948; Powers 1973) | Internal target state the system tries to track | Useful for cybernetic framings but assumes a closed control loop the LM doesn't obviously have. |
-| **Intent block / sub-goal** | Internal (`goalscope.md`) | A contiguous code region with a single intended purpose | Already in our vocabulary; useful for the code-region-level analysis. |
+| **Intent block / sub-goal** | Internal (`design/goalscope.md`) | A contiguous code region with a single intended purpose | Already in our vocabulary; useful for the code-region-level analysis. |
 
 ### 1.3 Recommendation
 
@@ -55,7 +55,7 @@ The document is meant to be revised. Each operationalization is a candidate, not
 
 - **"Strategy"** — for our fork concepts (A1–C2). It's specific, neutral, and doesn't claim mental-state content.
 - **"Pre-fork commitment" / "commitment direction"** — for the hidden-state representation we want to find. Foregrounds the *pre-decisional* nature and matches the Bratman / Schurger framings.
-- **"Instrumental goal"** — only when we mean the abstract sub-task being pursued (e.g. "the model is about to check the timeout condition"), kept distinct from its implementation. This is what `multi_predicate_setup_design.md` already does.
+- **"Instrumental goal"** — only when we mean the abstract sub-task being pursued (e.g. "the model is about to check the timeout condition"), kept distinct from its implementation. This is what `design/multi_predicate_setup_design.md` already does.
 - **"Goal" without qualification** — avoid in technical sections; use only in framing / motivation paragraphs where rhetorical force matters.
 
 The three attributes (proactiveness, persistence, plasticity) become attributes of a **commitment direction** rather than a "goal." This terminological tightening sharpens the empirical claims without sacrificing any of the philosophical motivation.
@@ -500,7 +500,7 @@ These are the unresolved bits worth tracking as the project evolves.
 
 3. **Plasticity vs cross-language transfer — is C++ → Python too hard?** A direction that fires across both Python and C++ for "use recursion" is a remarkably abstract concept. Failure to transfer is not necessarily evidence against goal-directedness; it may be evidence against *that level of abstraction*. We need an intermediate test (cross-Python-style transfer) before drawing conclusions from cross-language tests.
 
-4. **Are persistence and the `c` signal the same thing?** In `goal_completion_signal_brainstorm.md`, `c` tracks goal-completion progress. Persistence is the durability of the `g` direction. Mechanically these may be the same signal viewed two ways — `c` falling to zero is `g` losing persistence. Worth checking empirically.
+4. **Are persistence and the `c` signal the same thing?** In `2_goal_completion_signal_brainstorm.md`, `c` tracks goal-completion progress. Persistence is the durability of the `g` direction. Mechanically these may be the same signal viewed two ways — `c` falling to zero is `g` losing persistence. Worth checking empirically.
 
 5. **Self-initiated rate baseline.** What is the right null distribution for "the model would have chosen this strategy by chance"? Training-distribution token frequencies are one option but conflate "natural preference" with "task-distribution bias." Multi-paraphrase averaging is better but more expensive.
 
@@ -516,13 +516,13 @@ These are the unresolved bits worth tracking as the project evolves.
 
 In order of expected information value:
 
-1. **Implement the plasticity-first triage** (§ 6.3) as the standard protocol for any new concept added to `code_goal_target_concepts.md`. This will rapidly cull problem-specific false positives.
+1. **Implement the plasticity-first triage** (§ 6.3) as the standard protocol for any new concept added to `1.1_code_goal_target_concepts.md`. This will rapidly cull problem-specific false positives.
 
 2. **Add the anticipatory profile** (§ 2.2, R-2) to our existing notebook outputs. Replace single-position probe-accuracy reports with the temporal profile across pre-fork tokens.
 
 3. **Add the compliance-gap test** (§ 2.1, B-1) as a parallel behavioral measurement on the iterative-vs-recursive dataset we just built. Uses no new infrastructure — just two prompts per sample.
 
-4. **Define the `c`-vs-persistence relation** (§ 7, item 4) experimentally. The empirical question is whether the projection $\langle h_t, v \rangle$ across the implementation window matches what `goal_completion_signal_brainstorm.md` predicts the `c` signal looks like.
+4. **Define the `c`-vs-persistence relation** (§ 7, item 4) experimentally. The empirical question is whether the projection $\langle h_t, v \rangle$ across the implementation window matches what `2_goal_completion_signal_brainstorm.md` predicts the `c` signal looks like.
 
 5. **Run direction-alignment across contexts** (§ 4.2, R-1) as a first plasticity probe. Cheap, immediately informative.
 
