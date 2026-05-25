@@ -23,7 +23,9 @@ from src.utils.env_utils import DEFAULT_DATA_DIR
 logger = logging.getLogger(__name__)
 
 Language = Literal["python", "cpp", "java", "haskell", "rust", "prolog"]
-StrategyDirective = Literal["recursive", "iterative"]
+# Free-form string — each concept registers its own valid strategy keys in
+# _STRATEGY_DIRECTIVES; full_instruction validates against that table at runtime.
+StrategyDirective = str
 
 _NO_COMMENT_STR = (
     "Write your code without any comments or explanations, just the implementation."
@@ -41,6 +43,32 @@ _STRATEGY_DIRECTIVES: dict[str, dict[str, str]] = {
     "iterative_vs_recursive": {
         "recursive": "Implement the function recursively.",
         "iterative": "Implement the function iteratively using a loop. **Do not use recursion**.",
+    },
+    "monolithic_vs_modular": {
+        "monolithic": (
+            "Implement everything inside a single function. **Do not introduce "
+            "helper functions, classes, or split the logic across multiple "
+            "scopes.**"
+        ),
+        "modular": (
+            "Decompose the solution into small, well-named helper functions or "
+            "classes. Each helper should do one thing."
+        ),
+    },
+    "design_pattern": {
+        "singleton":  "Use the **Singleton** design pattern.",
+        "observer":   "Use the **Observer** design pattern.",
+        "strategy":   "Use the **Strategy** design pattern.",
+        "factory":    "Use the **Factory** design pattern.",
+        "decorator":  "Use the **Decorator** design pattern.",
+        "visitor":    "Use the **Visitor** design pattern.",
+        "iterator":   "Use the **Iterator** design pattern.",
+        "if_else":    "Use a flat if/else dispatch — **no classes, no polymorphism**.",
+        "callback_list": (
+            "Use a plain callback list (a dict or list of functions) — **do not "
+            "introduce an Observer/Subscriber class hierarchy**."
+        ),
+        "subclassing": "Add the new behavior by **subclassing** the existing class.",
     },
 }
 
@@ -117,33 +145,47 @@ class GoalConceptSample(DataClassJsonMixin):
 
     Fields
     ------
-    function_name : canonical snake_case identifier, e.g. "fibonacci"
+    function_name : canonical snake_case identifier, e.g. "fibonacci". May be
+                    "" for design-pattern / probing-only samples where there is
+                    no single target function and the code will never be
+                    compiled.
     concept       : concept tag, e.g. "iterative_vs_recursive"
     instruction   : language-neutral task description shown to the model
     unit_tests    : [(input, expected), ...]; input may be a scalar or tuple for
-                    multi-arg functions (e.g. gcd: input = (12, 4))
+                    multi-arg functions (e.g. gcd: input = (12, 4)).  Empty list
+                    for probing-only samples (no compilation / execution).
     pivot_note    : human-readable note about what the fork looks like
     stubs         : {language: code stub WITHOUT docstring}; stub must end with
                     the indentation cursor ready for the model to continue (e.g.
-                    "def foo(n):\\n    " or "int foo(int n) {\\n    ")
+                    "def foo(n):\\n    " or "int foo(int n) {\\n    ").  May be
+                    ``{}`` when ``prompt_stub`` is used instead.
+    prompt_stub   : a single language-agnostic free-form stub used when
+                    ``stubs`` is empty.  Typical values: ``""`` (empty — model
+                    starts fresh after the instruction), ``"class "``,
+                    ``"def "``, ``"# "``.  Used for probing samples where
+                    forcing a specific function signature would itself bias the
+                    pattern choice.
     docstring     : language-neutral one-line description inserted by
-                    get_code_stub when add_docstring=True
+                    get_code_stub when add_docstring=True (only when
+                    per-language ``stubs`` are present — ``prompt_stub`` is
+                    emitted verbatim).
     without_comments : mirrors IncompleteCodeSample; when True, full_instruction
                     appends a no-comment directive and get_code_stub ignores
                     add_docstring
     preferred_strategy : optional categorical preference (e.g. "recursive" /
-                    "iterative") to advertise in the instruction.  Looked up in
-                    _STRATEGY_DIRECTIVES[concept][preferred_strategy].  When
-                    ``None`` (default), the prompt stays underspecified — the
-                    setting used for proactive-choice probing.
+                    "iterative" / "singleton") to advertise in the instruction.
+                    Looked up in _STRATEGY_DIRECTIVES[concept][preferred_strategy].
+                    When ``None`` (default), the prompt stays underspecified —
+                    the setting used for proactive-choice probing.
     """
 
-    function_name: str
-    concept: str
-    instruction: str
-    unit_tests: list[tuple[Any, Any]]
-    pivot_note: str
-    stubs: dict[str, str]
+    function_name: str = ""
+    concept: str = ""
+    instruction: str = ""
+    unit_tests: list[tuple[Any, Any]] = field(default_factory=list)
+    pivot_note: str = ""
+    stubs: dict[str, str] = field(default_factory=dict)
+    prompt_stub: Optional[str] = None
     docstring: str = ""
     without_comments: bool = False
     preferred_strategy: Optional[StrategyDirective] = None
@@ -199,34 +241,53 @@ class GoalConceptSample(DataClassJsonMixin):
     def get_code_stub(self, lang: str, add_docstring: bool = True) -> str:
         """Return the code stub for *lang*, optionally with the docstring inserted.
 
-        When without_comments=True the docstring is never inserted regardless of
-        add_docstring.  Raises KeyError if no stub exists for the language.
+        Resolution order:
+          1. ``self.stubs[lang]`` if present (with docstring inserted per lang
+             when ``add_docstring`` and not ``without_comments``).
+          2. ``self.prompt_stub`` (returned verbatim, no docstring insertion —
+             prompt_stub is intentionally language-agnostic and free-form).
+
+        Raises KeyError if neither route yields a stub.
         """
-        if lang not in self.stubs:
-            available = list(self.stubs)
-            raise KeyError(
-                f"No stub for language {lang!r}. Available: {available}"
-            )
-        stub = self.stubs[lang]
-        if add_docstring and not self.without_comments and self.docstring:
-            fmt = _DOCSTRING_FORMATTERS.get(lang)
-            if fmt is not None:
-                stub = fmt(self.docstring, stub)
-        return stub.strip()
+        if lang in self.stubs:
+            stub = self.stubs[lang]
+            if add_docstring and not self.without_comments and self.docstring:
+                fmt = _DOCSTRING_FORMATTERS.get(lang)
+                if fmt is not None:
+                    stub = fmt(self.docstring, stub)
+            return stub.strip()
+
+        if self.prompt_stub is not None:
+            # Note: returned verbatim; no .strip() so callers can request
+            # prompt_stub="" or prompt_stub="class " and get exactly that.
+            return self.prompt_stub
+
+        available = list(self.stubs)
+        raise KeyError(
+            f"No stub for language {lang!r} and no prompt_stub set. "
+            f"Available stubs: {available}"
+        )
 
     def get_function_name(self, lang: str) -> str:
         """Return the idiomatic function name for *lang*.
 
         Python / Rust / Prolog use snake_case (the canonical function_name).
         C++ / Java / Haskell use camelCase derived from function_name.
+        Returns "" if function_name itself is empty (probing-only samples).
         """
+        if not self.function_name:
+            return ""
         if lang in _CAMEL_CASE_LANGS:
             return _to_camel_case(self.function_name)
         return self.function_name
 
     @property
     def languages(self) -> list[str]:
-        """Languages for which a stub is available."""
+        """Languages for which a per-language stub is available.
+
+        Empty when only ``prompt_stub`` is set — ``get_code_stub(lang)`` will
+        still succeed for any *lang* via the prompt_stub fallback.
+        """
         return list(self.stubs)
 
 

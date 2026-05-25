@@ -221,6 +221,7 @@ def collect_head_steering_vecs(
     src_tokenized: TokenizerOutput,
     selected_heads: list[tuple[int, int]],
     token_positions: list[int],
+    return_individual_heads: bool = False
 ) -> torch.Tensor:
     """Compute the summed residual-stream contribution of selected heads at each token position.
 
@@ -263,6 +264,9 @@ def collect_head_steering_vecs(
     n_pos = len(token_positions)
     steering_vecs = torch.zeros(batch_size, n_pos, n_embd, dtype=torch.float32)
 
+    if return_individual_heads:
+        individual_head_outputs = {}
+
     for layer, heads in heads_per_layer.items():
         attn_name = mt.attn_module_name_format.format(layer)
         o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
@@ -271,10 +275,15 @@ def collect_head_steering_vecs(
         inp = o_proj_inputs[layer]  # (batch_size, n_positions, n_embd) float32 CPU
 
         for h in heads:
-            h_inp = inp[:, :, h * head_dim : (h + 1) * head_dim]   # (B, n_pos, head_dim)
+            h_inp = inp[:, :, h * head_dim : (h + 1) * head_dim]    # (B, n_pos, head_dim)
             W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]       # (n_embd, head_dim)
-            steering_vecs += h_inp @ W_o_h.t()                       # (B, n_pos, n_embd)
+            head_outputs = h_inp @ W_o_h.t()                        # (B, n_pos, n_embd)
+            steering_vecs += head_outputs                       
+            if return_individual_heads:
+                individual_head_outputs[(layer, h)] = head_outputs
 
+    if return_individual_heads:
+        return steering_vecs, individual_head_outputs
     return steering_vecs  # (batch_size, n_positions, n_embd) float32 CPU
 
 
@@ -850,7 +859,7 @@ def forward_with_masked_patch_obsolete(
 def forward_with_src_replacement(
     mt,
     dest_inputs: Any,
-    src_head_vals: torch.Tensor,
+    src_head_inps: torch.Tensor,
     mask: HeadMask,
     layers: list[int],
     alpha: float = 1.0,
@@ -890,11 +899,11 @@ def forward_with_src_replacement(
         mt: ModelandTokenizer (frozen).
         dest_inputs: Tokenized destination prompt(s).  May include
             ``past_key_values`` and ``use_cache`` keys for KV-cache decoding.
-        src_head_vals: Source o_proj inputs stacked across layers.
+        src_head_inps: Source o_proj inputs stacked across layers.
             Shape ``(batch, n_layers_tested, n_embd)`` for batch, or
             ``(n_layers_tested, n_embd)`` for a single instance.
         mask: HeadMask with learnable values (requires_grad=True).
-        layers: Layer indices matching src_head_vals axis -2.
+        layers: Layer indices matching src_head_inps axis -2.
         patch_positions: Token positions (in the current x sequence) to patch.
             Negative indices are allowed (e.g., ``-1`` = last position).
             Duplicates are removed.  ``None`` defaults to ``[-1]`` — backward
@@ -910,8 +919,8 @@ def forward_with_src_replacement(
         Differentiable w.r.t. mask.values.
         If ``return_past_key_values=True``, returns ``(logits, past_key_values)``.
     """
-    if src_head_vals.dim() == 2:
-        src_head_vals = src_head_vals.unsqueeze(0)  # (1, L, n_embd)
+    if src_head_inps.dim() == 2:
+        src_head_inps = src_head_inps.unsqueeze(0)  # (1, L, n_embd)
         squeeze_output = True
     else:
         squeeze_output = False
@@ -923,7 +932,7 @@ def forward_with_src_replacement(
     n_embd = mt.n_embd
     head_dim = n_embd // n_heads
     mask_vals = mask.values  # (n_layers_tested, n_heads) requires_grad
-    src_batch = src_head_vals  # (batch, L, n_embd) float32 CPU
+    src_batch = src_head_inps  # (batch, L, n_embd) float32 CPU
     pos_arg = list(patch_positions)
 
     handles = []

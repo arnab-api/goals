@@ -86,7 +86,7 @@ def _normalize_input_positions(
 def headpatched_generate(
     mt,
     dest_inputs: dict,
-    src_head_vals: torch.Tensor,
+    src_o_proj_inps: torch.Tensor,
     mask,
     layers: list[int],
     max_new_tokens: int,
@@ -113,9 +113,9 @@ def headpatched_generate(
     Args:
         mt: ModelandTokenizer.
         dest_inputs: Tokenized destination prompt dict (input_ids, attention_mask).
-        src_head_vals: (n_layers, n_embd) source o_proj inputs stacked across layers.
+        src_o_proj_inps: (n_layers, n_embd) source o_proj inputs stacked across layers.
         mask: HeadMask controlling per-head interpolation weights.
-        layers: Layer indices matching src_head_vals axis 0.
+        layers: Layer indices matching src_o_proj_inps axis 0.
         max_new_tokens: Maximum tokens to generate.
         stop_ids: Token ids that halt generation.
         n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens``
@@ -127,7 +127,7 @@ def headpatched_generate(
             behavior: patch only the last prompt token).  All positions are
             validated to lie in ``[0, L_prompt)`` after normalization.
 
-            Note: the same ``src_head_vals`` snapshot is broadcast across every
+            Note: the same ``src_o_proj_inps`` snapshot is broadcast across every
             position in this list; per-position source variation is not
             supported.  See ``forward_with_src_replacement`` for details.
 
@@ -157,7 +157,7 @@ def headpatched_generate(
             if n_steer_tokens is None or step < n_steer_tokens:
                 positions_this_step = prefill_positions if step == 0 else [-1]
                 logits, past_key_values = forward_with_src_replacement(
-                    mt, inputs, src_head_vals, mask, layers,
+                    mt, inputs, src_o_proj_inps, mask, layers,
                     alpha=alpha,
                     patch_positions=positions_this_step,
                     return_past_key_values=True,
@@ -189,7 +189,7 @@ def headpatched_generate(
 def headpatched_generate_batch(
     mt,
     dest_inputs: dict,
-    src_head_vals_batch: torch.Tensor,
+    src_o_proj_inps_batch: torch.Tensor,
     mask,
     layers: list[int],
     max_new_tokens: int,
@@ -201,7 +201,7 @@ def headpatched_generate_batch(
     """Batched greedy generation with head-replacement patching — KV-cache aware.
 
     Runs B independent patched generations in parallel — one per source token
-    position.  Each item i in the batch uses src_head_vals_batch[i] as its patch
+    position.  Each item i in the batch uses src_o_proj_inps_batch[i] as its patch
     while sharing the same destination prompt.
 
     Decoding pattern:
@@ -215,9 +215,9 @@ def headpatched_generate_batch(
 
     Args:
         dest_inputs: Tokenized destination prompt (batch=1); tiled internally to B.
-        src_head_vals_batch: (B, n_layers, n_embd) — one row per source position.
+        src_o_proj_inps_batch: (B, n_layers, n_embd) — one row per source position.
         mask: HeadMask with per-head interpolation weights.
-        layers: Layer indices matching src_head_vals_batch axis 1.
+        layers: Layer indices matching src_o_proj_inps_batch axis 1.
         max_new_tokens: Maximum tokens to generate per item.
         stop_ids: Token ids that halt generation for an item.
         n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens``
@@ -231,7 +231,7 @@ def headpatched_generate_batch(
             behavior: patch only the last prompt token).  All positions are
             validated to lie in ``[0, L_prompt)`` after normalization.
 
-            Note: the same ``src_head_vals_batch[i]`` snapshot is broadcast
+            Note: the same ``src_o_proj_inps_batch[i]`` snapshot is broadcast
             across every position in this list for item ``i``; per-position
             source variation is not supported.
 
@@ -241,7 +241,7 @@ def headpatched_generate_batch(
     _stop = stop_ids or set()
     if len(_stop) == 0:
         _stop = {mt.tokenizer.eos_token_id}
-    B = src_head_vals_batch.shape[0]
+    B = src_o_proj_inps_batch.shape[0]
     input_ids = dest_inputs["input_ids"].expand(B, -1).clone()
     attention_mask = dest_inputs["attention_mask"].expand(B, -1).clone()
     L_prompt = input_ids.shape[1]
@@ -265,7 +265,7 @@ def headpatched_generate_batch(
             if n_steer_tokens is None or step < n_steer_tokens:
                 positions_this_step = prefill_positions if step == 0 else [-1]
                 logits, past_key_values = forward_with_src_replacement(
-                    mt, inputs, src_head_vals_batch, mask, layers,
+                    mt, inputs, src_o_proj_inps_batch, mask, layers,
                     alpha=alpha,
                     patch_positions=positions_this_step,
                     return_past_key_values=True,
@@ -681,7 +681,7 @@ def apply_goalscope(
             src_chunk = src_head_vals_all[chunk_start:chunk_end]  # (B, n_layers, n_embd)
             gens = headpatched_generate_batch(
                 mt=mt, dest_inputs=tiled,
-                src_head_vals_batch=src_chunk,
+                src_o_proj_inps_batch=src_chunk,
                 mask=mask_module, layers=layers_replace,
                 max_new_tokens=max_new_tokens,
                 n_steer_tokens=n_steer,
