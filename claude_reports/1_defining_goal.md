@@ -213,11 +213,6 @@ This is the **detour task** of comparative cognition adapted: an adversarial mid
 
 Add Gaussian noise to $h_{t, \ell}$ at a single mid-generation position. Measure $P(S_A \mid \text{noised run})$ vs $P(S_A \mid \text{clean run})$. The smaller the gap, the higher the persistence. Plot vs noise magnitude for a stability curve.
 
-#### B-3. Persistence-under-training-pressure (Hubinger sleeper-agent analog)
-
-Fine-tune the model on examples that violate the strategy choice (e.g., always-iterative fine-tuning examples). Measure how many fine-tuning steps are required for the direction to be ablated. Slow ablation = high persistence-through-training.
-
-This is the strongest persistence test but the most expensive. Use as a final-figure ambition, not an iteration tool.
 
 ### 3.2 Representational level
 
