@@ -92,48 +92,41 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 @torch.inference_mode()
 def get_attention_matrices(
-    input: str | TokenizerOutput,
+    input: str | list[str] | TokenizerOutput,
     mt: ModelandTokenizer,
     value_weighted: bool = False,
     patches: Optional[PatchSpec | list[PatchSpec]] = None,
     patch_interface: callable = patch_with_baukit,
-) -> torch.tensor:
+) -> "AttentionInformation | list[AttentionInformation]":
     """
     Parameters:
-        prompt: str, input prompt
+        input: str, list[str], or TokenizerOutput.
+            - str            => single prompt; returns one AttentionInformation
+            - list[str]      => batched prompts; returns list[AttentionInformation]
+            - TokenizerOutput=> already tokenized (batch dim required); returns list (or single
+              AttentionInformation if batch size is 1).
         mt: ModelandTokenizer, model and tokenizer
         value_weighted: bool.
-            - False => will reuturn attention masks for each key-value pair (after softmax). This is the attention mask actually produced inside the model
-            - True => will consider the value matrices to give a sense of the actual contribution of source tokens to the target token residual.
+            - False => returns attention masks after softmax (the attention pattern produced inside the model)
+            - True  => weights attention by ||v_k|| to reflect the actual contribution of source tokens
     Returns:
-        attention matrices: torch.tensor of shape (layers, heads, tokens, tokens)
+        AttentionInformation if a single str was passed, else list[AttentionInformation].
+        Each AttentionInformation has attention_matrices of shape (layers, heads, tokens, tokens).
     """
-    # ! doesn't support batching yet. ignore for now
-    # TODO (arnab)
+    single_input = False
     if isinstance(input, str):
+        input = prepare_input(prompts=input, tokenizer=mt)
+        single_input = True
+    elif isinstance(input, list):
         input = prepare_input(prompts=input, tokenizer=mt)
     else:
         assert isinstance(input, TokenizerOutput), (
-            "input must be either a string or a TokenizerOutput object"
+            "input must be a str, list[str], or TokenizerOutput object"
         )
+        single_input = input.input_ids.shape[0] == 1
 
     if patches is not None and isinstance(patches, PatchSpec):
         patches = [patches]
-
-    def is_an_attn_head(module_name) -> bool | tuple[int, int]:
-        attn_id = mt.attn_module_name_format.split(".")[-1]
-        if attn_id not in module_name:
-            return False
-        if module_name.endswith(attn_id):
-            return False
-
-        head_id = module_name.split(".")[-1]
-        try:
-            head_id = int(head_id)
-        except ValueError:
-            return False
-        layer_id = ".".join(module_name.split(".")[:-1])
-        return layer_id, int(head_id)
 
     output = patch_interface(
         mt=mt,
@@ -141,13 +134,15 @@ def get_attention_matrices(
         patches=patches if patches is not None else [],
         model_kwargs=dict(output_attentions=True, use_cache=True),
     )
-    # print(output.__dict__.keys())
-    logits = output.logits[0][-1]
 
-    # print(output.keys())
-    # print(logits.shape)
+    # logits: (batch, seq, vocab) -> last-position logits per sample
+    logits = output.logits[:, -1, :]  # (batch, vocab)
+
+    # attentions: list of (batch, heads, seq, seq) per layer
     output.attentions = [attn.cuda() for attn in output.attentions]
-    attentions = torch.vstack(output.attentions)  # (layers, heads, tokens, tokens)
+    # stack along new layer axis -> (layers, batch, heads, seq, seq) -> (batch, layers, heads, seq, seq)
+    attentions = torch.stack(output.attentions, dim=0).permute(1, 0, 2, 3, 4).contiguous()
+
     if value_weighted:
         pkv = output.past_key_values
         # transformers ≥ 4.36 returns a Cache object; the internal structure
@@ -161,18 +156,31 @@ def get_attention_matrices(
             value_list = [v.cuda() for v in pkv.value_cache]
         else:
             value_list = [pkv[i][1].cuda() for i in range(mt.config.num_hidden_layers)]
-        values = torch.vstack(value_list)  # (layers, kv_heads, tokens, head_dim)
+        # each layer value: (batch, kv_heads, seq, head_dim)
+        values = torch.stack(value_list, dim=0).permute(1, 0, 2, 3, 4).contiguous()
+        # values: (batch, layers, kv_heads, seq, head_dim)
         n_rep = mt.config.num_attention_heads // mt.config.num_key_value_heads
-        values = repeat_kv(values, n_rep=n_rep)
-        # logger.debug(f"{attentions.shape=} | {values.shape=}")
-        attentions = torch.einsum("abcd,abd->abcd", attentions, values.norm(dim=-1))
-    return AttentionInformation(
-        tokenized_prompt=[
-            _safe_token(mt.tokenizer.decode(tok)) for tok in input.input_ids[0]
-        ],
-        attention_matrices=attentions.detach().cpu().to(torch.float32).numpy(),
-        logits=logits.detach().cpu(),
-    )
+        b, L, kvh, s, d = values.shape
+        values = repeat_kv(values.reshape(b * L, kvh, s, d), n_rep=n_rep)
+        values = values.reshape(b, L, mt.config.num_attention_heads, s, d)
+        # attentions: (b, L, H, q, s); value norms: (b, L, H, s) -> broadcast over q
+        attentions = torch.einsum("blhqs,blhs->blhqs", attentions, values.norm(dim=-1))
+
+    attentions_np = attentions.detach().cpu().to(torch.float32).numpy()
+    logits_cpu = logits.detach().cpu()
+    batch_size = input.input_ids.shape[0]
+
+    infos = [
+        AttentionInformation(
+            tokenized_prompt=[
+                _safe_token(mt.tokenizer.decode(tok)) for tok in input.input_ids[i]
+            ],
+            attention_matrices=attentions_np[i],
+            logits=logits_cpu[i],
+        )
+        for i in range(batch_size)
+    ]
+    return infos[0] if single_input else infos
 
 
 def visualize_attn_matrix(
@@ -268,3 +276,330 @@ def visualize_average_attn_matrix(
             colored_tokens(tokens=tokens, values=avg_attn_module_matrix[start_from:])
         )
         print("-" * 80)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Interactive attention visualization (standalone HTML, no JS deps).
+# ──────────────────────────────────────────────────────────────────────────────
+
+_GLYPH_NL = "↵"
+_GLYPH_TAB = "⇥"
+_GLYPH_DOT = "·"
+
+
+def _display_tok(tok: str) -> str:
+    """Un-escape _safe_token HTML subs and replace whitespace with visible glyphs."""
+    tok = tok.replace("＜", "<").replace("＞", ">")
+    tok = tok.replace("\n", _GLYPH_NL).replace("\r", _GLYPH_NL)
+    tok = tok.replace("\t", _GLYPH_TAB)
+    if tok.strip() == "" and len(tok) > 0:
+        tok = _GLYPH_DOT * len(tok)
+    return tok
+
+
+def _is_newline_tok(tok: str) -> bool:
+    return "\n" in tok or "\r" in tok
+
+
+def _html_escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def aggregate_attention(
+    attn_info: AttentionInformation,
+    selected_heads: list[tuple[int, int]],
+    agg: str = "mean",
+) -> np.ndarray:
+    """Aggregate attention across a chosen set of (layer, head) pairs.
+
+    Args:
+        attn_info: AttentionInformation holding (layers, heads, seq, seq).
+        selected_heads: list of (layer, head) tuples to aggregate over.
+        agg: "mean" | "sum" | "max" over the head axis.
+
+    Returns:
+        (seq, seq) float32 ndarray.
+    """
+    if len(selected_heads) == 0:
+        raise ValueError("selected_heads must be non-empty")
+    rows = np.stack(
+        [attn_info.attention_matrices[layer, head] for (layer, head) in selected_heads],
+        axis=0,
+    ).astype(np.float32)
+    if agg == "mean":
+        return rows.mean(axis=0)
+    if agg == "sum":
+        return rows.sum(axis=0)
+    if agg == "max":
+        return rows.max(axis=0)
+    raise ValueError(f"Unknown agg={agg!r}; expected 'mean' | 'sum' | 'max'")
+
+
+def interactive_attention_html(
+    attn_info: AttentionInformation,
+    selected_heads: list[tuple[int, int]],
+    start_from: int = 0,
+    end_at: Optional[int] = None,
+    agg: str = "mean",
+    normalize: str = "row_max",
+    cmap: str = "Blues",
+    title: str = "Interactive attention",
+    save_path: Optional[str] = None,
+) -> str:
+    """Build a standalone interactive HTML for attention patterns.
+
+    Hover over a token (query q) to color tokens k ≤ q by attention A[q, k].
+    Tokens k > q (future positions) are greyed out. Click a token to pin/unpin
+    the view; click again to release.
+
+    Args:
+        attn_info: AttentionInformation from get_attention_matrices.
+        selected_heads: list of (layer, head) tuples to aggregate.
+        start_from / end_at: token index slice applied to both axes.
+        agg: head-axis aggregation ("mean" | "sum" | "max").
+        normalize: per-row max ("row_max") or global max ("global_max") or "none".
+        cmap: matplotlib colormap name for non-future cells.
+        title: HTML <title> and header.
+        save_path: if given, write the HTML to disk.
+
+    Returns:
+        The HTML string.
+    """
+    import matplotlib.cm as mcm
+    import matplotlib.colors as mcolors
+
+    A = aggregate_attention(attn_info, selected_heads, agg=agg)  # (S, S)
+    if end_at is None:
+        end_at = A.shape[0]
+    A = A[start_from:end_at, start_from:end_at]
+    tokens = attn_info.tokenized_prompt[start_from:end_at]
+    n = A.shape[0]
+    assert len(tokens) == n, f"token/attn length mismatch: {len(tokens)} vs {n}"
+
+    # Mask future positions (causal): A[q, k] for k > q is set to NaN-marker (-1).
+    mask_future = np.triu(np.ones_like(A, dtype=bool), k=1)
+    A = np.where(mask_future, 0.0, A)
+
+    if normalize == "row_max":
+        row_max = A.max(axis=1, keepdims=True)
+        row_max = np.where(row_max <= 0, 1.0, row_max)
+        Anorm = A / row_max
+    elif normalize == "global_max":
+        gm = A.max() if A.max() > 0 else 1.0
+        Anorm = A / gm
+    elif normalize == "none":
+        Anorm = A.copy()
+    else:
+        raise ValueError(f"Unknown normalize={normalize!r}")
+
+    cmap_obj = mcm.get_cmap(cmap)
+
+    # Pre-compute color (#rrggbb) and text-color (black/white) per (q, k).
+    # k > q tokens use a neutral grey background.
+    colors: list[list[str]] = []
+    text_colors: list[list[str]] = []
+    GREY = "#e9ecef"
+    GREY_TEXT = "#888"
+    for q in range(n):
+        row_colors = []
+        row_text = []
+        for k in range(n):
+            if k > q:
+                row_colors.append(GREY)
+                row_text.append(GREY_TEXT)
+                continue
+            v = float(np.clip(Anorm[q, k], 0.0, 1.0))
+            rgba = cmap_obj(v)
+            hex_color = mcolors.to_hex(rgba)
+            brightness = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+            row_colors.append(hex_color)
+            row_text.append("#111" if brightness > 0.55 else "#fafafa")
+        colors.append(row_colors)
+        text_colors.append(row_text)
+
+    # Token spans with optional <br/> after newline tokens for natural flow.
+    token_spans = []
+    for i, tok in enumerate(tokens):
+        disp = _display_tok(tok)
+        is_nl = _is_newline_tok(tok)
+        token_spans.append(
+            f'<span class="tok" data-idx="{i}" '
+            f'title="idx={i}, tok={_html_escape(repr(tok))}">'
+            f"{_html_escape(disp)}</span>"
+        )
+        if is_nl:
+            token_spans.append("<br/>")
+
+    tokens_html = "".join(token_spans)
+
+    # Heads summary for header.
+    heads_summary = (
+        f"{len(selected_heads)} heads · agg={agg} · norm={normalize}"
+    )
+    head_pairs_short = ", ".join(
+        f"({layer},{head})" for layer, head in selected_heads[:12]
+    )
+    if len(selected_heads) > 12:
+        head_pairs_short += f", … (+{len(selected_heads) - 12} more)"
+
+    import json as _json
+    import uuid as _uuid
+    colors_json = _json.dumps(colors)
+    text_colors_json = _json.dumps(text_colors)
+
+    # Unique root id so all CSS selectors and JS DOM queries are scoped — this
+    # chunk is safe to drop into a Jupyter cell without leaking styles onto
+    # other outputs (e.g. body { background } turning the whole notebook white).
+    root = f"iaviz-{_uuid.uuid4().hex[:8]}"
+    toks_id = f"{root}-toks"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{_html_escape(title)}</title>
+<style>
+ #{root} {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #fafafa; color: #111; padding: 12px; border-radius: 6px; }}
+ #{root} h2 {{ margin: 4px 0 6px 0; font-size: 16px; font-weight: 600; color: #111; }}
+ #{root} .meta {{ color: #555; font-size: 12px; margin-bottom: 10px; }}
+ #{root} .head-list {{ color: #777; font-size: 11px; margin-bottom: 14px; font-family: monospace; }}
+ #{root} .tokens {{
+   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+   font-size: 13px;
+   line-height: 1.85;
+   background: #fff;
+   border: 1px solid #ddd;
+   border-radius: 6px;
+   padding: 14px 16px;
+   white-space: pre-wrap;
+   word-break: break-word;
+ }}
+ #{root} .tok {{
+   display: inline-block;
+   padding: 2px 4px;
+   margin: 1px 0;
+   border-radius: 3px;
+   border: 1px solid transparent;
+   background: #fff;
+   color: #111;
+   cursor: pointer;
+   transition: background 60ms, color 60ms;
+ }}
+ #{root} .tok.query {{ outline: 2px solid #d62728; outline-offset: -1px; }}
+ #{root} .legend {{ margin-top: 12px; font-size: 11px; color: #666; }}
+ #{root} .swatch {{ display: inline-block; width: 14px; height: 12px; vertical-align: middle;
+            border: 1px solid #999; margin: 0 4px; border-radius: 2px; }}
+</style></head>
+<body>
+<div id="{root}">
+<h2>{_html_escape(title)}</h2>
+<div class="meta">{_html_escape(heads_summary)} · {n} tokens (slice [{start_from}, {end_at}))</div>
+<div class="head-list">heads: {_html_escape(head_pairs_short)}</div>
+<div class="tokens" id="{toks_id}">{tokens_html}</div>
+<div class="legend">
+  Hover a token to view its attention row · click to pin/unpin ·
+  <span class="swatch" style="background:#e9ecef;"></span> future (causal mask) ·
+  query token outlined in <span style="color:#d62728;font-weight:600;">red</span>
+</div>
+</div>
+<script>
+(function() {{
+  const COLORS = {colors_json};
+  const TEXT_COLORS = {text_colors_json};
+  const container = document.getElementById("{toks_id}");
+  if (!container) return;
+  const toks = container.querySelectorAll(".tok");
+  let pinned = null;
+
+  function paint(q) {{
+    if (q == null) {{
+      toks.forEach(t => {{
+        t.style.background = "";
+        t.style.color = "";
+        t.classList.remove("query");
+      }});
+      return;
+    }}
+    const row = COLORS[q];
+    const trow = TEXT_COLORS[q];
+    toks.forEach(t => {{
+      const k = +t.dataset.idx;
+      t.style.background = row[k];
+      t.style.color = trow[k];
+      t.classList.toggle("query", k === q);
+    }});
+  }}
+
+  toks.forEach(t => {{
+    t.addEventListener("mouseover", () => {{
+      if (pinned == null) paint(+t.dataset.idx);
+    }});
+    t.addEventListener("click", () => {{
+      const q = +t.dataset.idx;
+      if (pinned === q) {{ pinned = null; paint(null); }}
+      else {{ pinned = q; paint(q); }}
+    }});
+  }});
+
+  container.addEventListener("mouseleave", () => {{
+    if (pinned == null) paint(null);
+    else paint(pinned);
+  }});
+}})();
+</script>
+</body></html>
+"""
+
+    if save_path is not None:
+        with open(save_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.info(f"Saved interactive attention HTML → {save_path}")
+
+    return html
+
+
+def show_interactive_attention(
+    attn_info: AttentionInformation,
+    selected_heads: list[tuple[int, int]],
+    start_from: int = 0,
+    end_at: Optional[int] = None,
+    agg: str = "mean",
+    normalize: str = "row_max",
+    cmap: str = "Blues",
+    title: str = "Interactive attention",
+    save_path: Optional[str] = None,
+    height: Optional[int] = 520,
+):
+    """Convenience wrapper: build the HTML and display inline (Jupyter).
+
+    height:
+        - int  → wrap in an iframe of fixed pixel height (default 520).
+        - None → render inline (no iframe); the cell expands to fit all tokens.
+                 Use when you don't want to scroll inside a fixed-height box.
+    """
+    from IPython.display import HTML, display
+
+    html = interactive_attention_html(
+        attn_info=attn_info,
+        selected_heads=selected_heads,
+        start_from=start_from,
+        end_at=end_at,
+        agg=agg,
+        normalize=normalize,
+        cmap=cmap,
+        title=title,
+        save_path=save_path,
+    )
+    if height is None:
+        display(HTML(html))
+    else:
+        iframe = (
+            f'<iframe srcdoc="{_html_escape(html)}" '
+            f'style="width:100%; height:{height}px; border:1px solid #ddd; border-radius:6px;">'
+            f"</iframe>"
+        )
+        display(HTML(iframe))
+    return html
