@@ -6,18 +6,20 @@ For each MultiStepSample x each modularity in {modular, monolithic}:
   2. Label which token spans implement which step (oracle: Claude).
   3. Extract per-head attention distributions over the full sequence.
 
-Output layout:
+Output layout (attention is stored in a parallel subtree so it can be loaded
+or skipped independently of the lightweight labeled-generation files):
 
     results/multistep_clock/<model>/
       metadata.json
-      <modularity>/
-        <sample_name>/
-          completion.json   {sample_name, modularity, prompt, generation}
-          labels.json       LabeledGeneration.to_dict()
-          attn.npz          {attn: (n_layers, n_heads, seq, seq) float16,
-                             tokens: (seq,) str}
+      <modularity>/<sample_name>/
+        completion.json   {sample_name, modularity, prompt, generation}
+        labels.json       LabeledGeneration.to_dict()
+      attn/<modularity>/<sample_name>/
+        attn.npz          {attn: (n_layers, n_heads, seq, seq) float16,
+                           tokens: (seq,) str}
 
-Each artifact is checked individually; only missing ones are recomputed. Pass
+Each stage (generation, labeling, attention) is independent: a failure in one
+won't block the others. Each artifact has its own existence check; pass
 --overwrite to force re-run.
 """
 
@@ -31,8 +33,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# Make sure the project root is importable when called directly from scripts/.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Make sure the project root is importable when called directly via
+# `python scripts/clock/build_multistep_clock_data.py`. When invoked as
+# `python -m scripts.clock.build_multistep_clock_data`, this is a no-op.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -94,73 +98,87 @@ def process_sample(
     mt,
     sample: MultiStepSample,
     modularity: str,
-    out_dir: Path,
+    labeled_dir: Path,
+    attn_dir: Path,
     max_new_tokens: int,
     value_weighted: bool,
     overwrite: bool,
 ) -> None:
-    sample_dir = out_dir / sample.name
-    sample_dir.mkdir(parents=True, exist_ok=True)
-    completion_path = sample_dir / "completion.json"
-    labels_path = sample_dir / "labels.json"
-    attn_path = sample_dir / "attn.npz"
+    """Process one (sample, modularity). Each stage runs independently.
 
-    if (
-        not overwrite
-        and completion_path.exists()
-        and labels_path.exists()
-        and attn_path.exists()
-    ):
-        logger.info("  [skip] all artifacts already exist")
-        return
+    labeled_dir / <sample_name> /  completion.json, labels.json
+    attn_dir    / <sample_name> /  attn.npz
+    """
+    sample_lab_dir = labeled_dir / sample.name
+    sample_lab_dir.mkdir(parents=True, exist_ok=True)
+    sample_attn_dir = attn_dir / sample.name
+    sample_attn_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prompt (deterministic).
+    completion_path = sample_lab_dir / "completion.json"
+    labels_path = sample_lab_dir / "labels.json"
+    attn_path = sample_attn_dir / "attn.npz"
+
+    # Prompt is deterministic; render unconditionally.
     prompt = build_prompt(mt, sample, modularity)
+    generation: str | None = None
 
-    # 1) Completion.
+    # ── Stage 1: completion ──────────────────────────────────────────────────
     if completion_path.exists() and not overwrite:
-        with open(completion_path) as f:
-            generation = json.load(f)["generation"]
-        logger.info("  loaded cached completion")
-    else:
-        logger.info(f"  generating completion (max_new_tokens={max_new_tokens})")
-        generation = generate_completion(mt, prompt, max_new_tokens=max_new_tokens)
-        with open(completion_path, "w") as f:
-            json.dump(
-                {
-                    "sample_name": sample.name,
-                    "modularity": modularity,
-                    "prompt": prompt,
-                    "generation": generation,
-                },
-                f,
-                indent=2,
-            )
+        try:
+            with open(completion_path) as f:
+                generation = json.load(f)["generation"]
+            logger.info("  [1/3] loaded cached completion")
+        except Exception as e:
+            logger.exception(f"  [1/3] failed to load cached completion: {e}")
+    if generation is None:
+        try:
+            logger.info(f"  [1/3] generating (max_new_tokens={max_new_tokens})")
+            generation = generate_completion(mt, prompt, max_new_tokens=max_new_tokens)
+            with open(completion_path, "w") as f:
+                json.dump(
+                    {
+                        "sample_name": sample.name,
+                        "modularity": modularity,
+                        "prompt": prompt,
+                        "generation": generation,
+                    },
+                    f,
+                    indent=2,
+                )
+        except Exception as e:
+            logger.exception(f"  [1/3] generation FAILED: {e}")
+            return  # without a generation, stages 2 & 3 can't proceed
 
-    # 2) Oracle labels.
+    # ── Stage 2: oracle labels (independent of stage 3) ─────────────────────
     if labels_path.exists() and not overwrite:
-        logger.info("  loaded cached labels")
+        logger.info("  [2/3] labels already cached")
     else:
-        logger.info("  labeling generation with oracle")
-        labeled = label_generation(mt, sample, prompt, generation, use_cache=True)
-        with open(labels_path, "w") as f:
-            json.dump(labeled.to_dict(), f, indent=2)
+        try:
+            logger.info("  [2/3] labeling generation with oracle")
+            labeled = label_generation(mt, sample, prompt, generation, use_cache=True)
+            with open(labels_path, "w") as f:
+                json.dump(labeled.to_dict(), f, indent=2)
+        except Exception as e:
+            logger.exception(f"  [2/3] labeling FAILED (continuing): {e}")
 
-    # 3) Attention — full (n_layers, n_heads, seq, seq) for downstream flexibility.
+    # ── Stage 3: attention (independent of stage 2) ─────────────────────────
     if attn_path.exists() and not overwrite:
-        logger.info("  loaded cached attention")
+        logger.info("  [3/3] attention already cached")
     else:
-        logger.info(f"  extracting full attention (value_weighted={value_weighted})")
-        full_prompt = prompt + generation
-        attn, tokens = extract_attention(
-            mt, full_prompt, value_weighted=value_weighted
-        )
-        logger.info(f"    attn shape: {attn.shape}, dtype: {attn.dtype}")
-        np.savez_compressed(
-            attn_path,
-            attn=attn,
-            tokens=np.array(tokens, dtype=object),
-        )
+        try:
+            logger.info(f"  [3/3] extracting attention (value_weighted={value_weighted})")
+            full_prompt = prompt + generation
+            attn, tokens = extract_attention(
+                mt, full_prompt, value_weighted=value_weighted
+            )
+            logger.info(f"        attn shape: {attn.shape}, dtype: {attn.dtype}")
+            np.savez_compressed(
+                attn_path,
+                attn=attn,
+                tokens=np.array(tokens, dtype=object),
+            )
+        except Exception as e:
+            logger.exception(f"  [3/3] attention extraction FAILED: {e}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -248,27 +266,27 @@ def main() -> None:
             indent=2,
         )
 
-    # Loop.
+    # Loop. Each stage is wrapped in its own try/except inside process_sample,
+    # so we only need a catch-all here for truly unexpected failures.
     total = len(samples) * len(args.modularities)
     done = 0
     for sample in samples:
         for modularity in args.modularities:
             done += 1
-            logger.info(
-                f"[{done}/{total}] {sample.name} ({modularity})"
-            )
+            logger.info(f"[{done}/{total}] {sample.name} ({modularity})")
             try:
                 process_sample(
                     mt=mt,
                     sample=sample,
                     modularity=modularity,
-                    out_dir=out_root / modularity,
+                    labeled_dir=out_root / modularity,
+                    attn_dir=out_root / "attn" / modularity,
                     max_new_tokens=args.max_new_tokens,
                     value_weighted=args.value_weighted,
                     overwrite=args.overwrite,
                 )
             except Exception as e:
-                logger.exception(f"  FAILED: {e}")
+                logger.exception(f"  unexpected error: {e}")
 
     logger.info(f"done. outputs at {out_root}")
 
