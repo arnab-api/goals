@@ -128,6 +128,107 @@ It's worth asking: does the constant intervention create incoherence mid-generat
 
 ---
 
+## Empirical Investigation — Notebooks 17 & 18
+
+*Added 2026-06-04 after running the commitment-region thread.*
+
+### 6.0 Framing
+
+This thread is looking for *one specific facet* of `c`: the **step-transition trigger** — when is the LM about to commit to a new instrumental step? Not the full PENDING→COMPLETE staging, just the boundary detector. If we can't find even that as a clean linear signal, the full state-machine version is hopeless.
+
+### 6.1 Nb 17 — attention-pattern attempt
+
+**Setup.** Cached full attention over the multi-step dataset. For each head, scored "step-lookback": does it attend from query tokens *inside* step k's generated range back to step k's *prompt range* (the instruction text) more than to other steps' prompt ranges? Aggregated over (sample × step × query-position).
+
+**Hypothesis.** A sparse set of mid-layer heads should consistently look back at the instruction of the step currently being implemented. Track 2's success on the predicate-localization task suggested such heads should exist.
+
+**Result.** No consistent pattern across samples; no sparse set of heads with high score. The user's own note in the notebook: *"I don't see a consistent attention pattern, or a sparse set of attention heads that always *look back* to the instruction of the relevant step."*
+
+**Pivot.** Stop looking at attention. Probe the residual stream directly for "commitment is happening here" — the contrastive setup from nb 16, with positives at step starts and negatives mid-step.
+
+### 6.2 Nb 18 — commitment-region probe v1 (`span_start` vs mid-step, N=1 and N=3)
+
+**Setup.** Hinge-loss probe on unit-normalized residuals (Schut Eq. 2). Positives = first N tokens of each step's `gen_token_range`. Negatives = mid-step tokens + non-start line-starts. Within-record pair sampling controls for record identity. N ∈ {1, 3}.
+
+**Result.** 0.99+ sat at *every* layer, including layer 0. Best layer 40–44, but the curve was basically flat. Mean-diff and hinge directions both at near-ceiling.
+
+**Concern.** A signal that's already there at layer 0 isn't really a deep computation — it smells like the probe is picking up a surface feature (newline-ness, indent, position).
+
+### 6.3 Confound checks v1 (nb 18 §7)
+
+- **Syntactic blacklist.** Drop positives whose first token is `def`/`for`/`if`/`while`/`return`/etc. before training. Goal: rule out a "starts with a control-flow keyword" detector. Result: sat barely dropped — not a keyword detector.
+- **Shuffled-label control.** Permute pos/neg labels within record, re-train. Result: sat at chance (~0.5). The probe is at least learning *something* tied to the labels, not just memorizing record identity.
+
+Conclusion at this point: there's a signal, but it's not what we wanted — too lexical / surface.
+
+### 6.4 Whitespace-only confound (nb 18 §8)
+
+**Why.** Positives were systematically at line starts (right after newline + indent), negatives were systematically interior. The probe could trivially read "is this a newline / indent token".
+
+**Fix.** Restrict both pos and neg pools to whitespace tokens only (`\n`, `\n\n`, `'    '`, etc.). Plus a **LAG=1 autoregressive shift**: extract latents from `t_start − 1` (the newline before the step start), not `t_start` itself — since for autoregressive LMs the "I am about to commit to a new step" info lives in the late-layer state of the *previous* token.
+
+**Result.** Still 0.99+ at every layer. Best layer = 63 (the last transformer layer ≈ output logit space) — *more* suspicious, not less. The probe might just be reading "what kind of whitespace is this" or, at L=63, reading off the next-token distribution.
+
+### 6.5 Stratified diagnostics (nb 18 §8.1, §8.2)
+
+**Per-token counts:**
+- `\n\n` is 90% positive (almost always a step-start).
+- `\n` is ~18% positive.
+- All indent tokens (`'    '`, etc.) are 0% positive.
+
+→ The loose ws-only sampler is still mostly solving "which family of whitespace is the positive token in" — every (newline-family pos, indent neg) pair is trivially separable.
+
+**Same-token controls** (within-record pairs where pos and neg share the same token string):
+- (`\n`, `\n`): n=105, sat = 1.00 at best layer.
+- (`\n\n`, `\n\n`): n=49, sat = 0.80.
+
+**Per-layer same-token sat:** signal exists across mid-layers (e.g., L=20–40 plateau on `\n`/`\n` at 0.94–0.96), not just at L=63. Layer-0 sat ~0.78 on same-token pairs — confirmed with the user that "layer 0" in our setup is the output of block 0, so one attention pass has already integrated some context. Same-token at layer 0 being above chance is consistent with the LM bootstrapping step-context into the residual very early via attention.
+
+Encouraging on the surface, but the small n (49, 105) made conclusions weak — especially for `\n\n`.
+
+### 6.6 Data-augmentation pipeline (nb 18 §10)
+
+**Motivation.** Need more same-token `\n\n` and `\n` pairs to nail down the diagnostic. Tighten the data, not the sampler.
+
+**Design.**
+- Mutate only safe whitespace regions in each generation: tokenize, find every `tokenize.NEWLINE`, mutate only the whitespace bytes between the NEWLINE and the next code token. String interiors (no NEWLINE emitted) and bracket continuations (`NL` not `NEWLINE`) are auto-skipped — code semantics + unit-test pass-rate preserved.
+- Per safe region: swap `\n`↔`\n\n` and possibly insert one extra blank line.
+- Re-label each step's `gen_line_range` / `gen_token_range` / `gen_code` on the mutated text by mapping char positions through the mutation log and re-tokenizing.
+- K=2 mutated siblings per original record (parallel, not nested). Sample-level train/test split happens *first*; augmentation runs independently inside each split.
+
+**Symmetric → asymmetric swap correction.** Initially used symmetric `P_SWAP=0.5`. This drove the per-region steady state to ≈ (0.35, 0.50, 0.15) over (`\n`, `\n\n`, `\n\n\n`) — `\n\n` majority, opposite of natural code. Switched to asymmetric `P(\n → \n\n)=0.2`, `P(\n\n → \n)=0.7` to preserve `\n`-majority.
+
+**Result.** Same-token sat stayed high at mid/late layers for `\n\n`/`\n\n` and `\n`/`\n` buckets after augmentation. *But* the overall ws-only sat at layer 0 was still ~0.97 — so the loose sampler was still dominated by trivial off-diagonal pairs even after augmentation. The augmentation refined the diagnostic but didn't sharpen the signal qualitatively.
+
+### 6.7 LAG sweep (nb 18 §11)
+
+**What it tests.** Take the trained probe `v` at its best layer. Evaluate at positions `t_start − L` for `L ∈ {1, 2, 3, 5, 10}` (positives shifted backwards into the previous statement); negatives at `mid_step − L`. Does sat **cliff-drop at L=2** (probe is a pure newline detector — only fires when the input position is literally a `\n`) or **decay smoothly** (broader commitment signal spread across several tokens before the boundary)?
+
+**Result (held-out, three probes — `ws`, `ws_aug`, `n1`):**
+
+| probe | L=1 | L=2 | L=3 | L=5 | L=10 |
+|---|---|---|---|---|---|
+| ws | 1.00 | 0.88 | 0.73 | 0.69 | 0.65 |
+| ws_aug | 1.00 | 0.97 | 0.70 | 0.66 | 0.56 |
+| n1 | 0.99 | 0.82 | 0.72 | 0.70 | 0.64 |
+
+Smooth decay, no cliff at L=2. So the probe is **not** a pure newline-token detector. But the result is **ambiguous** between:
+
+- (a) **Real commitment build-up** — the LM commits to the next step over several tokens before the boundary, and the representation strengthens as it approaches.
+- (b) **Positional / structural feature** — tokens that are 5–10 positions before a step-start are systematically "near the end of a long statement"; the probe is reading depth/position rather than per-step semantic identity.
+
+Both hypotheses predict smooth decay.
+
+### 6.8 Verdict on the code setting
+
+The fundamental problem in code: every step boundary co-occurs with a fixed cluster of surface cues — newline + (often) blank line + DEDENT + indent on next line + position-relative-to-function-start + nesting depth. No diagnostic we can run on natural code separates "the LM is committing to step k" from "the LM is at a step boundary in this style of code". The probe perfect-saturates regardless of which signal it's actually reading.
+
+The clean test requires varying *which step is being committed to* while holding all surface cues constant. That's the multi-predicate setting (e.g., `validate_config(timeout, host, port)` with naturally-biased orderings via paraphrased docstrings or argument naming): same pivot position, same indent, same depth, but the LM is about to commit to predicate A vs B vs C. If a direction separates A/B/C at that pivot, we have a real *intent* representation; if not, the code-setting signal was structural all along.
+
+**The code setting is exhausted for this question.** Decision point: pivot to multi-predicate, or pivot to a non-code domain (math reasoning, structured NL plans) where boundaries don't co-occur with a fixed lexical signature.
+
+---
+
 ## Summary Table
 
 | Paper | Supports `g`? | Supports `c`? | Scheduling? | Contradicts? |
@@ -167,10 +268,16 @@ It's worth asking: does the constant intervention create incoherence mid-generat
 
 5. **Is the scheduling benefit worth the implementation complexity?** If `c` is noisy (Papers 10, 18), a scheduled intervention might not be clearly better than a constant-but-tapered intervention (e.g., just decay linearly after a fixed number of tokens). The simple baseline — apply full strength for first K tokens, then zero — might already capture most of the benefit.
 
+6. **(NEW, from §6) How to separate the commitment signal from co-occurring surface/positional features in code?** Every code step boundary cohabits with newline + indent + dedent + depth-from-function-start. No diagnostic on natural code we ran could disentangle "intent to commit to step k" from "located near a step boundary in this code style". The multi-predicate setting (same pivot, semantically different commitments) was identified as the necessary next step but not yet run.
+
 ---
 
 ## Conclusion
 
 The two-signal hypothesis (`g` + `c`) is well-motivated by the mechanistic interpretability literature. `g` has strong direct support (Function Vectors, RepE, Future Lens); `c` has strong support in analogous domains (Othello-GPT, FSA-in-CoT, multi-step reasoning) but has not been directly demonstrated for code subgoal tracking. The scheduling question — using `c` to gate `g`-intervention — is a genuine research gap. FASB (NeurIPS 2025) is the closest existing work, but it uses holistic generation state rather than a clean two-signal decomposition.
 
-The key experiment to run next: the two-predicate diagnostic (constant `g`-patching, score each predicate independently) to test whether constant intervention hurts later goals. If it does, that is the strongest motivation for `c`-scheduled steering.
+**Update from the empirical thread (§6).** The first attempt to find even the simplest `c`-facet — a *commitment-region* trigger ("the LM is about to commit to a new step now") — was run as nb 17 (attention) and nb 18 (residual-stream probing). Attention-pattern analysis failed to find a sparse step-lookback head set. Residual-stream probing found very high sat at every layer including L=0, which after iteration through five layers of confound controls (syntactic blacklist, shuffled-label control, whitespace-only restriction, per-token stratified buckets, data augmentation) ended up *ambiguous*: the probe is provably not a pure newline-token detector (LAG sweep shows smooth decay, not a cliff at L=2), but the code setting cannot distinguish "real commitment build-up" from "structural near-boundary feature" because depth, indent, position, and step-start all covary.
+
+**Concrete next step.** Pivot to the multi-predicate setting (same surface pivot, semantically different commitments) — that's the one design that breaks the surface ↔ semantics covariation in code. Failing that, leave the code domain entirely (math reasoning, PDDL with thinking, structured natural-language plans).
+
+The two-predicate diagnostic for `c`-scheduled steering (the original "next experiment" suggested in this report) is still worth running, but only after we have a credibly clean `g`/`c` direction — currently we have neither for the multi-step code setting.
