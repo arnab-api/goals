@@ -7,13 +7,27 @@ preferentially look back at the *instruction tokens* that describe step k.
 For each cached sample (output of build_multistep_clock_data.py) we compute,
 per (layer, head):
 
-    For every target step k with both a valid prompt_token_range and gen_token_range:
-      For every generated token q in gen_token_range[k]:
-        agg[k'] = sum over keys s ∈ prompt_token_range[k'] of attn[L, H, q, s]
-        ratio  = agg[k] / mean_{k'} agg[k']
-      We accumulate `ratio` into a (L, H) sum and a (L, H) count.
+    For every target step k (with a gen span) the query window is the first
+    `q_span` generated tokens of step k (q_span=None → the whole code span).
+    For every step k' (with a spec span) we score:
 
-Final score per (L, H) is `sum / count` (pooled mean across samples, steps, queries).
+        score[k'] = mean_{s ∈ selected spec tokens of k'} Σ_{q ∈ window} attn[L,H,q,s]
+
+    where "selected spec tokens" = all of them (key_agg=None) or the top-`key_agg`
+    most-attended ones (key_agg=int), per (L,H) — discarding stopword tokens.
+    The head score for target step k is then
+
+        head_score = score[k] / AGG_{k'}( score[k'] )
+
+    where AGG is `mean` (compare_with="mean", over all steps k' incl. target) or
+    `max` (compare_with="max", over the *other* steps k' ≠ target). We accumulate
+    one head_score per (sample, target step) into a (L, H) sum and count.
+
+Final score per (L, H) is `sum / count` (pooled mean across samples & target
+steps).
+
+`q_span` probes the hypothesis that the LM looks back at the step spec mainly
+while *starting* a step (small q_span) rather than throughout (q_span=None).
 
 For modularity == "monolithic" the *last* step is excluded from being a target
 (its code span typically subsumes earlier steps' work). It is still kept as a
@@ -67,13 +81,41 @@ def score_one_sample(
     labels: list[dict],
     modularity: str,
     skip_last_step_for_monolithic: bool = True,
+    q_span: int | None = None,
+    compare_with: str = "mean",
+    key_agg: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (sum_ratios, count) of shape (n_layers, n_heads).
 
-    sum_ratios is the running sum of per-query ratios; count is the number of
-    (k, q) pairs that contributed (denominator > 0).
+    Per (layer, head) and per target step k:
+
+        a[k'] = Σ_{q ∈ query window} attn[L,H,q,s]   for each spec token s of k'
+        score[k'] = mean over the selected spec tokens of a[k']
+        head_score = score[k] / AGG_{k'}( score[k'] )
+
+    where AGG = mean (compare_with="mean", target step included) or max
+    (compare_with="max", target step *excluded* — otherwise the ratio is ≤ 1 and
+    is 1 whenever the target is the argmax). One head_score per (sample, target
+    step) is accumulated into sum_ratios; count is the number of contributing
+    target steps (denominator > 0).
+
+    q_span: if not None, only the first `q_span` generated tokens of the target
+    step's code span are used as the query window (q_end clamped to
+    q_start + q_span). Probes the hypothesis that the LM looks back at the step
+    spec mainly while *starting* to implement a step, not throughout.
+
+    key_agg: how many spec tokens of step k' to average over. None → mean over
+    *all* spec tokens. An int (e.g. 10) → keep only the `key_agg` spec tokens
+    with the highest (window-summed) attention, then mean those, per (L,H). This
+    discards informationless stopword tokens and preserves the content tokens the
+    head actually attends to. If key_agg ≥ spec-span length, falls back to mean.
     """
-    n_layers, n_heads, seq, _ = attn.shape
+    if compare_with not in {"mean", "max"}:
+        raise ValueError(f"unknown compare_with={compare_with!r}; expected 'mean'|'max'")
+    if key_agg is not None and key_agg < 1:
+        raise ValueError(f"key_agg must be ≥ 1 or None; got {key_agg}")
+
+    n_layers, n_heads, _, _ = attn.shape
     sum_ratios = np.zeros((n_layers, n_heads), dtype=np.float64)
     count = np.zeros((n_layers, n_heads), dtype=np.int64)
 
@@ -100,37 +142,48 @@ def score_one_sample(
     if not target_steps:
         return sum_ratios, count
 
-    # Pre-aggregate attention from every query to each step's prompt span.
-    # per_step_agg[i] has shape (n_layers, n_heads, seq) for keyed_steps[i].
-    per_step_agg = []
-    for _k, (a, b) in keyed_steps:
-        if b <= a:
-            per_step_agg.append(np.zeros((n_layers, n_heads, seq), dtype=np.float32))
-            continue
-        # cast a thin slice to float32 to avoid summing in float16
-        sl = attn[:, :, :, a:b].astype(np.float32)
-        per_step_agg.append(sl.sum(axis=-1))
-        del sl
-    stacked = np.stack(per_step_agg, axis=0)  # (n_keyed, L, H, seq)
-    mean_step_agg = stacked.mean(axis=0)        # (L, H, seq)
-
-    # Index map: original step index → row of `stacked`.
+    # Index map: original step index → row in the per-target score stack.
     keyed_idx_by_k = {k: i for i, (k, _) in enumerate(keyed_steps)}
+
+    def _spec_score(block: np.ndarray) -> np.ndarray:
+        """block: (L, H, Q, Kspan) → (L, H). Sum over the query window, then mean
+        over the selected (all, or top-`key_agg`) spec tokens."""
+        key_attn = block.sum(axis=2)  # (L, H, Kspan): per-spec-token, window-summed
+        kspan = key_attn.shape[-1]
+        if key_agg is None or key_agg >= kspan:
+            return key_attn.mean(axis=-1)
+        # top-`key_agg` spec tokens by attention, per (L, H), then mean.
+        top = np.partition(key_attn, kspan - key_agg, axis=-1)[..., -key_agg:]
+        return top.mean(axis=-1)
 
     for k_tgt, lbl in target_steps:
         if k_tgt not in keyed_idx_by_k:
             continue
         q_start, q_end = lbl["gen_token_range"]
+        if q_span is not None:
+            q_end = min(q_end, q_start + q_span)
         if q_end <= q_start:
             continue
+        # One score per keyed step, over the target's query window. (n_keyed, L, H)
+        step_scores = np.empty((len(keyed_steps), n_layers, n_heads), dtype=np.float32)
+        for i, (_k, (a, b)) in enumerate(keyed_steps):
+            if b <= a:
+                step_scores[i] = 0.0
+                continue
+            block = attn[:, :, q_start:q_end, a:b].astype(np.float32)
+            step_scores[i] = _spec_score(block)
+            del block
         i_tgt = keyed_idx_by_k[k_tgt]
-        target_agg = stacked[i_tgt, :, :, q_start:q_end]   # (L, H, Q)
-        denom = mean_step_agg[:, :, q_start:q_end]          # (L, H, Q)
+        target_score = step_scores[i_tgt]                 # (L, H)
+        if compare_with == "mean":
+            denom = step_scores.mean(axis=0)              # (L, H), target included
+        else:  # "max", over the *other* steps only (else head_score ≤ 1 trivially)
+            denom = np.delete(step_scores, i_tgt, axis=0).max(axis=0)  # (L, H)
         mask = denom > 0
-        ratio = np.zeros_like(target_agg, dtype=np.float32)
-        np.divide(target_agg, denom, out=ratio, where=mask)
-        sum_ratios += (ratio * mask).sum(axis=-1).astype(np.float64)
-        count += mask.sum(axis=-1).astype(np.int64)
+        head_score = np.zeros((n_layers, n_heads), dtype=np.float32)
+        np.divide(target_score, denom, out=head_score, where=mask)
+        sum_ratios += (head_score * mask).astype(np.float64)
+        count += mask.astype(np.int64)
 
     return sum_ratios, count
 
@@ -184,6 +237,27 @@ def parse_args() -> argparse.Namespace:
         "--skip_last_step_for_monolithic",
         type=lambda x: x.lower() in {"1", "true", "yes"},
         default=True,
+    )
+    p.add_argument(
+        "--q_span",
+        type=int,
+        default=None,
+        help="if set, only the first q_span generated tokens of each step's "
+        "code span are used as queries (default: whole code span)",
+    )
+    p.add_argument(
+        "--compare_with",
+        choices=["mean", "max"],
+        default="mean",
+        help="how to aggregate the other steps' scores in the denominator",
+    )
+    p.add_argument(
+        "--key_agg",
+        type=int,
+        default=None,
+        help="how many spec tokens of a step to average over: None (default) = "
+        "all; an int = keep only the top-k most-attended spec tokens (drops "
+        "stopwords)",
     )
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--seed", type=int, default=42)
@@ -252,6 +326,9 @@ def main() -> None:
                 labels=labels_dict["labels"],
                 modularity=modularity,
                 skip_last_step_for_monolithic=args.skip_last_step_for_monolithic,
+                q_span=args.q_span,
+                compare_with=args.compare_with,
+                key_agg=args.key_agg,
             )
             if n_layers is None:
                 n_layers, n_heads = attn.shape[:2]
@@ -320,6 +397,9 @@ def main() -> None:
         "n_tasks": len(tasks),
         "n_per_sample_files": len(list(per_sample_root.glob("*.npz"))),
         "skip_last_step_for_monolithic": args.skip_last_step_for_monolithic,
+        "q_span": args.q_span,
+        "compare_with": args.compare_with,
+        "key_agg": args.key_agg,
         "failed": failed,
     }
     with open(score_root / "metadata.json", "w") as f:
