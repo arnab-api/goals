@@ -193,12 +193,14 @@ def score_one_sample(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def cache_root(model: str) -> Path:
-    return (
+def cache_root(model: str, version: str | None = None) -> Path:
+    prefix =  (
         Path(env_utils.DEFAULT_RESULTS_DIR)
-        / "multistep_clock"
-        / model.split("/")[-1]
+        / "multistep_clock" 
     )
+    if version is not None:
+        prefix = prefix / version
+    return prefix /  model.split("/")[-1]
 
 
 def load_cached(labeled_sample_dir: Path, attn_sample_dir: Path) -> tuple[dict, np.ndarray]:
@@ -259,6 +261,7 @@ def parse_args() -> argparse.Namespace:
         "all; an int = keep only the top-k most-attended spec tokens (drops "
         "stopwords)",
     )
+    p.add_argument("--version", type=str, default=None, help="optional version subdir under the cache root")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     logging_utils.add_logging_args(p)
@@ -270,7 +273,7 @@ def main() -> None:
     logging_utils.configure(args)
     experiment_utils.set_seed(args.seed)
 
-    cache = cache_root(args.model)
+    cache = cache_root(args.model, args.version)
     if not cache.exists():
         raise FileNotFoundError(f"cache root not found: {cache}")
 

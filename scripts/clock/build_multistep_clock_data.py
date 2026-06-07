@@ -62,6 +62,12 @@ logger = logging.getLogger(__name__)
 
 def build_prompt(mt, sample: MultiStepSample, modularity: str) -> str:
     """Render the prompt for a given (sample, modularity) without mutating sample."""
+    
+    # Hardcoded override
+    # sample.no_comment_str = """Before you complete one of the mentioned steps, write a comment `# Start 'STEP <step_no>'` and after you complete the step, write a comment `# End 'STEP <step_no>'`. Make sure that your code is also well decomented with appropriate comments."""
+    sample.no_comment_str = """Before you complete one of the mentioned steps, write a comment `# Start 'STEP <step_no>'` and after you complete the step, write a comment `# End 'STEP <step_no>'`. Make sure that your code doesn't have any other comments other than the step comments."""
+    sample.without_comments = True
+    
     instruction = sample.render_instruction(modularity=modularity)
     code_stub = sample.render_code_stub(modularity=modularity)
     if supports_chat_template(mt):
@@ -70,7 +76,7 @@ def build_prompt(mt, sample: MultiStepSample, modularity: str) -> str:
             user_query=instruction.strip(),
             incomplete_code=code_stub,
         )
-    return instruction + "<code>" + code_stub
+    return instruction + "\nAnswer:" + code_stub
 
 
 def generate_completion(mt, prompt: str, max_new_tokens: int) -> str:
@@ -192,7 +198,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    p.add_argument("--max_new_tokens", type=int, default=512)
+    p.add_argument("--max_new_tokens", type=int, default=1024)
     p.add_argument(
         "--value_weighted",
         type=lambda x: x.lower() in {"1", "true", "yes"},
@@ -246,7 +252,7 @@ def main() -> None:
     # Output root + metadata.
     out_root = (
         Path(env_utils.DEFAULT_RESULTS_DIR)
-        / "multistep_clock"
+        / "multistep_clock" / "v3"
         / args.model.split("/")[-1]
     )
     out_root.mkdir(parents=True, exist_ok=True)
