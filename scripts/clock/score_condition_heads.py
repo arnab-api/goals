@@ -138,6 +138,53 @@ def cache_root(model: str, version: str) -> Path:
     return Path(env_utils.DEFAULT_RESULTS_DIR) / "multistep_clock" / version / model.split("/")[-1]
 
 
+def config_tag(q_span: int | None, compare_with: str) -> str:
+    """A filesystem-safe tag identifying a scoring config. The per-sample sums and
+    aggregated scores both depend on (q_span, compare_with), so outputs for distinct
+    configs must live under distinct subdirs (otherwise the skip-cache reuses stale
+    sums computed under a different config)."""
+    qs = "full" if q_span is None else str(q_span)
+    return f"qspan-{qs}_cmp-{compare_with}"
+
+
+def head_scores_dir(model: str, version: str, q_span: int | None, compare_with: str) -> Path:
+    return cache_root(model, version) / "head_scores" / config_tag(q_span, compare_with)
+
+
+def load_head_scores(
+    model: str = "Qwen/Qwen2.5-Coder-32B-Instruct",
+    version: str = "conditions",
+    q_span: int | None = None,
+    compare_with: str = "mean",
+) -> dict:
+    """Load aggregated head scores for one scoring config.
+
+    Returns a dict with `modular`/`monolithic`/`combined` score arrays ((n_layers,
+    n_heads)), the raw npz, parsed `metadata`, and the resolved `dir`.
+    """
+    d = head_scores_dir(model, version, q_span, compare_with)
+    agg_path = d / "aggregated.npz"
+    if not agg_path.exists():
+        raise FileNotFoundError(
+            f"no aggregated scores at {agg_path} — run score_condition_heads.py with "
+            f"--q_span {q_span} --compare_with {compare_with}"
+        )
+    agg = np.load(agg_path)
+    meta = {}
+    meta_path = d / "metadata.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+    return {
+        "modular": agg["modular_score"],
+        "monolithic": agg["monolithic_score"],
+        "combined": agg["combined_score"],
+        "raw": agg,
+        "metadata": meta,
+        "dir": d,
+    }
+
+
 def load_cached(labeled_dir: Path, attn_dir: Path):
     with open(labeled_dir / "labels.json") as f:
         labels = json.load(f)["labels"]
@@ -178,9 +225,12 @@ def main() -> None:
     cache = cache_root(args.model, args.version)
     if not cache.exists():
         raise FileNotFoundError(f"cache root not found: {cache}")
-    score_root = cache / "head_scores"
+    # Outputs are namespaced by scoring config so distinct (q_span, compare_with)
+    # runs don't collide — the per-sample skip-cache is only valid within a config.
+    score_root = head_scores_dir(args.model, args.version, args.q_span, args.compare_with)
     per_sample_root = score_root / "per_sample"
     per_sample_root.mkdir(parents=True, exist_ok=True)
+    logger.info(f"scoring config: {config_tag(args.q_span, args.compare_with)} → {score_root}")
 
     # Discover (spec, modularity) with labels.json + key_ranges.json + attn.npz.
     tasks = []

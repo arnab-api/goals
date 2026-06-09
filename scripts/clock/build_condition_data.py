@@ -32,6 +32,7 @@ import gc
 import json
 import logging
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +64,16 @@ def build_prompt(mt, sample: ConditionSample) -> str:
     if supports_chat_template(mt):
         return apply_chat_template(mt=mt, user_query=instr.strip(), incomplete_code=stub)
     return instr + "\nAnswer:\n" + stub
+
+
+def log_dataset_stats(samples: list[ConditionSample]) -> None:
+    """Basic distribution summary of the loaded samples."""
+    logger.info(f"dataset: {len(samples)} samples, {len({s.spec.spec_id for s in samples})} unique specs")
+    logger.info(f"  lang:           {dict(Counter(s.lang for s in samples))}")
+    logger.info(f"  modularity:     {dict(Counter(s.modularity for s in samples))}")
+    logger.info(f"  num_conditions: {dict(sorted(Counter(s.spec.num_conditions for s in samples).items()))}")
+    pred = Counter(pid for s in samples for pid in s.spec.predicate_ids)
+    logger.info(f"  predicate freq: {dict(pred.most_common())}")
 
 
 def sample_dirs(out_root: Path, sample: ConditionSample) -> tuple[Path, Path]:
@@ -220,13 +231,16 @@ def main() -> None:
     logging_utils.configure(args)
     experiment_utils.set_seed(args.seed)
 
+    # Load + summarize the dataset first (fail fast before the expensive model load).
+    ds = ConditionDataset.load(args.dataset)
+    samples = ds.samples[:args.limit] if args.limit else ds.samples
+    logger.info(f"loaded {len(ds.samples)} samples from {args.dataset}"
+                + (f"; using first {len(samples)} (--limit)" if args.limit else ""))
+    log_dataset_stats(samples)
+
     logger.info(f"loading model: {args.model}")
     mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
                            device_map="auto", attn_implementation="eager")
-
-    ds = ConditionDataset.load(args.dataset)
-    samples = ds.samples[:args.limit] if args.limit else ds.samples
-    logger.info(f"loaded {len(samples)} samples from {args.dataset}")
 
     out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "multistep_clock" / args.version / args.model.split("/")[-1]
     out_root.mkdir(parents=True, exist_ok=True)
