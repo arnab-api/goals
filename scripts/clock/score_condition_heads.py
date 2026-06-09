@@ -14,7 +14,11 @@ For each cached (sample, modularity) and per (layer, head):
     `q_span` generated tokens of k's code span (q_span=None → whole code span).
     For every condition k' with key tokens K_{k'}:
 
-        score[k'] = mean_{s ∈ K_{k'}} Σ_{q ∈ window} attn[L,H,q,s]
+        score[k'] = mean_{s ∈ K_{k'}} mean_{q ∈ window} attn[L,H,q,s]
+
+    (The query window is shared by every k', so the mean-over-q factor cancels in
+    the ratio below — it's normalized purely so score[k'] reads as a per-query
+    spec-attention mass rather than a window-length-dependent sum.)
 
     head_score = score[k] / AGG_{k'}( score[k'] )
 
@@ -102,9 +106,9 @@ def score_one_sample(
         return sum_ratios, count
 
     def _spec_score(window: slice, Ki: np.ndarray) -> np.ndarray:
-        # attn[:, :, window, Ki] -> sum over query window -> mean over key tokens.
+        # attn[:, :, window, Ki] -> mean over query window -> mean over key tokens.
         block = attn[:, :, window][:, :, :, Ki].astype(np.float32)  # (L,H,Q,|Ki|)
-        return block.sum(axis=2).mean(axis=-1)                       # (L,H)
+        return block.mean(axis=2).mean(axis=-1)                      # (L,H)
 
     for k in target_steps:
         q0, q1 = labels[k]["gen_token_range"]
