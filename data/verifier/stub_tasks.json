@@ -1,0 +1,902 @@
+[
+  {
+    "lang": "python",
+    "name": "factorial_rec",
+    "task": "Write a Python function `factorial(n)` that returns n! using recursion.",
+    "correct": "def factorial(n):\n    if n == 0:\n        return 1\n    return n * factorial(n - 1)",
+    "incorrect": "def factorial(n):\n    result = 0\n    for i in range(1, n + 1):\n        result *= i\n    return result",
+    "bug": "semantic",
+    "id": "python_000"
+  },
+  {
+    "lang": "python",
+    "name": "fib_iter",
+    "task": "Write a Python function `fib(n)` returning the n-th Fibonacci number (fib(0)=0, fib(1)=1).",
+    "correct": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a",
+    "incorrect": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return b",
+    "bug": "semantic",
+    "id": "python_001"
+  },
+  {
+    "lang": "python",
+    "name": "is_prime",
+    "task": "Write a Python function `is_prime(n)` that returns True iff n is prime.",
+    "correct": "def is_prime(n):\n    if n < 2:\n        return False\n    for i in range(2, int(n ** 0.5) + 1):\n        if n % i == 0:\n            return False\n    return True",
+    "incorrect": "def is_prime(n):\n    if n < 2:\n        return False\n    for i in range(2, n):\n        if n % i == 0:\n            return True\n    return False",
+    "bug": "semantic",
+    "id": "python_002"
+  },
+  {
+    "lang": "python",
+    "name": "gcd",
+    "task": "Write a Python function `gcd(a, b)` returning the greatest common divisor.",
+    "correct": "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a",
+    "incorrect": "def gcd(a, b):\n    return a % b",
+    "bug": "semantic",
+    "id": "python_003"
+  },
+  {
+    "lang": "python",
+    "name": "lcm",
+    "task": "Write a Python function `lcm(a, b)` returning the least common multiple.",
+    "correct": "def lcm(a, b):\n    x, y = a, b\n    while y:\n        x, y = y, x % y\n    return a * b // x",
+    "incorrect": "def lcm(a, b):\n    return a * b",
+    "bug": "semantic",
+    "id": "python_004"
+  },
+  {
+    "lang": "python",
+    "name": "is_even",
+    "task": "Write a Python function `is_even(n)` returning True iff n is even.",
+    "correct": "def is_even(n):\n    return n % 2 == 0",
+    "incorrect": "def is_even(n):\n    return n % 2 == 1",
+    "bug": "semantic",
+    "id": "python_005"
+  },
+  {
+    "lang": "python",
+    "name": "sum_digits",
+    "task": "Write a Python function `sum_digits(n)` returning the sum of the decimal digits of n.",
+    "correct": "def sum_digits(n):\n    n = abs(n)\n    total = 0\n    while n:\n        total += n % 10\n        n //= 10\n    return total",
+    "incorrect": "def sum_digits(n):\n    return sum(str(n))",
+    "bug": "blatant",
+    "id": "python_006"
+  },
+  {
+    "lang": "python",
+    "name": "reverse_int",
+    "task": "Write a Python function `reverse_int(n)` returning the digits of a non-negative n reversed.",
+    "correct": "def reverse_int(n):\n    r = 0\n    while n:\n        r = r * 10 + n % 10\n        n //= 10\n    return r",
+    "incorrect": "def reverse_int(n):\n    return n",
+    "bug": "semantic",
+    "id": "python_007"
+  },
+  {
+    "lang": "python",
+    "name": "count_digits",
+    "task": "Write a Python function `count_digits(n)` returning the number of digits in non-negative n.",
+    "correct": "def count_digits(n):\n    return len(str(n))",
+    "incorrect": "def count_digits(n):\n    return n // 10",
+    "bug": "semantic",
+    "id": "python_008"
+  },
+  {
+    "lang": "python",
+    "name": "is_power_of_two",
+    "task": "Write a Python function `is_power_of_two(n)` returning True iff n is a power of two.",
+    "correct": "def is_power_of_two(n):\n    return n > 0 and (n & (n - 1)) == 0",
+    "incorrect": "def is_power_of_two(n):\n    return n % 2 == 0",
+    "bug": "semantic",
+    "id": "python_009"
+  },
+  {
+    "lang": "python",
+    "name": "sum_to_n",
+    "task": "Write a Python function `sum_to_n(n)` returning 1 + 2 + ... + n.",
+    "correct": "def sum_to_n(n):\n    return n * (n + 1) // 2",
+    "incorrect": "def sum_to_n(n):\n    return n * (n + 1)",
+    "bug": "semantic",
+    "id": "python_010"
+  },
+  {
+    "lang": "python",
+    "name": "is_leap_year",
+    "task": "Write a Python function `is_leap_year(y)` returning True iff y is a leap year.",
+    "correct": "def is_leap_year(y):\n    return y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)",
+    "incorrect": "def is_leap_year(y):\n    return y % 4 == 0",
+    "bug": "semantic",
+    "id": "python_011"
+  },
+  {
+    "lang": "python",
+    "name": "celsius_to_f",
+    "task": "Write a Python function `c_to_f(c)` converting Celsius to Fahrenheit.",
+    "correct": "def c_to_f(c):\n    return c * 9 / 5 + 32",
+    "incorrect": "def c_to_f(c):\n    return c * 9 / 5",
+    "bug": "semantic",
+    "id": "python_012"
+  },
+  {
+    "lang": "python",
+    "name": "abs_value",
+    "task": "Write a Python function `absval(x)` returning the absolute value of x without using abs().",
+    "correct": "def absval(x):\n    return x if x >= 0 else -x",
+    "incorrect": "def absval(x):\n    return -x",
+    "bug": "semantic",
+    "id": "python_013"
+  },
+  {
+    "lang": "python",
+    "name": "clamp",
+    "task": "Write a Python function `clamp(x, lo, hi)` clamping x to the range [lo, hi].",
+    "correct": "def clamp(x, lo, hi):\n    return max(lo, min(x, hi))",
+    "incorrect": "def clamp(x, lo, hi):\n    return x",
+    "bug": "semantic",
+    "id": "python_014"
+  },
+  {
+    "lang": "python",
+    "name": "power",
+    "task": "Write a Python function `power(base, exp)` returning base**exp for non-negative integer exp.",
+    "correct": "def power(base, exp):\n    result = 1\n    for _ in range(exp):\n        result *= base\n    return result",
+    "incorrect": "def power(base, exp):\n    return base * exp",
+    "bug": "semantic",
+    "id": "python_015"
+  },
+  {
+    "lang": "python",
+    "name": "is_perfect_square",
+    "task": "Write a Python function `is_perfect_square(n)` returning True iff n is a perfect square.",
+    "correct": "def is_perfect_square(n):\n    if n < 0:\n        return False\n    r = int(n ** 0.5)\n    return r * r == n or (r + 1) * (r + 1) == n",
+    "incorrect": "def is_perfect_square(n):\n    return n % 2 == 0",
+    "bug": "semantic",
+    "id": "python_016"
+  },
+  {
+    "lang": "python",
+    "name": "nth_triangular",
+    "task": "Write a Python function `triangular(n)` returning the n-th triangular number.",
+    "correct": "def triangular(n):\n    return n * (n + 1) // 2",
+    "incorrect": "def triangular(n):\n    return sum(range(n))",
+    "bug": "semantic",
+    "id": "python_017"
+  },
+  {
+    "lang": "python",
+    "name": "fib_rec",
+    "task": "Write a Python function `fib_rec(n)` returning the n-th Fibonacci number recursively.",
+    "correct": "def fib_rec(n):\n    if n < 2:\n        return n\n    return fib_rec(n - 1) + fib_rec(n - 2)",
+    "incorrect": "def fib_rec(n):\n    if n < 2:\n        return 1\n    return fib_rec(n - 1) + fib_rec(n - 2)",
+    "bug": "semantic",
+    "id": "python_018"
+  },
+  {
+    "lang": "python",
+    "name": "factorial_inf",
+    "task": "Write a Python function `fact(n)` returning n! recursively.",
+    "correct": "def fact(n):\n    if n <= 1:\n        return 1\n    return n * fact(n - 1)",
+    "incorrect": "def fact(n):\n    return n * fact(n - 1)",
+    "bug": "blatant",
+    "id": "python_019"
+  },
+  {
+    "lang": "python",
+    "name": "reverse_string",
+    "task": "Write a Python function `reverse(s)` returning the string s reversed.",
+    "correct": "def reverse(s):\n    return s[::-1]",
+    "incorrect": "def reverse(s):\n    return s",
+    "bug": "semantic",
+    "id": "python_020"
+  },
+  {
+    "lang": "python",
+    "name": "is_palindrome",
+    "task": "Write a Python function `is_palindrome(s)` returning True iff s reads the same forwards and backwards.",
+    "correct": "def is_palindrome(s):\n    return s == s[::-1]",
+    "incorrect": "def is_palindrome(s):\n    return s == s.upper()",
+    "bug": "semantic",
+    "id": "python_021"
+  },
+  {
+    "lang": "python",
+    "name": "count_vowels",
+    "task": "Write a Python function `count_vowels(s)` returning the number of vowels in s.",
+    "correct": "def count_vowels(s):\n    return sum(c in 'aeiouAEIOU' for c in s)",
+    "incorrect": "def count_vowels(s):\n    return sum(c not in 'aeiouAEIOU' for c in s)",
+    "bug": "semantic",
+    "id": "python_022"
+  },
+  {
+    "lang": "python",
+    "name": "count_words",
+    "task": "Write a Python function `count_words(s)` returning the number of whitespace-separated words in s.",
+    "correct": "def count_words(s):\n    return len(s.split())",
+    "incorrect": "def count_words(s):\n    return len(s)",
+    "bug": "semantic",
+    "id": "python_023"
+  },
+  {
+    "lang": "python",
+    "name": "is_anagram",
+    "task": "Write a Python function `is_anagram(a, b)` returning True iff a and b are anagrams.",
+    "correct": "def is_anagram(a, b):\n    return sorted(a) == sorted(b)",
+    "incorrect": "def is_anagram(a, b):\n    return len(a) == len(b)",
+    "bug": "semantic",
+    "id": "python_024"
+  },
+  {
+    "lang": "python",
+    "name": "capitalize_words",
+    "task": "Write a Python function `cap_words(s)` capitalizing the first letter of each word.",
+    "correct": "def cap_words(s):\n    return ' '.join(w.capitalize() for w in s.split(' '))",
+    "incorrect": "def cap_words(s):\n    return s.upper()",
+    "bug": "semantic",
+    "id": "python_025"
+  },
+  {
+    "lang": "python",
+    "name": "count_char",
+    "task": "Write a Python function `count_char(s, ch)` returning how many times ch occurs in s.",
+    "correct": "def count_char(s, ch):\n    return s.count(ch)",
+    "incorrect": "def count_char(s, ch):\n    return ch in s",
+    "bug": "semantic",
+    "id": "python_026"
+  },
+  {
+    "lang": "python",
+    "name": "swap_case",
+    "task": "Write a Python function `swap_case(s)` swapping the case of every letter.",
+    "correct": "def swap_case(s):\n    return s.swapcase()",
+    "incorrect": "def swap_case(s):\n    return s.lower()",
+    "bug": "semantic",
+    "id": "python_027"
+  },
+  {
+    "lang": "python",
+    "name": "count_upper",
+    "task": "Write a Python function `count_upper(s)` returning the number of uppercase letters in s.",
+    "correct": "def count_upper(s):\n    return sum(c.isupper() for c in s)",
+    "incorrect": "def count_upper(s):\n    return sum(c.islower() for c in s)",
+    "bug": "semantic",
+    "id": "python_028"
+  },
+  {
+    "lang": "python",
+    "name": "remove_spaces",
+    "task": "Write a Python function `remove_spaces(s)` returning s with all spaces removed.",
+    "correct": "def remove_spaces(s):\n    return s.replace(' ', '')",
+    "incorrect": "def remove_spaces(s):\n    return s.strip()",
+    "bug": "semantic",
+    "id": "python_029"
+  },
+  {
+    "lang": "python",
+    "name": "first_char",
+    "task": "Write a Python function `first_char(s)` returning the first character of s, or '' if empty.",
+    "correct": "def first_char(s):\n    return s[0] if s else ''",
+    "incorrect": "def first_char(s):\n    return s[1]",
+    "bug": "semantic",
+    "id": "python_030"
+  },
+  {
+    "lang": "python",
+    "name": "repeat_str",
+    "task": "Write a Python function `repeat(s, n)` returning s concatenated n times.",
+    "correct": "def repeat(s, n):\n    return s * n",
+    "incorrect": "def repeat(s, n):\n    return s + n",
+    "bug": "blatant",
+    "id": "python_031"
+  },
+  {
+    "lang": "python",
+    "name": "starts_with",
+    "task": "Write a Python function `starts_with(s, p)` returning True iff s starts with prefix p.",
+    "correct": "def starts_with(s, p):\n    return s.startswith(p)",
+    "incorrect": "def starts_with(s, p):\n    return p in s",
+    "bug": "semantic",
+    "id": "python_032"
+  },
+  {
+    "lang": "python",
+    "name": "reverse_str_bad",
+    "task": "Write a Python function `rev(s)` returning the string s reversed.",
+    "correct": "def rev(s):\n    return ''.join(reversed(s))",
+    "incorrect": "def rev(s):\n    return s.reverse()",
+    "bug": "blatant",
+    "id": "python_033"
+  },
+  {
+    "lang": "python",
+    "name": "vowel_only_blatant",
+    "task": "Write a Python function `vowels(s)` returning a list of the vowels in s.",
+    "correct": "def vowels(s):\n    return [c for c in s if c in 'aeiou']",
+    "incorrect": "def vowels(s):\n    return [c for c in s if c in 'aeiou'",
+    "bug": "blatant",
+    "id": "python_034"
+  },
+  {
+    "lang": "python",
+    "name": "sum_list",
+    "task": "Write a Python function `sum_list(lst)` returning the sum of the elements of lst.",
+    "correct": "def sum_list(lst):\n    total = 0\n    for x in lst:\n        total += x\n    return total",
+    "incorrect": "def sum_list(lst):\n    total = 1\n    for x in lst:\n        total += x\n    return total",
+    "bug": "semantic",
+    "id": "python_035"
+  },
+  {
+    "lang": "python",
+    "name": "max_list",
+    "task": "Write a Python function `max_list(lst)` returning the largest element of a non-empty list.",
+    "correct": "def max_list(lst):\n    m = lst[0]\n    for x in lst:\n        if x > m:\n            m = x\n    return m",
+    "incorrect": "def max_list(lst):\n    return lst[0]",
+    "bug": "semantic",
+    "id": "python_036"
+  },
+  {
+    "lang": "python",
+    "name": "min_list",
+    "task": "Write a Python function `min_list(lst)` returning the smallest element of a non-empty list.",
+    "correct": "def min_list(lst):\n    m = lst[0]\n    for x in lst:\n        if x < m:\n            m = x\n    return m",
+    "incorrect": "def min_list(lst):\n    m = 0\n    for x in lst:\n        if x < m:\n            m = x\n    return m",
+    "bug": "semantic",
+    "id": "python_037"
+  },
+  {
+    "lang": "python",
+    "name": "average",
+    "task": "Write a Python function `average(lst)` returning the mean of a non-empty list.",
+    "correct": "def average(lst):\n    return sum(lst) / len(lst)",
+    "incorrect": "def average(lst):\n    return sum(lst) / (len(lst) - 1)",
+    "bug": "semantic",
+    "id": "python_038"
+  },
+  {
+    "lang": "python",
+    "name": "count_even",
+    "task": "Write a Python function `count_even(lst)` returning how many elements of lst are even.",
+    "correct": "def count_even(lst):\n    return sum(1 for x in lst if x % 2 == 0)",
+    "incorrect": "def count_even(lst):\n    return sum(1 for x in lst if x % 2 == 1)",
+    "bug": "semantic",
+    "id": "python_039"
+  },
+  {
+    "lang": "python",
+    "name": "filter_positive",
+    "task": "Write a Python function `positives(lst)` returning the positive elements of lst.",
+    "correct": "def positives(lst):\n    return [x for x in lst if x > 0]",
+    "incorrect": "def positives(lst):\n    return [x for x in lst if x < 0]",
+    "bug": "semantic",
+    "id": "python_040"
+  },
+  {
+    "lang": "python",
+    "name": "reverse_list",
+    "task": "Write a Python function `reverse_list(lst)` returning a new list with the elements reversed.",
+    "correct": "def reverse_list(lst):\n    return lst[::-1]",
+    "incorrect": "def reverse_list(lst):\n    return lst",
+    "bug": "semantic",
+    "id": "python_041"
+  },
+  {
+    "lang": "python",
+    "name": "contains",
+    "task": "Write a Python function `contains(lst, x)` returning True iff x is in lst.",
+    "correct": "def contains(lst, x):\n    for y in lst:\n        if y == x:\n            return True\n    return False",
+    "incorrect": "def contains(lst, x):\n    for y in lst:\n        if y == x:\n            return True\n        return False",
+    "bug": "semantic",
+    "id": "python_042"
+  },
+  {
+    "lang": "python",
+    "name": "second_largest",
+    "task": "Write a Python function `second_largest(lst)` returning the second-largest distinct value.",
+    "correct": "def second_largest(lst):\n    u = sorted(set(lst))\n    return u[-2]",
+    "incorrect": "def second_largest(lst):\n    return sorted(lst)[-1]",
+    "bug": "semantic",
+    "id": "python_043"
+  },
+  {
+    "lang": "python",
+    "name": "dot_product",
+    "task": "Write a Python function `dot(a, b)` returning the dot product of two equal-length lists.",
+    "correct": "def dot(a, b):\n    return sum(x * y for x, y in zip(a, b))",
+    "incorrect": "def dot(a, b):\n    return sum(a) + sum(b)",
+    "bug": "semantic",
+    "id": "python_044"
+  },
+  {
+    "lang": "python",
+    "name": "running_sum",
+    "task": "Write a Python function `running_sum(lst)` returning the list of cumulative sums.",
+    "correct": "def running_sum(lst):\n    out, s = [], 0\n    for x in lst:\n        s += x\n        out.append(s)\n    return out",
+    "incorrect": "def running_sum(lst):\n    return lst",
+    "bug": "semantic",
+    "id": "python_045"
+  },
+  {
+    "lang": "python",
+    "name": "flatten",
+    "task": "Write a Python function `flatten(nested)` flattening a list of lists by one level.",
+    "correct": "def flatten(nested):\n    out = []\n    for sub in nested:\n        out.extend(sub)\n    return out",
+    "incorrect": "def flatten(nested):\n    return nested",
+    "bug": "semantic",
+    "id": "python_046"
+  },
+  {
+    "lang": "python",
+    "name": "remove_duplicates",
+    "task": "Write a Python function `dedup(lst)` returning lst with duplicates removed, preserving order.",
+    "correct": "def dedup(lst):\n    seen, out = set(), []\n    for x in lst:\n        if x not in seen:\n            seen.add(x)\n            out.append(x)\n    return out",
+    "incorrect": "def dedup(lst):\n    return lst.unique()",
+    "bug": "blatant",
+    "id": "python_047"
+  },
+  {
+    "lang": "python",
+    "name": "linear_search",
+    "task": "Write a Python function `find(lst, x)` returning the index of the first occurrence of x, or -1.",
+    "correct": "def find(lst, x):\n    for i, y in enumerate(lst):\n        if y == x:\n            return i\n    return -1",
+    "incorrect": "def find(lst, x):\n    for i, y in enumerate(lst):\n        if y == x:\n            return y\n    return -1",
+    "bug": "semantic",
+    "id": "python_048"
+  },
+  {
+    "lang": "python",
+    "name": "index_of_max",
+    "task": "Write a Python function `argmax(lst)` returning the index of the largest element.",
+    "correct": "def argmax(lst):\n    best = 0\n    for i in range(len(lst)):\n        if lst[i] > lst[best]:\n            best = i\n    return best",
+    "incorrect": "def argmax(lst):\n    return lst.index(min(lst))",
+    "bug": "semantic",
+    "id": "python_049"
+  },
+  {
+    "lang": "python",
+    "name": "product_list",
+    "task": "Write a Python function `product(lst)` returning the product of all elements.",
+    "correct": "def product(lst):\n    p = 1\n    for x in lst:\n        p *= x\n    return p",
+    "incorrect": "def product(lst):\n    p = 0\n    for x in lst:\n        p *= x\n    return p",
+    "bug": "semantic",
+    "id": "python_050"
+  },
+  {
+    "lang": "python",
+    "name": "count_positive_blatant",
+    "task": "Write a Python function `n_pos(lst)` returning how many elements are positive.",
+    "correct": "def n_pos(lst):\n    return sum(1 for x in lst if x > 0)",
+    "incorrect": "def n_pos(lst):\n    return sum(1 for x in lst if x > 0",
+    "bug": "blatant",
+    "id": "python_051"
+  },
+  {
+    "lang": "python",
+    "name": "list_sum_undefined",
+    "task": "Write a Python function `total(lst)` returning the sum of lst.",
+    "correct": "def total(lst):\n    return sum(lst)",
+    "incorrect": "def total(lst):\n    return summation(lst)",
+    "bug": "blatant",
+    "id": "python_052"
+  },
+  {
+    "lang": "python",
+    "name": "binary_search",
+    "task": "Write a Python function `bsearch(lst, x)` returning the index of x in a sorted list, or -1.",
+    "correct": "def bsearch(lst, x):\n    lo, hi = 0, len(lst) - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if lst[mid] == x:\n            return mid\n        if lst[mid] < x:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1",
+    "incorrect": "def bsearch(lst, x):\n    lo, hi = 0, len(lst) - 1\n    while lo < hi:\n        mid = (lo + hi) // 2\n        if lst[mid] == x:\n            return mid\n        if lst[mid] < x:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1",
+    "bug": "semantic",
+    "id": "python_053"
+  },
+  {
+    "lang": "python",
+    "name": "is_sorted",
+    "task": "Write a Python function `is_sorted(lst)` returning True iff lst is non-decreasing.",
+    "correct": "def is_sorted(lst):\n    return all(lst[i] <= lst[i + 1] for i in range(len(lst) - 1))",
+    "incorrect": "def is_sorted(lst):\n    return all(lst[i] < lst[i + 1] for i in range(len(lst) - 1))",
+    "bug": "semantic",
+    "id": "python_054"
+  },
+  {
+    "lang": "python",
+    "name": "bubble_sort",
+    "task": "Write a Python function `bubble_sort(lst)` sorting a list ascending in place and returning it.",
+    "correct": "def bubble_sort(lst):\n    n = len(lst)\n    for i in range(n):\n        for j in range(n - 1 - i):\n            if lst[j] > lst[j + 1]:\n                lst[j], lst[j + 1] = lst[j + 1], lst[j]\n    return lst",
+    "incorrect": "def bubble_sort(lst):\n    n = len(lst)\n    for i in range(n):\n        for j in range(n - 1):\n            if lst[j] > lst[j + 1]:\n                lst[j], lst[j + 1] = lst[j], lst[j]\n    return lst",
+    "bug": "semantic",
+    "id": "python_055"
+  },
+  {
+    "lang": "python",
+    "name": "merge_sorted",
+    "task": "Write a Python function `merge(a, b)` merging two sorted lists into one sorted list.",
+    "correct": "def merge(a, b):\n    i = j = 0\n    out = []\n    while i < len(a) and j < len(b):\n        if a[i] <= b[j]:\n            out.append(a[i]); i += 1\n        else:\n            out.append(b[j]); j += 1\n    return out + a[i:] + b[j:]",
+    "incorrect": "def merge(a, b):\n    return a + b",
+    "bug": "semantic",
+    "id": "python_056"
+  },
+  {
+    "lang": "python",
+    "name": "selection_min",
+    "task": "Write a Python function `find_min(lst)` returning the minimum element of a non-empty list.",
+    "correct": "def find_min(lst):\n    m = lst[0]\n    for x in lst[1:]:\n        if x < m:\n            m = x\n    return m",
+    "incorrect": "def find_min(lst):\n    return lst[-1]",
+    "bug": "semantic",
+    "id": "python_057"
+  },
+  {
+    "lang": "python",
+    "name": "fizzbuzz",
+    "task": "Write a Python function `fizzbuzz(n)` returning 'FizzBuzz'/'Fizz'/'Buzz'/str(n) for n.",
+    "correct": "def fizzbuzz(n):\n    if n % 15 == 0:\n        return 'FizzBuzz'\n    if n % 3 == 0:\n        return 'Fizz'\n    if n % 5 == 0:\n        return 'Buzz'\n    return str(n)",
+    "incorrect": "def fizzbuzz(n):\n    if n % 3 == 0:\n        return 'Fizz'\n    if n % 5 == 0:\n        return 'Buzz'\n    if n % 15 == 0:\n        return 'FizzBuzz'\n    return str(n)",
+    "bug": "semantic",
+    "id": "python_058"
+  },
+  {
+    "lang": "python",
+    "name": "grade",
+    "task": "Write a Python function `grade(score)` returning 'A' for >=90, 'B' for >=80, else 'F'.",
+    "correct": "def grade(score):\n    if score >= 90:\n        return 'A'\n    if score >= 80:\n        return 'B'\n    return 'F'",
+    "incorrect": "def grade(score):\n    if score >= 80:\n        return 'B'\n    if score >= 90:\n        return 'A'\n    return 'F'",
+    "bug": "semantic",
+    "id": "python_059"
+  },
+  {
+    "lang": "python",
+    "name": "max_of_three",
+    "task": "Write a Python function `max3(a, b, c)` returning the largest of three numbers.",
+    "correct": "def max3(a, b, c):\n    return max(a, b, c)",
+    "incorrect": "def max3(a, b, c):\n    return a if a > b else b",
+    "bug": "semantic",
+    "id": "python_060"
+  },
+  {
+    "lang": "python",
+    "name": "sign",
+    "task": "Write a Python function `sign(x)` returning -1, 0, or 1 for the sign of x.",
+    "correct": "def sign(x):\n    return (x > 0) - (x < 0)",
+    "incorrect": "def sign(x):\n    return 1 if x > 0 else -1",
+    "bug": "semantic",
+    "id": "python_061"
+  },
+  {
+    "lang": "python",
+    "name": "celsius_round_blatant",
+    "task": "Write a Python function `kelvin(c)` converting Celsius to Kelvin.",
+    "correct": "def kelvin(c):\n    return c + 273.15",
+    "incorrect": "def kelvin(c):\n    return c + 273.15 +",
+    "bug": "blatant",
+    "id": "python_062"
+  },
+  {
+    "lang": "python",
+    "name": "double_blatant",
+    "task": "Write a Python function `double(x)` returning x doubled.",
+    "correct": "def double(x):\n    return x * 2",
+    "incorrect": "def double(x):\n    retrun x * 2",
+    "bug": "blatant",
+    "id": "python_063"
+  },
+  {
+    "lang": "python",
+    "name": "to_int_blatant",
+    "task": "Write a Python function `to_int(s)` parsing a decimal string to an int.",
+    "correct": "def to_int(s):\n    return int(s)",
+    "incorrect": "def to_int(s):\n    return int(s",
+    "bug": "blatant",
+    "id": "python_064"
+  },
+  {
+    "lang": "python",
+    "name": "min_max_undefined",
+    "task": "Write a Python function `spread(lst)` returning max(lst) - min(lst).",
+    "correct": "def spread(lst):\n    return max(lst) - min(lst)",
+    "incorrect": "def spread(lst):\n    return biggest(lst) - smallest(lst)",
+    "bug": "blatant",
+    "id": "python_065"
+  },
+  {
+    "lang": "python",
+    "name": "square_blatant",
+    "task": "Write a Python function `square(x)` returning x squared.",
+    "correct": "def square(x):\n    return x * x",
+    "incorrect": "def square(x):\n    return x ^ 2",
+    "bug": "semantic",
+    "id": "python_066"
+  },
+  {
+    "lang": "python",
+    "name": "mean_blatant",
+    "task": "Write a Python function `mean(lst)` returning the average of lst.",
+    "correct": "def mean(lst):\n    return sum(lst) / len(lst)",
+    "incorrect": "def mean(lst):\n    return sum(lst) // len()",
+    "bug": "blatant",
+    "id": "python_067"
+  },
+  {
+    "lang": "cpp",
+    "name": "isPalindrome",
+    "task": "Write a C++ function `bool isPalindrome(string s)` returning true iff s is a palindrome.",
+    "correct": "bool isPalindrome(string s){\n    int l = 0, r = s.size() - 1;\n    while (l < r) {\n        if (s[l] != s[r]) return false;\n        l++; r--;\n    }\n    return true;\n}",
+    "incorrect": "bool isPalindrome(string s){\n    return s == s[::-1];\n}",
+    "bug": "blatant",
+    "id": "cpp_068"
+  },
+  {
+    "lang": "cpp",
+    "name": "factorial",
+    "task": "Write a C++ function `long factorial(int n)` returning n!.",
+    "correct": "long factorial(int n){\n    long r = 1;\n    for (int i = 2; i <= n; i++) r *= i;\n    return r;\n}",
+    "incorrect": "long factorial(int n){\n    long r = 0;\n    for (int i = 2; i <= n; i++) r *= i;\n    return r;\n}",
+    "bug": "semantic",
+    "id": "cpp_069"
+  },
+  {
+    "lang": "cpp",
+    "name": "isPrime",
+    "task": "Write a C++ function `bool isPrime(int n)` returning true iff n is prime.",
+    "correct": "bool isPrime(int n){\n    if (n < 2) return false;\n    for (int i = 2; i * i <= n; i++)\n        if (n % i == 0) return false;\n    return true;\n}",
+    "incorrect": "bool isPrime(int n){\n    if (n < 2) return false;\n    for (int i = 2; i < n; i++)\n        if (n % i == 0) return true;\n    return false;\n}",
+    "bug": "semantic",
+    "id": "cpp_070"
+  },
+  {
+    "lang": "cpp",
+    "name": "gcd",
+    "task": "Write a C++ function `int gcd(int a, int b)` returning the greatest common divisor.",
+    "correct": "int gcd(int a, int b){\n    while (b) { int t = b; b = a % b; a = t; }\n    return a;\n}",
+    "incorrect": "int gcd(int a, int b){\n    return a % b;\n}",
+    "bug": "semantic",
+    "id": "cpp_071"
+  },
+  {
+    "lang": "cpp",
+    "name": "isEven",
+    "task": "Write a C++ function `bool isEven(int n)` returning true iff n is even.",
+    "correct": "bool isEven(int n){\n    return n % 2 == 0;\n}",
+    "incorrect": "bool isEven(int n){\n    return n % 2 == 1;\n}",
+    "bug": "semantic",
+    "id": "cpp_072"
+  },
+  {
+    "lang": "cpp",
+    "name": "sumArray",
+    "task": "Write a C++ function `int sumArray(vector<int> a)` returning the sum of the elements.",
+    "correct": "int sumArray(vector<int> a){\n    int s = 0;\n    for (int x : a) s += x;\n    return s;\n}",
+    "incorrect": "int sumArray(vector<int> a){\n    int s = 1;\n    for (int x : a) s += x;\n    return s;\n}",
+    "bug": "semantic",
+    "id": "cpp_073"
+  },
+  {
+    "lang": "cpp",
+    "name": "maxArray",
+    "task": "Write a C++ function `int maxArray(vector<int> a)` returning the largest element of a non-empty vector.",
+    "correct": "int maxArray(vector<int> a){\n    int m = a[0];\n    for (int x : a) if (x > m) m = x;\n    return m;\n}",
+    "incorrect": "int maxArray(vector<int> a){\n    return a[0];\n}",
+    "bug": "semantic",
+    "id": "cpp_074"
+  },
+  {
+    "lang": "cpp",
+    "name": "fibonacci",
+    "task": "Write a C++ function `int fib(int n)` returning the n-th Fibonacci number (fib(0)=0).",
+    "correct": "int fib(int n){\n    int a = 0, b = 1;\n    for (int i = 0; i < n; i++) { int t = a + b; a = b; b = t; }\n    return a;\n}",
+    "incorrect": "int fib(int n){\n    int a = 0, b = 1;\n    for (int i = 0; i < n; i++) { int t = a + b; a = b; b = t; }\n    return b;\n}",
+    "bug": "semantic",
+    "id": "cpp_075"
+  },
+  {
+    "lang": "cpp",
+    "name": "reverseString",
+    "task": "Write a C++ function `string reverseString(string s)` returning s reversed.",
+    "correct": "string reverseString(string s){\n    int l = 0, r = s.size() - 1;\n    while (l < r) { swap(s[l], s[r]); l++; r--; }\n    return s;\n}",
+    "incorrect": "string reverseString(string s){\n    return s;\n}",
+    "bug": "semantic",
+    "id": "cpp_076"
+  },
+  {
+    "lang": "cpp",
+    "name": "countVowels",
+    "task": "Write a C++ function `int countVowels(string s)` returning the number of vowels in s.",
+    "correct": "int countVowels(string s){\n    int c = 0;\n    for (char ch : s)\n        if (string(\"aeiouAEIOU\").find(ch) != string::npos) c++;\n    return c;\n}",
+    "incorrect": "int countVowels(string s){\n    int c = 0;\n    for (char ch : s)\n        if (string(\"aeiouAEIOU\").find(ch) == string::npos) c++;\n    return c;\n}",
+    "bug": "semantic",
+    "id": "cpp_077"
+  },
+  {
+    "lang": "cpp",
+    "name": "power",
+    "task": "Write a C++ function `long power(int base, int exp)` returning base^exp for exp>=0.",
+    "correct": "long power(int base, int exp){\n    long r = 1;\n    for (int i = 0; i < exp; i++) r *= base;\n    return r;\n}",
+    "incorrect": "long power(int base, int exp){\n    return base * exp;\n}",
+    "bug": "semantic",
+    "id": "cpp_078"
+  },
+  {
+    "lang": "cpp",
+    "name": "isLeapYear",
+    "task": "Write a C++ function `bool isLeapYear(int y)` returning true iff y is a leap year.",
+    "correct": "bool isLeapYear(int y){\n    return y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);\n}",
+    "incorrect": "bool isLeapYear(int y){\n    return y % 4 == 0;\n}",
+    "bug": "semantic",
+    "id": "cpp_079"
+  },
+  {
+    "lang": "cpp",
+    "name": "sumDigits",
+    "task": "Write a C++ function `int sumDigits(int n)` returning the sum of the digits of n>=0.",
+    "correct": "int sumDigits(int n){\n    int s = 0;\n    while (n) { s += n % 10; n /= 10; }\n    return s;\n}",
+    "incorrect": "int sumDigits(int n){\n    int s = 0;\n    while (n) { s += n % 10; }\n    return s;\n}",
+    "bug": "semantic",
+    "id": "cpp_080"
+  },
+  {
+    "lang": "cpp",
+    "name": "absVal",
+    "task": "Write a C++ function `int absVal(int x)` returning the absolute value of x.",
+    "correct": "int absVal(int x){\n    return x < 0 ? -x : x;\n}",
+    "incorrect": "int absVal(int x){\n    return -x;\n}",
+    "bug": "semantic",
+    "id": "cpp_081"
+  },
+  {
+    "lang": "cpp",
+    "name": "binarySearch",
+    "task": "Write a C++ function `int binarySearch(vector<int> a, int x)` returning the index of x or -1.",
+    "correct": "int binarySearch(vector<int> a, int x){\n    int lo = 0, hi = a.size() - 1;\n    while (lo <= hi) {\n        int mid = (lo + hi) / 2;\n        if (a[mid] == x) return mid;\n        if (a[mid] < x) lo = mid + 1; else hi = mid - 1;\n    }\n    return -1;\n}",
+    "incorrect": "int binarySearch(vector<int> a, int x){\n    int lo = 0, hi = length - 1;\n    while (lo <= hi) {\n        int mid = (lo + hi) / 2;\n        if (a[mid] == x) return mid;\n        if (a[mid] < x) lo = mid + 1; else hi = mid - 1;\n    }\n    return -1;\n}",
+    "bug": "blatant",
+    "id": "cpp_082"
+  },
+  {
+    "lang": "cpp",
+    "name": "square_missing",
+    "task": "Write a C++ function `int square(int x)` returning x squared.",
+    "correct": "int square(int x){\n    return x * x;\n}",
+    "incorrect": "int square(int x){\n    return x * x\n}",
+    "bug": "blatant",
+    "id": "cpp_083"
+  },
+  {
+    "lang": "cpp",
+    "name": "doubleVal_blatant",
+    "task": "Write a C++ function `int doubleVal(int x)` returning x doubled.",
+    "correct": "int doubleVal(int x){\n    return x * 2;\n}",
+    "incorrect": "int doubleVal(int x){\n    retrun x * 2;\n}",
+    "bug": "blatant",
+    "id": "cpp_084"
+  },
+  {
+    "lang": "cpp",
+    "name": "minArray",
+    "task": "Write a C++ function `int minArray(vector<int> a)` returning the smallest element of a non-empty vector.",
+    "correct": "int minArray(vector<int> a){\n    int m = a[0];\n    for (int x : a) if (x < m) m = x;\n    return m;\n}",
+    "incorrect": "int minArray(vector<int> a){\n    int m = 0;\n    for (int x : a) if (x < m) m = x;\n    return m;\n}",
+    "bug": "semantic",
+    "id": "cpp_085"
+  },
+  {
+    "lang": "python",
+    "name": "cube_blatant",
+    "task": "Write a Python function `cube(x)` returning x cubed.",
+    "correct": "def cube(x):\n    return x ** 3",
+    "incorrect": "def cube(x):\n    return x ** ",
+    "bug": "blatant",
+    "id": "python_086"
+  },
+  {
+    "lang": "python",
+    "name": "halve_blatant",
+    "task": "Write a Python function `halve(x)` returning x divided by two.",
+    "correct": "def halve(x):\n    return x / 2",
+    "incorrect": "def halve(x):\n    return x /",
+    "bug": "blatant",
+    "id": "python_087"
+  },
+  {
+    "lang": "python",
+    "name": "negate_typo",
+    "task": "Write a Python function `negate(x)` returning -x.",
+    "correct": "def negate(x):\n    return -x",
+    "incorrect": "def negate(x):\n    reutrn -x",
+    "bug": "blatant",
+    "id": "python_088"
+  },
+  {
+    "lang": "python",
+    "name": "join_blatant",
+    "task": "Write a Python function `join_words(lst)` joining a list of strings with spaces.",
+    "correct": "def join_words(lst):\n    return ' '.join(lst)",
+    "incorrect": "def join_words(lst):\n    return ' '.join(lst",
+    "bug": "blatant",
+    "id": "python_089"
+  },
+  {
+    "lang": "python",
+    "name": "len_undefined",
+    "task": "Write a Python function `length(s)` returning the length of s.",
+    "correct": "def length(s):\n    return len(s)",
+    "incorrect": "def length(s):\n    return size(s)",
+    "bug": "blatant",
+    "id": "python_090"
+  },
+  {
+    "lang": "python",
+    "name": "incr_typo",
+    "task": "Write a Python function `incr(x)` returning x + 1.",
+    "correct": "def incr(x):\n    return x + 1",
+    "incorrect": "def incr(x):\n    return x ++ 1",
+    "bug": "blatant",
+    "id": "python_091"
+  },
+  {
+    "lang": "python",
+    "name": "last_elem_blatant",
+    "task": "Write a Python function `last(lst)` returning the last element of lst.",
+    "correct": "def last(lst):\n    return lst[-1]",
+    "incorrect": "def last(lst):\n    return lst[len(lst)]",
+    "bug": "semantic",
+    "id": "python_092"
+  },
+  {
+    "lang": "cpp",
+    "name": "addOne_typo",
+    "task": "Write a C++ function `int addOne(int x)` returning x + 1.",
+    "correct": "int addOne(int x){\n    return x + 1;\n}",
+    "incorrect": "int addOne(int x){\n    return x + 1\n}",
+    "bug": "blatant",
+    "id": "cpp_093"
+  },
+  {
+    "lang": "cpp",
+    "name": "negate_undefined",
+    "task": "Write a C++ function `int negate(int x)` returning -x.",
+    "correct": "int negate(int x){\n    return -x;\n}",
+    "incorrect": "int negate(int x){\n    return neg(x);\n}",
+    "bug": "blatant",
+    "id": "cpp_094"
+  },
+  {
+    "lang": "cpp",
+    "name": "triple_blatant",
+    "task": "Write a C++ function `int triple(int x)` returning 3*x.",
+    "correct": "int triple(int x){\n    return 3 * x;\n}",
+    "incorrect": "int triple(int x){\n    return 3 * x +;\n}",
+    "bug": "blatant",
+    "id": "cpp_095"
+  },
+  {
+    "lang": "cpp",
+    "name": "isOdd_typo",
+    "task": "Write a C++ function `bool isOdd(int n)` returning true iff n is odd.",
+    "correct": "bool isOdd(int n){\n    return n % 2 != 0;\n}",
+    "incorrect": "bool isOdd(int n){\n    retrun n % 2 != 0;\n}",
+    "bug": "blatant",
+    "id": "cpp_096"
+  },
+  {
+    "lang": "cpp",
+    "name": "lenStr_undefined",
+    "task": "Write a C++ function `int lenStr(string s)` returning the length of s.",
+    "correct": "int lenStr(string s){\n    return s.size();\n}",
+    "incorrect": "int lenStr(string s){\n    return length(s);\n}",
+    "bug": "blatant",
+    "id": "cpp_097"
+  },
+  {
+    "lang": "cpp",
+    "name": "sumTwo_blatant",
+    "task": "Write a C++ function `int sumTwo(int a, int b)` returning a + b.",
+    "correct": "int sumTwo(int a, int b){\n    return a + b;\n}",
+    "incorrect": "int sumTwo(int a, int b){\n    return a + b\n}",
+    "bug": "blatant",
+    "id": "cpp_098"
+  },
+  {
+    "lang": "python",
+    "name": "cap_first_blatant",
+    "task": "Write a Python function `cap_first(s)` capitalizing the first letter of s.",
+    "correct": "def cap_first(s):\n    return s[:1].upper() + s[1:]",
+    "incorrect": "def cap_first(s):\n    return s[:1].upper( + s[1:]",
+    "bug": "blatant",
+    "id": "python_099"
+  }
+]
