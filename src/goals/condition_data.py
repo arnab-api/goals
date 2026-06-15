@@ -104,6 +104,25 @@ def _digit_sum(n: int) -> int:
     return sum(int(c) for c in str(abs(n)))
 
 
+def _digit_product(n: int) -> int:
+    p = 1
+    for c in str(abs(n)):
+        p *= int(c)
+    return p
+
+
+def _is_perfect_cube(n: int) -> bool:
+    c = round(abs(n) ** (1 / 3))
+    return any((c + d) ** 3 == abs(n) for d in (-1, 0, 1))
+
+
+def _is_triangular(n: int) -> bool:
+    if n < 0:
+        return False
+    m = int((2 * n) ** 0.5)
+    return any(mm >= 0 and (mm * (mm + 1)) // 2 == n for mm in (m - 1, m, m + 1))
+
+
 @dataclass(frozen=True)
 class Predicate:
     id: str
@@ -114,6 +133,19 @@ class Predicate:
     # used to locate the spec tokens to track attention back to.
     # e.g. "n is a perfect square" -> ["perfect", "square"].
     id_substrs: list[str] = field(default_factory=list)
+    # Forced-prefill body: monolithic-Python lines (own indentation) implementing the
+    # predicate as an explicit multi-line block.  EVERY assigned variable — intermediates
+    # included — is `{var}` (reused across lines), so substituting the condition's result
+    # letter (a/b/c/…) renames the whole block in one shot.  `{param}` placeholders are
+    # filled from sampled params.  Empty ⇒ predicate has no canonical multi-line form.
+    multiline_impl: list[str] = field(default_factory=list)
+    # Single-line forced-prefill form: ONE complete `{var} = <boolean>` line that fully checks
+    # the condition (no intermediate, nothing left to finish). Same `{var}`/`{param}` rules.
+    singleline_impl: str = ""
+
+    @property
+    def is_multiline(self) -> bool:
+        return bool(self.multiline_impl)
 
     def sample_params(self, rng: random.Random) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -131,31 +163,141 @@ class Predicate:
         """Render the informative substrings with params (e.g. '{k}' -> '18')."""
         return [s.format(**params) for s in self.id_substrs]
 
+    def render_multiline(self, params: dict[str, Any], var: str) -> list[str]:
+        """Forced-prefill body lines with `{var}` -> the condition's result letter and
+        `{param}` placeholders filled in.  `var` is substituted first (it is not a
+        param), then params are formatted."""
+        return [ln.replace("{var}", var).format(**params) for ln in self.multiline_impl]
+
+    def render_singleline(self, params: dict[str, Any], var: str) -> str:
+        """Single-line forced-prefill: `{var}` -> the result letter, `{param}` filled in."""
+        return self.singleline_impl.replace("{var}", var).format(**params)
+
     def evaluate(self, n: int, params: dict[str, Any]) -> bool:
         return bool(self.oracle(n, **params))
 
 
 INT_PREDICATES: list[Predicate] = [
-    Predicate("positive", "n is positive", lambda n: n > 0, id_substrs=["positive"]),
-    Predicate("even", "n is even", lambda n: n % 2 == 0, id_substrs=["even"]),
-    Predicate("odd", "n is odd", lambda n: n % 2 == 1, id_substrs=["odd"]),
-    Predicate("prime", "n is a prime number", lambda n: _is_prime(n), id_substrs=["prime"]),
-    Predicate("perfect_square", "n is a perfect square",
-              lambda n: n >= 0 and math.isqrt(n) ** 2 == n, id_substrs=["perfect", "square"]),
-    Predicate("palindrome", "n is a palindrome (its digits read the same forwards and backwards)",
-              lambda n: str(abs(n)) == str(abs(n))[::-1], id_substrs=["palindrome"]),
+    # ── trivially single-line (no canonical multi-line form) ──
+    Predicate("positive", "n is positive", lambda n: n > 0, id_substrs=["positive"],
+              singleline_impl="    {var} = n > 0"),
     Predicate("le_bound", "n is less than or equal to {b}", lambda n, b: n <= b,
-              {"b": [50, 100, 200, 500, 1000]}, id_substrs=["less than or equal", "{b}"]),
+              {"b": [50, 100, 200, 500, 1000]}, id_substrs=["less than or equal", "{b}"],
+              singleline_impl="    {var} = n <= {b}"),
     Predicate("ge_bound", "n is greater than or equal to {a}", lambda n, a: n >= a,
-              {"a": [0, 1, 10, 50, 100]}, id_substrs=["greater than or equal", "{a}"]),
+              {"a": [0, 1, 10, 50, 100]}, id_substrs=["greater than or equal", "{a}"],
+              singleline_impl="    {var} = n >= {a}"),
     Predicate("in_range", "n is between {a} and {b} (inclusive)",
               lambda n, a, b: a <= n <= b, {"a": [0, 10, 50], "b": [100, 200, 500]},
-              id_substrs=["between", "{a}", "{b}"]),
+              id_substrs=["between", "{a}", "{b}"],
+              singleline_impl="    {var} = {a} <= n <= {b}"),
+
+    # ── "compute remainder/quantity, then compare" (forced 2-line) ──
+    Predicate("even", "n is even", lambda n: n % 2 == 0, id_substrs=["even"],
+              multiline_impl=["    {var} = n % 2", "    {var} = {var} == 0"],
+              singleline_impl="    {var} = n % 2 == 0"),
+    Predicate("odd", "n is odd", lambda n: n % 2 == 1, id_substrs=["odd"],
+              multiline_impl=["    {var} = n % 2", "    {var} = {var} == 1"],
+              singleline_impl="    {var} = n % 2 == 1"),
     Predicate("divisible", "n is divisible by {k}", lambda n, k: k != 0 and n % k == 0,
-              {"k": list(range(2, 21))}, id_substrs=["divisible", "{k}"]),
+              {"k": list(range(2, 21))}, id_substrs=["divisible", "{k}"],
+              multiline_impl=["    {var} = n % {k}", "    {var} = {var} == 0"],
+              singleline_impl="    {var} = n % {k} == 0"),
+    Predicate("perfect_square", "n is a perfect square",
+              lambda n: n >= 0 and math.isqrt(n) ** 2 == n, id_substrs=["perfect", "square"],
+              multiline_impl=["    {var} = int(abs(n) ** 0.5)",
+                              "    {var} = n >= 0 and {var} * {var} == n"],
+              singleline_impl="    {var} = n >= 0 and int(abs(n) ** 0.5) ** 2 == n"),
+    Predicate("perfect_cube", "n is a perfect cube", lambda n: _is_perfect_cube(n),
+              id_substrs=["perfect", "cube"],
+              multiline_impl=["    {var} = round(abs(n) ** (1 / 3))",
+                              "    {var} = {var} ** 3 == abs(n)"],
+              singleline_impl="    {var} = round(abs(n) ** (1 / 3)) ** 3 == abs(n)"),
+    Predicate("triangular", "n is a triangular number", lambda n: _is_triangular(n),
+              id_substrs=["triangular"],
+              multiline_impl=["    {var} = int((2 * abs(n)) ** 0.5)",
+                              "    {var} = n >= 0 and {var} * ({var} + 1) // 2 == n"],
+              singleline_impl="    {var} = n >= 0 and int((8 * n + 1) ** 0.5) ** 2 == 8 * n + 1"),
+    Predicate("palindrome", "n is a palindrome (its digits read the same forwards and backwards)",
+              lambda n: str(abs(n)) == str(abs(n))[::-1], id_substrs=["palindrome"],
+              multiline_impl=["    {var} = str(abs(n))",
+                              "    {var} = {var} == {var}[::-1]"],
+              singleline_impl="    {var} = str(abs(n)) == str(abs(n))[::-1]"),
+    Predicate("reversed_greater", "n is smaller than the number obtained by reversing its digits",
+              lambda n: int(str(abs(n))[::-1]) > abs(n), id_substrs=["reversing", "digits"],
+              multiline_impl=["    {var} = int(str(abs(n))[::-1])",
+                              "    {var} = {var} > abs(n)"],
+              singleline_impl="    {var} = int(str(abs(n))[::-1]) > abs(n)"),
+    Predicate("num_digits_ge", "n has at least {k} digits",
+              lambda n, k: len(str(abs(n))) >= k, {"k": [2, 3, 4]},
+              id_substrs=["at least", "{k}", "digits"],
+              multiline_impl=["    {var} = len(str(abs(n)))",
+                              "    {var} = {var} >= {k}"],
+              singleline_impl="    {var} = len(str(abs(n))) >= {k}"),
+    Predicate("set_bits_gt", "n has more than {t} ones in its binary representation",
+              lambda n, t: bin(abs(n)).count("1") > t, {"t": [1, 2, 3, 4]},
+              id_substrs=["more than", "{t}", "ones", "binary"],
+              multiline_impl=['    {var} = bin(abs(n)).count("1")',
+                              "    {var} = {var} > {t}"],
+              singleline_impl='    {var} = bin(abs(n)).count("1") > {t}'),
+    Predicate("power_of_two", "n is a power of two",
+              lambda n: n > 0 and (n & (n - 1)) == 0, id_substrs=["power", "two"],
+              multiline_impl=['    {var} = bin(n).count("1")',
+                              "    {var} = n > 0 and {var} == 1"],
+              singleline_impl="    {var} = n > 0 and (n & (n - 1)) == 0"),
+    Predicate("coprime_with", "n is coprime with {k}", lambda n, k: math.gcd(n, k) == 1,
+              {"k": [6, 10, 12, 15]}, id_substrs=["coprime", "{k}"],
+              multiline_impl=["    {var} = math.gcd(n, {k})",
+                              "    {var} = {var} == 1"],
+              singleline_impl="    {var} = math.gcd(n, {k}) == 1"),
+
+    # ── digit-sum family ──
     Predicate("digit_sum_gt", "the sum of n's digits is greater than {t}",
               lambda n, t: _digit_sum(n) > t, {"t": [5, 10, 15, 20]},
-              id_substrs=["sum", "digits", "{t}"]),
+              id_substrs=["sum", "digits", "{t}"],
+              multiline_impl=["    {var} = sum(int(d) for d in str(abs(n)))",
+                              "    {var} = {var} > {t}"],
+              singleline_impl="    {var} = sum(int(d) for d in str(abs(n))) > {t}"),
+    Predicate("digit_sum_divisible", "the sum of n's digits is divisible by {k}",
+              lambda n, k: _digit_sum(n) % k == 0, {"k": [3, 4, 5, 9]},
+              id_substrs=["sum", "digits", "divisible", "{k}"],
+              multiline_impl=["    {var} = sum(int(d) for d in str(abs(n)))",
+                              "    {var} = {var} % {k} == 0"],
+              singleline_impl="    {var} = sum(int(d) for d in str(abs(n))) % {k} == 0"),
+
+    # ── accumulate over digits/divisors, then test (loop / comprehension) ──
+    Predicate("digit_product_gt", "the product of n's digits is greater than {t}",
+              lambda n, t: _digit_product(n) > t, {"t": [0, 5, 10, 20]},
+              id_substrs=["product", "digits", "{t}"],
+              multiline_impl=["    {var} = 1",
+                              "    for d in str(abs(n)):",
+                              "        {var} *= int(d)",
+                              "    {var} = {var} > {t}"],
+              singleline_impl="    {var} = math.prod(int(d) for d in str(abs(n))) > {t}"),
+    Predicate("all_digits_even", "all of n's digits are even",
+              lambda n: all(int(c) % 2 == 0 for c in str(abs(n))),
+              id_substrs=["all", "digits", "even"],
+              multiline_impl=["    {var} = [int(c) for c in str(abs(n))]",
+                              "    {var} = all(d % 2 == 0 for d in {var})"],
+              singleline_impl="    {var} = all(int(c) % 2 == 0 for c in str(abs(n)))"),
+    Predicate("num_divisors_gt", "n has more than {t} divisors",
+              lambda n, t: n != 0 and sum(1 for d in range(1, abs(n) + 1) if n % d == 0) > t,
+              {"t": [2, 3, 4, 6]}, id_substrs=["more than", "{t}", "divisors"],
+              multiline_impl=["    {var} = sum(1 for d in range(1, abs(n) + 1) if n % d == 0)",
+                              "    {var} = {var} > {t}"],
+              singleline_impl="    {var} = sum(1 for d in range(1, abs(n) + 1) if n % d == 0) > {t}"),
+    Predicate("abundant", "the sum of n's proper divisors is greater than n",
+              lambda n: n > 0 and sum(d for d in range(1, n) if n % d == 0) > n,
+              id_substrs=["sum", "proper divisors", "greater"],
+              multiline_impl=["    {var} = sum(d for d in range(1, abs(n)) if n % d == 0)",
+                              "    {var} = n > 0 and {var} > n"],
+              singleline_impl="    {var} = n > 0 and sum(d for d in range(1, abs(n)) if n % d == 0) > n"),
+
+    # ── prime via trial division ──
+    Predicate("prime", "n is a prime number", lambda n: _is_prime(n), id_substrs=["prime"],
+              multiline_impl=["    {var} = all(n % d != 0 for d in range(2, int(abs(n) ** 0.5) + 1))",
+                              "    {var} = {var} and n > 1"],
+              singleline_impl="    {var} = n > 1 and all(n % d != 0 for d in range(2, int(abs(n) ** 0.5) + 1))"),
 ]
 
 PREDICATES_BY_ID: dict[str, Predicate] = {p.id: p for p in INT_PREDICATES}
