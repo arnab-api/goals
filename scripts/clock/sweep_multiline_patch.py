@@ -26,11 +26,16 @@ Pairs are kept only if (a) src & dst share the token at every patch position (to
 replace-patch) and (b) their next-token argmax differs (a genuine contrast for the IE).
 
 Writes (under results/multiline_patch/<model>/<tag>/):
-    metadata.json   run config + n_layer + counts
-    records.parquet one row per (pair, direction, patch_tokens, module, layer, metric)
-    pairs.json      per-pair prompts + target tokens (no tensors), for inspection
+    checkpoints/pair_XXXX.pt  per-pair checkpoint: that pair's records + BOTH full samples
+                              (full_prompt, prefill_code, all build fields, argmax) — written
+                              immediately after each pair so a crashed run is resumable.
+    records.parquet           one row per (pair, direction, patch_tokens, module, layer, metric)
+    pairs.json                per-pair full sample metadata (full_prompt etc.; no tensors)
+    metadata.json             run config + n_layer + counts
 
-Read back with `load_sweep_results(run_dir)` (defined below).
+Resumes by default: existing pair_XXXX.pt are reused (logged `[skip cached]`); pass --overwrite
+to recompute. Read back with `load_sweep_results(run_dir)` (defined below) — which also works on
+a partial run (no records.parquet yet) by concatenating the checkpoints.
 
 Example
 -------
@@ -327,9 +332,10 @@ def build_pairs(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def run_sweep(
+def sweep_one_pair(
     mt: ModelandTokenizer,
-    pairs: list[dict],
+    pi: int,
+    pair: dict,
     module_specs: dict[str, tuple[str, int]],
     patch_tok_options: list[tuple[int, ...]],
     sweep_layers: list[int],
@@ -339,64 +345,68 @@ def run_sweep(
     logit_location: tuple,
     ie_denom_eps: dict[str, float],
 ) -> list[dict]:
+    """Run the full (direction x patch-tokens x module x layer x metric) grid for ONE pair.
+
+    Returns the list of record dicts for this pair (each tagged with `pair=pi`). Kept
+    self-contained so the caller can checkpoint per pair.
+    """
     module_formats = [fmt for fmt, _ in module_specs.values()]
     records: list[dict] = []
-    for pi, pair in enumerate(tqdm(pairs, desc="pairs")):
-        for direction in directions:
-            src, dst = (
-                (pair["ml"], pair["sl"]) if direction == "ml->sl" else (pair["sl"], pair["ml"])
-            )
-            src_ans = src["argmax"]  # token we patch TOWARD
-            dst_ans = dst["argmax"]  # dest's own top token
-            gold = {m: score_token(src["logits"], src_ans, m) for m in METRICS}
-            base = {m: score_token(dst["logits"], src_ans, m) for m in METRICS}
-            base_dst = {m: score_token(dst["logits"], dst_ans, m) for m in METRICS}
-            src_hs = capture_source_hs(mt, src["tok"], module_formats, needed_layers, needed_pos)
-            for patch_toks in patch_tok_options:
-                for mod, (fmt, win) in module_specs.items():
-                    for L in sweep_layers:
-                        patched_logits = run_patched(
-                            mt=mt,
-                            clean_input=dst["tok"],
-                            patch_hs=src_hs,
-                            layer_idx=L,
-                            layer_name_format=fmt,
-                            logit_location=logit_location,
-                            window_size=win,
-                            patch_token_indices=list(patch_toks),
-                        ).float().cpu()
-                        for m in METRICS:
-                            patched = score_token(patched_logits, src_ans, m)
-                            patched_dst = score_token(patched_logits, dst_ans, m)
-                            denom = gold[m] - base[m]
-                            ie = (
-                                (patched - base[m]) / denom
-                                if abs(denom) >= ie_denom_eps[m]
-                                else float("nan")
+    for direction in directions:
+        src, dst = (
+            (pair["ml"], pair["sl"]) if direction == "ml->sl" else (pair["sl"], pair["ml"])
+        )
+        src_ans = src["argmax"]  # token we patch TOWARD
+        dst_ans = dst["argmax"]  # dest's own top token
+        gold = {m: score_token(src["logits"], src_ans, m) for m in METRICS}
+        base = {m: score_token(dst["logits"], src_ans, m) for m in METRICS}
+        base_dst = {m: score_token(dst["logits"], dst_ans, m) for m in METRICS}
+        src_hs = capture_source_hs(mt, src["tok"], module_formats, needed_layers, needed_pos)
+        for patch_toks in patch_tok_options:
+            for mod, (fmt, win) in module_specs.items():
+                for L in sweep_layers:
+                    patched_logits = run_patched(
+                        mt=mt,
+                        clean_input=dst["tok"],
+                        patch_hs=src_hs,
+                        layer_idx=L,
+                        layer_name_format=fmt,
+                        logit_location=logit_location,
+                        window_size=win,
+                        patch_token_indices=list(patch_toks),
+                    ).float().cpu()
+                    for m in METRICS:
+                        patched = score_token(patched_logits, src_ans, m)
+                        patched_dst = score_token(patched_logits, dst_ans, m)
+                        denom = gold[m] - base[m]
+                        ie = (
+                            (patched - base[m]) / denom
+                            if abs(denom) >= ie_denom_eps[m]
+                            else float("nan")
+                        )
+                        records.append(
+                            dict(
+                                pair=pi,
+                                target_slot=pair["target_slot"],
+                                direction=direction,
+                                patch_tokens=str(list(patch_toks)),
+                                module=mod,
+                                window=win,
+                                layer=L,
+                                metric=m,
+                                src_ans=src_ans,
+                                dst_ans=dst_ans,
+                                gold=gold[m],
+                                base=base[m],
+                                base_dst=base_dst[m],
+                                patched=patched,
+                                patched_dst=patched_dst,
+                                ie=ie,
                             )
-                            records.append(
-                                dict(
-                                    pair=pi,
-                                    target_slot=pair["target_slot"],
-                                    direction=direction,
-                                    patch_tokens=str(list(patch_toks)),
-                                    module=mod,
-                                    window=win,
-                                    layer=L,
-                                    metric=m,
-                                    src_ans=src_ans,
-                                    dst_ans=dst_ans,
-                                    gold=gold[m],
-                                    base=base[m],
-                                    base_dst=base_dst[m],
-                                    patched=patched,
-                                    patched_dst=patched_dst,
-                                    ie=ie,
-                                )
-                            )
-            del src_hs
-            gc.collect()
-            torch.cuda.empty_cache()
+                        )
+        del src_hs
+        gc.collect()
+        torch.cuda.empty_cache()
     return records
 
 
@@ -410,7 +420,7 @@ class SweepResults:
     """In-memory view of a saved sweep run."""
 
     records: pd.DataFrame          # one row per (pair, direction, patch_tokens, module, layer, metric)
-    pairs: list[dict]              # per-pair prompts + target tokens (no tensors)
+    pairs: list[dict]              # per-pair full sample metadata (full_prompt etc.; no tensors)
     metadata: dict                 # run config + n_layer + counts
     path: Path = field(default=None)
 
@@ -419,14 +429,80 @@ def run_dir(model: str, tag: str) -> Path:
     return Path(env_utils.DEFAULT_RESULTS_DIR) / "multiline_patch" / model.split("/")[-1] / tag
 
 
+def checkpoint_dir(out_dir: Path) -> Path:
+    return Path(out_dir) / "checkpoints"
+
+
+def checkpoint_path(out_dir: Path, pair_index: int) -> Path:
+    return checkpoint_dir(out_dir) / f"pair_{pair_index:04d}.pt"
+
+
+def serialize_example(ex: dict, tokenizer) -> dict:
+    """Everything in a built example EXCEPT the tensors (`tok`, `logits`) — keeps the full
+    prompt, prefill code, prior styles, spec id, target info, plus the decoded argmax token."""
+    out = {k: v for k, v in ex.items() if k not in ("tok", "logits")}
+    out["argmax"] = int(ex["argmax"])
+    out["argmax_str"] = tokenizer.decode(int(ex["argmax"]))
+    return out
+
+
+def serialize_pair(pi: int, pair: dict, tokenizer) -> dict:
+    """Full, tensor-free view of a pair (both samples), suitable for JSON / checkpoint."""
+    return {
+        "pair_index": pi,
+        "target_slot": pair["target_slot"],
+        "n_conditions": pair["n_conditions"],
+        "ml": serialize_example(pair["ml"], tokenizer),
+        "sl": serialize_example(pair["sl"], tokenizer),
+    }
+
+
+def _load_checkpoints(ckpt_dir: Path) -> tuple[list[dict], list[dict]]:
+    """Read every per-pair checkpoint -> (all records, per-pair sample metadata)."""
+    records: list[dict] = []
+    pairs_meta: list[dict] = []
+    for f in sorted(ckpt_dir.glob("pair_*.pt")):
+        ck = torch.load(f, weights_only=False)
+        records.extend(ck["records"])
+        pairs_meta.append(
+            {k: ck[k] for k in ("pair_index", "target_slot", "n_conditions", "ml", "sl")}
+        )
+    return records, pairs_meta
+
+
 def load_sweep_results(path: str | Path) -> SweepResults:
-    """Load a saved run. `path` is the run directory (…/multiline_patch/<model>/<tag>/)."""
+    """Load a saved run. `path` is the run directory (…/multiline_patch/<model>/<tag>/).
+
+    Prefers the finalized `records.parquet` / `pairs.json`; if those are absent (a partial /
+    in-progress run) it falls back to concatenating the per-pair `checkpoints/pair_*.pt`, so an
+    interrupted sweep is still inspectable.
+    """
     path = Path(path)
-    records = pd.read_parquet(path / "records.parquet")
-    with open(path / "pairs.json") as f:
-        pairs = json.load(f)
-    with open(path / "metadata.json") as f:
-        metadata = json.load(f)
+    ckpt_dir = checkpoint_dir(path)
+    has_parquet = (path / "records.parquet").exists()
+    has_pairs = (path / "pairs.json").exists()
+
+    ck_records = ck_pairs = None
+    if (not has_parquet or not has_pairs) and ckpt_dir.exists():
+        ck_records, ck_pairs = _load_checkpoints(ckpt_dir)
+
+    if has_parquet:
+        records = pd.read_parquet(path / "records.parquet")
+    elif ck_records:
+        records = pd.DataFrame(ck_records)
+    else:
+        raise FileNotFoundError(f"no records.parquet or checkpoints under {path}")
+
+    if has_pairs:
+        with open(path / "pairs.json") as f:
+            pairs = json.load(f)
+    else:
+        pairs = ck_pairs or []
+
+    metadata = {}
+    if (path / "metadata.json").exists():
+        with open(path / "metadata.json") as f:
+            metadata = json.load(f)
     return SweepResults(records=records, pairs=pairs, metadata=metadata, path=path)
 
 
@@ -452,24 +528,6 @@ def aggregate_sweep(records: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
-
-
-def _serialize_pairs(pairs: list[dict], tokenizer) -> list[dict]:
-    """Strip tensors from the in-memory pairs so they're JSON-serializable / inspectable."""
-    keep = (
-        "spec_id", "prefill_style", "prior_styles", "prompt", "target_slot", "target_var",
-        "next_var", "target_pred", "target_first_line", "expected_verdict", "n_conditions",
-    )
-    out = []
-    for p in pairs:
-        rec = {"target_slot": p["target_slot"], "n_conditions": p["n_conditions"]}
-        for role in ("ml", "sl"):
-            ex = p[role]
-            rec[role] = {k: ex[k] for k in keep if k in ex}
-            rec[role]["argmax"] = ex["argmax"]
-            rec[role]["argmax_str"] = tokenizer.decode(int(ex["argmax"]))
-        out.append(rec)
-    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -521,11 +579,13 @@ def main() -> None:
         f"n{args.n_pairs}_step{args.layer_step}_{args.prompt_mode}_seed{args.pair_seed}"
     )
     out_dir = run_dir(args.model, tag)
-    if out_dir.exists() and not args.overwrite:
-        if (out_dir / "records.parquet").exists():
-            raise FileExistsError(f"{out_dir} already has results — pass --overwrite or a new --tag")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"output dir: {out_dir}")
+    ckpt_dir = checkpoint_dir(out_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if args.overwrite:
+        for f in ckpt_dir.glob("pair_*.pt"):
+            f.unlink()
+        logger.info("--overwrite: cleared existing per-pair checkpoints")
+    logger.info(f"output dir: {out_dir}  (per-pair checkpoints under {ckpt_dir.name}/)")
 
     logger.info(f"loading model {args.model} ...")
     mt = ModelandTokenizer(
@@ -562,16 +622,38 @@ def main() -> None:
         seed=args.pair_seed, max_attempts=max_attempts,
     )
 
-    records = run_sweep(
-        mt=mt, pairs=pairs, module_specs=module_specs, patch_tok_options=patch_tok_options,
-        sweep_layers=sweep_layers, needed_layers=needed_layers, needed_pos=needed_pos,
-        directions=["ml->sl", "sl->ml"], logit_location=logit_location, ie_denom_eps=ie_denom_eps,
-    )
+    # Per-pair sweep with checkpointing. Each pair writes a self-contained
+    # checkpoints/pair_XXXX.pt (its records + both full samples); existing checkpoints are
+    # reused (resume) unless --overwrite. Pair building is deterministic from --pair-seed, so
+    # the i-th pair is identical across runs and resuming is safe.
+    all_records: list[dict] = []
+    n_cached = n_swept = 0
+    for pi, pair in enumerate(tqdm(pairs, desc="pairs")):
+        ckpt = checkpoint_path(out_dir, pi)
+        if ckpt.exists() and not args.overwrite:
+            ck = torch.load(ckpt, weights_only=False)
+            all_records.extend(ck["records"])
+            n_cached += 1
+            logger.info(f"[{pi + 1}/{len(pairs)}] [skip cached] {ckpt.name} ({len(ck['records'])} rows)")
+            continue
+        records = sweep_one_pair(
+            mt=mt, pi=pi, pair=pair, module_specs=module_specs,
+            patch_tok_options=patch_tok_options, sweep_layers=sweep_layers,
+            needed_layers=needed_layers, needed_pos=needed_pos,
+            directions=["ml->sl", "sl->ml"], logit_location=logit_location,
+            ie_denom_eps=ie_denom_eps,
+        )
+        payload = serialize_pair(pi, pair, mt.tokenizer)
+        payload["records"] = records
+        torch.save(payload, ckpt)            # checkpoint immediately after the pair completes
+        all_records.extend(records)
+        n_swept += 1
+        logger.info(f"[{pi + 1}/{len(pairs)}] swept + saved {ckpt.name} ({len(records)} rows)")
 
-    df = pd.DataFrame(records)
+    df = pd.DataFrame(all_records)
     df.to_parquet(out_dir / "records.parquet")
     with open(out_dir / "pairs.json", "w") as f:
-        json.dump(_serialize_pairs(pairs, mt.tokenizer), f, indent=2)
+        json.dump([serialize_pair(pi, p, mt.tokenizer) for pi, p in enumerate(pairs)], f, indent=2)
     metadata = {
         "model": args.model,
         "tag": tag,
@@ -590,6 +672,8 @@ def main() -> None:
         "n_records": int(len(df)),
         "n_valid_ie": int(df["ie"].notna().sum()),
         "frac_ie_dropped": float(df["ie"].isna().mean()),
+        "n_pairs_swept": n_swept,
+        "n_pairs_cached": n_cached,
         "created": datetime.now().isoformat(timespec="seconds"),
     }
     with open(out_dir / "metadata.json", "w") as f:
@@ -597,7 +681,8 @@ def main() -> None:
 
     logger.info(
         f"saved {len(df)} rows -> {out_dir / 'records.parquet'} "
-        f"({metadata['n_valid_ie']} non-NaN IE, {metadata['frac_ie_dropped']:.1%} dropped)"
+        f"({metadata['n_valid_ie']} non-NaN IE, {metadata['frac_ie_dropped']:.1%} dropped) "
+        f"| {n_swept} pairs swept, {n_cached} resumed from checkpoint"
     )
 
 
