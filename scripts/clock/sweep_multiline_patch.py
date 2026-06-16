@@ -491,8 +491,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", default="Qwen/Qwen2.5-Coder-14B-Instruct")
     p.add_argument("--tag", default=None, help="run subdir name (default: auto from config)")
     p.add_argument("--n-pairs", type=int, default=10)
-    p.add_argument("--target-slots", nargs="+", type=int, default=[1, 2, 3])
-    p.add_argument("--pair-seed", type=int, default=2024)
+    p.add_argument("--target-slots", nargs="+", type=int, default=[1, 2])
+    p.add_argument("--pair-seed", type=int, default=12345)
     p.add_argument("--max-attempts", type=int, default=None,
                    help="pair-sampling attempt cap (default: 40 * n_pairs)")
     p.add_argument("--prompt-mode", choices=["chat", "fim"], default="chat")
