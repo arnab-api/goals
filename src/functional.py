@@ -1058,9 +1058,9 @@ def get_hs(
                 current_state = (
                     module.output.save()
                     if (
-                        "qwen" in mt.name.lower()
-                        or "llama" in mt.name.lower()
-                        or ("mlp" in module_name or module_name == mt.embedder_name)
+                        ("mlp" in module_name or module_name == mt.embedder_name)
+                        # or "qwen" in mt.name.lower()
+                        # or "llama" in mt.name.lower()
                     )
                     else module.output[0].save()
                 )

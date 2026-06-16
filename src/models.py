@@ -232,7 +232,7 @@ def get_full_model_path(model_name: str) -> str:
     else:
         logger.warning(
             f"""{model_name} not found in {DEFAULT_MODELS_DIR}
-If not found in cache, model will be downloaded from HuggingFace to cache directory"""
+If not found in cache, model will be downloaded from HuggingFace to cache directory: {HF_CACHE_DIR}"""
         )
         return model_name
 
