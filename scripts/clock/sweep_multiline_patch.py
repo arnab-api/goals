@@ -13,8 +13,10 @@ DIRECTIONS reuse the same two prompts (swap source<->dest):
     "sl->ml":  source = singleline, destination = multiline
 
 Varied per pair: direction (2) x patch-tokens ([-1]/[-2]/[-1,-2]) x module/window
-(residual/mlp/attn) x layer (window center). Metrics `logit` and `prob` are read off the SAME
-patched run. The recorded indirect effect is
+(residual/mlp/attn) x layer (`layer_idx`). `--layer-mode` selects which layers are patched for
+each `layer_idx`: `window` (a window of layers around it, the default), `asc` (idx..n_layer-1) or
+`desc` (0..idx). Metrics `logit` and `prob` are read off the SAME patched run. The recorded
+indirect effect is
 
     IE = (patched - base) / (gold - base)
 
@@ -61,6 +63,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
+from transformers import BitsAndBytesConfig
+
 
 import torch
 from tqdm.auto import tqdm
@@ -97,7 +101,11 @@ METRICS = ("logit", "prob")
 # Prompt-building constants (ported from the notebook).
 MULTILINE_PREDS = [p for p in INT_PREDICATES if p.is_multiline]
 VAR_LETTERS = "abcdefghij"
-FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"
+FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = (
+    "<|fim_prefix|>",
+    "<|fim_suffix|>",
+    "<|fim_middle|>",
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -135,7 +143,7 @@ def build_example(
     preds = [rng.choice(MULTILINE_PREDS) for _ in range(n_conditions)]
     params = [p.sample_params(rng) for p in preds]
     spec = ConditionSpec(
-        spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10 ** 6):06d}",
+        spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10**6):06d}",
         predicate_ids=[p.id for p in preds],
         predicate_params=params,
         spec_texts=[p.render(pr) for p, pr in zip(preds, params)],
@@ -160,12 +168,16 @@ def build_example(
 
     # target: the test variable.
     if style == "multiline":
-        target_impl = preds[target_slot].render_multiline(params[target_slot], VAR_LETTERS[target_slot])
+        target_impl = preds[target_slot].render_multiline(
+            params[target_slot], VAR_LETTERS[target_slot]
+        )
         target_first = target_impl[0]
         expected_rest = "\n".join(target_impl[1:])
         expected_verdict = "continue"
     else:
-        target_first = preds[target_slot].render_singleline(params[target_slot], VAR_LETTERS[target_slot])
+        target_first = preds[target_slot].render_singleline(
+            params[target_slot], VAR_LETTERS[target_slot]
+        )
         expected_rest = ""
         expected_verdict = "moved_on"
     body.append(target_first)
@@ -183,7 +195,9 @@ def build_example(
     else:
         prefix_code = stub + "\n".join(body) + "\n"
         full_prompt = apply_chat_template(
-            mt=mt, user_query=sample.render_instruction().strip(), incomplete_code=prefix_code
+            mt=mt,
+            user_query=sample.render_instruction().strip(),
+            incomplete_code=prefix_code,
         )
 
     full_prompt = aug(full_prompt) if aug else full_prompt
@@ -238,6 +252,28 @@ def capture_source_hs(
     return src_hs
 
 
+def patched_layer_names(
+    layer_name_format: str,
+    layer_idx: int,
+    layer_mode: str,
+    window_size: int,
+    n_layer: int,
+) -> list[str]:
+    """Layer-name list to patch, given the layer-selection mode:
+
+        "window": a window of `window_size` layers centered on `layer_idx`.
+        "asc":    every layer from `layer_idx` up to `n_layer - 1` (inclusive).
+        "desc":   every layer from 0 up to `layer_idx` (inclusive).
+    """
+    if layer_mode == "window":
+        return list(get_window(layer_name_format, layer_idx, window_size, n_layer))
+    if layer_mode == "asc":
+        return [layer_name_format.format(L) for L in range(layer_idx, n_layer)]
+    if layer_mode == "desc":
+        return [layer_name_format.format(L) for L in range(0, layer_idx + 1)]
+    raise ValueError(f"unknown layer_mode {layer_mode!r}")
+
+
 def run_patched(
     mt: ModelandTokenizer,
     clean_input,
@@ -247,10 +283,13 @@ def run_patched(
     logit_location: tuple,
     window_size: int,
     patch_token_indices: list[int],
-) -> torch.Tensor:
-    """Patch `patch_hs` into `clean_input` over a window of `layer_name_format` centered at
-    `layer_idx`, return next-token logits (vocab,)."""
-    window = get_window(layer_name_format, layer_idx, window_size, mt.n_layer)
+    layer_mode: str = "window",
+) -> tuple[torch.Tensor, int]:
+    """Patch `patch_hs` into `clean_input` over the layers selected by `layer_mode` (see
+    `patched_layer_names`), return `(next-token logits (vocab,), n_patched_layers)`."""
+    layer_names = patched_layer_names(
+        layer_name_format, layer_idx, layer_mode, window_size, mt.n_layer
+    )
     patches = [
         PatchSpec(
             location=(layer_name, tok_idx),
@@ -258,12 +297,17 @@ def run_patched(
             strategy="replace",
             on_pass="first",
         )
-        for layer_name in window
+        for layer_name in layer_names
         for tok_idx in patch_token_indices
     ]
-    return get_hs(
-        mt=mt, input=clean_input, locations=logit_location, patches=patches, return_dict=False
+    logits = get_hs(
+        mt=mt,
+        input=clean_input,
+        locations=logit_location,
+        patches=patches,
+        return_dict=False,
     ).squeeze()
+    return logits, len(layer_names)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -284,9 +328,13 @@ def build_pairs(
     """Sample & validate `n_pairs` contrastive (multiline, singleline) pairs."""
 
     def prep(ex: dict) -> dict:
-        ex["prompt"] = replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   "
+        ex["prompt"] = (
+            replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   "
+        )
         ex["tok"] = prepare_input(ex["prompt"], tokenizer=mt)
-        ex["logits"] = get_hs(mt=mt, input=ex["tok"], locations=logit_location).float().cpu()
+        ex["logits"] = (
+            get_hs(mt=mt, input=ex["tok"], locations=logit_location).float().cpu()
+        )
         ex["argmax"] = int(ex["logits"].argmax())
         return ex
 
@@ -305,14 +353,29 @@ def build_pairs(
     while len(pairs) < n_pairs and attempts < max_attempts:
         attempts += 1
         target_slot = prng.choice(target_slot_options)
-        n_conditions = target_slot + 2  # >= target_slot, gives a 'next var' for moved_on
-        ml = prep(build_example(mt, prng, target_slot, n_conditions, prompt_mode, "multiline"))
-        sl = prep(build_example(mt, prng, target_slot, n_conditions, prompt_mode, "singleline"))
+        n_conditions = (
+            target_slot + 2
+        )  # >= target_slot, gives a 'next var' for moved_on
+        ml = prep(
+            build_example(mt, prng, target_slot, n_conditions, prompt_mode, "multiline")
+        )
+        sl = prep(
+            build_example(
+                mt, prng, target_slot, n_conditions, prompt_mode, "singleline"
+            )
+        )
         if not tokens_match(ml, sl):
             continue
         if ml["argmax"] == sl["argmax"]:  # not contrastive at the next token
             continue
-        pairs.append({"target_slot": target_slot, "n_conditions": n_conditions, "ml": ml, "sl": sl})
+        pairs.append(
+            {
+                "target_slot": target_slot,
+                "n_conditions": n_conditions,
+                "ml": ml,
+                "sl": sl,
+            }
+        )
         pbar.update(1)
     pbar.close()
     logger.info(
@@ -344,6 +407,7 @@ def sweep_one_pair(
     directions: list[str],
     logit_location: tuple,
     ie_denom_eps: dict[str, float],
+    layer_mode: str = "window",
 ) -> list[dict]:
     """Run the full (direction x patch-tokens x module x layer x metric) grid for ONE pair.
 
@@ -354,18 +418,22 @@ def sweep_one_pair(
     records: list[dict] = []
     for direction in directions:
         src, dst = (
-            (pair["ml"], pair["sl"]) if direction == "ml->sl" else (pair["sl"], pair["ml"])
+            (pair["ml"], pair["sl"])
+            if direction == "ml->sl"
+            else (pair["sl"], pair["ml"])
         )
         src_ans = src["argmax"]  # token we patch TOWARD
         dst_ans = dst["argmax"]  # dest's own top token
         gold = {m: score_token(src["logits"], src_ans, m) for m in METRICS}
         base = {m: score_token(dst["logits"], src_ans, m) for m in METRICS}
         base_dst = {m: score_token(dst["logits"], dst_ans, m) for m in METRICS}
-        src_hs = capture_source_hs(mt, src["tok"], module_formats, needed_layers, needed_pos)
+        src_hs = capture_source_hs(
+            mt, src["tok"], module_formats, needed_layers, needed_pos
+        )
         for patch_toks in patch_tok_options:
             for mod, (fmt, win) in module_specs.items():
                 for L in sweep_layers:
-                    patched_logits = run_patched(
+                    patched_logits, n_patched = run_patched(
                         mt=mt,
                         clean_input=dst["tok"],
                         patch_hs=src_hs,
@@ -374,7 +442,9 @@ def sweep_one_pair(
                         logit_location=logit_location,
                         window_size=win,
                         patch_token_indices=list(patch_toks),
-                    ).float().cpu()
+                        layer_mode=layer_mode,
+                    )
+                    patched_logits = patched_logits.float().cpu()
                     for m in METRICS:
                         patched = score_token(patched_logits, src_ans, m)
                         patched_dst = score_token(patched_logits, dst_ans, m)
@@ -392,6 +462,8 @@ def sweep_one_pair(
                                 patch_tokens=str(list(patch_toks)),
                                 module=mod,
                                 window=win,
+                                layer_mode=layer_mode,
+                                n_patched_layers=n_patched,
                                 layer=L,
                                 metric=m,
                                 src_ans=src_ans,
@@ -419,14 +491,21 @@ def sweep_one_pair(
 class SweepResults:
     """In-memory view of a saved sweep run."""
 
-    records: pd.DataFrame          # one row per (pair, direction, patch_tokens, module, layer, metric)
-    pairs: list[dict]              # per-pair full sample metadata (full_prompt etc.; no tensors)
-    metadata: dict                 # run config + n_layer + counts
+    records: (
+        pd.DataFrame
+    )  # one row per (pair, direction, patch_tokens, module, layer, metric)
+    pairs: list[dict]  # per-pair full sample metadata (full_prompt etc.; no tensors)
+    metadata: dict  # run config + n_layer + counts
     path: Path = field(default=None)
 
 
 def run_dir(model: str, tag: str) -> Path:
-    return Path(env_utils.DEFAULT_RESULTS_DIR) / "multiline_patch" / model.split("/")[-1] / tag
+    return (
+        Path(env_utils.DEFAULT_RESULTS_DIR)
+        / "multiline_patch"
+        / model.split("/")[-1]
+        / tag
+    )
 
 
 def checkpoint_dir(out_dir: Path) -> Path:
@@ -465,7 +544,10 @@ def _load_checkpoints(ckpt_dir: Path) -> tuple[list[dict], list[dict]]:
         ck = torch.load(f, weights_only=False)
         records.extend(ck["records"])
         pairs_meta.append(
-            {k: ck[k] for k in ("pair_index", "target_slot", "n_conditions", "ml", "sl")}
+            {
+                k: ck[k]
+                for k in ("pair_index", "target_slot", "n_conditions", "ml", "sl")
+            }
         )
     return records, pairs_meta
 
@@ -521,10 +603,15 @@ def aggregate_sweep(records: pd.DataFrame) -> pd.DataFrame:
     return (
         records.groupby(["metric", "module", "direction", "patch_tokens", "layer"])
         .agg(
-            ie_mean=("ie", "mean"), ie_sem=("ie", _sem), n=("ie", "count"),
-            src_mean=("patched", "mean"), src_sem=("patched", _sem),
-            dst_mean=("patched_dst", "mean"), dst_sem=("patched_dst", _sem),
-            base_src=("base", "mean"), base_dst=("base_dst", "mean"),
+            ie_mean=("ie", "mean"),
+            ie_sem=("ie", _sem),
+            n=("ie", "count"),
+            src_mean=("patched", "mean"),
+            src_sem=("patched", _sem),
+            dst_mean=("patched_dst", "mean"),
+            dst_sem=("patched_dst", _sem),
+            base_src=("base", "mean"),
+            base_dst=("base_dst", "mean"),
         )
         .reset_index()
     )
@@ -547,24 +634,48 @@ def parse_args() -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--model", default="Qwen/Qwen2.5-Coder-14B-Instruct")
-    p.add_argument("--tag", default=None, help="run subdir name (default: auto from config)")
+    p.add_argument(
+        "--tag", default=None, help="run subdir name (default: auto from config)"
+    )
     p.add_argument("--n-pairs", type=int, default=10)
     p.add_argument("--target-slots", nargs="+", type=int, default=[1, 2])
     p.add_argument("--pair-seed", type=int, default=12345)
-    p.add_argument("--max-attempts", type=int, default=None,
-                   help="pair-sampling attempt cap (default: 40 * n_pairs)")
+    p.add_argument(
+        "--max-attempts",
+        type=int,
+        default=None,
+        help="pair-sampling attempt cap (default: 40 * n_pairs)",
+    )
     p.add_argument("--prompt-mode", choices=["chat", "fim"], default="chat")
-    p.add_argument("--layer-step", type=int, default=1, help="sweep range(0, n_layer, step)")
-    p.add_argument("--modules", nargs="+", choices=list(MODULE_NAME_FORMATS),
-                   default=["residual", "mlp", "attn"])
+    p.add_argument(
+        "--layer-step", type=int, default=1, help="sweep range(0, n_layer, step)"
+    )
+    p.add_argument(
+        "--layer-mode",
+        choices=["window", "asc", "desc"],
+        default="window",
+        help="layers patched per layer_idx: window (around idx, uses --*-window) | "
+        "asc (idx..n_layer-1) | desc (0..idx)",
+    )
+    p.add_argument(
+        "--modules",
+        nargs="+",
+        choices=list(MODULE_NAME_FORMATS),
+        default=["residual", "mlp", "attn"],
+    )
     p.add_argument("--residual-window", type=int, default=DEFAULT_WINDOWS["residual"])
     p.add_argument("--mlp-window", type=int, default=DEFAULT_WINDOWS["mlp"])
     p.add_argument("--attn-window", type=int, default=DEFAULT_WINDOWS["attn"])
-    p.add_argument("--patch-tokens", nargs="+", default=["-1", "-2", "-2,-1"],
-                   help="patch position sets, comma-joined (e.g. -1 -2 -2,-1)")
+    p.add_argument(
+        "--patch-tokens",
+        nargs="+",
+        default=["-1", "-2", "-2,-1"],
+        help="patch position sets, comma-joined (e.g. -1 -2 -2,-1)",
+    )
     p.add_argument("--ie-eps-logit", type=float, default=0.5)
     p.add_argument("--ie-eps-prob", type=float, default=1e-3)
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--quantize", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     logging_utils.add_logging_args(p)
     return p.parse_args()
@@ -576,7 +687,8 @@ def main() -> None:
     experiment_utils.set_seed(args.seed)
 
     tag = args.tag or (
-        f"n{args.n_pairs}_step{args.layer_step}_{args.prompt_mode}_seed{args.pair_seed}"
+        f"{args.prompt_mode}_{args.layer_mode}_n{args.n_pairs}"
+        f"_step{args.layer_step}_seed{args.pair_seed}"
     )
     out_dir = run_dir(args.model, tag)
     ckpt_dir = checkpoint_dir(out_dir)
@@ -586,16 +698,26 @@ def main() -> None:
             f.unlink()
         logger.info("--overwrite: cleared existing per-pair checkpoints")
     logger.info(f"output dir: {out_dir}  (per-pair checkpoints under {ckpt_dir.name}/)")
+    quant_args = {}
+    if args.quantize:
+        quant_args = dict(quantization_config=BitsAndBytesConfig(load_in_8bit=True))
+        logger.info("quantization enabled: using 8-bit weights (no quantization for activations)")
 
     logger.info(f"loading model {args.model} ...")
     mt = ModelandTokenizer(
-        model_key=args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="eager"
+        model_key=args.model,
+        dtype=torch.bfloat16,
+        device_map="auto",
+        attn_implementation="eager",
+        **quant_args
     )
     logger.info(f"n_layer={mt.n_layer}, n_heads={mt.model.config.num_attention_heads}")
 
     logit_location = (mt.lm_head_name, -1)
     windows = {
-        "residual": args.residual_window, "mlp": args.mlp_window, "attn": args.attn_window,
+        "residual": args.residual_window,
+        "mlp": args.mlp_window,
+        "attn": args.attn_window,
     }
     module_specs = {
         m: (getattr(mt, MODULE_NAME_FORMATS[m]), windows[m]) for m in args.modules
@@ -608,18 +730,28 @@ def main() -> None:
     max_attempts = args.max_attempts or (40 * args.n_pairs)
 
     n_runs = (
-        args.n_pairs * 2 * len(patch_tok_options) * len(module_specs) * len(sweep_layers)
+        args.n_pairs
+        * 2
+        * len(patch_tok_options)
+        * len(module_specs)
+        * len(sweep_layers)
     )
     logger.info(
+        f"layer_mode={args.layer_mode} | "
         f"modules={ {m: w for m, (_, w) in module_specs.items()} } | "
         f"patch_tokens={patch_tok_options} | sweep_layers({len(sweep_layers)})={sweep_layers}"
     )
     logger.info(f"=> {n_runs} patched forward passes")
 
     pairs = build_pairs(
-        mt=mt, n_pairs=args.n_pairs, target_slot_options=args.target_slots,
-        needed_pos=needed_pos, logit_location=logit_location, prompt_mode=args.prompt_mode,
-        seed=args.pair_seed, max_attempts=max_attempts,
+        mt=mt,
+        n_pairs=args.n_pairs,
+        target_slot_options=args.target_slots,
+        needed_pos=needed_pos,
+        logit_location=logit_location,
+        prompt_mode=args.prompt_mode,
+        seed=args.pair_seed,
+        max_attempts=max_attempts,
     )
 
     # Per-pair sweep with checkpointing. Each pair writes a self-contained
@@ -634,26 +766,41 @@ def main() -> None:
             ck = torch.load(ckpt, weights_only=False)
             all_records.extend(ck["records"])
             n_cached += 1
-            logger.info(f"[{pi + 1}/{len(pairs)}] [skip cached] {ckpt.name} ({len(ck['records'])} rows)")
+            logger.info(
+                f"[{pi + 1}/{len(pairs)}] [skip cached] {ckpt.name} ({len(ck['records'])} rows)"
+            )
             continue
         records = sweep_one_pair(
-            mt=mt, pi=pi, pair=pair, module_specs=module_specs,
-            patch_tok_options=patch_tok_options, sweep_layers=sweep_layers,
-            needed_layers=needed_layers, needed_pos=needed_pos,
-            directions=["ml->sl", "sl->ml"], logit_location=logit_location,
+            mt=mt,
+            pi=pi,
+            pair=pair,
+            module_specs=module_specs,
+            patch_tok_options=patch_tok_options,
+            sweep_layers=sweep_layers,
+            needed_layers=needed_layers,
+            needed_pos=needed_pos,
+            directions=["ml->sl", "sl->ml"],
+            logit_location=logit_location,
             ie_denom_eps=ie_denom_eps,
+            layer_mode=args.layer_mode,
         )
         payload = serialize_pair(pi, pair, mt.tokenizer)
         payload["records"] = records
-        torch.save(payload, ckpt)            # checkpoint immediately after the pair completes
+        torch.save(payload, ckpt)  # checkpoint immediately after the pair completes
         all_records.extend(records)
         n_swept += 1
-        logger.info(f"[{pi + 1}/{len(pairs)}] swept + saved {ckpt.name} ({len(records)} rows)")
+        logger.info(
+            f"[{pi + 1}/{len(pairs)}] swept + saved {ckpt.name} ({len(records)} rows)"
+        )
 
     df = pd.DataFrame(all_records)
     df.to_parquet(out_dir / "records.parquet")
     with open(out_dir / "pairs.json", "w") as f:
-        json.dump([serialize_pair(pi, p, mt.tokenizer) for pi, p in enumerate(pairs)], f, indent=2)
+        json.dump(
+            [serialize_pair(pi, p, mt.tokenizer) for pi, p in enumerate(pairs)],
+            f,
+            indent=2,
+        )
     metadata = {
         "model": args.model,
         "tag": tag,
@@ -663,6 +810,7 @@ def main() -> None:
         "prompt_mode": args.prompt_mode,
         "n_layer": int(mt.n_layer),
         "layer_step": args.layer_step,
+        "layer_mode": args.layer_mode,
         "sweep_layers": sweep_layers,
         "modules": {m: w for m, (_, w) in module_specs.items()},
         "patch_tokens": [list(pt) for pt in patch_tok_options],

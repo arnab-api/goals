@@ -8,45 +8,13 @@ sys.stderr.reconfigure(line_buffering=True)
 ################################################################################################################################################################
 # Memory threshold in GB
 MEM_THRESHOLD = 30
-CUDA_INDEX = 6
+CUDA_INDEX = 0
 # Check interval in seconds (10 minutes)
 CHECK_INTERVAL = 10 * 60
 AUTO_CONTINUE = False  # Set to False if you want to stop on errors instead of auto-continuing
-CUDA_DEVICES = "2,3,6,7"  # GPUs to use for jobs (e.g. "0,1,2,3")
+CUDA_DEVICES = "0"  # GPUs to use for jobs (e.g. "0,1,2,3")
 ################################################################################################################################################################
 
-
-MODELS = [
-    # "Qwen/Qwen2.5-Coder-14B-Instruct",
-    # "Qwen/Qwen2.5-Coder-32B-Instruct",
-    # "facebook/cwm",
-    # "allenai/Olmo-3.1-32B-Instruct",
-    # # "Qwen/Qwen3.5-27B",
-    # # "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-    # "Qwen/Qwen2.5-72B-Instruct",
-    # "meta-llama/Llama-3.3-70B-Instruct",
-]
-# JOBS = [
-#     {
-#         "name": f"{model}",
-#         "command": f'CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 python -m scripts.train_head_mask --model-key="{model}" --n-epochs=50 --batch-size=64 --augment --lazy --checkpoint-every=5 -v 2>&1 | tee logs/{model.split("/")[-1]}.log',
-#     }
-#     for model in MODELS
-# ]
-
-MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
-MODEL_SHORT = "qwen-32"
-
-# ── Smoke test ────────────────────────────────────────────────────────────────
-# Set SMOKE_TEST=True to run only a handful of tasks end-to-end before
-# committing to the full pipeline.  Tasks are drawn from the custom source.
-SMOKE_TEST = False
-SMOKE_TEST_TASKS = ["bfs", "dfs", "binary_search", "merge_sort", "atoi"]
-SMOKE_TEST_SOURCE = "custom"
-# ─────────────────────────────────────────────────────────────────────────────
-
-_tasks_flag = f"--tasks {' '.join(SMOKE_TEST_TASKS)} --source {SMOKE_TEST_SOURCE}" if SMOKE_TEST else ""
-_log_suffix  = "_smoke" if SMOKE_TEST else ""
 
 # JOBS = [
 #     {
@@ -72,42 +40,16 @@ _log_suffix  = "_smoke" if SMOKE_TEST else ""
 # ]
 
 
-SUBSPACE_PROBE_CONFIGS = [
+JOBS = [
     {
-        "rank": 64,
-        "layer_range": (35, 46),
+        "name": "qwen14b_cma",
+        "command": 'python -m scripts.clock.sweep_multiline_patch --model="Qwen/Qwen2.5-Coder-14B-Instruct" --n-pairs=100 --overwrite |& tee logs/cma_multiline_14.log '
     },
     {
-        "rank": 128,
-        "layer_range": (35, 46),
-    },
-    {
-        "rank": 64,
-        "layer_range": (1, 11),
-    },
-    {
-        "rank": 64,
-        "layer_range": (45, 56),
-    },
-    {
-        "rank": 128,
-        "layer_range": (1, 11),
-    },
-    {
-        "rank": 128,
-        "layer_range": (45, 56),
+        "name": "qwen32b_cma",
+        "command": 'python -m scripts.clock.sweep_multiline_patch --model="Qwen/Qwen2.5-Coder-32B-Instruct" --n-pairs=100 --overwrite --quantize |& tee logs/cma_multiline_32.log '
     },
 ]
-
-JOBS = []
-for conf in SUBSPACE_PROBE_CONFIGS:
-    rank = conf["rank"]
-    layer_start, layer_stop = conf["layer_range"]
-    job_name = f"rank={rank}__layer={layer_start}_{layer_stop}"
-
-    command = f"""CUDA_VISIBLE_DEVICES={CUDA_DEVICES} python -m scripts.train_subspace_probe --model-key="{MODEL_NAME}" --layer-range {layer_start} {layer_stop} --r={rank} --batch-size=64 --epochs=5 2>&1 | tee logs/train_subspace/rank={rank}__layer={layer_start}_{layer_stop}.log"""
-    JOBS.append({"name": job_name, "command": command})
-
 
 
 
