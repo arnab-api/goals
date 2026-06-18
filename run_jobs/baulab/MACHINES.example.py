@@ -27,6 +27,29 @@ MACHINES = [
     # MachineConfig(name="my-cluster-box-a", cuda=[0]),
     # MachineConfig(name="my-cluster-box-b", cuda=[0, 1]),   # one job spanning GPUs 0,1
     # MachineConfig(name="my-cluster-box-b", cuda=[2, 3]),   # same host, separate concurrent slot
+    MachineConfig(name="umibozu", cuda=[0]),
+    MachineConfig(name="tokyo", cuda=[0]),
+    # MachineConfig(name="hawaii", cuda=[0]),
+    # MachineConfig(name="karasuno", cuda=[0]),
+    MachineConfig(name="kobe", cuda=[0]),
+    MachineConfig(name="macondo", cuda=[0]),
+    MachineConfig(name="ei", cuda=[0]),
+    # MachineConfig(name="andromeda", cuda=[0]), #! 20.04
+    MachineConfig(name="kawasaki", cuda=[0]),
+    # MachineConfig(name="sendai", cuda=[0]),   #! 20.04
+    # MachineConfig(name="kumamoto", cuda=[0]),
+    # MachineConfig(name="hamada", cuda=[0]),
+    MachineConfig(name="fukuyama", cuda=[0]),
+    # MachineConfig(name="osaka", cuda=[0]), #! 20.04
+    MachineConfig(name="cancun", cuda=[0]),
+    MachineConfig(name="kameoka", cuda=[0]),
+    # MachineConfig(name="bippu", cuda=[0]), #! 20.04
+    # MachineConfig(name="hokkaido", cuda=[0]), #! 20.04
+    MachineConfig(name="kyoto", cuda=[0, 1]),
+    MachineConfig(name="tottori", cuda=[0]),
+    MachineConfig(name="saitama", cuda=[0, 1]),
+    # MachineConfig(name="nagoya", cuda=[3, 4, 5, 6, 7]),
+    # MachineConfig(name="hakone", cuda=list(range(8)))
 ]
 
 # SAFE_MACHINES are the *preferred* tier — tried FIRST for every job (e.g. machines you own,

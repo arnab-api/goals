@@ -1,0 +1,141 @@
+"""Forced-prefill prompt builders for the multiline/singleline 'stop vs continue' setup.
+
+Lifted from `notebooks/clock/04.2_multiline.ipynb` (cell 4) so notebooks 04.2 / 04.3 / sweeps can
+share one source of truth. The construction:
+
+  - A `check_conditions(n)`-style stub over `n_conditions` predicate conditions (a, b, c, ...).
+  - PRIOR conditions (slots < target) are force-filled COMPLETE — a random single/multi-line mix,
+    but with >=1 multiline — so the LM has in-context precedent that a variable MAY span lines.
+  - The TARGET condition (slot `target_slot`) is the *test* variable:
+        style="multiline":  forced at its INCOMPLETE first line  -> hypothesis 'continue' (stay).
+        style="singleline": forced as one COMPLETE line          -> hypothesis 'moved_on'.
+
+Two prompt modes: "chat" (instruction + <code> assistant turn) and "fim" (Qwen FIM with a fixed
+result-printing suffix that references every var, forcing each to be defined in the middle).
+"""
+
+import random
+from typing import Callable, Optional
+
+from src.goals.condition_data import INT_PREDICATES, ConditionSample, ConditionSpec
+from src.goals.functional import apply_chat_template
+from src.models import ModelandTokenizer
+
+# multiline-capable predicates (have a `render_multiline`)
+MULTILINE_PREDS = [p for p in INT_PREDICATES if p.is_multiline]
+VAR_LETTERS = "abcdefghij"
+FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"
+
+
+def result_print(letters: list[str]) -> str:
+    """Fixed FIM suffix: an f-string `print` referencing EVERY result var (so to make the suffix
+    valid the model must define each one in the middle)."""
+    conds = ", ".join("Condition %d: {%s}" % (i + 1, v) for i, v in enumerate(letters))
+    all_expr = " and ".join(letters)
+    return '    print(f"' + conds + ", ALL: {" + all_expr + '}")\n'
+
+
+def replace_in_code_newline_with_tabnewline(prompt: str) -> str:
+    """Turn each `\\n` inside the final <code> block into `    \\n` so trailing-whitespace
+    tokenization is stable (used before tokenizing for latent extraction / patching)."""
+    code_split = prompt.split("<code>")
+    code_segment = code_split[-1]
+    prefix = "<code>".join(code_split[:-1])
+    code_segment = code_segment.replace("\n", "    \n")
+    return prefix + "<code>" + code_segment
+
+
+def build_example(
+    mt: ModelandTokenizer,
+    rng: random.Random,
+    target_slot: int,
+    n_conditions: int,
+    mode: str = "chat",
+    style: str = "multiline",
+    aug: Optional[Callable[[str], str]] = None,
+) -> dict:
+    """One forced-prefill example for the 'stay vs move-on' test.
+
+    `target_slot >= 1` (need >=1 prior to set the multiline precedent) and `target_slot <
+    n_conditions` (need a following condition for 'moved_on' to be possible).
+    """
+    assert 1 <= target_slot < n_conditions
+    preds = [rng.choice(MULTILINE_PREDS) for _ in range(n_conditions)]
+    params = [p.sample_params(rng) for p in preds]
+    spec = ConditionSpec(
+        spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10 ** 6):06d}",
+        predicate_ids=[p.id for p in preds],
+        predicate_params=params,
+        spec_texts=[p.render(pr) for p, pr in zip(preds, params)],
+        id_substrs=[p.render_substrs(pr) for p, pr in zip(preds, params)],
+        test_inputs=[rng.randint(-5, 1000) for _ in range(6)],
+    )
+    sample = ConditionSample(
+        spec=spec, lang="python", modularity="monolithic", without_comment=True
+    )
+    stub = sample.render_code_stub()
+
+    # priors: force-filled COMPLETE, random single/multi mix, but >=1 multiline
+    prior_styles = [rng.choice(["multiline", "singleline"]) for _ in range(target_slot)]
+    if "multiline" not in prior_styles:
+        prior_styles[rng.randrange(target_slot)] = "multiline"
+    body = []
+    for j in range(target_slot):
+        if prior_styles[j] == "multiline":
+            body += preds[j].render_multiline(params[j], VAR_LETTERS[j])
+        else:
+            body.append(preds[j].render_singleline(params[j], VAR_LETTERS[j]))
+
+    # target: the test variable
+    if style == "multiline":
+        target_impl = preds[target_slot].render_multiline(
+            params[target_slot], VAR_LETTERS[target_slot]
+        )
+        target_first = target_impl[0]  # incomplete first line
+        expected_rest = "\n".join(target_impl[1:])
+        expected_verdict = "continue"
+    else:
+        target_first = preds[target_slot].render_singleline(
+            params[target_slot], VAR_LETTERS[target_slot]
+        )
+        expected_rest = ""  # complete; nothing left for this var
+        expected_verdict = "moved_on"
+    body.append(target_first)
+
+    letters = [VAR_LETTERS[i] for i in range(n_conditions)]
+    fim_suffix = result_print(letters)
+    if mode == "fim":
+        doc = (
+            '    """\n'
+            + "".join(f"    {i + 1}. {t}\n" for i, t in enumerate(spec.spec_texts))
+            + '    """\n'
+        )
+        prefix_code = stub + doc + "\n".join(body) + "\n"
+        full_prompt = FIM_PREFIX + prefix_code + FIM_SUFFIX + fim_suffix + FIM_MIDDLE
+    else:
+        prefix_code = stub + "\n".join(body) + "\n"
+        full_prompt = apply_chat_template(
+            mt=mt,
+            user_query=sample.render_instruction().strip(),
+            incomplete_code=prefix_code,
+        )
+
+    full_prompt = aug(full_prompt) if aug else full_prompt
+    next_slot = target_slot + 1
+    return {
+        "spec_id": spec.spec_id,
+        "mode": mode,
+        "prefill_style": style,  # the TARGET's style (test variable)
+        "prior_styles": prior_styles,  # complete priors, >=1 multiline
+        "full_prompt": full_prompt,
+        "prefill_code": prefix_code,
+        "fim_suffix": fim_suffix.rstrip("\n") if mode == "fim" else None,
+        "target_slot": target_slot,
+        "target_var": VAR_LETTERS[target_slot],
+        "next_var": VAR_LETTERS[next_slot] if next_slot < n_conditions else None,
+        "target_pred": preds[target_slot].id,
+        "target_first_line": target_first.strip(),
+        "expected_rest": expected_rest,
+        "expected_verdict": expected_verdict,
+        "n_conditions": n_conditions,
+    }
