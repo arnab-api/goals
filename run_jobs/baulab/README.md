@@ -18,7 +18,29 @@ monitor.py    live terminal monitor: reads a manifest, polls each placed job's s
               scheduler exits. `--list` shows past batches.
 kill.py       kill jobs by name (`--names`) or a whole batch (`--all`). Killed jobs are NOT
               auto-requeued.
+setup.sh      one-time setup: installs the CLI tools (sshpass, screen) into the conda env and
+              seeds MACHINES.py from the template.
+MACHINES.py   per-client machine inventory (MACHINES + SAFE_MACHINES); gitignored, copied from
+              MACHINES.example.py.
 ```
+
+## 0. Setup (once per client)
+
+```bash
+bash run_jobs/baulab/setup.sh          # or: ENV_NAME=myenv bash run_jobs/baulab/setup.sh
+```
+
+This installs **`sshpass`** (feed the ssh password non-interactively) and **`screen`** (detached
+per-job sessions) into the `goals` conda env, and copies `MACHINES.example.py` → `MACHINES.py` if
+you don't have one yet. `sshpass` is only needed on the box you launch the scheduler from;
+`screen` must also exist on every remote worker. Then edit `MACHINES.py` (step 2) and make sure
+`env.yml` has `BAULAB_USER` / `BAULAB_PASS`.
+
+> **ssh-config gotcha.** If your `~/.ssh/config` sets `RequestTTY yes` + `RemoteCommand ...` for a
+> host (forcing an interactive login shell), plain `ssh <host> <cmd>` fails with *"Cannot execute
+> command-line and remote command."* The dispatcher already neutralises this with
+> `-o RequestTTY=no -o RemoteCommand=none` in `SSH_OPTS`, so such hosts work regardless. (For the
+> box you're *running on*, prefer `name="local"` — it skips ssh entirely.)
 
 ## 1. Define jobs (your responsibility)
 
@@ -34,7 +56,16 @@ dir, so `|& tee logs/...` paths are relative to it.
 
 See `jobs.example.json`.
 
-## 2. Define machines + config (edit `dispatch.py`)
+## 2. Define machines + config
+
+Machines live in a **local, gitignored `MACHINES.py`** — different clients have access to (and
+"own") different boxes, so this is per-client and not version-controlled. Copy the template once:
+
+```bash
+cp run_jobs/baulab/MACHINES.example.py run_jobs/baulab/MACHINES.py
+```
+
+then edit `MACHINES.py`:
 
 ```python
 SAFE_MACHINES = [          # preferred tier — tried FIRST for every job (e.g. machines you own)
@@ -46,7 +77,12 @@ MACHINES = [               # fallback tier — used only when no safe machine cu
     MachineConfig("kyoto", cuda=[2, 3]),   # same host, independent slot (runs concurrently)
     MachineConfig("local", cuda=[0]),
 ]
+```
 
+`dispatch.py` imports those two lists from `MACHINES.py` (and exits with a copy-the-template hint
+if it's missing). The scheduler **config** stays in `dispatch.py` (edit in-place):
+
+```python
 MIN_GPU_MEMORY  = 48    # GB; a job needs this much FREE (and capacity) across a machine's GPUs
 POLL_INTERVAL_MIN = 10  # idle-machine probe + placement cadence
 MAX_RETRY       = 5     # auto-requeue attempts for OOM / externally-killed jobs
@@ -76,7 +112,8 @@ machines freed by *other people's* jobs ending). One job per entry, using all it
 several jobs on one host concurrently, add multiple entries (`cuda=[0]`, `cuda=[1]`, ...).
 
 Credentials (`BAULAB_USER`, `BAULAB_PASS`) are read from `env.yml`. Needs `sshpass` + `screen`
-on the local box and `screen` on each remote.
+on the local box and `screen` on each remote — `bash run_jobs/baulab/setup.sh` installs them
+(see step 0).
 
 ## 3. Run the scheduler
 

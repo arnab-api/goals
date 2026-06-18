@@ -63,7 +63,7 @@ import sys
 import tempfile
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -77,53 +77,28 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EDIT ME — machines and config.
+# Machines come from a local, gitignored MACHINES.py (each client lists its own).
 # ──────────────────────────────────────────────────────────────────────────────
+# `MachineConfig`, `MACHINES` (fallback tier) and `SAFE_MACHINES` (preferred tier) are defined
+# there because different clients have access to — and "own" — different boxes. Copy the template
+# on a new client:  cp run_jobs/baulab/MACHINES.example.py run_jobs/baulab/MACHINES.py
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from MACHINES import MACHINES, SAFE_MACHINES  # (local, gitignored)
+except ModuleNotFoundError as e:
+    if e.name != "MACHINES":
+        raise
+    sys.exit(
+        "run_jobs/baulab: no MACHINES.py found next to dispatch.py.\n"
+        "  cp run_jobs/baulab/MACHINES.example.py run_jobs/baulab/MACHINES.py\n"
+        "then edit it to list this client's machines (MACHINES) and owned/safe boxes "
+        "(SAFE_MACHINES)."
+    )
 
 
-@dataclass
-class MachineConfig:
-    """One worker: a host plus the GPU indices it may use. Repeat a host with different
-    `cuda` sets to give it several independent queues."""
-
-    name: str
-    cuda: list[int] = field(default_factory=lambda: [0])
-
-
-MACHINES = [
-    MachineConfig(name="umibozu", cuda=[0]),
-    MachineConfig(name="tokyo", cuda=[0]),
-    # MachineConfig(name="hawaii", cuda=[0]),
-    # MachineConfig(name="karasuno", cuda=[0]),
-    MachineConfig(name="kobe", cuda=[0]),
-    MachineConfig(name="macondo", cuda=[0]),
-    MachineConfig(name="ei", cuda=[0]),
-    # MachineConfig(name="andromeda", cuda=[0]), #! 20.04
-    MachineConfig(name="kawasaki", cuda=[0]),
-    # MachineConfig(name="sendai", cuda=[0]),   #! 20.04
-    # MachineConfig(name="kumamoto", cuda=[0]), 
-    # MachineConfig(name="hamada", cuda=[0]),
-    MachineConfig(name="fukuyama", cuda=[0]),
-    # MachineConfig(name="osaka", cuda=[0]), #! 20.04
-    MachineConfig(name="cancun", cuda=[0]),
-    MachineConfig(name="kameoka", cuda=[0]),
-    # MachineConfig(name="bippu", cuda=[0]), #! 20.04
-    # MachineConfig(name="hokkaido", cuda=[0]), #! 20.04
-    MachineConfig(name="kyoto", cuda=[0]),
-    MachineConfig(name="tottori", cuda=[0]),
-    # MachineConfig(name="nagoya.research.khoury.northeastern.edu", cuda=list(range(8))),
-    # MachineConfig(name="hakone.research.khoury.northeastern.edu", cuda=list(range(8)))
-]
-
-# SAFE_MACHINES are the *preferred* tier — tried FIRST for every job (e.g. machines you own, where
-# your jobs won't be pre-empted by someone reclaiming the box). Only when **no** safe machine
-# currently satisfies a job's requirements does the scheduler fall back to MACHINES. You may list a
-# host here even if it's also in MACHINES — duplicates are de-duped into the safe tier, so you
-# don't have to edit MACHINES.
-SAFE_MACHINES = [
-    MachineConfig(name="umibozu", cuda=[0]),
-    MachineConfig(name="tokyo", cuda=[0])
-]
+# ──────────────────────────────────────────────────────────────────────────────
+# EDIT ME — scheduler config.
+# ──────────────────────────────────────────────────────────────────────────────
 
 # --- gates / behaviour --------------------------------------------------------
 MIN_GPU_MEMORY = 45        # GB; a job needs this much FREE (and capacity) across a worker's GPUs
@@ -143,8 +118,14 @@ LOCAL_PROJECT_DIR = str(_PROJECT_ROOT)        # used when name == "local"
 REMOTE_PROJECT_DIR = "~/Codes/Projects/goals"  # used on remote hosts (tilde ok)
 REMOTE_STAGING_SUBDIR = ".remote_jobs"        # under the project dir on each host
 
-# SSH hardening so automation never blocks on a prompt.
-SSH_OPTS = "-o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -o ConnectTimeout=15"
+# SSH hardening so automation never blocks on a prompt. RequestTTY=no + RemoteCommand=none
+# neutralise any per-host `RequestTTY`/`RemoteCommand` directives in the user's ~/.ssh/config
+# (which force an interactive login shell and make ssh refuse to run our passed command —
+# "Cannot execute command-line and remote command").
+SSH_OPTS = (
+    "-o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -o ConnectTimeout=15 "
+    "-o RequestTTY=no -o RemoteCommand=none"
+)
 
 # Failure kinds the scheduler will auto-requeue (everything else is terminal).
 RETRYABLE_KINDS = {"oom", "killed"}
