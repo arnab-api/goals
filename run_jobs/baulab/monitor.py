@@ -35,17 +35,16 @@ from rich.table import Table
 from rich.text import Text
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dispatch import SSH_OPTS, load_credentials, manifests_dir  # noqa: E402
+from dispatch import (  # noqa: E402
+    SSH_OPTS,
+    STATE_STYLE,
+    load_credentials,
+    manifests_dir,
+    print_runs,
+)
 
-TERMINAL = {"done", "error"}
-STATE_STYLE = {
-    "queued": "dim",
-    "waiting": "yellow",
-    "running": "cyan",
-    "done": "green",
-    "error": "bold red",
-    "no-status": "magenta",
-}
+TERMINAL = {"done", "error", "killed", "cancelled"}
+MANIFEST_TERMINAL = {"done", "error", "killed", "cancelled"}  # scheduler-authoritative states
 
 
 def latest_manifest() -> Path | None:
@@ -97,31 +96,46 @@ def _detail(rec: dict, now: float) -> str:
     return ""
 
 
-def resolve(job: dict, user: str, pw: str, now: float) -> tuple[str, str, str]:
-    """(machine, state, detail) for one manifest job, polling its host if placed."""
+def _retries(job: dict) -> str:
+    return ", ".join(f"{h['host']}({h['reason']})" for h in (job.get("history") or []))
+
+
+def resolve(job: dict, user: str, pw: str, now: float) -> tuple[str, str, str, str]:
+    """(machine, state, detail, retries) for one manifest job, polling its host if placed."""
+    retries = _retries(job)
+    mstate = job.get("state")
     if not job.get("status_path"):
-        return "—", "queued", "in wait queue"
-    machine = f"{job['host']}:{','.join(map(str, job['gpus']))}"
+        # never placed (or placed-then-removed): the manifest is authoritative.
+        detail = {"queued": "in wait queue"}.get(mstate, job.get("error") or "")
+        machine = "—"
+        if job.get("host"):
+            machine = f"{job['host'].split('.')[0]}:{','.join(map(str, job['gpus']))}"
+        return machine, mstate or "queued", detail, retries
+    machine = f"{job['host'].split('.')[0]}:{','.join(map(str, job['gpus']))}"
+    if mstate in MANIFEST_TERMINAL:
+        # scheduler already settled this one (incl. killed/cancelled / retries-exhausted).
+        return machine, mstate, job.get("error") or "", retries
     rec = fetch_job(job, user, pw)
     if rec is None:
         # placed but status not readable yet (driver starting) or host unreachable.
-        return machine, job.get("state", "no-status"), ""
-    return machine, rec["state"], _detail(rec, now)
+        return machine, mstate or "no-status", "", retries
+    return machine, rec["state"], _detail(rec, now), retries
 
 
-def render(manifest: dict, rows: list[tuple[str, str, str, str]]) -> Group:
+def render(manifest: dict, rows: list[tuple[str, str, str, str, str]]) -> Group:
     table = Table(box=SIMPLE_HEAVY, expand=False, pad_edge=False)
     table.add_column("job", style="bold", no_wrap=True)
     table.add_column("machine", no_wrap=True)
     table.add_column("status", no_wrap=True)
-    table.add_column("detail", overflow="fold", max_width=60)
+    table.add_column("retries", no_wrap=True, style="yellow")
+    table.add_column("detail", overflow="fold", max_width=52)
 
     counts: dict[str, int] = {}
-    for name, machine, state, detail in rows:
+    for name, machine, state, detail, retries in rows:
         counts[state] = counts.get(state, 0) + 1
-        table.add_row(name, machine, Text(state, style=STATE_STYLE.get(state, "white")), detail)
+        table.add_row(name, machine, Text(state, style=STATE_STYLE.get(state, "white")), retries, detail)
 
-    order = ["running", "waiting", "queued", "done", "error", "no-status"]
+    order = ["running", "waiting", "queued", "done", "error", "killed", "cancelled", "no-status"]
     parts = [f"[{STATE_STYLE.get(k, 'white')}]{k} {counts[k]}[/]" for k in order if counts.get(k)]
     header = Text.from_markup(
         f"run [bold]{manifest['run_id']}[/] · submitted {manifest['created']} · "
@@ -130,23 +144,27 @@ def render(manifest: dict, rows: list[tuple[str, str, str, str]]) -> Group:
     return Group(header, table)
 
 
-def collect(manifest: dict, user: str, pw: str) -> list[tuple[str, str, str, str]]:
+def collect(manifest: dict, user: str, pw: str) -> list[tuple[str, str, str, str, str]]:
     now = time.time()
     rows = []
     for job in manifest["jobs"]:
-        machine, state, detail = resolve(job, user, pw, now)
-        rows.append((job["name"], machine, state, detail))
+        machine, state, detail, retries = resolve(job, user, pw, now)
+        rows.append((job["name"], machine, state, detail, retries))
     return rows
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-id", default=None, help="batch to monitor (default: most recent)")
-    ap.add_argument("--interval", type=float, default=3.0, help="refresh seconds (default: 3)")
+    ap.add_argument("--interval", type=float, default=30.0, help="refresh seconds (default: 30)")
     ap.add_argument("--watch", action="store_true", help="keep refreshing even after all jobs finish")
+    ap.add_argument("--list", action="store_true", help="list past batches + run ids, then exit")
     args = ap.parse_args()
 
     console = Console()
+    if args.list:
+        print_runs(console)
+        return
     mpath = (manifests_dir() / f"{args.run_id}.json") if args.run_id else latest_manifest()
     if not mpath or not mpath.exists():
         console.print("[red]no submission manifest found.[/] Run dispatch.py first.")
@@ -159,7 +177,7 @@ def main() -> None:
             rows = collect(manifest, user, pw)
             live.update(render(manifest, rows))
             live.refresh()
-            if all(state in TERMINAL for _, _, state, _ in rows) and not args.watch:
+            if all(state in TERMINAL for _, _, state, _, _ in rows) and not args.watch:
                 break
             time.sleep(args.interval)
 

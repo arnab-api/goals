@@ -108,17 +108,20 @@ class StatusBoard:
         self.meta = {"run_id": run_id, "worker_id": worker_id, "host": host, "gpus": gpus}
         self.jobs = [
             {"seq": i + 1, "name": j["name"], "state": "queued",
-             "error": None, "started": None, "ended": None}
+             "error": None, "error_kind": None, "started": None, "ended": None}
             for i, j in enumerate(jobs)
         ]
         self.flush()
 
     def update(self, idx: int, *, state: str, error: str | None = None,
+               error_kind: str | None = None,
                started: float | None = None, ended: float | None = None) -> None:
         job = self.jobs[idx]
         job["state"] = state
         if error is not None:
             job["error"] = error
+        if error_kind is not None:
+            job["error_kind"] = error_kind
         if started is not None:
             job["started"] = started
         if ended is not None:
@@ -126,7 +129,8 @@ class StatusBoard:
         # marker line -> _driver.log (the monitor can fall back to grepping these).
         print(f"{STATUS_MARKER} " + json.dumps(
             {**self.meta, "seq": job["seq"], "name": job["name"],
-             "state": state, "error": job["error"], "ts": time.time()}
+             "state": state, "error": job["error"], "error_kind": job["error_kind"],
+             "ts": time.time()}
         ), flush=True)
         self.flush()
 
@@ -140,24 +144,39 @@ class StatusBoard:
 _ERR_LINE = re.compile(r"^[\w.]*(?:Error|Exception|Warning):.*$|^[\w.]*Error$")
 
 
-def classify_error(tail: list[str], returncode: int) -> str:
-    """A short human description of why a job failed, from its output tail + exit code."""
+def classify_error(tail: list[str], returncode: int) -> tuple[str, str]:
+    """Return ``(kind, message)`` describing why a job failed.
+
+    ``kind`` drives the scheduler's auto-requeue policy:
+      * ``"oom"``    — CUDA out of memory (someone else's job likely crowded the card);
+      * ``"killed"`` — the process was killed by a signal (oom-killer or a person reclaiming
+                       the machine — exit 137/143, or a direct fatal signal);
+      * ``"other"``  — a genuine failure in our code (not retried).
+    """
     text = "\n".join(tail)
     low = text.lower()
-    if "out of memory" in low or "cuda out of memory" in low or "cublas" in low and "alloc" in low:
-        return "CUDA OOM"
+    if "out of memory" in low or "cuda out of memory" in low or ("cublas" in low and "alloc" in low):
+        return "oom", "CUDA OOM"
     if returncode == 137:
-        return "killed (exit 137 — likely OOM/oom-killer)"
+        return "killed", "killed (exit 137 — SIGKILL / oom-killer)"
+    if returncode == 143:
+        return "killed", "killed (exit 143 — SIGTERM)"
+    if returncode < 0:  # the shell itself was signalled (e.g. screen quit / pkill)
+        sig = -returncode
+        if sig in (2, 9, 15):
+            return "killed", f"killed (signal {sig})"
+        return "other", f"terminated by signal {sig}"
     if returncode == 139:
-        return "segfault (exit 139)"
+        return "other", "segfault (exit 139)"
     # Last Python exception line, if any.
     for line in reversed(tail):
         s = line.strip()
         if _ERR_LINE.match(s):
-            return (s[:120] + "…") if len(s) > 120 else s
+            msg = (s[:120] + "…") if len(s) > 120 else s
+            return "other", msg
     if "Traceback (most recent call last)" in text:
-        return "Python traceback (see log)"
-    return f"non-zero exit {returncode}"
+        return "other", "Python traceback (see log)"
+    return "other", f"non-zero exit {returncode}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -165,7 +184,7 @@ def classify_error(tail: list[str], returncode: int) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def run_job(job: dict, gpus: list[int], runlog: Path, job_num: int, total: int) -> tuple[bool, str | None]:
+def run_job(job: dict, gpus: list[int], runlog: Path, job_num: int, total: int) -> tuple[bool, str | None, str | None]:
     name = job["name"]
     command = job["command"]
     cuda = ",".join(map(str, gpus))
@@ -195,10 +214,10 @@ def run_job(job: dict, gpus: list[int], runlog: Path, job_num: int, total: int) 
 
     if proc.returncode == 0:
         print(f"[{_now()}] ✓ job {job_num}/{total} ({name}) done.", flush=True)
-        return True, None
-    err = classify_error(list(tail), proc.returncode)
-    print(f"[{_now()}] ✗ job {job_num}/{total} ({name}) failed: {err}", flush=True)
-    return False, err
+        return True, None, None
+    kind, err = classify_error(list(tail), proc.returncode)
+    print(f"[{_now()}] ✗ job {job_num}/{total} ({name}) failed [{kind}]: {err}", flush=True)
+    return False, kind, err
 
 
 def main() -> None:
@@ -235,8 +254,8 @@ def main() -> None:
         board.update(i, state="running", started=time.time())
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", job["name"])
         runlog = cfg_path.parent / f"job_{i + 1:02d}_{safe}.log"
-        ok, err = run_job(job, gpus, runlog, i + 1, len(jobs))
-        board.update(i, state="done" if ok else "error", error=err, ended=time.time())
+        ok, kind, err = run_job(job, gpus, runlog, i + 1, len(jobs))
+        board.update(i, state="done" if ok else "error", error=err, error_kind=kind, ended=time.time())
         if not ok and not auto_continue:
             print(f"[{_now()}] stopping queue (auto_continue=False).", flush=True)
             break
