@@ -41,6 +41,7 @@ from dispatch import (  # noqa: E402
     load_credentials,
     manifests_dir,
     print_runs,
+    use_real_terminal_size,
 )
 
 TERMINAL = {"done", "error", "killed", "cancelled"}
@@ -161,6 +162,7 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="list past batches + run ids, then exit")
     args = ap.parse_args()
 
+    use_real_terminal_size()
     console = Console()
     if args.list:
         print_runs(console)

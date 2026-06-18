@@ -98,7 +98,7 @@ MACHINES = [
     MachineConfig(name="kobe", cuda=[0]),
     MachineConfig(name="macondo", cuda=[0]),
     MachineConfig(name="ei", cuda=[0]),
-    # MachineConfig(name="andromeda", cuda=[0]),
+    # MachineConfig(name="andromeda", cuda=[0]), #! 20.04
     MachineConfig(name="kawasaki", cuda=[0]),
     # MachineConfig(name="sendai", cuda=[0]),   #! 20.04
     # MachineConfig(name="kumamoto", cuda=[0]), 
@@ -174,6 +174,17 @@ class Worker:
     @property
     def project_dir(self) -> str:
         return LOCAL_PROJECT_DIR if self.is_local else REMOTE_PROJECT_DIR
+
+
+def use_real_terminal_size() -> None:
+    """Drop COLUMNS/LINES from the env so rich measures the real terminal via ioctl.
+
+    zsh exports COLUMNS (bash usually doesn't); a stale/narrow value makes rich render the
+    table to that width and fold the rightmost flexible column (``detail``) down to nothing,
+    while the fixed columns still show. Popping these lets rich follow the actual window.
+    """
+    for v in ("COLUMNS", "LINES"):
+        os.environ.pop(v, None)
 
 
 def load_credentials() -> tuple[str, str]:
@@ -752,6 +763,7 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="list past batches + run ids, then exit")
     args = ap.parse_args()
 
+    use_real_terminal_size()
     if args.list:
         print_runs(Console())
         return
