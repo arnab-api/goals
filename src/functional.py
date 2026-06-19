@@ -13,7 +13,7 @@ import torch
 from src.dataset import Relation
 from src.models import ModelandTokenizer
 from src.tokens import find_token_range, insert_padding_before_pos, prepare_input
-from src.utils.typing import SVD, ArrayLike, PredictedToken, Tokenizer, TokenizerOutput
+from src.utils.typing import ArrayLike, PredictedToken, Tokenizer, TokenizerOutput
 
 logger = logging.getLogger(__name__)
 
@@ -1292,44 +1292,7 @@ def get_dummy_input(
     return prepare_input(prompts=dummy_prompt, tokenizer=tokenizer)
 
 
-def low_rank_approx(
-    matrix: torch.Tensor, rank: int, svd: SVD | None = None
-) -> torch.Tensor:
-    """Compute a low-rank approximation of a matrix.
-
-    Args:
-        matrix: The matrix to approximate.
-        rank: The rank of the approximation.
-
-    Returns:
-        The approximation.
-
-    """
-    if svd is None:
-        svd = SVD.calculate(matrix.float())
-    u, s, v = svd.U, svd.S, svd.V
-    matrix_approx = u[:, :rank] @ torch.diag(s[:rank]) @ v[:, :rank].T
-    return matrix_approx.to(matrix.dtype)
-
-
-def low_rank_pinv(
-    matrix: torch.Tensor, rank: int, svd: SVD | None = None
-) -> torch.Tensor:
-    """Compute a low-rank pseudo-inverse of a matrix.
-
-    Args:
-        matrix: The matrix to invert.
-        rank: The rank of the approximation.
-
-    Returns:
-        The pseudo-inverse.
-
-    """
-    if svd is None:
-        svd = SVD.calculate(matrix.float())
-    u, s, v = svd.U, svd.S, svd.V
-    matrix_pinv = v[:, :rank] @ torch.diag(1 / s[:rank]) @ u[:, :rank].T
-    return matrix_pinv.to(matrix.dtype)
+# NOTE: low_rank_approx / low_rank_pinv / SVD moved to src.analysis.algo
 
 
 # useful for saving with jsons
