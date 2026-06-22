@@ -142,6 +142,15 @@ class Predicate:
     # Single-line forced-prefill form: ONE complete `{var} = <boolean>` line that fully checks
     # the condition (no intermediate, nothing left to finish). Same `{var}`/`{param}` rules.
     singleline_impl: str = ""
+    # Canonical natural variable name for this predicate's boolean result
+    # (e.g. "is_even"); used by build_example(naming="natural"). Populated from
+    # _PREDICATE_VAR_NAMES at module load; falls back to `id` if left blank.
+    variable_name: str = ""
+
+    @property
+    def var_name(self) -> str:
+        """Natural result-variable name (`variable_name`, else `id`)."""
+        return self.variable_name or self.id
 
     @property
     def is_multiline(self) -> bool:
@@ -302,6 +311,40 @@ INT_PREDICATES: list[Predicate] = [
 
 PREDICATES_BY_ID: dict[str, Predicate] = {p.id: p for p in INT_PREDICATES}
 
+# Canonical natural variable names per predicate, for build_example(naming="natural").
+# Kept as a table (not inline constructor kwargs) to keep the predicate list readable.
+_PREDICATE_VAR_NAMES: dict[str, str] = {
+    "positive": "is_positive",
+    "le_bound": "is_le_bound",
+    "ge_bound": "is_ge_bound",
+    "in_range": "is_in_range",
+    "even": "is_even",
+    "odd": "is_odd",
+    "divisible": "is_divisible",
+    "perfect_square": "is_perfect_square",
+    "perfect_cube": "is_perfect_cube",
+    "triangular": "is_triangular",
+    "palindrome": "is_palindrome",
+    "reversed_greater": "is_reverse_greater",
+    "num_digits_ge": "has_min_digits",
+    "set_bits_gt": "has_many_set_bits",
+    "power_of_two": "is_power_of_two",
+    "coprime_with": "is_coprime",
+    "digit_sum_gt": "has_large_digit_sum",
+    "digit_sum_divisible": "digit_sum_divisible",
+    "digit_product_gt": "has_large_digit_product",
+    "all_digits_even": "all_digits_even",
+    "num_divisors_gt": "has_many_divisors",
+    "abundant": "is_abundant",
+    "prime": "is_prime",
+}
+assert set(_PREDICATE_VAR_NAMES) == set(PREDICATES_BY_ID), (
+    "predicate var-name table out of sync with INT_PREDICATES"
+)
+# frozen dataclass → fill the field via object.__setattr__ at module load.
+for _p in INT_PREDICATES:
+    object.__setattr__(_p, "variable_name", _PREDICATE_VAR_NAMES[_p.id])
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sample types.
@@ -362,7 +405,10 @@ class ConditionSample(DataClassJsonMixin):
         return f"{self.spec.spec_id}__{self.lang}__{self.modularity}"
 
     # --- rendering ---------------------------------------------------------
-    def render_instruction(self) -> str:
+    def render_instruction(self, name_rule: str = "letters") -> str:
+        """`name_rule="letters"` mandates lowercase-letter result vars (`a`, `b`, …);
+        any other value drops the naming constraint entirely (lets the model/prefill
+        choose), used by build_example(naming="natural"|"indexed")."""
         ls = LANGS[self.lang]
         body = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(self.spec.spec_texts))
         opener = (
@@ -373,14 +419,23 @@ class ConditionSample(DataClassJsonMixin):
         # Force a named result variable per condition (so each check is a
         # separable statement, not hidden inside a print) + a single aggregation
         # print at the end (individual + collective pass).
-        assign_rule = (
-            "For each condition, in the order listed, assign the boolean result of "
-            "the check to its own local variable, using single lowercase letters in "
-            "order — `a` for the first condition, `b` for the second, and so on. "
-            "After all conditions have been checked, use a SINGLE print statement that, "
-            "using those variables, reports whether each condition passed individually "
-            "and whether all of them passed collectively."
-        )
+        if name_rule == "letters":
+            assign_rule = (
+                "For each condition, in the order listed, assign the boolean result of "
+                "the check to its own local variable, using single lowercase letters in "
+                "order — `a` for the first condition, `b` for the second, and so on. "
+                "After all conditions have been checked, use a SINGLE print statement that, "
+                "using those variables, reports whether each condition passed individually "
+                "and whether all of them passed collectively."
+            )
+        else:
+            assign_rule = (
+                "For each condition, in the order listed, assign the boolean result of "
+                "the check to its own local variable. "
+                "After all conditions have been checked, use a SINGLE print statement that, "
+                "using those variables, reports whether each condition passed individually "
+                "and whether all of them passed collectively."
+            )
         if self.modularity == "modular":
             mod_rule = (
                 f"Implement each condition as a separate function that returns a "

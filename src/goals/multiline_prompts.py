@@ -52,16 +52,37 @@ def build_example(
     n_conditions: int,
     mode: str = "chat",
     style: str = "multiline",
+    naming: str = "letters",
     aug: Optional[Callable[[str], str]] = None,
 ) -> dict:
     """One forced-prefill example for the 'stay vs move-on' test.
 
     `target_slot >= 1` (need >=1 prior to set the multiline precedent) and `target_slot <
     n_conditions` (need a following condition for 'moved_on' to be possible).
+
+    `naming` controls the per-condition result variable names (returned as `var_names`):
+        "letters" — positional `a`, `b`, `c`, …  (default; instruction mandates them)
+        "natural" — each predicate's `var_name` (e.g. `is_even`); instruction drops the
+                    naming constraint. Names are unique because predicate classes are distinct.
+        "indexed" — `var_1`, `var_2`, …; instruction drops the naming constraint.
+    Predicate CLASSES are always distinct within an example (no repeated `id`, even with
+    different params), so e.g. `divisible by 20` and `divisible by 26` can't co-occur.
     """
     assert 1 <= target_slot < n_conditions
-    preds = [rng.choice(MULTILINE_PREDS) for _ in range(n_conditions)]
+    assert naming in ("letters", "natural", "indexed"), f"unknown naming={naming!r}"
+    assert n_conditions <= len(MULTILINE_PREDS), (
+        f"n_conditions={n_conditions} exceeds {len(MULTILINE_PREDS)} distinct multiline predicates"
+    )
+    # distinct predicate classes per example (sample WITHOUT replacement)
+    preds = rng.sample(MULTILINE_PREDS, n_conditions)
     params = [p.sample_params(rng) for p in preds]
+    # per-condition result variable names
+    if naming == "natural":
+        var_names = [p.var_name for p in preds]
+    elif naming == "indexed":
+        var_names = [f"var_{i + 1}" for i in range(n_conditions)]
+    else:
+        var_names = [VAR_LETTERS[i] for i in range(n_conditions)]
     spec = ConditionSpec(
         spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10 ** 6):06d}",
         predicate_ids=[p.id for p in preds],
@@ -82,28 +103,27 @@ def build_example(
     body = []
     for j in range(target_slot):
         if prior_styles[j] == "multiline":
-            body += preds[j].render_multiline(params[j], VAR_LETTERS[j])
+            body += preds[j].render_multiline(params[j], var_names[j])
         else:
-            body.append(preds[j].render_singleline(params[j], VAR_LETTERS[j]))
+            body.append(preds[j].render_singleline(params[j], var_names[j]))
 
     # target: the test variable
     if style == "multiline":
         target_impl = preds[target_slot].render_multiline(
-            params[target_slot], VAR_LETTERS[target_slot]
+            params[target_slot], var_names[target_slot]
         )
         target_first = target_impl[0]  # incomplete first line
         expected_rest = "\n".join(target_impl[1:])
         expected_verdict = "continue"
     else:
         target_first = preds[target_slot].render_singleline(
-            params[target_slot], VAR_LETTERS[target_slot]
+            params[target_slot], var_names[target_slot]
         )
         expected_rest = ""  # complete; nothing left for this var
         expected_verdict = "moved_on"
     body.append(target_first)
 
-    letters = [VAR_LETTERS[i] for i in range(n_conditions)]
-    fim_suffix = result_print(letters)
+    fim_suffix = result_print(var_names)
     if mode == "fim":
         doc = (
             '    """\n'
@@ -114,9 +134,10 @@ def build_example(
         full_prompt = FIM_PREFIX + prefix_code + FIM_SUFFIX + fim_suffix + FIM_MIDDLE
     else:
         prefix_code = stub + "\n".join(body) + "\n"
+        name_rule = "letters" if naming == "letters" else "free"
         full_prompt = apply_chat_template(
             mt=mt,
-            user_query=sample.render_instruction().strip(),
+            user_query=sample.render_instruction(name_rule=name_rule).strip(),
             incomplete_code=prefix_code,
         )
 
@@ -131,8 +152,9 @@ def build_example(
         "prefill_code": prefix_code,
         "fim_suffix": fim_suffix.rstrip("\n") if mode == "fim" else None,
         "target_slot": target_slot,
-        "target_var": VAR_LETTERS[target_slot],
-        "next_var": VAR_LETTERS[next_slot] if next_slot < n_conditions else None,
+        "var_names": var_names,
+        "target_var": var_names[target_slot],
+        "next_var": var_names[next_slot] if next_slot < n_conditions else None,
         "target_pred": preds[target_slot].id,
         "target_first_line": target_first.strip(),
         "expected_rest": expected_rest,
