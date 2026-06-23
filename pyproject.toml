@@ -1,0 +1,68 @@
+[project]
+name = "goals"
+version = "0.1.0"
+description = "Investigating consistent intermediate goals in Code-LLMs (prefill probing + attention-head localization)."
+requires-python = "==3.11.*"
+dependencies = [
+    # core ML / interpretability
+    "torch>=2.7",
+    "torchvision",
+    "transformers>=4.55",
+    "accelerate",
+    "nnsight>=0.5",
+    "datasets",
+    "huggingface-hub",
+    "safetensors",
+    "tokenizers",
+    "sentencepiece",
+    "einops",
+    "bitsandbytes",
+    # activation patching (not on PyPI — pulled from git, see [tool.uv.sources])
+    "baukit",
+    # scientific stack
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "pandas",
+    "matplotlib",
+    # notebook / dev tools
+    "ipykernel",
+    "ipywidgets",
+    "jupyterlab",
+    "rich",
+    "tqdm",
+    "pyyaml",
+    # API clients & experiment tracking
+    "anthropic",
+    "openai",
+    "wandb",
+    # project utility libraries
+    "dataclasses-json",
+    "astor",
+    "line-profiler",
+    "goodfire",
+]
+
+[tool.uv]
+# The code is imported via `sys.path.append(".")` (e.g. `from src.models import ...`),
+# not installed as a distribution — so don't try to build/install this project itself,
+# just resolve its dependencies into the venv.
+package = false
+
+[tool.uv.sources]
+# PyTorch from the CUDA 12.4 wheel index (see [[tool.uv.index]] below). To switch CUDA
+# versions, change the index url AND this name to match (e.g. pytorch-cu121 / cu118).
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+# baukit is not published to PyPI — install from source.
+baukit = { git = "https://github.com/davidbau/baukit" }
+
+# Dedicated CUDA wheel index for torch/torchvision only (`explicit = true` keeps every
+# other package on PyPI). CUDA 12.x drivers must be installed on the host.
+#   CUDA 11.8 -> https://download.pytorch.org/whl/cu118
+#   CUDA 12.1 -> https://download.pytorch.org/whl/cu121
+#   CUDA 12.4 -> https://download.pytorch.org/whl/cu124
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
