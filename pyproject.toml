@@ -48,21 +48,28 @@ dependencies = [
 # not installed as a distribution — so don't try to build/install this project itself,
 # just resolve its dependencies into the venv.
 package = false
+# Resolve for Linux only. uv's universal resolver would otherwise try to satisfy every
+# platform (incl. win32/macOS), where the CUDA torch wheels don't exist — that split is
+# unsatisfiable and aborts the whole resolution. This project is Linux + CUDA only.
+environments = ["sys_platform == 'linux'"]
 
 [tool.uv.sources]
-# PyTorch from the CUDA 12.4 wheel index (see [[tool.uv.index]] below). To switch CUDA
-# versions, change the index url AND this name to match (e.g. pytorch-cu121 / cu118).
-torch = { index = "pytorch-cu124" }
-torchvision = { index = "pytorch-cu124" }
+# PyTorch from the CUDA 12.8 wheel index (see [[tool.uv.index]] below). To switch CUDA
+# versions, change the index url AND this name to match (e.g. pytorch-cu126 / cu121).
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 # baukit is not published to PyPI — install from source.
 baukit = { git = "https://github.com/davidbau/baukit" }
 
 # Dedicated CUDA wheel index for torch/torchvision only (`explicit = true` keeps every
-# other package on PyPI). CUDA 12.x drivers must be installed on the host.
-#   CUDA 11.8 -> https://download.pytorch.org/whl/cu118
+# other package on PyPI). CUDA 12.x drivers must be installed on the host. cu128 matches
+# the reference environment (torch 2.10 / CUDA 12.8); note cu124 caps at torch 2.6.0, so
+# it cannot satisfy torch>=2.7.
 #   CUDA 12.1 -> https://download.pytorch.org/whl/cu121
-#   CUDA 12.4 -> https://download.pytorch.org/whl/cu124
+#   CUDA 12.4 -> https://download.pytorch.org/whl/cu124   (torch <= 2.6.0)
+#   CUDA 12.6 -> https://download.pytorch.org/whl/cu126
+#   CUDA 12.8 -> https://download.pytorch.org/whl/cu128
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
