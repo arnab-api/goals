@@ -12,15 +12,18 @@ contributions at the patched position(s) carry that signal?
 
 Setup (mirrors scripts/clock/train_oid_gaze_mask.py + scripts/train_head_mask.py)
 ────────────────────────────────────────────────────────────────────────────────
-Each pair = (source = multiline/"continue", destination = singleline/"moved_on"). We transplant
-the masked heads' per-head o_proj inputs source→dest at ``--patch-tokens`` with the projected-GD
-recipe ``m*src + (1-m)*dest`` (mask=1 ⇒ take source, mask=0 ⇒ keep dest), and read the verdict at
-the destination's last position as a logit contrast:
+Each pair = (source, destination), both rendered in BOTH styles. The source only DONATES the
+masked heads' per-head o_proj inputs; we transplant them source→dest at ``--patch-tokens`` with
+the projected-GD recipe ``m*src + (1-m)*dest`` (mask=1 ⇒ take source, mask=0 ⇒ keep dest), and
+read the verdict at the destination's last position as a logit contrast:
 
-    score(dest) = logp[src_ans] - logp[dst_ans]          # push dest toward the source's verdict
+    score(dest) = logp[target_ans] - logp[dst_ans]       # push dest toward ITS OWN flipped verdict
 
-where ``src_ans = argmax`` of the source's next token (the transplant-target verdict token) and
-``dst_ans = argmax`` of the destination's own next token. Objective per pair:
+where ``dst_ans = argmax`` of the destination's CLEAN next token and ``target_ans = argmax`` of
+the destination's FLIPPED-STYLE sibling (the counterfactual we want the transplant to induce).
+Both live in the DEST's token space — ``target_ans`` is NEVER taken from the source. For a sl→ml
+leg ``source_ans``, ``dst_ans`` and ``target_ans`` can be three mutually-distinct tokens (the
+source's next-var, the dest staying, the dest's next-var). Objective per pair:
 
     L = -score(dest_patched) + lambda_sparse * mean(mask)
 
@@ -34,11 +37,12 @@ Pairing (variable-name scheme is ``naming="letters"`` so verdicts are single tok
 Per example: ``target_slot ∈ {1,2,3,4}`` (never 0 — need a prior so staying is in-context) and
 ``n_conditions ≥ target_slot + 2`` (need a *next* var for "moved_on").
 
-  --same              source & dest share the SAME predicate list/spec (same seed + same
-                      target_slot/n_conditions; only style differs) → minimal pair. When set,
-                      --match-target-slot / --match-n-cond are ignored (implied).
-  (default)           source & dest use DIFFERENT predicate lists; target_slot / n_conditions
-                      are sampled independently unless pinned by:
+  --same              source & dest are the SAME context (same seed → same predicate list/spec/
+                      var-names; only style differs) → minimal pair; here source_ans == target_ans
+                      by construction. When set, --match-target-slot / --match-n-cond are implied.
+  (default)           source & dest are DIFFERENT contexts; target_slot / n_conditions sampled
+                      independently unless pinned below. Gated on source_ans != target_ans so the
+                      transplant is genuinely cross-context (not a same-token copy).
   --match-target-slot force the same target_slot on both sides.
   --match-n-cond      force the same n_conditions on both sides.
 
@@ -65,8 +69,8 @@ import logging
 import os
 import random
 import sys
-from dataclasses import dataclass
 from pathlib import Path
+import matplotlib
 
 import torch
 from torch.optim import AdamW
@@ -75,7 +79,6 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -83,11 +86,11 @@ import matplotlib.pyplot as plt  # noqa: E402
 from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.functional import get_module_nnsight  # noqa: E402
-from src.goals.head_loc_attn import HeadMask  # noqa: E402
-from src.goals.multiline_prompts import (  # noqa: E402
-    build_example,
-    replace_in_code_newline_with_tabnewline,
+from src.goals.completion_pairs import (  # noqa: E402
+    build_completion_pairs,
+    iter_leg_batches,
 )
+from src.goals.head_loc_attn import HeadMask  # noqa: E402
 from src.goals.oid_gaze import cache_root  # noqa: E402
 from src.utils import logging_utils  # noqa: E402
 
@@ -95,36 +98,10 @@ logger = logging.getLogger("train_completion_mask")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pair construction.
+# Source-activation extraction + masked transplant + readout.
+# Pair construction (StyledContext / CompletionPair / build_completion_pairs / iter_leg_batches)
+# lives in src.goals.completion_pairs so the 04.2 / 04.3 notebooks sample the SAME way.
 # ──────────────────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class CompletionPair:
-    """One (multiline=continue, singleline=moved_on) contrastive pair, token-aligned at the patch
-    positions. Prompts are stored as strings; each training batch re-tokenizes its sources +
-    destinations TOGETHER (left-padded to a shared length) so every row's patch positions map to
-    the same ``-2`` token from the right (no positional confound)."""
-
-    key: str
-    ml_prompt: str
-    sl_prompt: str
-    ml_ans: int  # multiline argmax  → the "continue" verdict token
-    sl_ans: int  # singleline argmax → the "moved_on" verdict token
-
-
-def _build_prompt(mt, rng, target_slot, n_conditions, mode, style):
-    ex = build_example(
-        mt=mt, rng=rng, target_slot=target_slot, n_conditions=n_conditions,
-        mode=mode, style=style, naming="letters",
-    )
-    return replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   "
-
-
-@torch.no_grad()
-def _argmax_next(mt, inputs):
-    out = mt._model(**dict(inputs), use_cache=False)
-    return int(out.logits[0, -1, :].argmax())
 
 
 @torch.no_grad()
@@ -151,73 +128,6 @@ def _extract_src_hv(mt, inputs, layers, patch_tokens):
         for h in handles:
             h.remove()
     return torch.stack([saved[li] for li in range(len(layers))], dim=1)  # (B, n_layers, P, n_embd)
-
-
-def build_completion_pairs(mt, args, layers, patch_tokens):
-    """Sample up to ``args.n_pairs`` validated pairs.
-
-    Kept iff (a) ml & sl share the token at every patch position (token-aligned replace) and
-    (b) their next-token argmaxes differ (a real continue↔moved_on contrast)."""
-    target_slots = [int(x) for x in args.target_slots.split(",")]
-    assert all(1 <= ts <= 4 for ts in target_slots), "target_slot must be in {1,2,3,4}"
-    n_preds_max = 19  # len(MULTILINE_PREDS); n_conditions cannot exceed it
-
-    def _sample_ncond(rng, ts):
-        lo = ts + 2  # need a NEXT var for moved_on
-        hi = min(max(lo, args.max_conditions), n_preds_max)
-        return rng.randint(lo, hi)
-
-    prng = random.Random(args.seed)
-    pairs: list[CompletionPair] = []
-    attempts = 0
-    max_attempts = 50 * args.n_pairs
-    while len(pairs) < args.n_pairs and attempts < max_attempts:
-        attempts += 1
-        ts = prng.choice(target_slots)
-        nc = _sample_ncond(prng, ts)
-
-        if args.same:
-            seed = prng.randrange(10 ** 9)
-            ml_prompt = _build_prompt(mt, random.Random(seed), ts, nc, args.mode, "multiline")
-            sl_prompt = _build_prompt(mt, random.Random(seed), ts, nc, args.mode, "singleline")
-        else:
-            ts_sl = ts if args.match_target_slot else prng.choice(target_slots)
-            nc_sl = nc if args.match_n_cond else _sample_ncond(prng, ts_sl)
-            ml_prompt = _build_prompt(mt, random.Random(prng.randrange(10 ** 9)), ts, nc, args.mode, "multiline")
-            sl_prompt = _build_prompt(mt, random.Random(prng.randrange(10 ** 9)), ts_sl, nc_sl, args.mode, "singleline")
-
-        # gate with B=1 tokenization (argmax token ids are padding-invariant; the train-time
-        # forward re-tokenizes sources+dests together)
-        ml = prepare_input(ml_prompt, tokenizer=mt, padding_side="left")
-        sl = prepare_input(sl_prompt, tokenizer=mt, padding_side="left")
-
-        # (a) token-aligned at every patch position
-        aligned = True
-        for t in patch_tokens:
-            a = mt.tokenizer.decode(ml["input_ids"][0, t].item())
-            b = mt.tokenizer.decode(sl["input_ids"][0, t].item())
-            if a != b:
-                aligned = False
-                break
-        if not aligned:
-            continue
-
-        # (b) a real contrast
-        ml_ans = _argmax_next(mt, ml)
-        sl_ans = _argmax_next(mt, sl)
-        if ml_ans == sl_ans:
-            continue
-
-        pairs.append(
-            CompletionPair(
-                key=f"p{len(pairs)}_ts{ts}_nc{nc}",
-                ml_prompt=ml_prompt, sl_prompt=sl_prompt, ml_ans=ml_ans, sl_ans=sl_ans,
-            )
-        )
-        if len(pairs) % 25 == 0:
-            logger.info(f"  built {len(pairs)}/{args.n_pairs} pairs ({attempts} attempts)")
-    logger.info(f"built {len(pairs)} pairs from {attempts} attempts")
-    return pairs
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -250,9 +160,11 @@ def completion_patch_hooks(mt, layers, src_hv, mask, n_q, head_dim, patch_tokens
     return hooks
 
 
-def completion_score(mt, dest_inputs, src_ans, dst_ans, pre_hooks):
-    """Per-row logp[src_ans] - logp[dst_ans] at the destination's last position, under the patch
-    hooks → (B,). Differentiable through any mask in ``pre_hooks``."""
+def completion_score(mt, dest_inputs, target_ans, dst_ans, pre_hooks):
+    """Per-row logp[target_ans] - logp[dst_ans] at the destination's last position, under the
+    patch hooks → (B,). ``target_ans`` is the DEST's OWN counterfactual token (its flipped-style
+    answer), ``dst_ans`` the DEST's clean answer — both live in the dest's token space, never the
+    source's. Differentiable through any mask in ``pre_hooks``."""
     handles = [mod.register_forward_pre_hook(fn) for mod, fn in pre_hooks]
     try:
         out = mt._model(**dict(dest_inputs), use_cache=False)
@@ -261,32 +173,13 @@ def completion_score(mt, dest_inputs, src_ans, dst_ans, pre_hooks):
             h.remove()
     logp = out.logits[:, -1, :].float().log_softmax(-1)  # (B, vocab)
     rows = torch.arange(logp.shape[0], device=logp.device)
-    sa = torch.as_tensor(src_ans, device=logp.device)
+    ta = torch.as_tensor(target_ans, device=logp.device)
     da = torch.as_tensor(dst_ans, device=logp.device)
-    return logp[rows, sa] - logp[rows, da]  # (B,)
+    return logp[rows, ta] - logp[rows, da]  # (B,)
 
 
 def _slice_inputs(inputs, sl):
     return {k: (v[sl] if torch.is_tensor(v) else v) for k, v in inputs.items()}
-
-
-def iter_leg_batches(pairs, batch_size, direction):
-    """Yield (src_prompts, dst_prompts, src_ans, dst_ans) chunks of ≤ batch_size — one stream per
-    leg implied by ``direction`` (ml→sl and/or sl→ml)."""
-    legs = []
-    if direction in ("ml->sl", "both"):
-        legs.append("ml->sl")
-    if direction in ("sl->ml", "both"):
-        legs.append("sl->ml")
-    for leg in legs:
-        for i in range(0, len(pairs), batch_size):
-            chunk = pairs[i:i + batch_size]
-            if leg == "ml->sl":  # transplant continue → moved_on
-                yield ([p.ml_prompt for p in chunk], [p.sl_prompt for p in chunk],
-                       [p.ml_ans for p in chunk], [p.sl_ans for p in chunk])
-            else:                # transplant moved_on → continue
-                yield ([p.sl_prompt for p in chunk], [p.ml_prompt for p in chunk],
-                       [p.sl_ans for p in chunk], [p.ml_ans for p in chunk])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -347,7 +240,20 @@ def main():
     logger.info(f"layers {layers[0]}..{layers[-1]} ({len(layers)} masked) · patch_tokens={patch_tokens} "
                 f"· direction={args.direction} · same={args.same} · batch_size={args.batch_size} · accum={args.accum}")
 
-    pairs = build_completion_pairs(mt, args, layers, patch_tokens)
+    pairs = build_completion_pairs(
+        mt,
+        n_pairs=args.n_pairs,
+        target_slots=[int(x) for x in args.target_slots.split(",")],
+        direction=args.direction,
+        same=args.same,
+        match_target_slot=args.match_target_slot,
+        match_n_cond=args.match_n_cond,
+        max_conditions=args.max_conditions,
+        mode=args.mode,
+        seed=args.seed,
+        patch_tokens=patch_tokens,
+        log=logger.info,
+    )
     assert len(pairs) >= 4, "need a few pairs to train"
 
     # pair-disjoint train/val split
@@ -363,16 +269,17 @@ def main():
     mask = HeadMask(len(layers), nH).to(args.mask_device)
     opt = AdamW(mask.parameters(), lr=args.lr)
 
-    def batch_score(src_prompts, dst_prompts, src_ans, dst_ans):
+    def batch_score(src_prompts, dst_prompts, target_ans, dst_ans):
         """Tokenize sources+dests TOGETHER (left-pad → shared length → aligned -2), extract the
-        source o_proj inputs, then run the mask-patched forward on the dests → per-row score (B,)."""
+        source o_proj inputs, then run the mask-patched forward on the dests → per-row score (B,).
+        ``target_ans``/``dst_ans`` are the DEST's own counterfactual/clean tokens (not the source's)."""
         B = len(src_prompts)
         combined = prepare_input(prompts=src_prompts + dst_prompts, tokenizer=mt, padding_side="left")
         src_inputs = _slice_inputs(combined, slice(0, B))
         dst_inputs = _slice_inputs(combined, slice(B, 2 * B))
         src_hv = _extract_src_hv(mt, src_inputs, layers, patch_tokens)  # (B, n_layers, P, n_embd)
         hooks = completion_patch_hooks(mt, layers, src_hv, mask, nH, hd, patch_tokens)
-        return completion_score(mt, dst_inputs, src_ans, dst_ans, hooks)
+        return completion_score(mt, dst_inputs, target_ans, dst_ans, hooks)
 
     rng = random.Random(args.seed)
     hist = {"train_score": [], "val_score": [], "mean_mask": [], "n_active": []}
@@ -383,8 +290,8 @@ def main():
         batches = list(iter_leg_batches(order, args.batch_size, args.direction))
         opt.zero_grad()
         ep_score, n_rows = 0.0, 0
-        for bi, (sp, dp, sa, da) in enumerate(batches):
-            scores = batch_score(sp, dp, sa, da)  # (B,)
+        for bi, (sp, dp, ta, da) in enumerate(batches):
+            scores = batch_score(sp, dp, ta, da)  # (B,)
             target_loss = -scores.mean()
             sparsity_loss = args.lambda_sparse * mask.values.mean()
             loss = (target_loss + sparsity_loss) / args.accum
@@ -403,8 +310,8 @@ def main():
 
         with torch.no_grad():
             vsum, vn = 0.0, 0
-            for (sp, dp, sa, da) in iter_leg_batches(val_pairs, args.batch_size, args.direction):
-                s = batch_score(sp, dp, sa, da).detach()
+            for (sp, dp, ta, da) in iter_leg_batches(val_pairs, args.batch_size, args.direction):
+                s = batch_score(sp, dp, ta, da).detach()
                 vsum += float(s.sum())
                 vn += s.numel()
         hist["train_score"].append(ep_score / max(n_rows, 1))
@@ -461,7 +368,7 @@ def main():
     ax[0].plot(ep, hist["train_score"], "o-", label="train")
     ax[0].plot(ep, hist["val_score"], "s--", label="val")
     ax[0].axhline(0, color="k", lw=0.6)
-    ax[0].set_xlabel("epoch"); ax[0].set_ylabel("logp(src_ans) - logp(dst_ans)")
+    ax[0].set_xlabel("epoch"); ax[0].set_ylabel("logp(target_ans) - logp(dst_ans)")
     ax[0].set_title("transplant score"); ax[0].legend(); ax[0].grid(alpha=0.3)
     ax[1].plot(ep, hist["n_active"], "^:", color="tab:gray")
     ax[1].set_xlabel("epoch"); ax[1].set_ylabel(f"n_active (>{args.sel_threshold})")

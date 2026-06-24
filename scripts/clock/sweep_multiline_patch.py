@@ -3,29 +3,40 @@
 
 Ports the `## Causal Experiment` of `notebooks/clock/04.2_multiline.ipynb` into a batch job.
 
-For each of N contrastive pairs — one *multiline* (incomplete target line -> hypothesis
-"continue") and one *singleline* (complete target line -> hypothesis "moved_on") example built
-with the SAME `target_slot` — we patch hidden states from a SOURCE prompt into a DESTINATION
-prompt at the final whitespace token(s) and read the next-token distribution. Both patch
-DIRECTIONS reuse the same two prompts (swap source<->dest):
+Pairs come from the SHARED sampler `src.goals.completion_pairs.build_completion_pairs` — the
+SAME one `scripts/clock/train_completion_mask.py` and the 04.2 / 04.3 notebooks use — so a fix to
+the sampling logic (distinct predicate classes, the `--same`/`--match-*` schemes, the gates)
+propagates to every consumer. Each pair is a (SOURCE, DESTINATION) of `StyledContext`s (one spec
+rendered in BOTH styles). For each patch leg we transplant hidden states from the SOURCE into the
+DESTINATION at the final whitespace token(s) and read the next-token distribution:
 
-    "ml->sl":  source = multiline,  destination = singleline
-    "sl->ml":  source = singleline, destination = multiline
+    "ml->sl":  source donates its MULTILINE  (stay) signal -> dest run clean as SINGLELINE
+    "sl->ml":  source donates its SINGLELINE (moved_on) signal -> dest run clean as MULTILINE
 
-Varied per pair: direction (2) x patch-tokens ([-1]/[-2]/[-1,-2]) x module/window
-(residual/mlp/attn) x layer (`layer_idx`). `--layer-mode` selects which layers are patched for
-each `layer_idx`: `window` (a window of layers around it, the default), `asc` (idx..n_layer-1) or
-`desc` (0..idx). Metrics `logit` and `prob` are read off the SAME patched run. The recorded
-indirect effect is
+The readout token lives entirely in the DEST's own token space (NEVER the source's): for a leg
+with source-donating style `ss`,
+
+    target_ans = dest's argmax in style `ss`   (the dest's OWN flipped-style counterfactual)
+    dst_ans    = dest's argmax in its clean run style   (what it emits unpatched)
+
+so `source_ans`, `dst_ans`, `target_ans` can be three mutually-distinct tokens. (An earlier
+version drove the IE toward the *source's* argmax, which is only correct under `--same`.)
+
+Varied per pair: direction x patch-tokens ([-1]/[-2]/[-1,-2]) x module/window (residual/mlp/attn)
+x layer (`layer_idx`). `--layer-mode` selects which layers are patched per `layer_idx`: `window`
+(default), `asc` (idx..n_layer-1) or `desc` (0..idx). Metrics `logit` and `prob` read off the SAME
+patched run. The recorded indirect effect, in the dest's token space, is
 
     IE = (patched - base) / (gold - base)
 
-where `gold` = source's own score for `src_ans` (its argmax), `base` = destination's UNPATCHED
-score for `src_ans`. We also record patched/base scores for `dst_ans` (destination's own argmax)
-so the notebook can plot the src_ans-vs-dst_ans crossover.
+where `gold` = dest's FLIPPED-style score for `target_ans` (the counterfactual ceiling), `base` =
+dest's CLEAN-style score for `target_ans` (the unpatched floor), `patched` = the patched score for
+`target_ans`. We also record patched/base scores for `dst_ans` so the notebook can plot the
+target_ans-vs-dst_ans crossover.
 
-Pairs are kept only if (a) src & dst share the token at every patch position (token-aligned
-replace-patch) and (b) their next-token argmax differs (a genuine contrast for the IE).
+Pairing follows the shared sampler's gates: distinct predicate classes per example, per-leg token
+alignment at every patch position, `target_ans != dst_ans` by construction, and (when not `--same`)
+`source_ans != target_ans` so the transplant is genuinely cross-context.
 
 Writes (under results/multiline_patch/<model>/<tag>/):
     checkpoints/pair_XXXX.pt  per-pair checkpoint: that pair's records + BOTH full samples
@@ -46,23 +57,26 @@ Example
         --model Qwen/Qwen2.5-1.5B-Instruct --tag smoke \
         --n-pairs 2 --layer-step 8 --modules residual attn
 
-    # full run
+    # full run, minimal pairs (source IS dest)
     conda run -n goals python scripts/clock/sweep_multiline_patch.py \
         --model Qwen/Qwen2.5-Coder-14B-Instruct --tag full \
-        --n-pairs 10 --layer-step 1 --modules residual mlp attn
+        --n-pairs 10 --layer-step 1 --modules residual mlp attn --same
+
+    # cross-context pairs, only the sl->ml leg
+    conda run -n goals python scripts/clock/sweep_multiline_patch.py \
+        --n-pairs 50 --direction sl->ml --match-target-slot
 """
 
 import argparse
 import gc
 import json
 import logging
-import random
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
 from transformers import BitsAndBytesConfig
 
 
@@ -76,12 +90,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from src.functional import PatchSpec, get_hs  # noqa: E402
-from src.goals.condition_data import (  # noqa: E402
-    INT_PREDICATES,
-    ConditionSample,
-    ConditionSpec,
+from src.goals.completion_pairs import (  # noqa: E402  — SHARED sampler (also used by train_completion_mask.py + 04.2/04.3)
+    LEG_STYLES,
+    build_completion_pairs,
+    legs_for,
 )
-from src.goals.functional import apply_chat_template  # noqa: E402
 from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.trace import get_window  # noqa: E402
@@ -97,128 +110,7 @@ MODULE_NAME_FORMATS = {
 }
 DEFAULT_WINDOWS = {"residual": 3, "mlp": 7, "attn": 7}
 METRICS = ("logit", "prob")
-
-# Prompt-building constants (ported from the notebook).
-MULTILINE_PREDS = [p for p in INT_PREDICATES if p.is_multiline]
-VAR_LETTERS = "abcdefghij"
-FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = (
-    "<|fim_prefix|>",
-    "<|fim_suffix|>",
-    "<|fim_middle|>",
-)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Prompt construction (ported verbatim from notebooks/clock/04.2_multiline.ipynb).
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def result_print(letters: list[str]) -> str:
-    """FIM suffix: an f-string print referencing EVERY result var."""
-    conds = ", ".join("Condition %d: {%s}" % (i + 1, v) for i, v in enumerate(letters))
-    all_expr = " and ".join(letters)
-    return '    print(f"' + conds + ", ALL: {" + all_expr + '}")\n'
-
-
-def replace_in_code_newline_with_tabnewline(prompt: str) -> str:
-    """Turn every code-region `\\n` into `    \\n` (4 spaces + newline)."""
-    code_split = prompt.split("<code>")
-    code_segment = code_split[-1]
-    prefix = "<code>".join(code_split[:-1])
-    code_segment = code_segment.replace("\n", "    \n")
-    return prefix + "<code>" + code_segment
-
-
-def build_example(
-    mt: ModelandTokenizer,
-    rng: random.Random,
-    target_slot: int,
-    n_conditions: int,
-    mode: str = "chat",
-    style: str = "multiline",
-    aug: Optional[Callable] = None,
-) -> dict:
-    """Forced-prefill example for the 'stay vs move-on' test (see notebook docstring)."""
-    assert 1 <= target_slot < n_conditions
-    preds = [rng.choice(MULTILINE_PREDS) for _ in range(n_conditions)]
-    params = [p.sample_params(rng) for p in preds]
-    spec = ConditionSpec(
-        spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10**6):06d}",
-        predicate_ids=[p.id for p in preds],
-        predicate_params=params,
-        spec_texts=[p.render(pr) for p, pr in zip(preds, params)],
-        id_substrs=[p.render_substrs(pr) for p, pr in zip(preds, params)],
-        test_inputs=[rng.randint(-5, 1000) for _ in range(6)],
-    )
-    sample = ConditionSample(
-        spec=spec, lang="python", modularity="monolithic", without_comment=True
-    )
-    stub = sample.render_code_stub()
-
-    # priors: force-filled COMPLETE, random single/multi mix, but >=1 multiline.
-    prior_styles = [rng.choice(["multiline", "singleline"]) for _ in range(target_slot)]
-    if "multiline" not in prior_styles:
-        prior_styles[rng.randrange(target_slot)] = "multiline"
-    body: list[str] = []
-    for j in range(target_slot):
-        if prior_styles[j] == "multiline":
-            body += preds[j].render_multiline(params[j], VAR_LETTERS[j])
-        else:
-            body.append(preds[j].render_singleline(params[j], VAR_LETTERS[j]))
-
-    # target: the test variable.
-    if style == "multiline":
-        target_impl = preds[target_slot].render_multiline(
-            params[target_slot], VAR_LETTERS[target_slot]
-        )
-        target_first = target_impl[0]
-        expected_rest = "\n".join(target_impl[1:])
-        expected_verdict = "continue"
-    else:
-        target_first = preds[target_slot].render_singleline(
-            params[target_slot], VAR_LETTERS[target_slot]
-        )
-        expected_rest = ""
-        expected_verdict = "moved_on"
-    body.append(target_first)
-
-    letters = [VAR_LETTERS[i] for i in range(n_conditions)]
-    fim_suffix = result_print(letters)
-    if mode == "fim":
-        doc = (
-            '    """\n'
-            + "".join(f"    {i + 1}. {t}\n" for i, t in enumerate(spec.spec_texts))
-            + '    """\n'
-        )
-        prefix_code = stub + doc + "\n".join(body) + "\n"
-        full_prompt = FIM_PREFIX + prefix_code + FIM_SUFFIX + fim_suffix + FIM_MIDDLE
-    else:
-        prefix_code = stub + "\n".join(body) + "\n"
-        full_prompt = apply_chat_template(
-            mt=mt,
-            user_query=sample.render_instruction().strip(),
-            incomplete_code=prefix_code,
-        )
-
-    full_prompt = aug(full_prompt) if aug else full_prompt
-    next_slot = target_slot + 1
-    return {
-        "spec_id": spec.spec_id,
-        "mode": mode,
-        "prefill_style": style,
-        "prior_styles": prior_styles,
-        "full_prompt": full_prompt,
-        "prefill_code": prefix_code,
-        "fim_suffix": fim_suffix.rstrip("\n") if mode == "fim" else None,
-        "target_slot": target_slot,
-        "target_var": VAR_LETTERS[target_slot],
-        "next_var": VAR_LETTERS[next_slot] if next_slot < n_conditions else None,
-        "target_pred": preds[target_slot].id,
-        "target_first_line": target_first.strip(),
-        "expected_rest": expected_rest,
-        "expected_verdict": expected_verdict,
-        "n_conditions": n_conditions,
-    }
+_KEY_TS_RE = re.compile(r"_ts(\d+)_")  # CompletionPair.key == f"p{i}_ts{ts}_nc{nc}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -315,78 +207,79 @@ def run_patched(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def cache_context(mt, ctx, logit_location: tuple, memo: dict) -> dict:
+    """Tokenize + cache BOTH styles of one `StyledContext` -> {style: {prompt, tok, logits,
+    argmax}}. Memoized on `id(ctx)` so under `--same` (source IS dest) the shared context is only
+    run once. `argmax` is asserted to match the sampler's cached verdict token."""
+    if id(ctx) in memo:
+        return memo[id(ctx)]
+    d: dict = {}
+    for style in ("ml", "sl"):
+        prompt = ctx.prompt(style)
+        tok = prepare_input(prompt, tokenizer=mt)
+        logits = get_hs(mt=mt, input=tok, locations=logit_location).float().cpu()
+        amax = int(logits.argmax())
+        assert amax == ctx.ans(style), "sweep vs sampler argmax mismatch (stale build?)"
+        d[style] = {"prompt": prompt, "tok": tok, "logits": logits, "argmax": amax}
+    memo[id(ctx)] = d
+    return d
+
+
 def build_pairs(
     mt: ModelandTokenizer,
+    *,
     n_pairs: int,
-    target_slot_options: list[int],
+    target_slots: list[int],
+    direction: str,
+    same: bool,
+    match_target_slot: bool,
+    match_n_cond: bool,
+    max_conditions: int,
     needed_pos: list[int],
     logit_location: tuple,
     prompt_mode: str,
     seed: int,
-    max_attempts: int,
+    max_attempts_factor: int,
 ) -> list[dict]:
-    """Sample & validate `n_pairs` contrastive (multiline, singleline) pairs."""
-
-    def prep(ex: dict) -> dict:
-        ex["prompt"] = (
-            replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   "
+    """Sample `n_pairs` (source, destination) pairs via the SHARED `build_completion_pairs`, then
+    cache per-(context, style) tok + unpatched logits for the sweep. Each returned dict is
+    `{"key", "source", "dest"}` where source/dest are `cache_context` outputs."""
+    cps = build_completion_pairs(
+        mt,
+        n_pairs=n_pairs,
+        target_slots=target_slots,
+        direction=direction,
+        same=same,
+        match_target_slot=match_target_slot,
+        match_n_cond=match_n_cond,
+        max_conditions=max_conditions,
+        mode=prompt_mode,
+        seed=seed,
+        patch_tokens=tuple(needed_pos),
+        max_attempts_factor=max_attempts_factor,
+        log=logger.info,
+    )
+    if len(cps) < n_pairs:
+        raise RuntimeError(
+            f"only collected {len(cps)}/{n_pairs} pairs (max_attempts_factor={max_attempts_factor}); "
+            f"raise --max-attempts-factor / --n-pairs or loosen the pairing flags"
         )
-        ex["tok"] = prepare_input(ex["prompt"], tokenizer=mt)
-        ex["logits"] = (
-            get_hs(mt=mt, input=ex["tok"], locations=logit_location).float().cpu()
-        )
-        ex["argmax"] = int(ex["logits"].argmax())
-        return ex
 
-    def tokens_match(a: dict, b: dict) -> bool:
-        for t in needed_pos:
-            ta = mt.tokenizer.decode(a["tok"]["input_ids"][0, t].item())
-            tb = mt.tokenizer.decode(b["tok"]["input_ids"][0, t].item())
-            if ta != tb:
-                return False
-        return True
-
-    prng = random.Random(seed)
+    memo: dict = {}
     pairs: list[dict] = []
-    attempts = 0
-    pbar = tqdm(total=n_pairs, desc="building pairs")
-    while len(pairs) < n_pairs and attempts < max_attempts:
-        attempts += 1
-        target_slot = prng.choice(target_slot_options)
-        n_conditions = (
-            target_slot + 2
-        )  # >= target_slot, gives a 'next var' for moved_on
-        ml = prep(
-            build_example(mt, prng, target_slot, n_conditions, prompt_mode, "multiline")
-        )
-        sl = prep(
-            build_example(
-                mt, prng, target_slot, n_conditions, prompt_mode, "singleline"
-            )
-        )
-        if not tokens_match(ml, sl):
-            continue
-        if ml["argmax"] == sl["argmax"]:  # not contrastive at the next token
-            continue
+    for cp in tqdm(cps, desc="caching pairs"):
         pairs.append(
             {
-                "target_slot": target_slot,
-                "n_conditions": n_conditions,
-                "ml": ml,
-                "sl": sl,
+                "key": cp.key,
+                "source": cache_context(mt, cp.source, logit_location, memo),
+                "dest": cache_context(mt, cp.dest, logit_location, memo),
             }
         )
-        pbar.update(1)
-    pbar.close()
+    ts_dist = dict(Counter(int(m.group(1)) for p in pairs if (m := _KEY_TS_RE.search(p["key"]))))
     logger.info(
-        f"collected {len(pairs)}/{n_pairs} valid pairs in {attempts} attempts | "
-        f"target_slot dist: {dict(Counter(p['target_slot'] for p in pairs))}"
+        f"cached {len(pairs)} pairs | unique contexts {len(memo)} "
+        f"(same={same} -> source IS dest) | source target_slot dist: {ts_dist}"
     )
-    if len(pairs) < n_pairs:
-        raise RuntimeError(
-            f"only collected {len(pairs)}/{n_pairs} pairs in {max_attempts} attempts; "
-            f"raise --max-attempts or loosen the filter"
-        )
     return pairs
 
 
@@ -417,16 +310,17 @@ def sweep_one_pair(
     module_formats = [fmt for fmt, _ in module_specs.values()]
     records: list[dict] = []
     for direction in directions:
-        src, dst = (
-            (pair["ml"], pair["sl"])
-            if direction == "ml->sl"
-            else (pair["sl"], pair["ml"])
-        )
-        src_ans = src["argmax"]  # token we patch TOWARD
-        dst_ans = dst["argmax"]  # dest's own top token
-        gold = {m: score_token(src["logits"], src_ans, m) for m in METRICS}
-        base = {m: score_token(dst["logits"], src_ans, m) for m in METRICS}
-        base_dst = {m: score_token(dst["logits"], dst_ans, m) for m in METRICS}
+        ss = LEG_STYLES[direction]["src_style"]  # source-donating style == dest's target style
+        ds = LEG_STYLES[direction]["dst_style"]  # dest's clean (run) style
+        src = pair["source"][ss]                 # donor: provides head/module activations only
+        dst_clean = pair["dest"][ds]             # dest, clean style: patched + read out
+        dst_flip = pair["dest"][ss]              # dest, flipped style: counterfactual ceiling
+        target_ans = dst_flip["argmax"]          # token we push the dest TOWARD (dest's OWN)
+        dst_ans = dst_clean["argmax"]            # dest's clean top token
+        source_ans = src["argmax"]               # donor's own argmax (informational)
+        gold = {m: score_token(dst_flip["logits"], target_ans, m) for m in METRICS}   # ceiling
+        base = {m: score_token(dst_clean["logits"], target_ans, m) for m in METRICS}  # floor (unpatched)
+        base_dst = {m: score_token(dst_clean["logits"], dst_ans, m) for m in METRICS}
         src_hs = capture_source_hs(
             mt, src["tok"], module_formats, needed_layers, needed_pos
         )
@@ -435,7 +329,7 @@ def sweep_one_pair(
                 for L in sweep_layers:
                     patched_logits, n_patched = run_patched(
                         mt=mt,
-                        clean_input=dst["tok"],
+                        clean_input=dst_clean["tok"],
                         patch_hs=src_hs,
                         layer_idx=L,
                         layer_name_format=fmt,
@@ -446,7 +340,7 @@ def sweep_one_pair(
                     )
                     patched_logits = patched_logits.float().cpu()
                     for m in METRICS:
-                        patched = score_token(patched_logits, src_ans, m)
+                        patched = score_token(patched_logits, target_ans, m)
                         patched_dst = score_token(patched_logits, dst_ans, m)
                         denom = gold[m] - base[m]
                         ie = (
@@ -457,7 +351,7 @@ def sweep_one_pair(
                         records.append(
                             dict(
                                 pair=pi,
-                                target_slot=pair["target_slot"],
+                                key=pair["key"],
                                 direction=direction,
                                 patch_tokens=str(list(patch_toks)),
                                 module=mod,
@@ -466,13 +360,14 @@ def sweep_one_pair(
                                 n_patched_layers=n_patched,
                                 layer=L,
                                 metric=m,
-                                src_ans=src_ans,
-                                dst_ans=dst_ans,
-                                gold=gold[m],
-                                base=base[m],
-                                base_dst=base_dst[m],
-                                patched=patched,
-                                patched_dst=patched_dst,
+                                source_ans=source_ans,  # donor token (informational)
+                                dst_ans=dst_ans,         # dest clean argmax
+                                target_ans=target_ans,   # dest's OWN flipped-style counterfactual
+                                gold=gold[m],            # ceiling: dest-flipped -> target_ans
+                                base=base[m],            # floor: dest-clean -> target_ans
+                                base_dst=base_dst[m],    # dest-clean -> dst_ans
+                                patched=patched,         # patched -> target_ans
+                                patched_dst=patched_dst, # patched -> dst_ans
                                 ie=ie,
                             )
                         )
@@ -516,23 +411,26 @@ def checkpoint_path(out_dir: Path, pair_index: int) -> Path:
     return checkpoint_dir(out_dir) / f"pair_{pair_index:04d}.pt"
 
 
-def serialize_example(ex: dict, tokenizer) -> dict:
-    """Everything in a built example EXCEPT the tensors (`tok`, `logits`) — keeps the full
-    prompt, prefill code, prior styles, spec id, target info, plus the decoded argmax token."""
-    out = {k: v for k, v in ex.items() if k not in ("tok", "logits")}
-    out["argmax"] = int(ex["argmax"])
-    out["argmax_str"] = tokenizer.decode(int(ex["argmax"]))
+def serialize_context(ctx_cache: dict, tokenizer) -> dict:
+    """Tensor-free view of one cached `StyledContext` (both styles): prompt + decoded argmax."""
+    out = {}
+    for style in ("ml", "sl"):
+        e = ctx_cache[style]
+        out[style] = {
+            "prompt": e["prompt"],
+            "argmax": int(e["argmax"]),
+            "argmax_str": tokenizer.decode(int(e["argmax"])),
+        }
     return out
 
 
 def serialize_pair(pi: int, pair: dict, tokenizer) -> dict:
-    """Full, tensor-free view of a pair (both samples), suitable for JSON / checkpoint."""
+    """Full, tensor-free view of a (source, dest) pair, suitable for JSON / checkpoint."""
     return {
         "pair_index": pi,
-        "target_slot": pair["target_slot"],
-        "n_conditions": pair["n_conditions"],
-        "ml": serialize_example(pair["ml"], tokenizer),
-        "sl": serialize_example(pair["sl"], tokenizer),
+        "key": pair["key"],
+        "source": serialize_context(pair["source"], tokenizer),
+        "dest": serialize_context(pair["dest"], tokenizer),
     }
 
 
@@ -543,12 +441,7 @@ def _load_checkpoints(ckpt_dir: Path) -> tuple[list[dict], list[dict]]:
     for f in sorted(ckpt_dir.glob("pair_*.pt")):
         ck = torch.load(f, weights_only=False)
         records.extend(ck["records"])
-        pairs_meta.append(
-            {
-                k: ck[k]
-                for k in ("pair_index", "target_slot", "n_conditions", "ml", "sl")
-            }
-        )
+        pairs_meta.append({k: ck[k] for k in ("pair_index", "key", "source", "dest")})
     return records, pairs_meta
 
 
@@ -638,14 +531,21 @@ def parse_args() -> argparse.Namespace:
         "--tag", default=None, help="run subdir name (default: auto from config)"
     )
     p.add_argument("--n-pairs", type=int, default=10)
-    p.add_argument("--target-slots", nargs="+", type=int, default=[1, 2])
+    p.add_argument("--target-slots", nargs="+", type=int, default=[1, 2, 3, 4],
+                   help="target slot choices (each in {1,2,3,4}: need a prior + a next var)")
     p.add_argument("--pair-seed", type=int, default=12345)
-    p.add_argument(
-        "--max-attempts",
-        type=int,
-        default=None,
-        help="pair-sampling attempt cap (default: 40 * n_pairs)",
-    )
+    p.add_argument("--max-attempts-factor", type=int, default=50,
+                   help="pair-sampling attempt cap = factor * n_pairs (shared sampler default 50)")
+    # ── pairing scheme (mirrors scripts/clock/train_completion_mask.py / completion_pairs.py) ──
+    p.add_argument("--direction", default="both", choices=["ml->sl", "sl->ml", "both"],
+                   help="which patch leg(s) to sweep")
+    p.add_argument("--same", action="store_true",
+                   help="source IS dest (minimal pair; source_ans == target_ans); ignores --match-* flags")
+    p.add_argument("--match-target-slot", action="store_true",
+                   help="force matched target_slot on both sides (ignored if --same)")
+    p.add_argument("--match-n-cond", action="store_true",
+                   help="force matched n_conditions on both sides (ignored if --same)")
+    p.add_argument("--max-conditions", type=int, default=6, help="upper bound when sampling n_conditions")
     p.add_argument("--prompt-mode", choices=["chat", "fim"], default="chat")
     p.add_argument(
         "--layer-step", type=int, default=1, help="sweep range(0, n_layer, step)"
@@ -686,9 +586,13 @@ def main() -> None:
     logging_utils.configure(args)
     experiment_utils.set_seed(args.seed)
 
+    pair_tag = ("same" if args.same else "diff") + (
+        "" if args.same else
+        f"{'_mts' if args.match_target_slot else ''}{'_mnc' if args.match_n_cond else ''}"
+    )
     tag = args.tag or (
-        f"{args.prompt_mode}_{args.layer_mode}_n{args.n_pairs}"
-        f"_step{args.layer_step}_seed{args.pair_seed}"
+        f"{args.prompt_mode}_{args.layer_mode}_{pair_tag}_{args.direction.replace('->', '2')}"
+        f"_n{args.n_pairs}_step{args.layer_step}_seed{args.pair_seed}"
     )
     out_dir = run_dir(args.model, tag)
     ckpt_dir = checkpoint_dir(out_dir)
@@ -727,14 +631,18 @@ def main() -> None:
     needed_layers = list(range(mt.n_layer))
     sweep_layers = list(range(0, mt.n_layer, args.layer_step))
     ie_denom_eps = {"logit": args.ie_eps_logit, "prob": args.ie_eps_prob}
-    max_attempts = args.max_attempts or (40 * args.n_pairs)
+    directions = legs_for(args.direction)
 
     n_runs = (
         args.n_pairs
-        * 2
+        * len(directions)
         * len(patch_tok_options)
         * len(module_specs)
         * len(sweep_layers)
+    )
+    logger.info(
+        f"pairing: same={args.same} match_ts={args.match_target_slot} match_nc={args.match_n_cond} "
+        f"max_cond={args.max_conditions} | direction={args.direction} -> legs={directions}"
     )
     logger.info(
         f"layer_mode={args.layer_mode} | "
@@ -746,12 +654,17 @@ def main() -> None:
     pairs = build_pairs(
         mt=mt,
         n_pairs=args.n_pairs,
-        target_slot_options=args.target_slots,
+        target_slots=args.target_slots,
+        direction=args.direction,
+        same=args.same,
+        match_target_slot=args.match_target_slot,
+        match_n_cond=args.match_n_cond,
+        max_conditions=args.max_conditions,
         needed_pos=needed_pos,
         logit_location=logit_location,
         prompt_mode=args.prompt_mode,
         seed=args.pair_seed,
-        max_attempts=max_attempts,
+        max_attempts_factor=args.max_attempts_factor,
     )
 
     # Per-pair sweep with checkpointing. Each pair writes a self-contained
@@ -779,7 +692,7 @@ def main() -> None:
             sweep_layers=sweep_layers,
             needed_layers=needed_layers,
             needed_pos=needed_pos,
-            directions=["ml->sl", "sl->ml"],
+            directions=directions,
             logit_location=logit_location,
             ie_denom_eps=ie_denom_eps,
             layer_mode=args.layer_mode,
@@ -808,6 +721,10 @@ def main() -> None:
         "target_slots": args.target_slots,
         "pair_seed": args.pair_seed,
         "prompt_mode": args.prompt_mode,
+        "same": args.same,
+        "match_target_slot": args.match_target_slot,
+        "match_n_cond": args.match_n_cond,
+        "max_conditions": args.max_conditions,
         "n_layer": int(mt.n_layer),
         "layer_step": args.layer_step,
         "layer_mode": args.layer_mode,
@@ -815,7 +732,7 @@ def main() -> None:
         "modules": {m: w for m, (_, w) in module_specs.items()},
         "patch_tokens": [list(pt) for pt in patch_tok_options],
         "metrics": list(METRICS),
-        "directions": ["ml->sl", "sl->ml"],
+        "directions": directions,
         "ie_denom_eps": ie_denom_eps,
         "n_records": int(len(df)),
         "n_valid_ie": int(df["ie"].notna().sum()),
