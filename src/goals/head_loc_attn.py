@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import random
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -856,75 +857,39 @@ def forward_with_masked_patch_obsolete(
     return logits[0] if squeeze_output else logits
 
 
-def forward_with_src_replacement(
+@contextmanager
+def src_replacement_hooks(
     mt,
-    dest_inputs: Any,
     src_head_inps: torch.Tensor,
     mask: HeadMask,
     layers: list[int],
     alpha: float = 1.0,
     patch_positions: Optional[list[int]] = None,
-    return_past_key_values: bool = False,
-) -> torch.Tensor:
-    """Run dest_inputs with mask-weighted per-head o_proj input replacement.
+):
+    """Register the per-head o_proj-input replacement pre-hooks for the duration of the
+    ``with`` block, then remove them.  Single source of truth for the head transplant.
 
-    For each layer l (index li in layers), each head h, and each token position p
-    in ``patch_positions``:
-        o_proj_input[:, p, h*head_dim:(h+1)*head_dim] =
-            mask[li,h] * src_h + (1 - mask[li,h]) * cascade_h
-
-    where ``cascade_h`` is the live dest attention output for head h at position p
-    (after cascading patches from all earlier layers), and ``src_h`` is the
-    corresponding head output from the source (C++) forward pass.
-
-    True replacement semantics:
-        mask=1 → pure source head output (full goal transfer)
-        mask=0 → pure cascade dest output (no patching)
-
-    Implemented via ``register_forward_pre_hook`` on o_proj — fully compatible with
-    ``torch.autograd`` (unlike nnsight's thread-based SWAP which breaks the graph).
-    Multi-position patching uses the same cat-based splice as single-position so
-    the autograd graph stays lean: only the patched-position slices carry
-    gradients through ``mask_vals``; the untouched inter-position slices are
-    bare views.
-
-    Limitation — single source broadcast across positions:
-        ``src_head_vals`` is a single snapshot (per layer) that is *broadcast*
-        across every position in ``patch_positions``.  Per-position source
-        variation is not supported.  This matches the project's working
-        assumption of a position-invariant goal representation, but forecloses
-        experiments that would want a distinct src per dest position.
+    For each layer ``l`` (index ``li`` in ``layers``), head ``h`` and position ``p`` in
+    ``patch_positions`` the live o_proj input is spliced to
+    ``alpha*mask[li,h]*src_h + (1 - mask[li,h])*cascade_h`` (``cascade_h`` = the live dest
+    head output after earlier layers' patches; ``src_h`` = the source snapshot).  This is the
+    OV→residual write of the selected heads.  Differentiable w.r.t. ``mask.values`` — the
+    patched-position slices carry the gradient, untouched slices are bare views of ``x``.
 
     Args:
-        mt: ModelandTokenizer (frozen).
-        dest_inputs: Tokenized destination prompt(s).  May include
-            ``past_key_values`` and ``use_cache`` keys for KV-cache decoding.
-        src_head_inps: Source o_proj inputs stacked across layers.
-            Shape ``(batch, n_layers_tested, n_embd)`` for batch, or
-            ``(n_layers_tested, n_embd)`` for a single instance.
-        mask: HeadMask with learnable values (requires_grad=True).
-        layers: Layer indices matching src_head_inps axis -2.
-        patch_positions: Token positions (in the current x sequence) to patch.
-            Negative indices are allowed (e.g., ``-1`` = last position).
-            Duplicates are removed.  ``None`` defaults to ``[-1]`` — backward
-            compatible with the single-last-position behavior.
-        return_past_key_values: If True, force ``use_cache=True`` and return
-            ``(logits, past_key_values)`` so callers can thread the cache into
-            the next call.  Patched K/V written into the cache during this
-            forward pass will persist there for subsequent decode steps.
+        src_head_inps: ``(batch, n_layers, n_embd)`` or ``(n_layers, n_embd)`` (broadcast over
+            batch).  A single snapshot per layer, broadcast across every position in
+            ``patch_positions`` (no per-position source variation).
+        mask: HeadMask with per-head interpolation weights.
+        layers: Layer indices matching ``src_head_inps`` axis -2.
+        alpha: Scale on the source term (1.0 = pure replacement at mask=1).
+        patch_positions: Positions (in the live x sequence) to patch.  Negatives allowed
+            (``-1`` = last).  De-duplicated.  ``None`` → ``[-1]``.
 
-    Returns:
-        ``(vocab_size,)`` float32 logits for 2D input (single instance), or
-        ``(batch, vocab_size)`` float32 logits for 3D input (batch).
-        Differentiable w.r.t. mask.values.
-        If ``return_past_key_values=True``, returns ``(logits, past_key_values)``.
-    """
+    Used by ``forward_with_src_replacement`` (logits / KV-cache decoding) and by
+    ``make_head_replacement_patch_interface`` (attention extraction)."""
     if src_head_inps.dim() == 2:
         src_head_inps = src_head_inps.unsqueeze(0)  # (1, L, n_embd)
-        squeeze_output = True
-    else:
-        squeeze_output = False
-
     if patch_positions is None:
         patch_positions = [-1]
 
@@ -991,14 +956,109 @@ def forward_with_src_replacement(
                 return pre_hook
 
             handles.append(o_proj.register_forward_pre_hook(make_hook(li)))
+        yield
+    finally:
+        for h in handles:
+            h.remove()
 
+
+def make_head_replacement_patch_interface(
+    src_head_inps: torch.Tensor,
+    mask: HeadMask,
+    layers: list[int],
+    patch_positions: Optional[list[int]] = None,
+    alpha: float = 1.0,
+):
+    """Build a ``patch_interface`` for ``src.attention.get_attention_matrices`` that applies
+    the per-head o_proj transplant instead of the default residual-add ``patch_with_baukit``.
+
+    The returned callable ``(mt, inputs, patches=None, model_kwargs=None) -> output`` runs the
+    forward under :func:`src_replacement_hooks`, so ``output.attentions`` / ``.logits`` /
+    ``.past_key_values`` all reflect the head-patched run — letting you visualize the attention
+    of a patched generation with the exact transplant used for steering.  The standard
+    ``patches`` arg is accepted (interface contract) but ignored: the intervention is fully
+    specified by ``src_head_inps`` / ``mask`` / ``patch_positions``.
+
+    Args mirror :func:`src_replacement_hooks`.  Typically ``patch_positions=[POS]`` (the pivot
+    whitespace token) to match how the mask was trained / how steering is applied."""
+    def patch_interface(mt, inputs, patches=None, model_kwargs=None):
+        model_kwargs = dict(model_kwargs or {})
+        with src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions):
+            return mt._model(**dict(inputs), **model_kwargs)
+
+    return patch_interface
+
+
+def forward_with_src_replacement(
+    mt,
+    dest_inputs: Any,
+    src_head_inps: torch.Tensor,
+    mask: HeadMask,
+    layers: list[int],
+    alpha: float = 1.0,
+    patch_positions: Optional[list[int]] = None,
+    return_past_key_values: bool = False,
+) -> torch.Tensor:
+    """Run dest_inputs with mask-weighted per-head o_proj input replacement.
+
+    For each layer l (index li in layers), each head h, and each token position p
+    in ``patch_positions``:
+        o_proj_input[:, p, h*head_dim:(h+1)*head_dim] =
+            mask[li,h] * src_h + (1 - mask[li,h]) * cascade_h
+
+    where ``cascade_h`` is the live dest attention output for head h at position p
+    (after cascading patches from all earlier layers), and ``src_h`` is the
+    corresponding head output from the source (C++) forward pass.
+
+    True replacement semantics:
+        mask=1 → pure source head output (full goal transfer)
+        mask=0 → pure cascade dest output (no patching)
+
+    Implemented via ``register_forward_pre_hook`` on o_proj — fully compatible with
+    ``torch.autograd`` (unlike nnsight's thread-based SWAP which breaks the graph).
+    Multi-position patching uses the same cat-based splice as single-position so
+    the autograd graph stays lean: only the patched-position slices carry
+    gradients through ``mask_vals``; the untouched inter-position slices are
+    bare views.
+
+    Limitation — single source broadcast across positions:
+        ``src_head_vals`` is a single snapshot (per layer) that is *broadcast*
+        across every position in ``patch_positions``.  Per-position source
+        variation is not supported.  This matches the project's working
+        assumption of a position-invariant goal representation, but forecloses
+        experiments that would want a distinct src per dest position.
+
+    Args:
+        mt: ModelandTokenizer (frozen).
+        dest_inputs: Tokenized destination prompt(s).  May include
+            ``past_key_values`` and ``use_cache`` keys for KV-cache decoding.
+        src_head_inps: Source o_proj inputs stacked across layers.
+            Shape ``(batch, n_layers_tested, n_embd)`` for batch, or
+            ``(n_layers_tested, n_embd)`` for a single instance.
+        mask: HeadMask with learnable values (requires_grad=True).
+        layers: Layer indices matching src_head_inps axis -2.
+        patch_positions: Token positions (in the current x sequence) to patch.
+            Negative indices are allowed (e.g., ``-1`` = last position).
+            Duplicates are removed.  ``None`` defaults to ``[-1]`` — backward
+            compatible with the single-last-position behavior.
+        return_past_key_values: If True, force ``use_cache=True`` and return
+            ``(logits, past_key_values)`` so callers can thread the cache into
+            the next call.  Patched K/V written into the cache during this
+            forward pass will persist there for subsequent decode steps.
+
+    Returns:
+        ``(vocab_size,)`` float32 logits for 2D input (single instance), or
+        ``(batch, vocab_size)`` float32 logits for 3D input (batch).
+        Differentiable w.r.t. mask.values.
+        If ``return_past_key_values=True``, returns ``(logits, past_key_values)``.
+    """
+    squeeze_output = src_head_inps.dim() == 2
+
+    with src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions):
         call_kwargs = dict(dest_inputs)
         if return_past_key_values:
             call_kwargs.setdefault("use_cache", True)
         output = mt._model(**call_kwargs)
-    finally:
-        for h in handles:
-            h.remove()
 
     logits = output.logits[:, -1, :].float()  # (batch, vocab)
     out_logits = logits[0] if squeeze_output else logits

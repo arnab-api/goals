@@ -350,6 +350,7 @@ def interactive_attention_html(
     cmap: str = "Blues",
     title: str = "Interactive attention",
     save_path: Optional[str] = None,
+    intervened_positions: Optional[list[int]] = None,
 ) -> str:
     """Build a standalone interactive HTML for attention patterns.
 
@@ -366,6 +367,11 @@ def interactive_attention_html(
         cmap: matplotlib colormap name for non-future cells.
         title: HTML <title> and header.
         save_path: if given, write the HTML to disk.
+        intervened_positions: token positions (in the FULL, un-sliced sequence — same index
+            space as ``attn_info.tokenized_prompt``; negatives allowed) where an intervention
+            (steering / head patch) was applied.  Marked with a persistent purple underline +
+            badge so the viz shows where the transplant landed.  Positions outside the
+            ``[start_from, end_at)`` slice are dropped.
 
     Returns:
         The HTML string.
@@ -380,6 +386,15 @@ def interactive_attention_html(
     tokens = attn_info.tokenized_prompt[start_from:end_at]
     n = A.shape[0]
     assert len(tokens) == n, f"token/attn length mismatch: {len(tokens)} vs {n}"
+
+    # Intervened token positions: map from full-sequence (possibly negative) index space into
+    # the displayed slice [start_from, end_at); drop any that fall outside the window.
+    seq_full = len(attn_info.tokenized_prompt)
+    interv_set: set[int] = set()
+    for p in intervened_positions or []:
+        pf = p if p >= 0 else seq_full + p
+        if start_from <= pf < end_at:
+            interv_set.add(pf - start_from)
 
     # Mask future positions (causal): A[q, k] for k > q is set to NaN-marker (-1).
     mask_future = np.triu(np.ones_like(A, dtype=bool), k=1)
@@ -427,9 +442,12 @@ def interactive_attention_html(
     for i, tok in enumerate(tokens):
         disp = _display_tok(tok)
         is_nl = _is_newline_tok(tok)
+        interv = i in interv_set
+        cls = "tok interv" if interv else "tok"
+        title_extra = ", INTERVENED" if interv else ""
         token_spans.append(
-            f'<span class="tok" data-idx="{i}" '
-            f'title="idx={i}, tok={_html_escape(repr(tok))}">'
+            f'<span class="{cls}" data-idx="{i}" '
+            f'title="idx={i}, tok={_html_escape(repr(tok))}{title_extra}">'
             f"{_html_escape(disp)}</span>"
         )
         if is_nl:
@@ -446,6 +464,12 @@ def interactive_attention_html(
     )
     if len(selected_heads) > 12:
         head_pairs_short += f", … (+{len(selected_heads) - 12} more)"
+
+    intervened_legend = (
+        " · <span style=\"border-bottom:3px solid #8e44ad;font-weight:700;\">intervened</span>"
+        f" position{'s' if len(interv_set) != 1 else ''} ({len(interv_set)})"
+        if interv_set else ""
+    )
 
     import json as _json
     import uuid as _uuid
@@ -489,6 +513,7 @@ def interactive_attention_html(
    transition: background 60ms, color 60ms;
  }}
  #{root} .tok.query {{ outline: 2px solid #d62728; outline-offset: -1px; }}
+ #{root} .tok.interv {{ border-bottom: 3px solid #8e44ad; font-weight: 700; }}
  #{root} .legend {{ margin-top: 12px; font-size: 11px; color: #666; }}
  #{root} .swatch {{ display: inline-block; width: 14px; height: 12px; vertical-align: middle;
             border: 1px solid #999; margin: 0 4px; border-radius: 2px; }}
@@ -502,7 +527,7 @@ def interactive_attention_html(
 <div class="legend">
   Hover a token to view its attention row · click to pin/unpin ·
   <span class="swatch" style="background:#e9ecef;"></span> future (causal mask) ·
-  query token outlined in <span style="color:#d62728;font-weight:600;">red</span>
+  query token outlined in <span style="color:#d62728;font-weight:600;">red</span>{intervened_legend}
 </div>
 </div>
 <script>
@@ -572,6 +597,7 @@ def show_interactive_attention(
     title: str = "Interactive attention",
     save_path: Optional[str] = None,
     height: Optional[int] = 520,
+    intervened_positions: Optional[list[int]] = None,
 ):
     """Convenience wrapper: build the HTML and display inline (Jupyter).
 
@@ -579,6 +605,10 @@ def show_interactive_attention(
         - int  → wrap in an iframe of fixed pixel height (default 520).
         - None → render inline (no iframe); the cell expands to fit all tokens.
                  Use when you don't want to scroll inside a fixed-height box.
+    intervened_positions:
+        token positions (full-sequence index space, negatives allowed) where steering /
+        head-patching was applied — marked with a purple underline.  See
+        ``interactive_attention_html``.
     """
     from IPython.display import HTML, display
 
@@ -592,6 +622,7 @@ def show_interactive_attention(
         cmap=cmap,
         title=title,
         save_path=save_path,
+        intervened_positions=intervened_positions,
     )
     if height is None:
         display(HTML(html))
