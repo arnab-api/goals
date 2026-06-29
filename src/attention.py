@@ -445,9 +445,12 @@ def interactive_attention_html(
         interv = i in interv_set
         cls = "tok interv" if interv else "tok"
         title_extra = ", INTERVENED" if interv else ""
+        # base_title is the static tooltip; on hover JS appends the live attn score A[q, i]
+        # (and resets back to this base when unhovered). Stored in data-base so it survives.
+        base_title = f"idx={i}, tok={_html_escape(repr(tok))}{title_extra}"
         token_spans.append(
-            f'<span class="{cls}" data-idx="{i}" '
-            f'title="idx={i}, tok={_html_escape(repr(tok))}{title_extra}">'
+            f'<span class="{cls}" data-idx="{i}" data-base="{base_title}" '
+            f'title="{base_title}">'
             f"{_html_escape(disp)}</span>"
         )
         if is_nl:
@@ -475,6 +478,9 @@ def interactive_attention_html(
     import uuid as _uuid
     colors_json = _json.dumps(colors)
     text_colors_json = _json.dumps(text_colors)
+    # Aggregated, causal-masked attention actually being plotted (A[q, k]); shown live in the
+    # tooltip on hover. Future cells (k > q) are 0 here and flagged as "(future)" in JS.
+    scores_json = _json.dumps(np.round(A, 6).tolist())
 
     # Unique root id so all CSS selectors and JS DOM queries are scoped — this
     # chunk is safe to drop into a Jupyter cell without leaking styles onto
@@ -525,7 +531,7 @@ def interactive_attention_html(
 <div class="head-list">heads: {_html_escape(head_pairs_short)}</div>
 <div class="tokens" id="{toks_id}">{tokens_html}</div>
 <div class="legend">
-  Hover a token to view its attention row · click to pin/unpin ·
+  Hover a token to view its attention row (score shown in tooltip) · click to pin/unpin ·
   <span class="swatch" style="background:#e9ecef;"></span> future (causal mask) ·
   query token outlined in <span style="color:#d62728;font-weight:600;">red</span>{intervened_legend}
 </div>
@@ -534,6 +540,7 @@ def interactive_attention_html(
 (function() {{
   const COLORS = {colors_json};
   const TEXT_COLORS = {text_colors_json};
+  const SCORES = {scores_json};
   const container = document.getElementById("{toks_id}");
   if (!container) return;
   const toks = container.querySelectorAll(".tok");
@@ -545,16 +552,21 @@ def interactive_attention_html(
         t.style.background = "";
         t.style.color = "";
         t.classList.remove("query");
+        t.title = t.dataset.base;
       }});
       return;
     }}
     const row = COLORS[q];
     const trow = TEXT_COLORS[q];
+    const srow = SCORES[q];
     toks.forEach(t => {{
       const k = +t.dataset.idx;
       t.style.background = row[k];
       t.style.color = trow[k];
       t.classList.toggle("query", k === q);
+      t.title = (k <= q)
+        ? t.dataset.base + " · attn[q" + q + "->k" + k + "]=" + srow[k].toFixed(4)
+        : t.dataset.base + " · (future)";
     }});
   }}
 

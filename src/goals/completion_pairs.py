@@ -42,7 +42,9 @@ from src.goals.multiline_prompts import (
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
 
-N_MULTILINE_PREDS = len(MULTILINE_PREDS)  # n_conditions cannot exceed this (distinct classes)
+N_MULTILINE_PREDS = len(
+    MULTILINE_PREDS
+)  # n_conditions cannot exceed this (distinct classes)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -105,13 +107,20 @@ def legs_for(direction: str) -> list[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def build_prompt(mt: ModelandTokenizer, rng, target_slot, n_conditions, mode, style) -> str:
+def build_prompt(
+    mt: ModelandTokenizer, rng, target_slot, n_conditions, mode, style
+) -> str:
     """One forced-prefill prompt (naming='letters' → single-token verdicts), tokenization-stable
     (newlines → ``"    \\n"``) with a trailing ``"   "`` so the pivot whitespace tokenizes the
     same across styles."""
     ex = build_example(
-        mt=mt, rng=rng, target_slot=target_slot, n_conditions=n_conditions,
-        mode=mode, style=style, naming="letters",
+        mt=mt,
+        rng=rng,
+        target_slot=target_slot,
+        n_conditions=n_conditions,
+        mode=mode,
+        style=style,
+        naming="letters",
     )
     return replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   "
 
@@ -131,24 +140,37 @@ def sample_ncond(rng, ts: int, max_conditions: int) -> int:
     return rng.randint(lo, hi)
 
 
-def build_context(mt: ModelandTokenizer, seed: int, target_slot: int, n_conditions: int,
-                  mode: str) -> "StyledContext | None":
+def build_context(
+    mt: ModelandTokenizer, seed: int, target_slot: int, n_conditions: int, mode: str
+) -> "StyledContext | None":
     """Render one spec in BOTH styles (shared seed → identical spec, only the target line differs)
     and take each style's next-token argmax. Returns ``StyledContext`` or ``None`` if the two
     styles don't yield a genuine stay↔moved_on contrast (``ml_ans == sl_ans``)."""
-    ml_prompt = build_prompt(mt, random.Random(seed), target_slot, n_conditions, mode, "multiline")
-    sl_prompt = build_prompt(mt, random.Random(seed), target_slot, n_conditions, mode, "singleline")
+    ml_prompt = build_prompt(
+        mt, random.Random(seed), target_slot, n_conditions, mode, "multiline"
+    )
+    sl_prompt = build_prompt(
+        mt, random.Random(seed), target_slot, n_conditions, mode, "singleline"
+    )
     ml = prepare_input(ml_prompt, tokenizer=mt, padding_side="left")
     sl = prepare_input(sl_prompt, tokenizer=mt, padding_side="left")
     ml_ans = argmax_next(mt, ml)
     sl_ans = argmax_next(mt, sl)
     if ml_ans == sl_ans:  # no genuine stay↔moved_on contrast for this context
         return None
-    return StyledContext(ml_prompt=ml_prompt, sl_prompt=sl_prompt, ml_ans=ml_ans, sl_ans=sl_ans)
+    return StyledContext(
+        ml_prompt=ml_prompt, sl_prompt=sl_prompt, ml_ans=ml_ans, sl_ans=sl_ans
+    )
 
 
-def validate_pair(mt: ModelandTokenizer, source: StyledContext, dest: StyledContext,
-                  legs: list[str], patch_tokens, same: bool) -> bool:
+def validate_pair(
+    mt: ModelandTokenizer,
+    source: StyledContext,
+    dest: StyledContext,
+    legs: list[str],
+    patch_tokens,
+    same: bool,
+) -> bool:
     """Per active leg, gate that (a) the leg's src/dst prompts are token-aligned at every patch
     position (so the per-head transplant lands on the same token), and (b) — when ``same`` is
     False — the source's own answer differs from the dest's target token
@@ -214,19 +236,21 @@ def build_completion_pairs(
         nc = sample_ncond(prng, ts, max_conditions)
 
         if same:
-            source = build_context(mt, prng.randrange(10 ** 9), ts, nc, mode)
+            source = build_context(mt, prng.randrange(10**9), ts, nc, mode)
             dest = source  # minimal pair: source IS dest
         else:
             ts2 = ts if match_target_slot else prng.choice(target_slots)
             nc2 = nc if match_n_cond else sample_ncond(prng, ts2, max_conditions)
-            source = build_context(mt, prng.randrange(10 ** 9), ts, nc, mode)
-            dest = build_context(mt, prng.randrange(10 ** 9), ts2, nc2, mode)
+            source = build_context(mt, prng.randrange(10**9), ts, nc, mode)
+            dest = build_context(mt, prng.randrange(10**9), ts2, nc2, mode)
         if source is None or dest is None:
             continue
         if not validate_pair(mt, source, dest, legs, patch_tokens, same):
             continue
 
-        pairs.append(CompletionPair(key=f"p{len(pairs)}_ts{ts}_nc{nc}", source=source, dest=dest))
+        pairs.append(
+            CompletionPair(key=f"p{len(pairs)}_ts{ts}_nc{nc}", source=source, dest=dest)
+        )
         if log and len(pairs) % 25 == 0:
             log(f"  built {len(pairs)}/{n_pairs} pairs ({attempts} attempts)")
     if log:
@@ -241,13 +265,19 @@ def iter_leg_batches(pairs: list[CompletionPair], batch_size: int, direction: st
     DEST — ``target_ans`` is the dest's flipped-style (counterfactual) answer, in the dest's token
     space (target_style == src_style; see ``LEG_STYLES``)."""
     for leg in legs_for(direction):
-        ss = LEG_STYLES[leg]["src_style"]  # source-donating style == dest's target style
+        ss = LEG_STYLES[leg][
+            "src_style"
+        ]  # source-donating style == dest's target style
         ds = LEG_STYLES[leg]["dst_style"]  # dest's clean (run) style
         for i in range(0, len(pairs), batch_size):
-            chunk = pairs[i:i + batch_size]
+            chunk = pairs[i : i + batch_size]
             yield (
-                [p.source.prompt(ss) for p in chunk],  # source: donates head activations
-                [p.dest.prompt(ds) for p in chunk],    # dest: patched + read out
-                [p.dest.ans(ss) for p in chunk],       # target_ans: dest's counterfactual token
-                [p.dest.ans(ds) for p in chunk],       # dst_ans: dest's clean token
+                [
+                    p.source.prompt(ss) for p in chunk
+                ],  # source: donates head activations
+                [p.dest.prompt(ds) for p in chunk],  # dest: patched + read out
+                [
+                    p.dest.ans(ss) for p in chunk
+                ],  # target_ans: dest's counterfactual token
+                [p.dest.ans(ds) for p in chunk],  # dst_ans: dest's clean token
             )
