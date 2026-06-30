@@ -19,9 +19,10 @@ monitor.py    live terminal monitor: reads a manifest, polls each placed job's s
 kill.py       kill jobs by name (`--names`) or a whole batch (`--all`). Killed jobs are NOT
               auto-requeued.
 setup.sh      one-time setup: installs the CLI tools (sshpass, screen) into the conda env and
-              seeds MACHINES.py from the template.
-MACHINES.py   per-client machine inventory (MACHINES + SAFE_MACHINES); gitignored, copied from
-              MACHINES.example.py.
+              seeds CONFIG.py from the template.
+CONFIG.py     per-client config — machine inventory (MACHINES + SAFE_MACHINES) AND scheduler
+              tunables (MIN_GPU_MEMORY, POLL_INTERVAL_MIN, …); gitignored, copied from
+              CONFIG.example.py. (Credentials are separate: auth.yml.)
 ```
 
 ## 0. Setup (once per client)
@@ -31,10 +32,10 @@ bash run_jobs/baulab/setup.sh          # or: ENV_NAME=myenv bash run_jobs/baulab
 ```
 
 This installs **`sshpass`** (feed the ssh password non-interactively) and **`screen`** (detached
-per-job sessions) into the `goals` conda env, and copies `MACHINES.example.py` → `MACHINES.py` and
+per-job sessions) into the `goals` conda env, and copies `CONFIG.example.py` → `CONFIG.py` and
 `auth.example.yml` → `auth.yml` if you don't have them yet. `sshpass` is only needed on the box you
 launch the scheduler from (and only when `ssh_login: false`); `screen` must also exist on every
-remote worker. Then edit `MACHINES.py` (step 2) and fill in `auth.yml`.
+remote worker. Then edit `CONFIG.py` (step 2) and fill in `auth.yml`.
 
 **Auth (`run_jobs/baulab/auth.yml`, gitignored).** Credentials live next to the module so it's
 self-contained — nothing is read from the project-root `env.yml`. Two modes:
@@ -102,14 +103,15 @@ duplicates, or cycles (deadlocks).
 
 ## 2. Define machines + config
 
-Machines live in a **local, gitignored `MACHINES.py`** — different clients have access to (and
-"own") different boxes, so this is per-client and not version-controlled. Copy the template once:
+Machines **and** the scheduler tunables live in a **local, gitignored `CONFIG.py`** — different
+clients own different boxes and may want different gates/cadences, so this is per-client and not
+version-controlled. Copy the template once:
 
 ```bash
-cp run_jobs/baulab/MACHINES.example.py run_jobs/baulab/MACHINES.py
+cp run_jobs/baulab/CONFIG.example.py run_jobs/baulab/CONFIG.py
 ```
 
-then edit `MACHINES.py`:
+then edit `CONFIG.py`:
 
 ```python
 SAFE_MACHINES = [          # preferred tier — tried FIRST for every job (e.g. machines you own)
@@ -121,16 +123,17 @@ MACHINES = [               # fallback tier — used only when no safe machine cu
     MachineConfig("kyoto", cuda=[2, 3]),   # same host, independent slot (runs concurrently)
     MachineConfig("local", cuda=[0]),
 ]
+
+# ── scheduler tunables (same file) ──
+MIN_GPU_MEMORY    = 45   # GB; a job needs this much FREE (and capacity) across a machine's GPUs
+POLL_INTERVAL_MIN = 10   # idle-machine probe + placement cadence
+MAX_RETRY         = 5    # auto-requeue attempts for OOM / externally-killed jobs
+# … plus AUTO_CONTINUE, STATUS_POLL_SEC, RENDER_INTERVAL_SEC, CONDA_ENV, *_PROJECT_DIR, etc.
 ```
 
-`dispatch.py` imports those two lists from `MACHINES.py` (and exits with a copy-the-template hint
-if it's missing). The scheduler **config** stays in `dispatch.py` (edit in-place):
-
-```python
-MIN_GPU_MEMORY  = 48    # GB; a job needs this much FREE (and capacity) across a machine's GPUs
-POLL_INTERVAL_MIN = 10  # idle-machine probe + placement cadence
-MAX_RETRY       = 5     # auto-requeue attempts for OOM / externally-killed jobs
-```
+`dispatch.py` imports the machine lists and the tunables from `CONFIG.py` (and exits with a
+copy-the-template hint if it's missing, or names the missing setting if `CONFIG.py` is stale).
+Only the scheduler *invariants* (`SSH_OPTS`, retry/terminal state sets) stay in `dispatch.py`.
 
 ### Machine tiers
 

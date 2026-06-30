@@ -49,8 +49,9 @@ Usage
     python run_jobs/baulab/dispatch.py --jobs my_jobs.json --dry-run   # probe + plan, no launch
     python run_jobs/baulab/dispatch.py --list                          # past batches + run ids
 
-Edit MACHINES and the CONFIG block below in-place. Credentials come from auth.yml next to
-this module (BAULAB_USER + BAULAB_PASS, or ssh_login: true for passwordless ssh).
+Machines + scheduler tunables live in a local, gitignored CONFIG.py (copy CONFIG.example.py).
+Credentials come from auth.yml next to this module (BAULAB_USER + BAULAB_PASS, or
+ssh_login: true for passwordless ssh).
 """
 
 import argparse
@@ -77,46 +78,48 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Machines come from a local, gitignored MACHINES.py (each client lists its own).
+# Per-client config comes from a local, gitignored CONFIG.py (each client edits its own).
 # ──────────────────────────────────────────────────────────────────────────────
-# `MachineConfig`, `MACHINES` (fallback tier) and `SAFE_MACHINES` (preferred tier) are defined
-# there because different clients have access to — and "own" — different boxes. Copy the template
-# on a new client:  cp run_jobs/baulab/MACHINES.example.py run_jobs/baulab/MACHINES.py
+# `MachineConfig`, the `MACHINES`/`SAFE_MACHINES` inventory AND the scheduler tunables below
+# all live there, because different clients own different boxes and may want different
+# gates/cadences. Copy the template on a new client:
+#   cp run_jobs/baulab/CONFIG.example.py run_jobs/baulab/CONFIG.py
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from MACHINES import MACHINES, SAFE_MACHINES  # (local, gitignored)
+    from CONFIG import (  # (local, gitignored)
+        AUTO_CONTINUE,
+        CONDA_ENV,
+        LOCAL_PROJECT_DIR,
+        MACHINES,
+        MAX_RETRY,
+        MIN_GPU_MEMORY,
+        POLL_INTERVAL_MIN,
+        REMOTE_PROJECT_DIR,
+        REMOTE_STAGING_SUBDIR,
+        RENDER_INTERVAL_SEC,
+        SAFE_MACHINES,
+        STATUS_POLL_SEC,
+    )
 except ModuleNotFoundError as e:
-    if e.name != "MACHINES":
+    if e.name != "CONFIG":
         raise
     sys.exit(
-        "run_jobs/baulab: no MACHINES.py found next to dispatch.py.\n"
-        "  cp run_jobs/baulab/MACHINES.example.py run_jobs/baulab/MACHINES.py\n"
-        "then edit it to list this client's machines (MACHINES) and owned/safe boxes "
-        "(SAFE_MACHINES)."
+        "run_jobs/baulab: no CONFIG.py found next to dispatch.py.\n"
+        "  cp run_jobs/baulab/CONFIG.example.py run_jobs/baulab/CONFIG.py\n"
+        "then edit it: this client's machines (MACHINES / SAFE_MACHINES) and scheduler tunables."
+    )
+except ImportError as e:
+    sys.exit(
+        f"run_jobs/baulab: CONFIG.py is missing a required setting — {e}.\n"
+        "Re-sync it against CONFIG.example.py (it gained the scheduler tunables: MIN_GPU_MEMORY, "
+        "POLL_INTERVAL_MIN, MAX_RETRY, AUTO_CONTINUE, STATUS_POLL_SEC, RENDER_INTERVAL_SEC, "
+        "CONDA_ENV, LOCAL_PROJECT_DIR, REMOTE_PROJECT_DIR, REMOTE_STAGING_SUBDIR)."
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EDIT ME — scheduler config.
+# Scheduler invariants (logic, not deployment config — keep here).
 # ──────────────────────────────────────────────────────────────────────────────
-
-# --- gates / behaviour --------------------------------------------------------
-MIN_GPU_MEMORY = 45        # GB; a job needs this much FREE (and capacity) across a worker's GPUs
-POLL_INTERVAL_MIN = 10     # idle-machine probe + placement cadence
-MAX_RETRY = 5              # auto-requeue attempts for OOM / externally-killed jobs
-AUTO_CONTINUE = True       # (per-job driver flag; one job per worker so largely cosmetic)
-
-# --- live-display cadences --------------------------------------------------
-# STATUS_POLL_SEC is the only one that hits the network (ssh to each placed job), so it's kept
-# coarse to avoid overloading the master box; RENDER_INTERVAL_SEC is a local-only repaint.
-STATUS_POLL_SEC = 8 * 60   # how often to ssh-poll placed jobs' status + handle requeue/kills
-RENDER_INTERVAL_SEC = 2    # dashboard repaint (local; just animates elapsed clocks)
-
-# --- where things live --------------------------------------------------------
-CONDA_ENV = "goals"
-LOCAL_PROJECT_DIR = str(_PROJECT_ROOT)        # used when name == "local"
-REMOTE_PROJECT_DIR = "~/Codes/Projects/goals"  # used on remote hosts (tilde ok)
-REMOTE_STAGING_SUBDIR = ".remote_jobs"        # under the project dir on each host
 
 # SSH hardening so automation never blocks on a prompt. RequestTTY=no + RemoteCommand=none
 # neutralise any per-host `RequestTTY`/`RemoteCommand` directives in the user's ~/.ssh/config

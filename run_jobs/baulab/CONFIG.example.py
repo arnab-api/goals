@@ -1,9 +1,11 @@
-"""Machine inventory template — copy to `MACHINES.py` (gitignored) and edit per client.
+"""Per-client config template — copy to `CONFIG.py` (gitignored) and edit per client.
 
-    cp run_jobs/baulab/MACHINES.example.py run_jobs/baulab/MACHINES.py
+    cp run_jobs/baulab/CONFIG.example.py run_jobs/baulab/CONFIG.py
 
-`dispatch.py` imports `MACHINES` and `SAFE_MACHINES` from `MACHINES.py`. Different clients
-have access to (and "own") different boxes, so this lives outside version control.
+`dispatch.py` imports the machine inventory (`MACHINES`, `SAFE_MACHINES`) *and* the scheduler
+tunables (bottom of this file) from `CONFIG.py`. Different clients have access to (and "own")
+different boxes and may want different gates/cadences, so this lives outside version control.
+(Credentials are separate — see `auth.yml`.)
 
 A *worker* is one `MachineConfig(name=<host>, cuda=[<gpu indices>])` entry; it runs at most
 one of our jobs at a time. Repeat a host with different `cuda` sets to give it several
@@ -11,6 +13,7 @@ independent, concurrent slots (e.g. `cuda=[0]` and `cuda=[1]` on the same host).
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -60,3 +63,26 @@ MACHINES = [
 SAFE_MACHINES = [
     # MachineConfig(name="my-own-box", cuda=[0]),
 ]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scheduler config — tune per deployment.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# --- gates / behaviour --------------------------------------------------------
+MIN_GPU_MEMORY = 45        # GB; a job needs this much FREE (and capacity) across a worker's GPUs
+POLL_INTERVAL_MIN = 10     # idle-machine probe + placement cadence
+MAX_RETRY = 5              # auto-requeue attempts for OOM / externally-killed jobs
+AUTO_CONTINUE = True       # (per-job driver flag; one job per worker so largely cosmetic)
+
+# --- live-display cadences ----------------------------------------------------
+# STATUS_POLL_SEC is the only one that hits the network (ssh to each placed job), so it's kept
+# coarse to avoid overloading the master box; RENDER_INTERVAL_SEC is a local-only repaint.
+STATUS_POLL_SEC = 8 * 60   # how often to ssh-poll placed jobs' status + handle requeue/kills
+RENDER_INTERVAL_SEC = 2    # dashboard repaint (local; just animates elapsed clocks)
+
+# --- where things live --------------------------------------------------------
+CONDA_ENV = "goals"
+LOCAL_PROJECT_DIR = str(Path(__file__).resolve().parents[2])   # used when name == "local"
+REMOTE_PROJECT_DIR = "~/Codes/Projects/goals"   # used on remote hosts (tilde ok)
+REMOTE_STAGING_SUBDIR = ".remote_jobs"          # under the project dir on each host

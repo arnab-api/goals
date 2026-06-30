@@ -3,7 +3,7 @@
 #
 # Installs the CLI tools the dispatcher shells out to — `sshpass` (feed the ssh password
 # non-interactively) and `screen` (detached per-job sessions) — into the project conda env,
-# and seeds a local MACHINES.py from the template if you don't have one yet.
+# and seeds a local CONFIG.py from the template if you don't have one yet.
 #
 # Usage:
 #   bash run_jobs/baulab/setup.sh            # uses the `goals` env
@@ -32,12 +32,12 @@ else
     echo "    already present — nothing to install"
 fi
 
-echo "==> Seeding MACHINES.py (per-client machine inventory; gitignored)"
-if [ -f "${HERE}/MACHINES.py" ]; then
-    echo "    ${HERE}/MACHINES.py already exists — leaving it untouched"
+echo "==> Seeding CONFIG.py (per-client machines + scheduler tunables; gitignored)"
+if [ -f "${HERE}/CONFIG.py" ]; then
+    echo "    ${HERE}/CONFIG.py already exists — leaving it untouched"
 else
-    cp "${HERE}/MACHINES.example.py" "${HERE}/MACHINES.py"
-    echo "    created ${HERE}/MACHINES.py from MACHINES.example.py — EDIT IT to list your machines"
+    cp "${HERE}/CONFIG.example.py" "${HERE}/CONFIG.py"
+    echo "    created ${HERE}/CONFIG.py from CONFIG.example.py — EDIT IT (machines + tunables)"
 fi
 
 echo "==> Seeding auth.yml (per-client credentials; gitignored)"
@@ -50,6 +50,6 @@ fi
 
 echo ""
 echo "Done. Next:"
-echo "  1. Edit run_jobs/baulab/MACHINES.py  (MACHINES + SAFE_MACHINES; use name=\"local\" for this box)"
+echo "  1. Edit run_jobs/baulab/CONFIG.py  (MACHINES + SAFE_MACHINES + scheduler tunables; name=\"local\" for this box)"
 echo "  2. Edit run_jobs/baulab/auth.yml  (BAULAB_USER; ssh_login: true for passwordless ssh, else BAULAB_PASS)"
 echo "  3. Plan a batch:  conda run -n ${ENV_NAME} python -m run_jobs.baulab.dispatch --jobs <jobs.json> --dry-run"
