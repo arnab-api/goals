@@ -31,9 +31,11 @@ API
 
 import random
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
+from src.goals.condition_data import ConditionSpec
 from src.goals.multiline_prompts import (
     MULTILINE_PREDS,
     build_example,
@@ -63,6 +65,9 @@ class StyledContext:
     sl_prompt: str
     ml_ans: int  # multiline argmax  → this context's "stay/continue" token
     sl_ans: int  # singleline argmax → this context's "moved_on" (next-var) token
+    # the shared ConditionSpec (both styles render the same spec → identical conditions);
+    # carried for per-condition gaze tracking in the attention viz. Optional/back-compatible.
+    spec: Optional[ConditionSpec] = None
 
     def prompt(self, style: str) -> str:
         return self.ml_prompt if style == "ml" else self.sl_prompt
@@ -109,10 +114,10 @@ def legs_for(direction: str) -> list[str]:
 
 def build_prompt(
     mt: ModelandTokenizer, rng, target_slot, n_conditions, mode, style
-) -> str:
+) -> tuple[str, ConditionSpec]:
     """One forced-prefill prompt (naming='letters' → single-token verdicts), tokenization-stable
     (newlines → ``"    \\n"``) with a trailing ``"   "`` so the pivot whitespace tokenizes the
-    same across styles."""
+    same across styles. Returns ``(prompt, spec)`` — the ConditionSpec is carried for gaze tracking."""
     ex = build_example(
         mt=mt,
         rng=rng,
@@ -122,7 +127,7 @@ def build_prompt(
         style=style,
         naming="letters",
     )
-    return replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   "
+    return replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   ", ex["spec"]
 
 
 @torch.no_grad()
@@ -146,12 +151,12 @@ def build_context(
     """Render one spec in BOTH styles (shared seed → identical spec, only the target line differs)
     and take each style's next-token argmax. Returns ``StyledContext`` or ``None`` if the two
     styles don't yield a genuine stay↔moved_on contrast (``ml_ans == sl_ans``)."""
-    ml_prompt = build_prompt(
+    ml_prompt, spec = build_prompt(
         mt, random.Random(seed), target_slot, n_conditions, mode, "multiline"
     )
-    sl_prompt = build_prompt(
+    sl_prompt, _ = build_prompt(
         mt, random.Random(seed), target_slot, n_conditions, mode, "singleline"
-    )
+    )  # same seed → identical spec; reuse the multiline one
     ml = prepare_input(ml_prompt, tokenizer=mt, padding_side="left")
     sl = prepare_input(sl_prompt, tokenizer=mt, padding_side="left")
     ml_ans = argmax_next(mt, ml)
@@ -159,7 +164,7 @@ def build_context(
     if ml_ans == sl_ans:  # no genuine stay↔moved_on contrast for this context
         return None
     return StyledContext(
-        ml_prompt=ml_prompt, sl_prompt=sl_prompt, ml_ans=ml_ans, sl_ans=sl_ans
+        ml_prompt=ml_prompt, sl_prompt=sl_prompt, ml_ans=ml_ans, sl_ans=sl_ans, spec=spec
     )
 
 

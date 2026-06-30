@@ -310,6 +310,142 @@ def _html_escape(s: str) -> str:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Condition-gaze: map ordered conditions (id_substrs) → prompt token spans.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _token_char_offsets(tokenized_prompt: list[str]) -> tuple[str, list[int], list[int]]:
+    """Reconstruct the literal prompt string from the stored (decoded) token pieces and
+    return ``(text, starts, ends)`` where ``starts[i]``/``ends[i]`` are the [inclusive,
+    exclusive) char offsets of token ``i`` in ``text``.
+
+    The token pieces were stored via ``_safe_token`` (``<``→``＜``, ``>``→``＞``); we reverse
+    that so the reconstruction is byte-identical to the original prompt and substring lookups
+    on NL spec text line up with the same tokenization being visualized — no re-tokenization.
+    """
+    raw = [t.replace("＜", "<").replace("＞", ">") for t in tokenized_prompt]
+    starts, ends, pos = [], [], 0
+    for s in raw:
+        starts.append(pos)
+        pos += len(s)
+        ends.append(pos)
+    return "".join(raw), starts, ends
+
+
+def _char_span_to_token_idxs(
+    starts: list[int], ends: list[int], c_start: int, c_end: int
+) -> list[int]:
+    """Token indices whose char span overlaps [c_start, c_end)."""
+    return [i for i in range(len(starts)) if ends[i] > c_start and starts[i] < c_end]
+
+
+def _extract_spec_texts(obj) -> Optional[list[str]]:
+    """Best-effort rendered NL spec text per condition, in order, from a ConditionSpec /
+    ConditionSample-like object (``.spec_texts`` | ``.steps`` | ``.spec.spec_texts``)."""
+    for v in (getattr(obj, "spec_texts", None), getattr(obj, "steps", None)):
+        if v:
+            return list(v)
+    sp = getattr(obj, "spec", None)
+    if sp is not None and getattr(sp, "spec_texts", None):
+        return list(sp.spec_texts)
+    return None
+
+
+def _normalize_track_conditions(track_conditions) -> tuple[Optional[list[str]], list[list[str]]]:
+    """Coerce ``track_conditions`` into ``(cond_texts | None, cond_substrs)``, both ordered.
+
+    Accepts: a single ConditionSpec/ConditionSample-like object (exposes ``.id_substrs`` →
+    ``list[list[str]]``, ideally also ``.spec_texts`` for instruction-region bounding); a list
+    of such objects (their conditions concatenated in order); or a raw ``list[list[str]]`` of
+    id_substrs (no bounding text → weaker monotonic fallback).
+    """
+    if not track_conditions:
+        return None, []
+
+    # single spec-like object
+    if hasattr(track_conditions, "id_substrs") and not isinstance(track_conditions, (list, tuple)):
+        return _extract_spec_texts(track_conditions), list(track_conditions.id_substrs)
+
+    seq = list(track_conditions)
+    if not seq:
+        return None, []
+
+    # list of spec-like objects → concat their conditions in order
+    if hasattr(seq[0], "id_substrs"):
+        texts: list[str] = []
+        substrs: list[list[str]] = []
+        any_text = False
+        for obj in seq:
+            substrs.extend(list(obj.id_substrs))
+            t = _extract_spec_texts(obj)
+            if t is not None:
+                any_text = True
+                texts.extend(t)
+            else:
+                texts.extend([""] * len(obj.id_substrs))
+        return (texts if any_text else None), substrs
+
+    # raw list[list[str]] of id_substrs (no bounding text)
+    return None, [list(s) for s in seq]
+
+
+def _condition_token_spans(
+    tokenized_prompt: list[str],
+    cond_texts: Optional[list[str]],
+    cond_substrs: list[list[str]],
+) -> list[list[int]]:
+    """Per-condition full-sequence token spans (sorted, possibly empty).
+
+    Each condition's ``id_substrs`` are located *within* that condition's instruction region:
+    the first occurrence of its rendered ``spec_text`` (``id_substrs ⊂ spec_text`` by
+    construction) bounds the search, so a literal like ``"500"`` is matched in the spec line,
+    not in the generated code.  Without ``cond_texts`` we fall back to a monotonic cursor over
+    the prompt (keeps conditions in order) and warn that bounding is approximate.
+    """
+    text, starts, ends = _token_char_offsets(tokenized_prompt)
+    have_texts = cond_texts is not None
+    if not have_texts:
+        logger.warning(
+            "track_conditions: no spec_texts available — bounding id_substrs by monotonic "
+            "cursor (pass a ConditionSpec/ConditionSample for instruction-region bounding)."
+        )
+
+    spans: list[list[int]] = []
+    cursor = 0  # used only in the no-spec_texts fallback
+    for ci, substrs in enumerate(cond_substrs):
+        region: Optional[tuple[int, int]] = None
+        if have_texts and ci < len(cond_texts) and cond_texts[ci]:
+            loc = text.find(cond_texts[ci])
+            if loc != -1:
+                region = (loc, loc + len(cond_texts[ci]))
+            else:
+                logger.warning(
+                    "track_conditions: spec_text for condition %d not found in prompt; "
+                    "falling back to first-occurrence match.", ci
+                )
+
+        tok_idxs: set[int] = set()
+        for sub in substrs:
+            if not sub:
+                continue
+            if region is not None:
+                local = text.find(sub, region[0], region[1])
+            elif have_texts:
+                local = text.find(sub)  # region missing for this cond: first occurrence
+            else:
+                local = text.find(sub, cursor)
+                if local == -1:
+                    local = text.find(sub)  # wrap as last resort
+            if local == -1:
+                continue
+            if region is None and not have_texts:
+                cursor = local + len(sub)
+            tok_idxs.update(_char_span_to_token_idxs(starts, ends, local, local + len(sub)))
+        spans.append(sorted(tok_idxs))
+    return spans
+
+
 def aggregate_attention(
     attn_info: AttentionInformation,
     selected_heads: list[tuple[int, int]],
@@ -351,6 +487,8 @@ def interactive_attention_html(
     title: str = "Interactive attention",
     save_path: Optional[str] = None,
     intervened_positions: Optional[list[int]] = None,
+    track_conditions=None,
+    condition_agg: str = "sum",
 ) -> str:
     """Build a standalone interactive HTML for attention patterns.
 
@@ -372,6 +510,19 @@ def interactive_attention_html(
             (steering / head patch) was applied.  Marked with a persistent purple underline +
             badge so the viz shows where the transplant landed.  Positions outside the
             ``[start_from, end_at)`` slice are dropped.
+        track_conditions: optional ordered conditions for the current example, used to compute
+            a per-condition **gaze score** from each query ``q``: the pooled selected-head
+            attention mass ``A[q, k]`` over the tokens ``k`` belonging to that condition.
+            Accepts a ``ConditionSpec``/``ConditionSample``-like object (preferred — its
+            ``.spec_texts`` bound each ``id_substr`` to that condition's instruction region),
+            a list of such objects (conditions concatenated in order), or a raw
+            ``list[list[str]]`` of ``id_substrs`` (weaker monotonic bounding).  When non-empty:
+            each token's tooltip is tagged with its condition, hovering ``q`` shows the
+            per-condition breakdown on the query token, and a condition legend is rendered.
+        condition_agg: how to pool ``A[q, ·]`` over a condition's tokens for the gaze score —
+            ``"sum"`` (total mass; favours longer conditions) or ``"mean"`` (per-token; length-
+            normalised).  The breakdown also always shows each condition's % share of the
+            query's total attention mass (which is agg-independent).
 
     Returns:
         The HTML string.
@@ -399,6 +550,46 @@ def interactive_attention_html(
     # Mask future positions (causal): A[q, k] for k > q is set to NaN-marker (-1).
     mask_future = np.triu(np.ones_like(A, dtype=bool), k=1)
     A = np.where(mask_future, 0.0, A)
+
+    # ── Condition gaze ────────────────────────────────────────────────────────
+    # Per query q, pool the (raw, future-masked) selected-head attention mass A[q, ·] over each
+    # condition's tokens.  Spans are computed on the FULL sequence then mapped into the displayed
+    # slice; tokens outside [start_from, end_at) are unscoreable and dropped.
+    if condition_agg not in ("sum", "mean"):
+        raise ValueError(f"Unknown condition_agg={condition_agg!r}; expected 'sum' | 'mean'")
+    cond_texts, cond_substrs = _normalize_track_conditions(track_conditions)
+    cond_labels: list[str] = []
+    cond_of_token = [-1] * n
+    gaze_disp: list[list[float]] = []
+    gaze_pct: list[list[float]] = []
+    if cond_substrs:
+        full_spans = _condition_token_spans(
+            attn_info.tokenized_prompt, cond_texts, cond_substrs
+        )
+        # full-seq idx → sliced idx; keep only tokens inside the window
+        sliced_spans = [
+            [k - start_from for k in span if start_from <= k < end_at]
+            for span in full_spans
+        ]
+        for ci, span in enumerate(sliced_spans):
+            for k in span:
+                cond_of_token[k] = ci
+        cond_labels = [
+            (" ".join(s for s in substrs if s) or f"condition {ci}")
+            for ci, substrs in enumerate(cond_substrs)
+        ]
+        C = len(cond_substrs)
+        row_total = A.sum(axis=1)  # total mass per query over k ≤ q
+        for q in range(n):
+            disp_row, pct_row = [], []
+            for c in range(C):
+                ks = [k for k in sliced_spans[c] if k <= q]
+                s = float(A[q, ks].sum()) if ks else 0.0
+                disp_row.append(s / len(ks) if (condition_agg == "mean" and ks) else s)
+                tot = float(row_total[q])
+                pct_row.append(100.0 * s / tot if tot > 0 else 0.0)
+            gaze_disp.append([round(float(v), 6) for v in disp_row])
+            gaze_pct.append([round(float(v), 2) for v in pct_row])
 
     if normalize == "row_max":
         row_max = A.max(axis=1, keepdims=True)
@@ -437,20 +628,35 @@ def interactive_attention_html(
         colors.append(row_colors)
         text_colors.append(row_text)
 
+    # Categorical palette for condition membership (avoids the query-outline red #d62728).
+    COND_PALETTE = [
+        "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e",
+        "#17becf", "#8c564b", "#e377c2", "#bcbd22",
+    ]
+
+    def _cond_color(ci: int) -> str:
+        return COND_PALETTE[ci % len(COND_PALETTE)]
+
     # Token spans with optional <br/> after newline tokens for natural flow.
     token_spans = []
     for i, tok in enumerate(tokens):
         disp = _display_tok(tok)
         is_nl = _is_newline_tok(tok)
         interv = i in interv_set
+        ci = cond_of_token[i]
         cls = "tok interv" if interv else "tok"
         title_extra = ", INTERVENED" if interv else ""
+        # persistent colored left-border marks condition membership (survives hover repaint).
+        style_attr = ""
+        if ci >= 0:
+            title_extra += f', cond {ci}: "{_html_escape(cond_labels[ci])}"'
+            style_attr = f' style="border-left:3px solid {_cond_color(ci)};"'
         # base_title is the static tooltip; on hover JS appends the live attn score A[q, i]
         # (and resets back to this base when unhovered). Stored in data-base so it survives.
         base_title = f"idx={i}, tok={_html_escape(repr(tok))}{title_extra}"
         token_spans.append(
-            f'<span class="{cls}" data-idx="{i}" data-base="{base_title}" '
-            f'title="{base_title}">'
+            f'<span class="{cls}" data-idx="{i}" data-cond="{ci}"{style_attr} '
+            f'data-base="{base_title}" title="{base_title}">'
             f"{_html_escape(disp)}</span>"
         )
         if is_nl:
@@ -481,12 +687,48 @@ def interactive_attention_html(
     # Aggregated, causal-masked attention actually being plotted (A[q, k]); shown live in the
     # tooltip on hover. Future cells (k > q) are 0 here and flagged as "(future)" in JS.
     scores_json = _json.dumps(np.round(A, 6).tolist())
+    # Condition gaze payloads (empty when track_conditions is None / empty).
+    gaze_json = _json.dumps(gaze_disp)
+    gaze_pct_json = _json.dumps(gaze_pct)
+    cond_labels_json = _json.dumps(cond_labels)
 
     # Unique root id so all CSS selectors and JS DOM queries are scoped — this
     # chunk is safe to drop into a Jupyter cell without leaking styles onto
     # other outputs (e.g. body { background } turning the whole notebook white).
     root = f"iaviz-{_uuid.uuid4().hex[:8]}"
     toks_id = f"{root}-toks"
+
+    # Static conditions legend: one colored chip + label per tracked condition.
+    # Live gaze barchart panel: one bar per condition, updated on token select in paint().
+    if cond_substrs:
+        cond_items = "".join(
+            f'<div style="margin:2px 0;"><span class="swatch" '
+            f'style="background:{_cond_color(ci)};"></span>'
+            f'c{ci}: {_html_escape(lab)}</div>'
+            for ci, lab in enumerate(cond_labels)
+        )
+        conditions_block = (
+            f'<div class="conditions"><b>conditions</b> (gaze agg={condition_agg}; '
+            f"hover a query token to see its per-condition gaze on the query span):"
+            f"{cond_items}</div>"
+        )
+        gaze_rows = "".join(
+            f'<div class="gbar-row" title="{_html_escape(lab)}">'
+            f'<span class="gbar-lab">c{ci}</span>'
+            f'<span class="gbar-track">'
+            f'<span class="gbar-fill" data-c="{ci}" style="background:{_cond_color(ci)};"></span>'
+            f"</span>"
+            f'<span class="gbar-val" data-c="{ci}">–</span></div>'
+            for ci, lab in enumerate(cond_labels)
+        )
+        gaze_panel = (
+            f'<div class="gazepanel" id="{root}-gaze">'
+            f'<div class="gaze-hd">gaze · <span class="gaze-q">no token</span></div>'
+            f"{gaze_rows}</div>"
+        )
+    else:
+        conditions_block = ""
+        gaze_panel = ""
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{_html_escape(title)}</title>
@@ -521,14 +763,36 @@ def interactive_attention_html(
  #{root} .tok.query {{ outline: 2px solid #d62728; outline-offset: -1px; }}
  #{root} .tok.interv {{ border-bottom: 3px solid #8e44ad; font-weight: 700; }}
  #{root} .legend {{ margin-top: 12px; font-size: 11px; color: #666; }}
+ #{root} .conditions {{ margin: 4px 0 14px 0; font-size: 11px; color: #555; }}
  #{root} .swatch {{ display: inline-block; width: 14px; height: 12px; vertical-align: middle;
             border: 1px solid #999; margin: 0 4px; border-radius: 2px; }}
+ #{root} .titlebar {{ display: flex; justify-content: space-between; align-items: flex-start;
+            gap: 16px; flex-wrap: wrap; }}
+ #{root} .titlebar .left {{ flex: 1 1 auto; min-width: 240px; }}
+ #{root} .gazepanel {{ flex: 0 0 auto; min-width: 200px; background: #fff; border: 1px solid #ddd;
+            border-radius: 6px; padding: 8px 10px; font-size: 11px; }}
+ #{root} .gaze-hd {{ font-weight: 600; color: #444; margin-bottom: 6px; }}
+ #{root} .gaze-q {{ color: #d62728; font-weight: 700; }}
+ #{root} .gbar-row {{ display: flex; align-items: center; gap: 6px; margin: 3px 0; }}
+ #{root} .gbar-lab {{ width: 22px; color: #555; font-family: monospace; }}
+ #{root} .gbar-track {{ flex: 1 1 auto; height: 11px; background: #eee; border-radius: 3px;
+            overflow: hidden; }}
+ #{root} .gbar-fill {{ display: block; height: 100%; width: 0%; border-radius: 3px;
+            transition: width 80ms; }}
+ #{root} .gbar-val {{ width: 92px; text-align: right; color: #444; font-family: monospace;
+            white-space: nowrap; }}
 </style></head>
 <body>
 <div id="{root}">
+<div class="titlebar">
+<div class="left">
 <h2>{_html_escape(title)}</h2>
 <div class="meta">{_html_escape(heads_summary)} · {n} tokens (slice [{start_from}, {end_at}))</div>
 <div class="head-list">heads: {_html_escape(head_pairs_short)}</div>
+</div>
+{gaze_panel}
+</div>
+{conditions_block}
 <div class="tokens" id="{toks_id}">{tokens_html}</div>
 <div class="legend">
   Hover a token to view its attention row (score shown in tooltip) · click to pin/unpin ·
@@ -541,12 +805,49 @@ def interactive_attention_html(
   const COLORS = {colors_json};
   const TEXT_COLORS = {text_colors_json};
   const SCORES = {scores_json};
+  const GAZE = {gaze_json};
+  const GAZE_PCT = {gaze_pct_json};
+  const CLABELS = {cond_labels_json};
+  const CAGG = {condition_agg!r};
   const container = document.getElementById("{toks_id}");
   if (!container) return;
   const toks = container.querySelectorAll(".tok");
+  const gpanel = document.getElementById("{root}-gaze");
+  const gFills = gpanel ? gpanel.querySelectorAll(".gbar-fill") : [];
+  const gVals = gpanel ? gpanel.querySelectorAll(".gbar-val") : [];
+  const gQ = gpanel ? gpanel.querySelector(".gaze-q") : null;
   let pinned = null;
 
+  function gazeText(q) {{
+    if (!CLABELS.length || !GAZE[q]) return "";
+    const parts = CLABELS.map((lab, c) =>
+      "c" + c + "=" + GAZE[q][c].toFixed(3) + " (" + GAZE_PCT[q][c].toFixed(0) + "%)");
+    return " · gaze[" + CAGG + "]: " + parts.join(", ");
+  }}
+
+  function paintGaze(q) {{
+    if (!gpanel) return;
+    if (q == null || !GAZE[q]) {{
+      if (gQ) gQ.textContent = "no token";
+      gFills.forEach(f => {{ f.style.width = "0%"; }});
+      gVals.forEach(v => {{ v.textContent = "–"; }});
+      return;
+    }}
+    if (gQ) gQ.textContent = "token " + q;
+    const vals = GAZE[q];
+    const mx = Math.max(1e-12, ...vals.map(Math.abs));  // normalize bars within this token
+    gFills.forEach(f => {{
+      const c = +f.dataset.c;
+      f.style.width = (100 * Math.abs(vals[c]) / mx).toFixed(1) + "%";
+    }});
+    gVals.forEach(v => {{
+      const c = +v.dataset.c;
+      v.textContent = vals[c].toFixed(3) + " (" + GAZE_PCT[q][c].toFixed(0) + "%)";
+    }});
+  }}
+
   function paint(q) {{
+    paintGaze(q);
     if (q == null) {{
       toks.forEach(t => {{
         t.style.background = "";
@@ -559,14 +860,19 @@ def interactive_attention_html(
     const row = COLORS[q];
     const trow = TEXT_COLORS[q];
     const srow = SCORES[q];
+    const gtxt = gazeText(q);
     toks.forEach(t => {{
       const k = +t.dataset.idx;
       t.style.background = row[k];
       t.style.color = trow[k];
       t.classList.toggle("query", k === q);
-      t.title = (k <= q)
-        ? t.dataset.base + " · attn[q" + q + "->k" + k + "]=" + srow[k].toFixed(4)
-        : t.dataset.base + " · (future)";
+      if (k > q) {{
+        t.title = t.dataset.base + " · (future)";
+      }} else {{
+        // k ≤ q: live attn score; the query token (k === q) also gets the gaze breakdown.
+        t.title = t.dataset.base + " · attn[q" + q + "->k" + k + "]=" + srow[k].toFixed(4)
+          + (k === q ? gtxt : "");
+      }}
     }});
   }}
 
@@ -610,6 +916,8 @@ def show_interactive_attention(
     save_path: Optional[str] = None,
     height: Optional[int] = 520,
     intervened_positions: Optional[list[int]] = None,
+    track_conditions=None,
+    condition_agg: str = "sum",
 ):
     """Convenience wrapper: build the HTML and display inline (Jupyter).
 
@@ -620,6 +928,9 @@ def show_interactive_attention(
     intervened_positions:
         token positions (full-sequence index space, negatives allowed) where steering /
         head-patching was applied — marked with a purple underline.  See
+        ``interactive_attention_html``.
+    track_conditions / condition_agg:
+        ordered conditions for per-condition gaze scoring in the tooltips.  See
         ``interactive_attention_html``.
     """
     from IPython.display import HTML, display
@@ -635,6 +946,8 @@ def show_interactive_attention(
         title=title,
         save_path=save_path,
         intervened_positions=intervened_positions,
+        track_conditions=track_conditions,
+        condition_agg=condition_agg,
     )
     if height is None:
         display(HTML(html))

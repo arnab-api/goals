@@ -145,6 +145,7 @@ def build_example(
     next_slot = target_slot + 1
     return {
         "spec_id": spec.spec_id,
+        "spec": spec,  # the ConditionSpec (ordered conditions + id_substrs) — for gaze tracking
         "mode": mode,
         "prefill_style": style,  # the TARGET's style (test variable)
         "prior_styles": prior_styles,  # complete priors, >=1 multiline
