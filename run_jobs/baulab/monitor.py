@@ -22,7 +22,6 @@ Usage
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -36,8 +35,8 @@ from rich.text import Text
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dispatch import (  # noqa: E402
-    SSH_OPTS,
     STATE_STYLE,
+    _ssh_prefix,
     load_credentials,
     manifests_dir,
     print_runs,
@@ -65,7 +64,7 @@ def fetch_job(job: dict, user: str, pw: str) -> dict | None:
         except (OSError, json.JSONDecodeError):
             return None
     else:
-        cmd = f"sshpass -p {shlex.quote(pw)} ssh {SSH_OPTS} {user}@{job['host']} cat {path}"
+        cmd = f"{_ssh_prefix(user, pw, job['host'])} cat {path}"
         res = subprocess.run(cmd, shell=True, capture_output=True, text=True, executable="/bin/bash")
         if res.returncode != 0 or not res.stdout.strip():
             return None

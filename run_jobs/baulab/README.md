@@ -31,10 +31,17 @@ bash run_jobs/baulab/setup.sh          # or: ENV_NAME=myenv bash run_jobs/baulab
 ```
 
 This installs **`sshpass`** (feed the ssh password non-interactively) and **`screen`** (detached
-per-job sessions) into the `goals` conda env, and copies `MACHINES.example.py` → `MACHINES.py` if
-you don't have one yet. `sshpass` is only needed on the box you launch the scheduler from;
-`screen` must also exist on every remote worker. Then edit `MACHINES.py` (step 2) and make sure
-`env.yml` has `BAULAB_USER` / `BAULAB_PASS`.
+per-job sessions) into the `goals` conda env, and copies `MACHINES.example.py` → `MACHINES.py` and
+`auth.example.yml` → `auth.yml` if you don't have them yet. `sshpass` is only needed on the box you
+launch the scheduler from (and only when `ssh_login: false`); `screen` must also exist on every
+remote worker. Then edit `MACHINES.py` (step 2) and fill in `auth.yml`.
+
+**Auth (`run_jobs/baulab/auth.yml`, gitignored).** Credentials live next to the module so it's
+self-contained — nothing is read from the project-root `env.yml`. Two modes:
+- `ssh_login: false` (default): set `BAULAB_USER` + `BAULAB_PASS`; remote exec uses `sshpass`.
+- `ssh_login: true`: set `BAULAB_USER` only. Remote exec uses plain passwordless `ssh`
+  (key/agent-based login must already work for **every** target host — test `ssh <host> true`).
+  `BAULAB_PASS` is then ignored and `sshpass` is not needed at all.
 
 > **ssh-config gotcha.** If your `~/.ssh/config` sets `RequestTTY yes` + `RemoteCommand ...` for a
 > host (forcing an interactive login shell), plain `ssh <host> <cmd>` fails with *"Cannot execute
@@ -55,6 +62,43 @@ dir, so `|& tee logs/...` paths are relative to it.
 ```
 
 See `jobs.example.json`.
+
+### Dependencies (optional)
+
+A job may declare `"dependencies": [<job names>]` — it won't be placed until **every** listed
+dependency has finished **successfully** (`done`). A missing or empty `dependencies` field means
+"no dependencies". Jobs without (satisfied) deps are placed in list order, FIFO; a job blocked on
+deps is simply skipped over until its deps complete, so it never stalls independent jobs.
+
+```json
+[
+  {"name": "build_data", "command": "..."},
+  {"name": "train",    "command": "...", "dependencies": ["build_data"]},
+  {"name": "cma",      "command": "...", "dependencies": []},
+  {"name": "clean_up", "command": "...", "dependencies": ["build_data", "train", "cma"]}
+]
+```
+
+If a dependency ends in any non-`done` terminal state — `error`, `killed` (via `kill.py` or after
+exhausting `MAX_RETRY`), or `cancelled` — all of its dependents are **cancelled transitively**
+(state `cancelled`, detail `dependency '<dep>' <state>`) and never run. Dependency names are
+validated up front: unknown names, self-edges, and cycles are rejected before anything launches.
+The dashboard shows a blocked job's outstanding deps as `waiting on: <deps>`.
+
+### Integrity check
+
+`dispatch.py` validates the jobs file before launching anything and refuses to start if it
+doesn't pass. You can run the same check ahead of time (model-free, instant):
+
+```bash
+python run_jobs/baulab/check_jobs.py job_list/my_jobs.json
+```
+
+It reports **all** problems at once (exit 1 if any), and on success prints the dependency
+*execution waves*. Checks: top-level is a non-empty list of objects; every job has a non-empty
+unique `name` and a `command`; **no unknown fields** (typo guard — only `name`, `command`,
+`dependencies` are allowed); every `dependencies` entry names a real job, with no self-edges,
+duplicates, or cycles (deadlocks).
 
 ## 2. Define machines + config
 
@@ -111,9 +155,9 @@ that don't fit stay in the queue and are retried every `POLL_INTERVAL_MIN` (whic
 machines freed by *other people's* jobs ending). One job per entry, using all its GPUs — to run
 several jobs on one host concurrently, add multiple entries (`cuda=[0]`, `cuda=[1]`, ...).
 
-Credentials (`BAULAB_USER`, `BAULAB_PASS`) are read from `env.yml`. Needs `sshpass` + `screen`
-on the local box and `screen` on each remote — `bash run_jobs/baulab/setup.sh` installs them
-(see step 0).
+Credentials are read from `run_jobs/baulab/auth.yml` (see step 0). Needs `screen` on each remote,
+and `sshpass` on the local box unless `ssh_login: true` (passwordless ssh) — `bash
+run_jobs/baulab/setup.sh` installs them.
 
 ## 3. Run the scheduler
 

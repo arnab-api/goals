@@ -49,8 +49,8 @@ Usage
     python run_jobs/baulab/dispatch.py --jobs my_jobs.json --dry-run   # probe + plan, no launch
     python run_jobs/baulab/dispatch.py --list                          # past batches + run ids
 
-Edit MACHINES and the CONFIG block below in-place. Credentials come from env.yml
-(BAULAB_USER / BAULAB_PASS).
+Edit MACHINES and the CONFIG block below in-place. Credentials come from auth.yml next to
+this module (BAULAB_USER + BAULAB_PASS, or ssh_login: true for passwordless ssh).
 """
 
 import argparse
@@ -168,15 +168,41 @@ def use_real_terminal_size() -> None:
         os.environ.pop(v, None)
 
 
-def load_credentials() -> tuple[str, str]:
-    with open(_PROJECT_ROOT / "env.yml") as f:
-        cfg = yaml.safe_load(f)
-    user = cfg.get("BAULAB_USER")
-    pw = cfg.get("BAULAB_PASS")
-    if not user or not pw:
+# Auth lives next to this module so run_jobs/baulab is self-contained (no dependency on
+# the project-root env.yml). auth.yml is gitignored; see auth.example.yml for the template.
+_AUTH_PATH = Path(__file__).resolve().parent / "auth.yml"
+
+
+def load_credentials() -> tuple[str | None, str | None]:
+    """Read BAULAB auth from run_jobs/baulab/auth.yml.
+
+    Returns (user, pw). When `ssh_login: true`, `pw` is None and remote exec uses plain
+    (passwordless) ssh — i.e. key/agent-based login must be configured for every target
+    host, and BAULAB_PASS is not needed at all. Otherwise `pw` is BAULAB_PASS (sshpass).
+    """
+    if not _AUTH_PATH.exists():
         print(
-            "WARNING: BAULAB_USER / BAULAB_PASS not set in env.yml — only the 'local' "
-            "worker will work (remote SSH/scp will fail).",
+            f"WARNING: {_AUTH_PATH} not found — only the 'local' worker will work "
+            f"(remote SSH/scp will fail). Copy auth.example.yml -> auth.yml and fill it in.",
+            file=sys.stderr,
+        )
+        return None, None
+    with open(_AUTH_PATH) as f:
+        cfg = yaml.safe_load(f) or {}
+    user = cfg.get("BAULAB_USER")
+    ssh_login = bool(cfg.get("ssh_login", False))
+    pw = None if ssh_login else cfg.get("BAULAB_PASS")
+    if not user:
+        print(
+            "WARNING: BAULAB_USER not set in auth.yml — only the 'local' worker will work "
+            "(remote SSH/scp will fail).",
+            file=sys.stderr,
+        )
+    elif not ssh_login and not pw:
+        print(
+            "WARNING: BAULAB_PASS not set and ssh_login is false in auth.yml — remote "
+            "SSH/scp will fail. Either set ssh_login: true (passwordless ssh configured "
+            "for all target hosts) or provide BAULAB_PASS.",
             file=sys.stderr,
         )
     return user, pw
@@ -187,8 +213,11 @@ def load_credentials() -> tuple[str, str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _ssh_prefix(user: str, pw: str, host: str) -> str:
-    return f"sshpass -p {shlex.quote(pw)} ssh {SSH_OPTS} {user}@{host}"
+def _ssh_prefix(user: str, pw: str | None, host: str) -> str:
+    # pw is None when auth.yml sets ssh_login: true → rely on passwordless (key/agent) ssh.
+    if pw:
+        return f"sshpass -p {shlex.quote(pw)} ssh {SSH_OPTS} {user}@{host}"
+    return f"ssh {SSH_OPTS} {user}@{host}"
 
 
 def run_on(worker: Worker, command: str, user: str, pw: str) -> subprocess.CompletedProcess:
@@ -209,8 +238,9 @@ def copy_dir_to(worker: Worker, local_dir: Path, remote_dir: str, user: str, pw:
             subprocess.run(["cp", str(f), str(target / f.name)], check=True)
         return
     run_on(worker, f"mkdir -p {remote_dir}", user, pw)
+    scp_bin = f"sshpass -p {shlex.quote(pw)} scp" if pw else "scp"
     scp = (
-        f"sshpass -p {shlex.quote(pw)} scp {SSH_OPTS} "
+        f"{scp_bin} {SSH_OPTS} "
         f"{shlex.quote(str(local_dir))}/* {user}@{worker.host}:{remote_dir}/"
     )
     res = subprocess.run(scp, shell=True, capture_output=True, text=True, executable="/bin/bash")
@@ -433,18 +463,158 @@ def summarize_runs() -> list[dict]:
     return runs
 
 
+def job_deps(job: dict) -> list[str]:
+    """The job's dependency names. Missing or empty 'dependencies' both mean 'no deps'."""
+    deps = job.get("dependencies") or []
+    if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+        raise ValueError(f"job {job.get('name')!r}: 'dependencies' must be a list of job names")
+    return deps
+
+
+def dep_cancel_closure(
+    order: list[str], deps_of: dict[str, list[str]], terminal_state: dict[str, str | None]
+) -> dict[str, str]:
+    """Jobs that must be cancelled because a dependency reached a non-'done' terminal state.
+
+    Returns {job_name: offending_dependency}. Transitive: a job cancelled here counts as a
+    non-'done' terminal for *its* dependents, so whole chains collapse. `terminal_state` maps
+    each job to its current terminal state (or None if not terminal). Pure / side-effect free.
+    """
+    bad = {n for n in order if terminal_state.get(n) in (TERMINAL - {"done"})}
+    result: dict[str, str] = {}
+    changed = True
+    while changed:
+        changed = False
+        for name in order:
+            if terminal_state.get(name) is not None or name in result:
+                continue
+            dead = next((d for d in deps_of[name] if d in bad or d in result), None)
+            if dead is not None:
+                result[name] = dead
+                bad.add(name)        # now also "failed" for the benefit of its own dependents
+                changed = True
+    return result
+
+
+ALLOWED_JOB_FIELDS = {"name", "command", "dependencies"}
+
+
+def _find_dependency_cycles(deps_of: dict[str, list[str]]) -> list[list[str]]:
+    """All distinct dependency cycles (each as a path ``a -> b -> ... -> a``).
+
+    Only traverses edges whose target exists in `deps_of`; unknown-name edges are reported
+    separately. Each cycle (by its node set) is reported once.
+    """
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in deps_of}
+    cycles: list[list[str]] = []
+    seen: set[frozenset[str]] = set()
+
+    def visit(n: str, stack: list[str]) -> None:
+        color[n] = GREY
+        for d in deps_of[n]:
+            if d not in color:
+                continue                       # unknown dep — reported elsewhere
+            if color[d] == GREY:
+                cyc = stack[stack.index(d):] + [d]
+                key = frozenset(cyc[:-1])
+                if key not in seen:
+                    seen.add(key)
+                    cycles.append(cyc)
+            elif color[d] == WHITE:
+                visit(d, stack + [d])
+        color[n] = BLACK
+
+    for n in deps_of:
+        if color[n] == WHITE:
+            visit(n, [n])
+    return cycles
+
+
+def validate_jobs(jobs: object) -> list[str]:
+    """Return a list of integrity errors for a parsed jobs list — empty means valid.
+
+    Checks: top-level is a non-empty list; each job is an object with non-empty string
+    `name` (unique) and `command`; no unknown fields (typo guard); `dependencies` is a list
+    of known job names with no self-edges, no duplicates, and no cycles (deadlocks).
+    Collects *all* problems rather than failing on the first.
+    """
+    errors: list[str] = []
+    if not isinstance(jobs, list):
+        return [f"top-level JSON must be a list of job objects (got {type(jobs).__name__})"]
+    if not jobs:
+        return ["job list is empty — nothing to run"]
+
+    names: set[str] = set()
+    for i, j in enumerate(jobs):
+        where = f"job #{i}"
+        if not isinstance(j, dict):
+            errors.append(f"{where}: must be a JSON object, got {type(j).__name__}")
+            continue
+        name = j.get("name")
+        if isinstance(name, str) and name:
+            where = f"job #{i} ({name!r})"
+        # name
+        if "name" not in j:
+            errors.append(f"{where}: missing required field 'name'")
+        elif not isinstance(name, str) or not name.strip():
+            errors.append(f"{where}: 'name' must be a non-empty string")
+        elif name in names:
+            errors.append(f"{where}: duplicate job name {name!r} (names must be unique)")
+        else:
+            names.add(name)
+        # command
+        if "command" not in j:
+            errors.append(f"{where}: missing required field 'command'")
+        elif not isinstance(j["command"], str) or not j["command"].strip():
+            errors.append(f"{where}: 'command' must be a non-empty string")
+        # unknown fields (typo guard — no fuzzy resolution, just reject)
+        unknown = set(j) - ALLOWED_JOB_FIELDS
+        if unknown:
+            errors.append(f"{where}: unknown field(s) {sorted(unknown)} "
+                          f"(allowed: {sorted(ALLOWED_JOB_FIELDS)})")
+        # dependencies type
+        if "dependencies" in j:
+            deps = j["dependencies"]
+            if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+                errors.append(f"{where}: 'dependencies' must be a list of job-name strings")
+
+    # dependency-reference checks (only over well-formed, named jobs).
+    deps_of: dict[str, list[str]] = {}
+    for j in jobs:
+        if not isinstance(j, dict):
+            continue
+        name = j.get("name")
+        if not isinstance(name, str) or not name or name not in names:
+            continue
+        deps = j.get("dependencies")
+        if deps is None:
+            deps_of[name] = []
+            continue
+        if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+            continue                            # type error already reported
+        dups = sorted({d for d in deps if deps.count(d) > 1})
+        if dups:
+            errors.append(f"job {name!r}: duplicate entries in 'dependencies': {dups}")
+        for d in deps:
+            if d == name:
+                errors.append(f"job {name!r}: depends on itself (deadlock)")
+            elif d not in names:
+                errors.append(f"job {name!r}: depends on unknown job {d!r}")
+        deps_of[name] = [d for d in dict.fromkeys(deps) if d in names and d != name]
+
+    for cyc in _find_dependency_cycles(deps_of):
+        errors.append(f"dependency cycle (deadlock): {' -> '.join(cyc)}")
+    return errors
+
+
 def load_jobs(path: str) -> list[dict]:
     with open(path) as f:
         jobs = json.load(f)
-    if not isinstance(jobs, list):
-        raise ValueError(f"{path} must contain a JSON list of jobs")
-    names = set()
-    for j in jobs:
-        if "name" not in j or "command" not in j:
-            raise ValueError(f"each job needs 'name' and 'command'; got {j}")
-        if j["name"] in names:
-            raise ValueError(f"duplicate job name {j['name']!r} (names must be unique)")
-        names.add(j["name"])
+    errors = validate_jobs(jobs)
+    if errors:
+        bullet = "\n  - ".join(errors)
+        raise ValueError(f"{path}: {len(errors)} integrity error(s):\n  - {bullet}")
     return jobs
 
 
@@ -508,6 +678,8 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
     job_by_name = {j["name"]: j for j in jobs}
     order = [j["name"] for j in jobs]
 
+    deps_of: dict[str, list[str]] = {j["name"]: job_deps(j) for j in jobs}   # name -> deps it waits on
+
     queue: deque[str] = deque(order)                # FIFO of job names waiting for a machine
     running: dict[str, dict] = {}                   # worker_id -> {name, assignment, deployed_at}
     terminal: dict[str, dict] = {}                  # name -> {state, error, error_kind, assignment}
@@ -525,12 +697,40 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
     def placed_by_name() -> dict[str, dict]:
         return {info["name"]: info for info in running.values()}
 
+    def deps_ready(name: str) -> bool:
+        """True iff every dependency has finished successfully (terminal state 'done')."""
+        return all(terminal.get(d, {}).get("state") == "done" for d in deps_of[name])
+
+    def blocked_deps(name: str) -> list[str]:
+        """Dependencies of `name` that have not (yet) succeeded — for display."""
+        return [d for d in deps_of[name] if terminal.get(d, {}).get("state") != "done"]
+
+    def propagate_cancellations() -> None:
+        """Cancel any pending job whose dependency reached a non-'done' terminal state
+        (transitively). A running dependent is unexpected — its deps were all done — but if
+        one exists (e.g. via direct kill of a sibling) its screen is torn down too."""
+        tstate = {n: terminal.get(n, {}).get("state") for n in order}
+        for name, dead in dep_cancel_closure(order, deps_of, tstate).items():
+            dstate = terminal[dead]["state"] if dead in terminal else "cancelled"
+            if name in queue:
+                queue.remove(name)
+            for wid, info in list(running.items()):
+                if info["name"] == name:
+                    quit_screen(info["assignment"], user, pw)
+                    del running[wid]
+            terminal[name] = {"state": "cancelled",
+                              "error": f"dependency {dead!r} {dstate}",
+                              "error_kind": "dep_failed", "assignment": None}
+            cur_state[name] = "cancelled"
+            ev(f"cancelled {name} (dependency {dead} {dstate})")
+
     def snapshot() -> list[dict]:
         placed = placed_by_name()
         out = []
         for name in order:
             rec = {"name": name, "try_count": tries[name],
-                   "history": [dict(h) for h in history[name]]}
+                   "history": [dict(h) for h in history[name]],
+                   "dependencies": list(deps_of[name])}
             if name in placed:
                 a = placed[name]["assignment"]
                 rec.update(state=cur_state[name], host=a["host"], gpus=a["gpus"],
@@ -548,7 +748,8 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
                                status_path=None, screen=None)
             else:
                 rec.update(state="queued", host=None, gpus=None, worker_id=None,
-                           is_local=None, status_path=None, screen=None)
+                           is_local=None, status_path=None, screen=None,
+                           blocked_on=blocked_deps(name))
             out.append(rec)
         return out
 
@@ -612,6 +813,8 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
             elif state in ("running", "waiting"):
                 cur_state[name] = state
             # state None + alive True/None -> driver starting or host blip; leave running.
+        # cascade: any job whose dependency just failed/was-killed gets cancelled (transitively).
+        propagate_cancellations()
         persist()
 
     def candidates(workers: list[Worker]) -> list[tuple[Worker, float]]:
@@ -627,27 +830,39 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
         cands.sort(key=lambda c: c[1], reverse=True)  # most free first
         return cands
 
+    def next_eligible(skip: set[str]) -> str | None:
+        """First queued job (FIFO order) whose dependencies are all done, ignoring `skip`."""
+        for name in queue:
+            if name not in skip and deps_ready(name):
+                return name
+        return None
+
     def place_on(cands: list[tuple[Worker, float]]) -> None:
+        failed: set[str] = set()   # deploy failed this tick -> don't retry on another worker now
         for w, free in cands:
-            if not queue:
+            name = next_eligible(failed)
+            if name is None:        # nothing both eligible and not-yet-failed left to place
                 break
-            name = queue[0]
             try:
                 assignment = deploy_job(w, job_by_name[name], run_id, user, pw)
             except Exception as e:  # noqa: BLE001 — skip this machine, retry the job next tick
                 ev(f"deploy {name} -> {w.host} failed: {e}")
+                failed.add(name)
                 continue
-            queue.popleft()
+            queue.remove(name)
             running[w.worker_id] = {"name": name, "assignment": assignment, "deployed_at": time.time()}
             cur_state[name] = "running"
             ev(f"placed {name} on [{w.tier}] {w.host}:{','.join(map(str, w.cuda))} (free {free:.0f}GB)")
 
     def place() -> None:
+        if next_eligible(set()) is None:   # all queued jobs (if any) blocked on deps — don't probe
+            persist()
+            return
         idle = [w for w in pool if w.worker_id not in running]
         # Tier 1 — prefer SAFE_MACHINES.
         place_on(candidates([w for w in idle if w.tier == "safe"]))
         # Tier 2 — fall back to MACHINES only for jobs no safe machine could take.
-        if queue:
+        if next_eligible(set()) is not None:
             idle_fb = [w for w in idle if w.tier == "fallback" and w.worker_id not in running]
             place_on(candidates(idle_fb))
         persist()
@@ -663,7 +878,8 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
         elif state == "waiting":
             detail = "for GPU memory"
         elif state == "queued":
-            detail = "in wait queue"
+            blocked = rec.get("blocked_on") or []
+            detail = f"waiting on: {', '.join(blocked)}" if blocked else "in wait queue"
         elif state == "done":
             detail = "finished"
         else:
@@ -753,7 +969,14 @@ def main() -> None:
 
     run_id = args.run_id or time.strftime("%Y%m%d_%H%M%S")
     user, pw = load_credentials()
-    jobs = load_jobs(args.jobs)
+
+    # Integrity-check the jobs file first — refuse to run *anything* if it doesn't pass.
+    try:
+        jobs = load_jobs(args.jobs)
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"\njobs file failed integrity check — nothing was launched.\n{e}", file=sys.stderr)
+        print("\n(run `python run_jobs/baulab/check_jobs.py <file>` to re-check.)", file=sys.stderr)
+        sys.exit(1)
 
     # Two tiers: SAFE_MACHINES (preferred) then MACHINES, de-duping any host listed in both.
     safe_workers = [Worker(host=m.name, cuda=list(m.cuda), tier="safe") for m in SAFE_MACHINES]
@@ -765,6 +988,11 @@ def main() -> None:
     print("=" * 80)
     print(f"run_id={run_id} | jobs={len(jobs)} | safe={len(safe_workers)} fallback={len(fb_workers)} | "
           f"MIN_GPU_MEMORY={MIN_GPU_MEMORY}GB | poll={POLL_INTERVAL_MIN}min | max_retry={MAX_RETRY}")
+    deps_listed = [(j["name"], job_deps(j)) for j in jobs if job_deps(j)]
+    if deps_listed:
+        print("dependencies:")
+        for name, deps in deps_listed:
+            print(f"  {name}  <-  {', '.join(deps)}")
     print("=" * 80)
 
     # Static gate (GPU presence + capacity + reachability) — drops permanently-unusable machines.

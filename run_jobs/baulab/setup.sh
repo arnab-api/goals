@@ -40,8 +40,16 @@ else
     echo "    created ${HERE}/MACHINES.py from MACHINES.example.py — EDIT IT to list your machines"
 fi
 
+echo "==> Seeding auth.yml (per-client credentials; gitignored)"
+if [ -f "${HERE}/auth.yml" ]; then
+    echo "    ${HERE}/auth.yml already exists — leaving it untouched"
+else
+    cp "${HERE}/auth.example.yml" "${HERE}/auth.yml"
+    echo "    created ${HERE}/auth.yml from auth.example.yml — EDIT IT (BAULAB_USER + ssh_login/BAULAB_PASS)"
+fi
+
 echo ""
 echo "Done. Next:"
 echo "  1. Edit run_jobs/baulab/MACHINES.py  (MACHINES + SAFE_MACHINES; use name=\"local\" for this box)"
-echo "  2. Make sure env.yml has BAULAB_USER / BAULAB_PASS"
+echo "  2. Edit run_jobs/baulab/auth.yml  (BAULAB_USER; ssh_login: true for passwordless ssh, else BAULAB_PASS)"
 echo "  3. Plan a batch:  conda run -n ${ENV_NAME} python -m run_jobs.baulab.dispatch --jobs <jobs.json> --dry-run"

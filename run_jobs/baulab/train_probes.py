@@ -8,11 +8,12 @@ import yaml
 np.random.seed(123456)
 ######################################################
 
-PROJECT_ROOT = "/".join(os.path.dirname(os.path.abspath(__file__)).split("/")[:-1])
-with open(os.path.join(PROJECT_ROOT, "env.yml"), "r") as f:
-    config = yaml.safe_load(f)
+AUTH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.yml")
+with open(AUTH_PATH, "r") as f:
+    config = yaml.safe_load(f) or {}
     username = config["BAULAB_USER"]
-    password = config["BAULAB_PASS"]
+    # ssh_login: true -> passwordless ssh (keys/agent); BAULAB_PASS not needed.
+    password = None if config.get("ssh_login", False) else config["BAULAB_PASS"]
 
 
 class MachineConfig:
@@ -140,11 +141,13 @@ for exp_name in exp_name_2_cmd:
 
     # copy the job script to the remote machine and then run it
     if machine != "local":
+        scp_pre = f"sshpass -p {password} scp" if password else "scp"
+        ssh_pre = f"sshpass -p {password} ssh" if password else "ssh"
         os.system(
-            f"sshpass -p {password} scp {job_path}/{exp_name}.sh {username}@{machine}:{file_path}"
+            f"{scp_pre} {job_path}/{exp_name}.sh {username}@{machine}:{file_path}"
         )
         os.system(
-            f"sshpass -p {password} ssh {username}@{machine} 'screen -dmS {exp_name} bash -i {file_path}'"
+            f"{ssh_pre} {username}@{machine} 'screen -dmS {exp_name} bash -i {file_path}'"
         )
     else:
         os.system(f"cp {job_path}/{exp_name}.sh {file_path}")
