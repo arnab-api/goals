@@ -80,9 +80,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # ──────────────────────────────────────────────────────────────────────────────
 # Per-client config comes from a local, gitignored CONFIG.py (each client edits its own).
 # ──────────────────────────────────────────────────────────────────────────────
-# `MachineConfig`, the `MACHINES`/`SAFE_MACHINES` inventory AND the scheduler tunables below
-# all live there, because different clients own different boxes and may want different
-# gates/cadences. Copy the template on a new client:
+# The `MACHINES`/`SAFE_MACHINES` inventory AND the scheduler tunables below all live there,
+# because different clients own different boxes and may want different gates/cadences. (The
+# `MachineConfig` dataclass it uses lives in datatypes.py.) Copy the template on a new client:
 #   cp run_jobs/baulab/CONFIG.example.py run_jobs/baulab/CONFIG.py
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:

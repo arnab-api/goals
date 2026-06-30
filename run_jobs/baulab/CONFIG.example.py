@@ -12,16 +12,9 @@ one of our jobs at a time. Repeat a host with different `cuda` sets to give it s
 independent, concurrent slots (e.g. `cuda=[0]` and `cuda=[1]` on the same host).
 """
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
-
-@dataclass
-class MachineConfig:
-    """One worker: a host plus the GPU indices it may use."""
-
-    name: str
-    cuda: list[int] = field(default_factory=lambda: [0])
+from datatypes import MachineConfig
 
 
 # Fallback tier — used only when no SAFE_MACHINES entry currently fits a job.
@@ -82,7 +75,22 @@ STATUS_POLL_SEC = 8 * 60   # how often to ssh-poll placed jobs' status + handle 
 RENDER_INTERVAL_SEC = 2    # dashboard repaint (local; just animates elapsed clocks)
 
 # --- where things live --------------------------------------------------------
+# Each job runs inside this conda env: the generated run.sh does `conda activate CONDA_ENV`
+# before launching the driver, and the driver runs your job command as a subprocess that
+# inherits that activated env. (setup.sh also installs sshpass/screen into this env.)
 CONDA_ENV = "goals"
-LOCAL_PROJECT_DIR = str(Path(__file__).resolve().parents[2])   # used when name == "local"
-REMOTE_PROJECT_DIR = "~/Codes/Projects/goals"   # used on remote hosts (tilde ok)
-REMOTE_STAGING_SUBDIR = ".remote_jobs"          # under the project dir on each host
+
+# Working directory each job runs from. run.sh does `cd <project_dir>` before the driver, and
+# the driver launches your job command with no cwd override, so the command inherits this cwd —
+# which is why module-style invocations and relative `logs/… |& tee` paths in jobs resolve here.
+#   LOCAL_PROJECT_DIR  — used for the name=="local" worker (absolute; derived from this file).
+#   REMOTE_PROJECT_DIR — used on every remote host. The leading `~` is expanded by the *remote*
+#                        shell (each host's own home). NOTE: dispatch does NOT clone or sync the
+#                        repo — it only scp's the tiny staging dir below. The project must already
+#                        exist (and be up to date) at this path on every remote worker, or the job
+#                        runs stale code / fails.
+LOCAL_PROJECT_DIR = str(Path(__file__).resolve().parents[2])
+REMOTE_PROJECT_DIR = "~/Codes/Projects/goals"
+
+# Per-job staging (driver.py + config.json + run.sh) is scp'd to <project_dir>/<this>/<run_id>/…
+REMOTE_STAGING_SUBDIR = ".remote_jobs"

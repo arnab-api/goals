@@ -18,6 +18,10 @@ monitor.py    live terminal monitor: reads a manifest, polls each placed job's s
               scheduler exits. `--list` shows past batches.
 kill.py       kill jobs by name (`--names`) or a whole batch (`--all`). Killed jobs are NOT
               auto-requeued.
+check_jobs.py integrity-check a jobs JSON file before dispatch (unknown fields, bad/circular
+              dependencies, …); dispatch runs the same check at launch.
+datatypes.py  shared, dependency-free dataclasses (e.g. MachineConfig) used by CONFIG.py and
+              the scheduler.
 setup.sh      one-time setup: installs the CLI tools (sshpass, screen) into the conda env and
               seeds CONFIG.py from the template.
 CONFIG.py     per-client config — machine inventory (MACHINES + SAFE_MACHINES) AND scheduler
