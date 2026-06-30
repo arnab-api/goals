@@ -280,17 +280,26 @@ class GazeScorer:
         return y.view(*x.shape[:-1], n_heads, self.head_dim)
 
     def _rope(self, vec, pos):
-        """vec (B, P, n_heads, D); rotate at integer positions `pos` (P,). Manual + device-safe."""
+        """vec (B, P, n_heads, D); rotate at integer positions `pos`. `pos` may be 1-D (P,) —
+        shared across the batch (no padding) — or 2-D (B, P) — per-row, e.g. position_ids derived
+        from a left-padded attention mask. Manual + device-safe."""
         if not self.include_rope:
             return vec
         dev, dt = vec.device, vec.dtype
         rotary = self.mt._model.model.rotary_emb
         inv_freq = rotary.inv_freq.to(dev).float()
         scaling = float(getattr(rotary, "attention_scaling", 1.0))
-        freqs = torch.outer(pos.to(dev).float(), inv_freq)
-        emb = torch.cat([freqs, freqs], dim=-1)
-        cos = (emb.cos() * scaling).to(dt)[None, :, None, :]
-        sin = (emb.sin() * scaling).to(dt)[None, :, None, :]
+        pos = pos.to(dev).float()
+        if pos.dim() == 1:
+            freqs = torch.outer(pos, inv_freq)                  # (P, d/2)
+            emb = torch.cat([freqs, freqs], dim=-1)             # (P, D)
+            cos = (emb.cos() * scaling).to(dt)[None, :, None, :]
+            sin = (emb.sin() * scaling).to(dt)[None, :, None, :]
+        else:  # (B, P) → per-row
+            freqs = pos.unsqueeze(-1) * inv_freq                # (B, P, d/2)
+            emb = torch.cat([freqs, freqs], dim=-1)             # (B, P, D)
+            cos = (emb.cos() * scaling).to(dt).unsqueeze(2)     # (B, P, 1, D)
+            sin = (emb.sin() * scaling).to(dt).unsqueeze(2)
         d = vec.shape[-1]
         rot = torch.cat([-vec[..., d // 2:], vec[..., : d // 2]], dim=-1)  # rotate_half (HF)
         return vec * cos + rot * sin
@@ -345,6 +354,46 @@ class GazeScorer:
                     T[:, c] = T[:, c] + aff.to(self.device)
                 n_used += 1
         return T / max(n_used, 1)
+
+    def compute_T_masked(self, dest_inputs, key_masks, pre_hooks=()):
+        """Like ``compute_T`` but with PER-ROW key masks, for a left-padded batch where each row's
+        span sits at different absolute key positions.
+
+        ``key_masks`` (n_span, B, seq) float — 1.0 on the key tokens of each span per row, else 0.
+        Query is the LAST position (-1, the decision token). Returns ``T`` (B, n_span): mean over
+        gaze heads of the query's raw Q·K affinity to each span (per-row masked mean over keys).
+        Differentiable through any mask living in ``pre_hooks``."""
+        lat = self._latents(dest_inputs, pre_hooks)
+        L0 = self.gaze_layers[0]
+        B, seq = lat[L0].shape[0], lat[L0].shape[1]
+        if self.include_rope:  # position_ids from left-padded mask (real tokens start at 0)
+            am = dest_inputs["attention_mask"].to(self.device)
+            pos_all = (am.long().cumsum(-1) - 1).clamp_min(0)   # (B, seq)
+            pos_q = pos_all[:, -1:]                             # (B, 1)
+        else:
+            pos_all = torch.arange(seq)
+            pos_q = pos_all[-1:]
+        key_masks = key_masks.to(self.device).float()           # (n_span, B, seq)
+        n_span = key_masks.shape[0]
+        denom = key_masks.sum(-1).clamp_min(1.0)                # (n_span, B)
+        T = torch.zeros(n_span, B, device=self.device)
+        n_used = 0
+        for l, hs in self.heads_by_layer.items():
+            x = lat[l]
+            Wq, bq, Wk, bk = self.W[l]
+            Q = self._rope(self._proj(x[:, -1:, :], Wq, bq, self.n_q), pos_q)[:, 0]  # (B, n_q, D)
+            K = self._rope(self._proj(x, Wk, bk, self.n_kv), pos_all)               # (B, seq, n_kv, D)
+            for h in hs:
+                qh = Q[:, h, :]                          # (B, D)
+                kh = K[:, :, h // self.gqa, :]           # (B, seq, D) — GQA mapping
+                if self.normalize:
+                    qh = qh / (qh.norm(dim=-1, keepdim=True) + 1e-9)
+                    kh = kh / (kh.norm(dim=-1, keepdim=True) + 1e-9)
+                aff = (qh.unsqueeze(1) * kh).sum(-1).to(self.device)  # (B, seq)
+                for c in range(n_span):
+                    T[c] = T[c] + (aff * key_masks[c]).sum(-1) / denom[c]
+                n_used += 1
+        return (T / max(n_used, 1)).t()  # (B, n_span)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

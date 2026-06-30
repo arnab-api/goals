@@ -68,6 +68,9 @@ class StyledContext:
     # the shared ConditionSpec (both styles render the same spec → identical conditions);
     # carried for per-condition gaze tracking in the attention viz. Optional/back-compatible.
     spec: Optional[ConditionSpec] = None
+    # the target_slot this context was built at (current var = slot, next var = slot+1) — lets the
+    # gaze trainer pick the current/next condition spans. Optional/back-compatible.
+    target_slot: Optional[int] = None
 
     def prompt(self, style: str) -> str:
         return self.ml_prompt if style == "ml" else self.sl_prompt
@@ -164,7 +167,8 @@ def build_context(
     if ml_ans == sl_ans:  # no genuine stay↔moved_on contrast for this context
         return None
     return StyledContext(
-        ml_prompt=ml_prompt, sl_prompt=sl_prompt, ml_ans=ml_ans, sl_ans=sl_ans, spec=spec
+        ml_prompt=ml_prompt, sl_prompt=sl_prompt, ml_ans=ml_ans, sl_ans=sl_ans,
+        spec=spec, target_slot=target_slot,
     )
 
 

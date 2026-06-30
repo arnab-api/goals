@@ -1,0 +1,30 @@
+[
+    {
+        "name": "01_build_condition_data_14b",
+        "command": "mkdir -p logs/clock_14b && python -m scripts.clock.build_condition_data --model=Qwen/Qwen2.5-Coder-14B-Instruct --dataset=data/multistep/condition_check_python.json --version=conditions |& tee logs/clock_14b/01_build_condition_data.log"
+    },
+    {
+        "name": "02_score_condition_heads_14b_mean",
+        "command": "mkdir -p logs/clock_14b && python -m scripts.clock.score_condition_heads --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --q_span=15 --compare_with=mean |& tee logs/clock_14b/02_score_heads_mean.log"
+    },
+    {
+        "name": "02b_score_condition_heads_14b_max",
+        "command": "mkdir -p logs/clock_14b && python -m scripts.clock.score_condition_heads --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --q_span=15 --compare_with=max |& tee logs/clock_14b/02b_score_heads_max.log"
+    },
+    {
+        "name": "03_train_completion_mask_14b_lamb50",
+        "command": "mkdir -p logs/clock_14b && python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=5e1 --n-pairs=600 |& tee logs/clock_14b/03_train_completion_mask_lam50.log"
+    },
+    {
+        "name": "03_train_completion_mask_14b_lamb10",
+        "command": "mkdir -p logs/clock_14b && python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=1e1 --n-pairs=600 |& tee logs/clock_14b/03_train_completion_mask_lam10.log"
+    },
+    {
+        "name": "03_train_completion_mask_14b_lamb1",
+        "command": "mkdir -p logs/clock_14b && python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=1e0 --n-pairs=600 |& tee logs/clock_14b/03_train_completion_mask_lam1.log"
+    },
+    {
+        "name": "03_train_completion_mask_14b_lamb100",
+        "command": "mkdir -p logs/clock_14b && python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=1e2 --n-pairs=600 |& tee logs/clock_14b/03_train_completion_mask_lam100.log"
+    }
+]
