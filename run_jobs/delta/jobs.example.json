@@ -1,0 +1,33 @@
+[
+  {
+    "name": "cache_qwen_states",
+    "command": "python -m scripts.cache_selection_states --model=\"Qwen/Qwen2.5-72B-Instruct\" --token_pos=\"last_token\" --limit=12000 -v |& tee cache_qwen_72B.log"
+  },
+  {
+    "name": "cache_llama_states",
+    "command": "python -m scripts.cache_selection_states --model=\"meta-llama/Llama-3.3-70B-Instruct\" --token_pos=\"last_token\" --limit=12000 -v |& tee cache_llama_70b.log"
+  },
+  {
+    "name": "finetuning",
+    "gpus_per_task": 4,
+    "time": "15:00:00",
+    "command": "python run_finetuning.py"
+  },
+  {
+    "name": "activation_patching",
+    "command": "python -m scripts.patching_within_task --model=\"meta-llama/Llama-3.3-70B-Instruct\" --category=\"objects\" --limit=256 -v"
+  },
+  {
+    "name": "locate_legacy",
+    "command": "python -m scripts.train_selection_heads --model=\"google/gemma-2-27b-it\" --train_limit=512 --validation_limit=256 --n_epochs=10 --category=\"objects\" --option_config=\"distinct\" --opt_interface=\"legacy\" -v |& tee gemma_27b_it_legacy.log"
+  },
+  {
+    "name": "locate_upd",
+    "command": "python -m scripts.train_selection_heads --model=\"google/gemma-2-27b-it\" --train_limit=512 --validation_limit=256 --n_epochs=10 --category=\"objects\" --option_config=\"distinct\" --opt_interface=\"updated\" -v |& tee gemma_27b_it_updated.log"
+  },
+  {
+    "name": "locate_via_attn_behavior",
+    "time": "15:00:00",
+    "command": "python -m scripts.locate_via_attention_behavior --model=\"meta-llama/Llama-3.3-70B-Instruct\" --limit=2048 --task=\"select_one\" --category_type=\"objects\" -v"
+  }
+]
