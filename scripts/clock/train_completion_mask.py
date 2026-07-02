@@ -269,6 +269,44 @@ def main():
     mask = HeadMask(len(layers), nH).to(args.mask_device)
     opt = AdamW(mask.parameters(), lr=args.lr)
 
+    # ── output dirs (up-front so per-epoch checkpoints have a place to land) ──
+    pt_tag = "_".join(str(t) for t in patch_tokens)
+    dir_tag = args.direction.replace("->", "2")  # filesystem-safe ("ml->sl" -> "ml2sl")
+    tag = (
+        f"{'same' if args.same else 'diff'}"
+        f"{'_mts' if (not args.same and args.match_target_slot) else ''}"
+        f"{'_mnc' if (not args.same and args.match_n_cond) else ''}"
+        f"_pt{pt_tag}_{dir_tag}_L{args.layer_lo}-{layer_hi}"
+        f"_lam{args.lambda_sparse}_n{len(pairs)}"
+    )
+    out_dir = args.out or os.path.join(cache_root(args.model, args.version), "completion_mask", tag)
+    epochs_dir = os.path.join(out_dir, "epochs")
+    os.makedirs(epochs_dir, exist_ok=True)
+    logger.info(f"outputs → {out_dir} (per-epoch checkpoints under epochs/)")
+
+    def save_ckpt(path, epoch):
+        decision_heads = mask.selected_heads(layers, threshold=args.sel_threshold)
+        torch.save(
+            {
+                "mask_values": mask.values.detach().cpu(),
+                "layers": layers,
+                "patch_tokens": patch_tokens,
+                "decision_heads": decision_heads,
+                "history": hist,
+                "epoch": epoch,
+                "meta": {
+                    "model": args.model, "version": args.version, "mode": args.mode,
+                    "direction": args.direction, "same": args.same,
+                    "match_target_slot": args.match_target_slot, "match_n_cond": args.match_n_cond,
+                    "target_slots": args.target_slots, "max_conditions": args.max_conditions,
+                    "n_pairs": len(pairs), "n_epochs": args.n_epochs, "lr": args.lr,
+                    "batch_size": args.batch_size, "accum": args.accum,
+                    "lambda_sparse": args.lambda_sparse, "sel_threshold": args.sel_threshold,
+                },
+            },
+            path,
+        )
+
     def batch_score(src_prompts, dst_prompts, target_ans, dst_ans):
         """Tokenize sources+dests TOGETHER (left-pad → shared length → aligned -2), extract the
         source o_proj inputs, then run the mask-patched forward on the dests → per-row score (B,).
@@ -324,44 +362,16 @@ def main():
             f"n_active(>{args.sel_threshold})={hist['n_active'][-1]}"
         )
 
+        # per-epoch checkpoint + overwrite the top-level mask.pt with the latest state
+        save_ckpt(os.path.join(epochs_dir, f"mask_epoch{epoch:02d}.pt"), epoch)
+        save_ckpt(os.path.join(out_dir, "mask.pt"), epoch)
+
     decision_heads = mask.selected_heads(layers, threshold=args.sel_threshold)
     mv = mask.values.detach().cpu().numpy()
     ranked = sorted(decision_heads, key=lambda lh: mv[layers.index(lh[0]), lh[1]], reverse=True)
     logger.info(f"selected {len(decision_heads)} decision heads (mask>{args.sel_threshold}); top:")
     for (l, h) in ranked[:20]:
         logger.info(f"  L{l:2d} H{h:2d}  mask={mv[layers.index(l), h]:.3f}")
-
-    # ── outputs ──
-    pt_tag = "_".join(str(t) for t in patch_tokens)
-    dir_tag = args.direction.replace("->", "2")  # filesystem-safe ("ml->sl" -> "ml2sl")
-    tag = (
-        f"{'same' if args.same else 'diff'}"
-        f"{'_mts' if (not args.same and args.match_target_slot) else ''}"
-        f"{'_mnc' if (not args.same and args.match_n_cond) else ''}"
-        f"_pt{pt_tag}_{dir_tag}_L{args.layer_lo}-{layer_hi}"
-        f"_lam{args.lambda_sparse}_n{len(pairs)}"
-    )
-    out_dir = args.out or os.path.join(cache_root(args.model, args.version), "completion_mask", tag)
-    os.makedirs(out_dir, exist_ok=True)
-    torch.save(
-        {
-            "mask_values": mask.values.detach().cpu(),
-            "layers": layers,
-            "patch_tokens": patch_tokens,
-            "decision_heads": decision_heads,
-            "history": hist,
-            "meta": {
-                "model": args.model, "version": args.version, "mode": args.mode,
-                "direction": args.direction, "same": args.same,
-                "match_target_slot": args.match_target_slot, "match_n_cond": args.match_n_cond,
-                "target_slots": args.target_slots, "max_conditions": args.max_conditions,
-                "n_pairs": len(pairs), "n_epochs": args.n_epochs, "lr": args.lr,
-                "batch_size": args.batch_size, "accum": args.accum,
-                "lambda_sparse": args.lambda_sparse, "sel_threshold": args.sel_threshold,
-            },
-        },
-        os.path.join(out_dir, "mask.pt"),
-    )
 
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.2))
     ep = range(len(hist["train_score"]))
