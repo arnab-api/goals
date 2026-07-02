@@ -1,0 +1,25 @@
+# Per-cluster SBATCH defaults for run_jobs.slurm.submit.
+#
+# Selected by `--on {delta,nurc}`. Values here are the lowest-priority tier:
+#   cluster defaults  <  per-job JSON fields  <  --<field> CLI overrides.
+#
+# The templates decide which fields they consume:
+#   template_delta.sh  -> mem, gpus_per_task, partition, account, time, cwd (+ name, command)
+#   template_nurc.sh   -> partition, nodes, cpus_per_task, gpus, account, time, cwd (+ name, command)
+
+delta:
+  mem: 256g
+  gpus_per_task: 2
+  partition: gpuH200x8       # or one of: gpuA100x4 gpuA40x4 gpuA100x8 gpuMI100x8 gpuH200x8
+  account: bezl-delta-gpu
+  time: "48:00:00"
+  cwd: /projects/bezl/goals
+
+nurc:
+  # `agi` doesn't require --account (SLURM picks the default association); do not set it.
+  partition: agi
+  nodes: 1
+  cpus_per_task: 64
+  gpus: 2
+  time: "48:00:00"
+  cwd: /projects/baulab/sensharma.a/goals
