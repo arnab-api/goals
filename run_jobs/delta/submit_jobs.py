@@ -23,7 +23,6 @@ DEFAULTS = {
     "partition": "gpuH200x8",
     "account": "bezl-delta-gpu",
     "time": "48:00:00",
-    "conda_env": "goals",
     "cwd": "/projects/bezl/goals",
 }
 

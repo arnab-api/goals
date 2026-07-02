@@ -31,8 +31,13 @@ for inspection/resubmission.
 A JSON list of job dicts. `name` and `command` are required; everything else
 falls back to the defaults in `submit_jobs.py` (`DEFAULTS`): `mem=256g`,
 `gpus_per_task=1`, `partition=gpuH200x8`, `account=bezl-delta-gpu`,
-`time=48:00:00`, `conda_env=goals`, `cwd=/projects/bezl/goals`. Override any
-of these per-job (see `jobs.example.json`'s `finetuning` entry).
+`time=48:00:00`, `cwd=/projects/bezl/goals`. Override any of these per-job
+(see `jobs.example.json`'s `finetuning` entry).
+
+The template activates `${cwd}/.venv` (uv-managed) — the project's conda
+`goals` env has been retired. `python -m …` in a job command resolves to
+`.venv/bin/python`. After any `pyproject.toml` change, run `uv sync` on the
+login node once; compute nodes just consume the shared `.venv`.
 
 ```json
 [
