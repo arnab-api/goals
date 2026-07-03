@@ -142,6 +142,13 @@ class Predicate:
     # Single-line forced-prefill form: ONE complete `{var} = <boolean>` line that fully checks
     # the condition (no intermediate, nothing left to finish). Same `{var}`/`{param}` rules.
     singleline_impl: str = ""
+    # C++ forced-prefill forms.  Same shape and rules as the Python versions.  Because
+    # C++ statements are typed, multiline impls typically declare an intermediate
+    # `int {var}_v = …;` on line 1 and then `bool {var} = {var}_v <op> …;` on line 2 —
+    # the `{var}` substitution ripples through so distinct condition letters produce
+    # distinct intermediate names.  Empty ⇒ predicate has no C++ multi-line form.
+    multiline_impl_cpp: list[str] = field(default_factory=list)
+    singleline_impl_cpp: str = ""
     # Canonical natural variable name for this predicate's boolean result
     # (e.g. "is_even"); used by build_example(naming="natural"). Populated from
     # _PREDICATE_VAR_NAMES at module load; falls back to `id` if left blank.
@@ -155,6 +162,24 @@ class Predicate:
     @property
     def is_multiline(self) -> bool:
         return bool(self.multiline_impl)
+
+    def _multiline_for(self, lang: str) -> list[str]:
+        if lang == "cpp":
+            return self.multiline_impl_cpp
+        if lang == "python":
+            return self.multiline_impl
+        raise ValueError(f"Predicate has no forced-prefill impl for lang={lang!r}")
+
+    def _singleline_for(self, lang: str) -> str:
+        if lang == "cpp":
+            return self.singleline_impl_cpp
+        if lang == "python":
+            return self.singleline_impl
+        raise ValueError(f"Predicate has no forced-prefill impl for lang={lang!r}")
+
+    def is_multiline_for(self, lang: str = "python") -> bool:
+        """Whether this predicate has a multi-line forced-prefill form in `lang`."""
+        return bool(self._multiline_for(lang))
 
     def sample_params(self, rng: random.Random) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -172,15 +197,15 @@ class Predicate:
         """Render the informative substrings with params (e.g. '{k}' -> '18')."""
         return [s.format(**params) for s in self.id_substrs]
 
-    def render_multiline(self, params: dict[str, Any], var: str) -> list[str]:
+    def render_multiline(self, params: dict[str, Any], var: str, lang: str = "python") -> list[str]:
         """Forced-prefill body lines with `{var}` -> the condition's result letter and
         `{param}` placeholders filled in.  `var` is substituted first (it is not a
         param), then params are formatted."""
-        return [ln.replace("{var}", var).format(**params) for ln in self.multiline_impl]
+        return [ln.replace("{var}", var).format(**params) for ln in self._multiline_for(lang)]
 
-    def render_singleline(self, params: dict[str, Any], var: str) -> str:
+    def render_singleline(self, params: dict[str, Any], var: str, lang: str = "python") -> str:
         """Single-line forced-prefill: `{var}` -> the result letter, `{param}` filled in."""
-        return self.singleline_impl.replace("{var}", var).format(**params)
+        return self._singleline_for(lang).replace("{var}", var).format(**params)
 
     def evaluate(self, n: int, params: dict[str, Any]) -> bool:
         return bool(self.oracle(n, **params))
@@ -189,76 +214,116 @@ class Predicate:
 INT_PREDICATES: list[Predicate] = [
     # ── trivially single-line (no canonical multi-line form) ──
     Predicate("positive", "n is positive", lambda n: n > 0, id_substrs=["positive"],
-              singleline_impl="    {var} = n > 0"),
+              singleline_impl="    {var} = n > 0",
+              singleline_impl_cpp="    bool {var} = n > 0;"),
     Predicate("le_bound", "n is less than or equal to {b}", lambda n, b: n <= b,
               {"b": [50, 100, 200, 500, 1000]}, id_substrs=["less than or equal", "{b}"],
-              singleline_impl="    {var} = n <= {b}"),
+              singleline_impl="    {var} = n <= {b}",
+              singleline_impl_cpp="    bool {var} = n <= {b};"),
     Predicate("ge_bound", "n is greater than or equal to {a}", lambda n, a: n >= a,
               {"a": [0, 1, 10, 50, 100]}, id_substrs=["greater than or equal", "{a}"],
-              singleline_impl="    {var} = n >= {a}"),
+              singleline_impl="    {var} = n >= {a}",
+              singleline_impl_cpp="    bool {var} = n >= {a};"),
     Predicate("in_range", "n is between {a} and {b} (inclusive)",
               lambda n, a, b: a <= n <= b, {"a": [0, 10, 50], "b": [100, 200, 500]},
               id_substrs=["between", "{a}", "{b}"],
-              singleline_impl="    {var} = {a} <= n <= {b}"),
+              singleline_impl="    {var} = {a} <= n <= {b}",
+              singleline_impl_cpp="    bool {var} = n >= {a} && n <= {b};"),
 
     # ── "compute remainder/quantity, then compare" (forced 2-line) ──
     Predicate("even", "n is even", lambda n: n % 2 == 0, id_substrs=["even"],
               multiline_impl=["    {var} = n % 2", "    {var} = {var} == 0"],
-              singleline_impl="    {var} = n % 2 == 0"),
+              singleline_impl="    {var} = n % 2 == 0",
+              multiline_impl_cpp=["    int {var}_v = n % 2;",
+                                  "    bool {var} = {var}_v == 0;"],
+              singleline_impl_cpp="    bool {var} = n % 2 == 0;"),
     Predicate("odd", "n is odd", lambda n: n % 2 == 1, id_substrs=["odd"],
               multiline_impl=["    {var} = n % 2", "    {var} = {var} == 1"],
-              singleline_impl="    {var} = n % 2 == 1"),
+              singleline_impl="    {var} = n % 2 == 1",
+              multiline_impl_cpp=["    int {var}_v = n % 2;",
+                                  "    bool {var} = {var}_v == 1;"],
+              singleline_impl_cpp="    bool {var} = n % 2 == 1;"),
     Predicate("divisible", "n is divisible by {k}", lambda n, k: k != 0 and n % k == 0,
               {"k": list(range(2, 21))}, id_substrs=["divisible", "{k}"],
               multiline_impl=["    {var} = n % {k}", "    {var} = {var} == 0"],
-              singleline_impl="    {var} = n % {k} == 0"),
+              singleline_impl="    {var} = n % {k} == 0",
+              multiline_impl_cpp=["    int {var}_v = n % {k};",
+                                  "    bool {var} = {var}_v == 0;"],
+              singleline_impl_cpp="    bool {var} = n % {k} == 0;"),
     Predicate("perfect_square", "n is a perfect square",
               lambda n: n >= 0 and math.isqrt(n) ** 2 == n, id_substrs=["perfect", "square"],
               multiline_impl=["    {var} = int(abs(n) ** 0.5)",
                               "    {var} = n >= 0 and {var} * {var} == n"],
-              singleline_impl="    {var} = n >= 0 and int(abs(n) ** 0.5) ** 2 == n"),
+              singleline_impl="    {var} = n >= 0 and int(abs(n) ** 0.5) ** 2 == n",
+              multiline_impl_cpp=["    int {var}_v = (int)std::sqrt((double)std::abs(n));",
+                                  "    bool {var} = n >= 0 && {var}_v * {var}_v == n;"],
+              singleline_impl_cpp="    bool {var} = n >= 0 && (int)std::sqrt((double)std::abs(n)) * (int)std::sqrt((double)std::abs(n)) == n;"),
     Predicate("perfect_cube", "n is a perfect cube", lambda n: _is_perfect_cube(n),
               id_substrs=["perfect", "cube"],
               multiline_impl=["    {var} = round(abs(n) ** (1 / 3))",
                               "    {var} = {var} ** 3 == abs(n)"],
-              singleline_impl="    {var} = round(abs(n) ** (1 / 3)) ** 3 == abs(n)"),
+              singleline_impl="    {var} = round(abs(n) ** (1 / 3)) ** 3 == abs(n)",
+              multiline_impl_cpp=["    int {var}_v = (int)std::round(std::cbrt((double)std::abs(n)));",
+                                  "    bool {var} = {var}_v * {var}_v * {var}_v == std::abs(n);"],
+              singleline_impl_cpp="    bool {var} = (int)std::round(std::cbrt((double)std::abs(n))) * (int)std::round(std::cbrt((double)std::abs(n))) * (int)std::round(std::cbrt((double)std::abs(n))) == std::abs(n);"),
     Predicate("triangular", "n is a triangular number", lambda n: _is_triangular(n),
               id_substrs=["triangular"],
               multiline_impl=["    {var} = int((2 * abs(n)) ** 0.5)",
                               "    {var} = n >= 0 and {var} * ({var} + 1) // 2 == n"],
-              singleline_impl="    {var} = n >= 0 and int((8 * n + 1) ** 0.5) ** 2 == 8 * n + 1"),
+              singleline_impl="    {var} = n >= 0 and int((8 * n + 1) ** 0.5) ** 2 == 8 * n + 1",
+              multiline_impl_cpp=["    int {var}_v = (int)std::sqrt(2.0 * (double)std::abs(n));",
+                                  "    bool {var} = n >= 0 && {var}_v * ({var}_v + 1) / 2 == n;"],
+              singleline_impl_cpp="    bool {var} = n >= 0 && (int)std::sqrt(2.0 * (double)n) * ((int)std::sqrt(2.0 * (double)n) + 1) / 2 == n;"),
     Predicate("palindrome", "n is a palindrome (its digits read the same forwards and backwards)",
               lambda n: str(abs(n)) == str(abs(n))[::-1], id_substrs=["palindrome"],
               multiline_impl=["    {var} = str(abs(n))",
                               "    {var} = {var} == {var}[::-1]"],
-              singleline_impl="    {var} = str(abs(n)) == str(abs(n))[::-1]"),
+              singleline_impl="    {var} = str(abs(n)) == str(abs(n))[::-1]",
+              multiline_impl_cpp=["    std::string {var}_s = std::to_string(std::abs(n));",
+                                  "    bool {var} = {var}_s == std::string({var}_s.rbegin(), {var}_s.rend());"],
+              singleline_impl_cpp="    bool {var} = std::to_string(std::abs(n)) == std::string(std::to_string(std::abs(n)).rbegin(), std::to_string(std::abs(n)).rend());"),
     Predicate("reversed_greater", "n is smaller than the number obtained by reversing its digits",
               lambda n: int(str(abs(n))[::-1]) > abs(n), id_substrs=["reversing", "digits"],
               multiline_impl=["    {var} = int(str(abs(n))[::-1])",
                               "    {var} = {var} > abs(n)"],
-              singleline_impl="    {var} = int(str(abs(n))[::-1]) > abs(n)"),
+              singleline_impl="    {var} = int(str(abs(n))[::-1]) > abs(n)",
+              multiline_impl_cpp=["    std::string {var}_s = std::to_string(std::abs(n));",
+                                  "    bool {var} = std::stoi(std::string({var}_s.rbegin(), {var}_s.rend())) > std::abs(n);"],
+              singleline_impl_cpp="    bool {var} = std::stoi(std::string(std::to_string(std::abs(n)).rbegin(), std::to_string(std::abs(n)).rend())) > std::abs(n);"),
     Predicate("num_digits_ge", "n has at least {k} digits",
               lambda n, k: len(str(abs(n))) >= k, {"k": [2, 3, 4]},
               id_substrs=["at least", "{k}", "digits"],
               multiline_impl=["    {var} = len(str(abs(n)))",
                               "    {var} = {var} >= {k}"],
-              singleline_impl="    {var} = len(str(abs(n))) >= {k}"),
+              singleline_impl="    {var} = len(str(abs(n))) >= {k}",
+              multiline_impl_cpp=["    int {var}_v = (int)std::to_string(std::abs(n)).length();",
+                                  "    bool {var} = {var}_v >= {k};"],
+              singleline_impl_cpp="    bool {var} = std::to_string(std::abs(n)).length() >= {k};"),
     Predicate("set_bits_gt", "n has more than {t} ones in its binary representation",
               lambda n, t: bin(abs(n)).count("1") > t, {"t": [1, 2, 3, 4]},
               id_substrs=["more than", "{t}", "ones", "binary"],
               multiline_impl=['    {var} = bin(abs(n)).count("1")',
                               "    {var} = {var} > {t}"],
-              singleline_impl='    {var} = bin(abs(n)).count("1") > {t}'),
+              singleline_impl='    {var} = bin(abs(n)).count("1") > {t}',
+              multiline_impl_cpp=["    int {var}_v = __builtin_popcount(std::abs(n));",
+                                  "    bool {var} = {var}_v > {t};"],
+              singleline_impl_cpp="    bool {var} = __builtin_popcount(std::abs(n)) > {t};"),
     Predicate("power_of_two", "n is a power of two",
               lambda n: n > 0 and (n & (n - 1)) == 0, id_substrs=["power", "two"],
               multiline_impl=['    {var} = bin(n).count("1")',
                               "    {var} = n > 0 and {var} == 1"],
-              singleline_impl="    {var} = n > 0 and (n & (n - 1)) == 0"),
+              singleline_impl="    {var} = n > 0 and (n & (n - 1)) == 0",
+              multiline_impl_cpp=["    int {var}_v = __builtin_popcount(n);",
+                                  "    bool {var} = n > 0 && {var}_v == 1;"],
+              singleline_impl_cpp="    bool {var} = n > 0 && (n & (n - 1)) == 0;"),
     Predicate("coprime_with", "n is coprime with {k}", lambda n, k: math.gcd(n, k) == 1,
               {"k": [6, 10, 12, 15]}, id_substrs=["coprime", "{k}"],
               multiline_impl=["    {var} = math.gcd(n, {k})",
                               "    {var} = {var} == 1"],
-              singleline_impl="    {var} = math.gcd(n, {k}) == 1"),
+              singleline_impl="    {var} = math.gcd(n, {k}) == 1",
+              multiline_impl_cpp=["    int {var}_v = std::gcd(n, {k});",
+                                  "    bool {var} = {var}_v == 1;"],
+              singleline_impl_cpp="    bool {var} = std::gcd(n, {k}) == 1;"),
 
     # ── digit-sum family ──
     Predicate("digit_sum_gt", "the sum of n's digits is greater than {t}",
@@ -266,13 +331,21 @@ INT_PREDICATES: list[Predicate] = [
               id_substrs=["sum", "digits", "{t}"],
               multiline_impl=["    {var} = sum(int(d) for d in str(abs(n)))",
                               "    {var} = {var} > {t}"],
-              singleline_impl="    {var} = sum(int(d) for d in str(abs(n))) > {t}"),
+              singleline_impl="    {var} = sum(int(d) for d in str(abs(n))) > {t}",
+              multiline_impl_cpp=["    int {var}_s = 0;",
+                                  "    for (char c : std::to_string(std::abs(n))) {var}_s += c - '0';",
+                                  "    bool {var} = {var}_s > {t};"],
+              singleline_impl_cpp="    bool {var} = std::accumulate(std::to_string(std::abs(n)).begin(), std::to_string(std::abs(n)).end(), 0, [](int acc, char c) {{ return acc + (c - '0'); }}) > {t};"),
     Predicate("digit_sum_divisible", "the sum of n's digits is divisible by {k}",
               lambda n, k: _digit_sum(n) % k == 0, {"k": [3, 4, 5, 9]},
               id_substrs=["sum", "digits", "divisible", "{k}"],
               multiline_impl=["    {var} = sum(int(d) for d in str(abs(n)))",
                               "    {var} = {var} % {k} == 0"],
-              singleline_impl="    {var} = sum(int(d) for d in str(abs(n))) % {k} == 0"),
+              singleline_impl="    {var} = sum(int(d) for d in str(abs(n))) % {k} == 0",
+              multiline_impl_cpp=["    int {var}_s = 0;",
+                                  "    for (char c : std::to_string(std::abs(n))) {var}_s += c - '0';",
+                                  "    bool {var} = {var}_s % {k} == 0;"],
+              singleline_impl_cpp="    bool {var} = std::accumulate(std::to_string(std::abs(n)).begin(), std::to_string(std::abs(n)).end(), 0, [](int acc, char c) {{ return acc + (c - '0'); }}) % {k} == 0;"),
 
     # ── accumulate over digits/divisors, then test (loop / comprehension) ──
     Predicate("digit_product_gt", "the product of n's digits is greater than {t}",
@@ -282,31 +355,49 @@ INT_PREDICATES: list[Predicate] = [
                               "    for d in str(abs(n)):",
                               "        {var} *= int(d)",
                               "    {var} = {var} > {t}"],
-              singleline_impl="    {var} = math.prod(int(d) for d in str(abs(n))) > {t}"),
+              singleline_impl="    {var} = math.prod(int(d) for d in str(abs(n))) > {t}",
+              multiline_impl_cpp=["    int {var}_p = 1;",
+                                  "    for (char c : std::to_string(std::abs(n))) {var}_p *= (c - '0');",
+                                  "    bool {var} = {var}_p > {t};"],
+              singleline_impl_cpp="    bool {var} = std::accumulate(std::to_string(std::abs(n)).begin(), std::to_string(std::abs(n)).end(), 1, [](int acc, char c) {{ return acc * (c - '0'); }}) > {t};"),
     Predicate("all_digits_even", "all of n's digits are even",
               lambda n: all(int(c) % 2 == 0 for c in str(abs(n))),
               id_substrs=["all", "digits", "even"],
               multiline_impl=["    {var} = [int(c) for c in str(abs(n))]",
                               "    {var} = all(d % 2 == 0 for d in {var})"],
-              singleline_impl="    {var} = all(int(c) % 2 == 0 for c in str(abs(n)))"),
+              singleline_impl="    {var} = all(int(c) % 2 == 0 for c in str(abs(n)))",
+              multiline_impl_cpp=["    std::string {var}_s = std::to_string(std::abs(n));",
+                                  "    bool {var} = std::all_of({var}_s.begin(), {var}_s.end(), [](char c) {{ return (c - '0') % 2 == 0; }});"],
+              singleline_impl_cpp="    bool {var} = std::all_of(std::to_string(std::abs(n)).begin(), std::to_string(std::abs(n)).end(), [](char c) {{ return (c - '0') % 2 == 0; }});"),
     Predicate("num_divisors_gt", "n has more than {t} divisors",
               lambda n, t: n != 0 and sum(1 for d in range(1, abs(n) + 1) if n % d == 0) > t,
               {"t": [2, 3, 4, 6]}, id_substrs=["more than", "{t}", "divisors"],
               multiline_impl=["    {var} = sum(1 for d in range(1, abs(n) + 1) if n % d == 0)",
                               "    {var} = {var} > {t}"],
-              singleline_impl="    {var} = sum(1 for d in range(1, abs(n) + 1) if n % d == 0) > {t}"),
+              singleline_impl="    {var} = sum(1 for d in range(1, abs(n) + 1) if n % d == 0) > {t}",
+              multiline_impl_cpp=["    int {var}_c = 0;",
+                                  "    for (int d = 1; d <= std::abs(n); ++d) if (n % d == 0) {var}_c++;",
+                                  "    bool {var} = {var}_c > {t};"],
+              singleline_impl_cpp="    bool {var} = [n]() {{ int c = 0; for (int d = 1; d <= std::abs(n); ++d) if (n % d == 0) c++; return c; }}() > {t};"),
     Predicate("abundant", "the sum of n's proper divisors is greater than n",
               lambda n: n > 0 and sum(d for d in range(1, n) if n % d == 0) > n,
               id_substrs=["sum", "proper divisors", "greater"],
               multiline_impl=["    {var} = sum(d for d in range(1, abs(n)) if n % d == 0)",
                               "    {var} = n > 0 and {var} > n"],
-              singleline_impl="    {var} = n > 0 and sum(d for d in range(1, abs(n)) if n % d == 0) > n"),
+              singleline_impl="    {var} = n > 0 and sum(d for d in range(1, abs(n)) if n % d == 0) > n",
+              multiline_impl_cpp=["    int {var}_s = 0;",
+                                  "    for (int d = 1; d < std::abs(n); ++d) if (n % d == 0) {var}_s += d;",
+                                  "    bool {var} = n > 0 && {var}_s > n;"],
+              singleline_impl_cpp="    bool {var} = n > 0 && [n]() {{ int s = 0; for (int d = 1; d < std::abs(n); ++d) if (n % d == 0) s += d; return s; }}() > n;"),
 
     # ── prime via trial division ──
     Predicate("prime", "n is a prime number", lambda n: _is_prime(n), id_substrs=["prime"],
               multiline_impl=["    {var} = all(n % d != 0 for d in range(2, int(abs(n) ** 0.5) + 1))",
                               "    {var} = {var} and n > 1"],
-              singleline_impl="    {var} = n > 1 and all(n % d != 0 for d in range(2, int(abs(n) ** 0.5) + 1))"),
+              singleline_impl="    {var} = n > 1 and all(n % d != 0 for d in range(2, int(abs(n) ** 0.5) + 1))",
+              multiline_impl_cpp=["    bool {var} = n > 1;",
+                                  "    for (int d = 2; d * d <= std::abs(n); ++d) if (n % d == 0) {var} = false;"],
+              singleline_impl_cpp="    bool {var} = n > 1 && [n]() {{ for (int d = 2; d * d <= std::abs(n); ++d) if (n % d == 0) return false; return true; }}();"),
 ]
 
 PREDICATES_BY_ID: dict[str, Predicate] = {p.id: p for p in INT_PREDICATES}

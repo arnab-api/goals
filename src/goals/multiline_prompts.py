@@ -17,12 +17,17 @@ result-printing suffix that references every var, forcing each to be defined in 
 import random
 from typing import Callable, Optional
 
-from src.goals.condition_data import INT_PREDICATES, ConditionSample, ConditionSpec
+from src.goals.condition_data import INT_PREDICATES, ConditionSample, ConditionSpec, Lang
 from src.goals.functional import apply_chat_template
 from src.models import ModelandTokenizer
 
-# multiline-capable predicates (have a `render_multiline`)
-MULTILINE_PREDS = [p for p in INT_PREDICATES if p.is_multiline]
+# multiline-capable predicates (have a `render_multiline`), keyed by language.
+# Populated lazily so a language without impls (e.g. cpp before we add impls to
+# every predicate) simply yields a smaller pool rather than a KeyError.
+def _multiline_preds_for(lang: str) -> list:
+    return [p for p in INT_PREDICATES if p.is_multiline_for(lang)]
+
+MULTILINE_PREDS = _multiline_preds_for("python")  # backward-compat alias (python only)
 VAR_LETTERS = "abcdefghij"
 FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"
 
@@ -54,6 +59,7 @@ def build_example(
     style: str = "multiline",
     naming: str = "letters",
     aug: Optional[Callable[[str], str]] = None,
+    lang: Lang = "python",
 ) -> dict:
     """One forced-prefill example for the 'stay vs move-on' test.
 
@@ -67,14 +73,21 @@ def build_example(
         "indexed" — `var_1`, `var_2`, …; instruction drops the naming constraint.
     Predicate CLASSES are always distinct within an example (no repeated `id`, even with
     different params), so e.g. `divisible by 20` and `divisible by 26` can't co-occur.
+
+    `lang` picks the forced-prefill impl (`python` | `cpp`).  FIM mode is python-only for
+    now: `result_print` writes a python `print(...)` suffix; a C++-flavoured suffix would
+    need a matching `std::cout` writer.
     """
     assert 1 <= target_slot < n_conditions
     assert naming in ("letters", "natural", "indexed"), f"unknown naming={naming!r}"
-    assert n_conditions <= len(MULTILINE_PREDS), (
-        f"n_conditions={n_conditions} exceeds {len(MULTILINE_PREDS)} distinct multiline predicates"
+    if mode == "fim" and lang != "python":
+        raise NotImplementedError(f"mode='fim' is python-only; got lang={lang!r}")
+    multiline_preds = _multiline_preds_for(lang)
+    assert n_conditions <= len(multiline_preds), (
+        f"n_conditions={n_conditions} exceeds {len(multiline_preds)} multiline predicates for lang={lang!r}"
     )
     # distinct predicate classes per example (sample WITHOUT replacement)
-    preds = rng.sample(MULTILINE_PREDS, n_conditions)
+    preds = rng.sample(multiline_preds, n_conditions)
     params = [p.sample_params(rng) for p in preds]
     # per-condition result variable names
     if naming == "natural":
@@ -92,7 +105,7 @@ def build_example(
         test_inputs=[rng.randint(-5, 1000) for _ in range(6)],
     )
     sample = ConditionSample(
-        spec=spec, lang="python", modularity="monolithic", without_comment=True
+        spec=spec, lang=lang, modularity="monolithic", without_comment=True
     )
     stub = sample.render_code_stub()
 
@@ -103,27 +116,27 @@ def build_example(
     body = []
     for j in range(target_slot):
         if prior_styles[j] == "multiline":
-            body += preds[j].render_multiline(params[j], var_names[j])
+            body += preds[j].render_multiline(params[j], var_names[j], lang=lang)
         else:
-            body.append(preds[j].render_singleline(params[j], var_names[j]))
+            body.append(preds[j].render_singleline(params[j], var_names[j], lang=lang))
 
     # target: the test variable
     if style == "multiline":
         target_impl = preds[target_slot].render_multiline(
-            params[target_slot], var_names[target_slot]
+            params[target_slot], var_names[target_slot], lang=lang
         )
         target_first = target_impl[0]  # incomplete first line
         expected_rest = "\n".join(target_impl[1:])
         expected_verdict = "continue"
     else:
         target_first = preds[target_slot].render_singleline(
-            params[target_slot], var_names[target_slot]
+            params[target_slot], var_names[target_slot], lang=lang
         )
         expected_rest = ""  # complete; nothing left for this var
         expected_verdict = "moved_on"
     body.append(target_first)
 
-    fim_suffix = result_print(var_names)
+    fim_suffix = result_print(var_names) if lang == "python" else None
     if mode == "fim":
         doc = (
             '    """\n'
@@ -147,11 +160,12 @@ def build_example(
         "spec_id": spec.spec_id,
         "spec": spec,  # the ConditionSpec (ordered conditions + id_substrs) — for gaze tracking
         "mode": mode,
+        "lang": lang,
         "prefill_style": style,  # the TARGET's style (test variable)
         "prior_styles": prior_styles,  # complete priors, >=1 multiline
         "full_prompt": full_prompt,
         "prefill_code": prefix_code,
-        "fim_suffix": fim_suffix.rstrip("\n") if mode == "fim" else None,
+        "fim_suffix": fim_suffix.rstrip("\n") if (mode == "fim" and fim_suffix) else None,
         "target_slot": target_slot,
         "var_names": var_names,
         "target_var": var_names[target_slot],
