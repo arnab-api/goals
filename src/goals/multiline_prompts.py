@@ -17,7 +17,15 @@ result-printing suffix that references every var, forcing each to be defined in 
 import random
 from typing import Callable, Optional
 
-from src.goals.condition_data import INT_PREDICATES, ConditionSample, ConditionSpec, Lang
+from src.goals.condition_data import (
+    INT_PREDICATES,
+    ConditionSample,
+    ConditionSpec,
+    DataType,
+    Lang,
+    chunky_predicates_for,
+    sample_test_inputs,
+)
 from src.goals.functional import apply_chat_template
 from src.models import ModelandTokenizer
 
@@ -60,6 +68,8 @@ def build_example(
     naming: str = "letters",
     aug: Optional[Callable[[str], str]] = None,
     lang: Lang = "python",
+    chunky: bool = False,
+    datatype: DataType = "int",
 ) -> dict:
     """One forced-prefill example for the 'stay vs move-on' test.
 
@@ -77,17 +87,30 @@ def build_example(
     `lang` picks the forced-prefill impl (`python` | `cpp`).  FIM mode is python-only for
     now: `result_print` writes a python `print(...)` suffix; a C++-flavoured suffix would
     need a matching `std::cout` writer.
+
+    `chunky=True` draws from `CHUNKY_PREDICATES` (inherently multi-line, no single-line form)
+    for the given `datatype` (`int` -> `check_conditions(n: int)`, `str` -> `(s: str)`).  Since
+    chunky predicates have no single-line form, the 'moved_on' (complete-target) state is the
+    FULL multiline block (pivot after its last line) rather than a one-line impl; priors are
+    always rendered as full blocks.  Chat mode only.
     """
     assert 1 <= target_slot < n_conditions
     assert naming in ("letters", "natural", "indexed"), f"unknown naming={naming!r}"
     if mode == "fim" and lang != "python":
         raise NotImplementedError(f"mode='fim' is python-only; got lang={lang!r}")
-    multiline_preds = _multiline_preds_for(lang)
-    assert n_conditions <= len(multiline_preds), (
-        f"n_conditions={n_conditions} exceeds {len(multiline_preds)} multiline predicates for lang={lang!r}"
+    if chunky:
+        if mode == "fim":
+            raise NotImplementedError("mode='fim' is not supported for chunky predicates")
+        pool = chunky_predicates_for(datatype)
+        assert pool, f"no chunky predicates for datatype={datatype!r}"
+    else:
+        pool = _multiline_preds_for(lang)
+    assert n_conditions <= len(pool), (
+        f"n_conditions={n_conditions} exceeds {len(pool)} available predicates "
+        f"(chunky={chunky}, datatype={datatype!r}, lang={lang!r})"
     )
     # distinct predicate classes per example (sample WITHOUT replacement)
-    preds = rng.sample(multiline_preds, n_conditions)
+    preds = rng.sample(pool, n_conditions)
     params = [p.sample_params(rng) for p in preds]
     # per-condition result variable names
     if naming == "natural":
@@ -102,39 +125,52 @@ def build_example(
         predicate_params=params,
         spec_texts=[p.render(pr) for p, pr in zip(preds, params)],
         id_substrs=[p.render_substrs(pr) for p, pr in zip(preds, params)],
-        test_inputs=[rng.randint(-5, 1000) for _ in range(6)],
+        test_inputs=sample_test_inputs(rng, datatype if chunky else "int"),
     )
     sample = ConditionSample(
         spec=spec, lang=lang, modularity="monolithic", without_comment=True
     )
     stub = sample.render_code_stub()
 
-    # priors: force-filled COMPLETE, random single/multi mix, but >=1 multiline
-    prior_styles = [rng.choice(["multiline", "singleline"]) for _ in range(target_slot)]
-    if "multiline" not in prior_styles:
-        prior_styles[rng.randrange(target_slot)] = "multiline"
+    def render_complete(pred, prm, var, prefer_singleline: bool) -> list[str]:
+        """Lines that fully implement `pred` at a slot: the single-line form when available and
+        requested, else the full multiline block (chunky predicates are always full blocks)."""
+        if prefer_singleline and pred.has_singleline_for(lang):
+            return [pred.render_singleline(prm, var, lang=lang)]
+        return pred.render_multiline(prm, var, lang=lang)
+
+    # priors: force-filled COMPLETE, random single/multi mix, but >=1 multiline.
+    # chunky predicates have no single-line form → all priors are full multiline blocks.
+    if chunky:
+        prior_styles = ["multiline"] * target_slot
+    else:
+        prior_styles = [rng.choice(["multiline", "singleline"]) for _ in range(target_slot)]
+        if "multiline" not in prior_styles:
+            prior_styles[rng.randrange(target_slot)] = "multiline"
     body = []
     for j in range(target_slot):
-        if prior_styles[j] == "multiline":
-            body += preds[j].render_multiline(params[j], var_names[j], lang=lang)
-        else:
-            body.append(preds[j].render_singleline(params[j], var_names[j], lang=lang))
+        body += render_complete(preds[j], params[j], var_names[j],
+                                prefer_singleline=(prior_styles[j] == "singleline"))
 
     # target: the test variable
+    tp, tvar, tprm = preds[target_slot], var_names[target_slot], params[target_slot]
     if style == "multiline":
-        target_impl = preds[target_slot].render_multiline(
-            params[target_slot], var_names[target_slot], lang=lang
-        )
-        target_first = target_impl[0]  # incomplete first line
+        target_impl = tp.render_multiline(tprm, tvar, lang=lang)
+        target_first = target_impl[0]          # incomplete first line -> "continue"
+        target_lines = [target_first]
         expected_rest = "\n".join(target_impl[1:])
         expected_verdict = "continue"
     else:
-        target_first = preds[target_slot].render_singleline(
-            params[target_slot], var_names[target_slot], lang=lang
-        )
-        expected_rest = ""  # complete; nothing left for this var
+        # 'moved_on': the target var is COMPLETE at the pivot.  Single-line form if the predicate
+        # has one; otherwise (chunky) the full multiline block, with the pivot after its last line.
+        if tp.has_singleline_for(lang):
+            target_lines = [tp.render_singleline(tprm, tvar, lang=lang)]
+        else:
+            target_lines = tp.render_multiline(tprm, tvar, lang=lang)
+        target_first = target_lines[-1]        # pivot line = the completed statement
+        expected_rest = ""                     # complete; nothing left for this var
         expected_verdict = "moved_on"
-    body.append(target_first)
+    body += target_lines
 
     fim_suffix = result_print(var_names) if lang == "python" else None
     if mode == "fim":

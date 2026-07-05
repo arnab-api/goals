@@ -29,12 +29,15 @@ import math
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Optional
 
 from dataclasses_json import DataClassJsonMixin
 
 Lang = Literal["python", "cpp", "java", "javascript"]
 Modularity = Literal["modular", "monolithic"]
+# The argument datatype a predicate operates on.  A single prompt/spec mixes only predicates
+# of ONE datatype: "int" -> check_conditions(n: int); "str" -> check_conditions(s: str).
+DataType = Literal["int", "str"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -127,8 +130,13 @@ def _is_triangular(n: int) -> bool:
 class Predicate:
     id: str
     spec_template: str                 # NL spec, e.g. "n is divisible by {k}"
-    oracle: Callable[..., bool]        # oracle(n, **params) -> bool (ground truth)
+    oracle: Callable[..., bool]        # oracle(arg, **params) -> bool (ground truth)
     param_space: dict[str, list] = field(default_factory=dict)
+    # Datatype of the checked value.  "int" -> impls/oracle take `n`; "str" -> they take `s`.
+    # All predicates in one spec share a single datatype (see `DataType`).  Kept AFTER
+    # param_space so the existing positional `Predicate(id, spec, oracle, param_space, ...)`
+    # call sites (int bank) are unaffected; chunky predicates pass `datatype=` as a kwarg.
+    datatype: DataType = "int"
     # Most-informative substrings of spec_template (may contain {param} placeholders);
     # used to locate the spec tokens to track attention back to.
     # e.g. "n is a perfect square" -> ["perfect", "square"].
@@ -141,14 +149,17 @@ class Predicate:
     multiline_impl: list[str] = field(default_factory=list)
     # Single-line forced-prefill form: ONE complete `{var} = <boolean>` line that fully checks
     # the condition (no intermediate, nothing left to finish). Same `{var}`/`{param}` rules.
-    singleline_impl: str = ""
+    # OPTIONAL — `None` ⇒ predicate has no single-line form (e.g. "chunky" predicates whose
+    # implementation is inherently multi-line). Such predicates can only be rendered multiline;
+    # the "moved_on" (complete-target) state is produced from the full multiline block instead.
+    singleline_impl: Optional[str] = None
     # C++ forced-prefill forms.  Same shape and rules as the Python versions.  Because
     # C++ statements are typed, multiline impls typically declare an intermediate
     # `int {var}_v = …;` on line 1 and then `bool {var} = {var}_v <op> …;` on line 2 —
     # the `{var}` substitution ripples through so distinct condition letters produce
     # distinct intermediate names.  Empty ⇒ predicate has no C++ multi-line form.
     multiline_impl_cpp: list[str] = field(default_factory=list)
-    singleline_impl_cpp: str = ""
+    singleline_impl_cpp: Optional[str] = None
     # Canonical natural variable name for this predicate's boolean result
     # (e.g. "is_even"); used by build_example(naming="natural"). Populated from
     # _PREDICATE_VAR_NAMES at module load; falls back to `id` if left blank.
@@ -170,7 +181,7 @@ class Predicate:
             return self.multiline_impl
         raise ValueError(f"Predicate has no forced-prefill impl for lang={lang!r}")
 
-    def _singleline_for(self, lang: str) -> str:
+    def _singleline_for(self, lang: str) -> Optional[str]:
         if lang == "cpp":
             return self.singleline_impl_cpp
         if lang == "python":
@@ -180,6 +191,12 @@ class Predicate:
     def is_multiline_for(self, lang: str = "python") -> bool:
         """Whether this predicate has a multi-line forced-prefill form in `lang`."""
         return bool(self._multiline_for(lang))
+
+    def has_singleline_for(self, lang: str = "python") -> bool:
+        """Whether this predicate has a single-line forced-prefill form in `lang`.
+        `False` for "chunky" (inherently multi-line) predicates — callers that need a
+        completed-target rendering must fall back to the full multiline block."""
+        return bool(self._singleline_for(lang))
 
     def sample_params(self, rng: random.Random) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -204,8 +221,15 @@ class Predicate:
         return [ln.replace("{var}", var).format(**params) for ln in self._multiline_for(lang)]
 
     def render_singleline(self, params: dict[str, Any], var: str, lang: str = "python") -> str:
-        """Single-line forced-prefill: `{var}` -> the result letter, `{param}` filled in."""
-        return self._singleline_for(lang).replace("{var}", var).format(**params)
+        """Single-line forced-prefill: `{var}` -> the result letter, `{param}` filled in.
+        Raises if this predicate has no single-line form in `lang` (see `has_singleline_for`)."""
+        impl = self._singleline_for(lang)
+        if not impl:
+            raise ValueError(
+                f"predicate {self.id!r} has no single-line impl for lang={lang!r} "
+                f"(multiline-only 'chunky' predicate); use render_multiline instead"
+            )
+        return impl.replace("{var}", var).format(**params)
 
     def evaluate(self, n: int, params: dict[str, Any]) -> bool:
         return bool(self.oracle(n, **params))
@@ -438,6 +462,112 @@ for _p in INT_PREDICATES:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# "Chunky" predicates — inherently multi-line (explicit loops / accumulators / flags), with
+# NO single-line form (`singleline_impl` left None → multiline-only, see `has_singleline_for`).
+# Unlike INT_PREDICATES these span both datatypes: `datatype="int"` (arg `n`) and `"str"`
+# (arg `s`).  A spec is built from chunky predicates of ONE datatype.  Seed set only — kept
+# small to test model behavior before scaling.  `variable_name` is set inline here (the
+# frozen dataclass still accepts it in __init__), so no separate name table is needed.
+# `{var}` reuse convention matches INT_PREDICATES: every assigned variable — accumulators and
+# flags included — is `{var}` (or `{var}_<suffix>` for a distinct intermediate), so swapping
+# the result letter renames the whole block; loop variables stay plain (`d`, `ch`, `i`).
+CHUNKY_PREDICATES: list[Predicate] = [
+    # ── int (arg `n`) ──
+    Predicate("prime_chunky", "n is a prime number", lambda n: _is_prime(n),
+              datatype="int", id_substrs=["prime"], variable_name="is_prime",
+              multiline_impl=["    {var} = True",
+                              "    for d in range(2, int(abs(n) ** 0.5) + 1):",
+                              "        if n % d == 0:",
+                              "            {var} = False",
+                              "            break",
+                              "    {var} = {var} and n > 1"]),
+    Predicate("digit_sum_gt_chunky", "the sum of n's digits is greater than {t}",
+              lambda n, t: _digit_sum(n) > t, datatype="int", param_space={"t": [5, 10, 15, 20]},
+              id_substrs=["sum", "digits", "{t}"], variable_name="has_large_digit_sum",
+              multiline_impl=["    {var} = 0",
+                              "    for d in str(abs(n)):",
+                              "        {var} += int(d)",
+                              "    {var} = {var} > {t}"]),
+    Predicate("perfect_number_chunky", "the sum of n's proper divisors equals n",
+              lambda n: n > 0 and sum(d for d in range(1, n) if n % d == 0) == n,
+              datatype="int", id_substrs=["proper divisors", "equals"], variable_name="is_perfect",
+              multiline_impl=["    {var} = 0",
+                              "    for d in range(1, abs(n)):",
+                              "        if n % d == 0:",
+                              "            {var} += d",
+                              "    {var} = n > 0 and {var} == n"]),
+    Predicate("all_digits_even_chunky", "all of n's digits are even",
+              lambda n: all(int(c) % 2 == 0 for c in str(abs(n))),
+              datatype="int", id_substrs=["all", "digits", "even"], variable_name="all_digits_even",
+              multiline_impl=["    {var} = True",
+                              "    for d in str(abs(n)):",
+                              "        if int(d) % 2 != 0:",
+                              "            {var} = False",
+                              "            break"]),
+
+    # ── str (arg `s`) ──
+    Predicate("vowel_count_ge_chunky", "s contains at least {k} vowels",
+              lambda s, k: sum(1 for ch in s.lower() if ch in "aeiou") >= k,
+              datatype="str", param_space={"k": [2, 3, 4]},
+              id_substrs=["at least", "{k}", "vowels"], variable_name="has_min_vowels",
+              multiline_impl=["    {var} = 0",
+                              "    for ch in s.lower():",
+                              "        if ch in 'aeiou':",
+                              "            {var} += 1",
+                              "    {var} = {var} >= {k}"]),
+    Predicate("palindrome_chunky", "s reads the same forwards and backwards",
+              lambda s: s == s[::-1], datatype="str",
+              id_substrs=["forwards", "backwards"], variable_name="is_palindrome",
+              multiline_impl=["    {var} = True",
+                              "    for i in range(len(s) // 2):",
+                              "        if s[i] != s[len(s) - 1 - i]:",
+                              "            {var} = False",
+                              "            break"]),
+    Predicate("has_digit_char_chunky", "s contains at least one digit character",
+              lambda s: any(ch.isdigit() for ch in s), datatype="str",
+              id_substrs=["digit", "character"], variable_name="has_digit",
+              multiline_impl=["    {var} = False",
+                              "    for ch in s:",
+                              "        if ch.isdigit():",
+                              "            {var} = True",
+                              "            break"]),
+    Predicate("no_repeated_chars_chunky", "no character in s appears more than once",
+              lambda s: len(set(s)) == len(s), datatype="str",
+              id_substrs=["no character", "more than once"], variable_name="no_repeated_chars",
+              multiline_impl=["    {var} = True",
+                              "    {var}_seen = []",
+                              "    for ch in s:",
+                              "        if ch in {var}_seen:",
+                              "            {var} = False",
+                              "            break",
+                              "        {var}_seen.append(ch)"]),
+]
+
+CHUNKY_PREDICATES_BY_ID: dict[str, Predicate] = {p.id: p for p in CHUNKY_PREDICATES}
+
+# Unified id → Predicate lookup across the int bank + chunky bank (ids are disjoint: chunky
+# ids are suffixed `_chunky`).  Used wherever a spec resolves predicate ids to oracles, since a
+# spec may draw from either bank.
+ALL_PREDICATES_BY_ID: dict[str, Predicate] = {**PREDICATES_BY_ID, **CHUNKY_PREDICATES_BY_ID}
+assert len(ALL_PREDICATES_BY_ID) == len(PREDICATES_BY_ID) + len(CHUNKY_PREDICATES_BY_ID), (
+    "predicate id collision between INT_PREDICATES and CHUNKY_PREDICATES"
+)
+
+# invariants for the seed set: every chunky predicate is multiline-only in python, has a
+# result-variable name, and a valid datatype.
+for _p in CHUNKY_PREDICATES:
+    assert _p.is_multiline_for("python"), f"chunky predicate {_p.id!r} has no python multiline_impl"
+    assert not _p.has_singleline_for("python"), f"chunky predicate {_p.id!r} should be multiline-only"
+    assert _p.variable_name, f"chunky predicate {_p.id!r} missing variable_name"
+    assert _p.datatype in ("int", "str"), f"chunky predicate {_p.id!r} bad datatype {_p.datatype!r}"
+
+
+def chunky_predicates_for(datatype: DataType) -> list[Predicate]:
+    """Chunky predicates for one datatype (a spec mixes only a single datatype)."""
+    return [p for p in CHUNKY_PREDICATES if p.datatype == datatype]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Sample types.
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -458,12 +588,20 @@ class ConditionSpec(DataClassJsonMixin):
     def num_conditions(self) -> int:
         return len(self.predicate_ids)
 
-    def expected_results(self, n: int) -> tuple[list[bool], bool]:
-        """Oracle-derived (per-condition booleans in order, collective-all) for input n.
-        Logical reference for eyeballing — the LM chooses the print format, so this is
-        not an exact stdout matcher."""
+    @property
+    def datatype(self) -> DataType:
+        """The checked-value datatype for this spec (all predicates share one).
+        `int` for the classic int bank; may be `str` for chunky specs."""
+        if not self.predicate_ids:
+            return "int"
+        return ALL_PREDICATES_BY_ID[self.predicate_ids[0]].datatype
+
+    def expected_results(self, n) -> tuple[list[bool], bool]:
+        """Oracle-derived (per-condition booleans in order, collective-all) for input `n`
+        (an int, or a str for str-datatype specs).  Logical reference for eyeballing — the LM
+        chooses the print format, so this is not an exact stdout matcher."""
         individuals = [
-            PREDICATES_BY_ID[pid].evaluate(n, params)
+            ALL_PREDICATES_BY_ID[pid].evaluate(n, params)
             for pid, params in zip(self.predicate_ids, self.predicate_params)
         ]
         return individuals, all(individuals)
@@ -496,15 +634,21 @@ class ConditionSample(DataClassJsonMixin):
         return f"{self.spec.spec_id}__{self.lang}__{self.modularity}"
 
     # --- rendering ---------------------------------------------------------
-    def render_instruction(self, name_rule: str = "letters") -> str:
+    def render_instruction(self, name_rule: str = "letters", multistep: bool = False) -> str:
         """`name_rule="letters"` mandates lowercase-letter result vars (`a`, `b`, …);
         any other value drops the naming constraint entirely (lets the model/prefill
-        choose), used by build_example(naming="natural"|"indexed")."""
+        choose), used by build_example(naming="natural"|"indexed").
+
+        `multistep=True` adds a clause asking the model to implement each check step-by-step
+        with explicit loops/intermediate variables rather than a one-line expression or
+        comprehension — used for the chunky dataset, where we WANT multi-line implementations
+        (the simple predicates otherwise collapse to one-liners)."""
         ls = LANGS[self.lang]
         body = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(self.spec.spec_texts))
+        subject = "a string s" if self.spec.datatype == "str" else "an integer n"
         opener = (
             f"Write a {ls.display} program that implements a function "
-            f"`{ls.fn_name}` which, given an integer n, checks the following "
+            f"`{ls.fn_name}` which, given {subject}, checks the following "
             f"conditions:"
         )
         # Force a named result variable per condition (so each check is a
@@ -540,21 +684,42 @@ class ConditionSample(DataClassJsonMixin):
                 f"define any helper functions."
             )
         parts = [opener, "", body, "", assign_rule, mod_rule]
+        if multistep:
+            parts.append(
+                "Implement each condition's check step by step using explicit statements — "
+                "loops and intermediate variables where appropriate — rather than a single "
+                "one-line expression or comprehension."
+            )
         if self.without_comment:
             parts.append("Do not include any comments in your code.")
         return "\n".join(parts)
 
     def render_code_stub(self) -> str:
         """Prefill stub. Monolithic seeds the entry signature; modular seeds empty
-        (helpers-first — required so C++/Java compile, harmless for Python/JS)."""
-        if self.modularity == "monolithic":
-            return LANGS[self.lang].mono_stub
-        return ""
+        (helpers-first — required so C++/Java compile, harmless for Python/JS).
+        The Python monolithic stub is datatype-aware: `n: int` vs `s: str`."""
+        if self.modularity != "monolithic":
+            return ""
+        ls = LANGS[self.lang]
+        if self.lang == "python":
+            arg, ann = ("s", "str") if self.spec.datatype == "str" else ("n", "int")
+            return f"def {ls.fn_name}({arg}: {ann}):\n"
+        return ls.mono_stub  # non-python langs: int-only for now
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sampling.
 # ──────────────────────────────────────────────────────────────────────────────
+
+_STR_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def sample_test_inputs(rng: random.Random, datatype: DataType, k: int = 6) -> list:
+    """Eyeball/unit-test inputs for a spec: ints for `int`, short random strings for `str`."""
+    if datatype == "str":
+        return ["".join(rng.choice(_STR_ALPHABET) for _ in range(rng.randint(3, 8)))
+                for _ in range(k)]
+    return [rng.randint(-5, 1000) for _ in range(k)]
 
 
 def sample_specs(
@@ -567,7 +732,10 @@ def sample_specs(
 ) -> list[ConditionSpec]:
     """Draw `n_samples` specs. Each gets a count drawn uniformly from
     `num_conditions`, then that many predicates drawn (with replacement if
-    `allow_repeats`) from `predicates`, each with sampled params."""
+    `allow_repeats`) from `predicates`, each with sampled params.
+
+    `predicates` must be a single-datatype pool (all int, or all str — a spec never mixes
+    datatypes).  Pass e.g. `chunky_predicates_for("str")` for a string-datatype dataset."""
     rng = random.Random(seed)
     specs: list[ConditionSpec] = []
     for i in range(n_samples):
@@ -576,10 +744,12 @@ def sample_specs(
             chosen = [rng.choice(predicates) for _ in range(k)]
         else:
             chosen = rng.sample(predicates, k=min(k, len(predicates)))
+        dts = {p.datatype for p in chosen}
+        assert len(dts) == 1, f"spec {i} mixes datatypes {dts}; a spec must be single-datatype"
         params = [p.sample_params(rng) for p in chosen]
         texts = [p.render(pr) for p, pr in zip(chosen, params)]
         substrs = [p.render_substrs(pr) for p, pr in zip(chosen, params)]
-        test_inputs = [rng.randint(-5, 1000) for _ in range(n_test_inputs)]
+        test_inputs = sample_test_inputs(rng, next(iter(dts)), n_test_inputs)
         specs.append(ConditionSpec(
             spec_id=f"cond_{i:04d}",
             predicate_ids=[p.id for p in chosen],
