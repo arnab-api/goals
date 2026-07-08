@@ -464,6 +464,11 @@ def render_patchscope_html(
         # Newline tokens render as invisible — replace \n with a visible glyph
         # (↵) so the span is hoverable, then emit the real \n for indentation.
         tok_html = _html.escape(raw).replace("\n", "↵\n")
+        # Non-scoped context tokens (e.g. the prompt prefix when include_noncode=True)
+        # are shown dimmed for readability, with no goal-scope tooltip.
+        if not r.get("scoped", True):
+            spans.append(f'<span class="ps-noncode" style="opacity:0.4">{tok_html}</span>')
+            continue
         tip_text = f'pos {r["pos"]} {r["token"]!r}: {r["patched_gen"].strip() or "(empty)"}'
         tip_attr = _html.escape(tip_text, quote=True)
         cls = ("ps-tok " + _prism_class(r["token"])).strip()
@@ -521,6 +526,8 @@ def apply_goalscope(
     title: str = "GoalScope",
     show: bool = True,
     goalscope_prompt: Optional[str] = None,
+    include_noncode: bool = False,
+    save_path: Optional[str] = None,
 ) -> list[dict]:
     """Run GoalScope on a single prompt.
 
@@ -559,10 +566,22 @@ def apply_goalscope(
         title: HTML visualization title.
         show: Display the HTML visualization inline when ``True``.
         goalscope_prompt: Override the default GoalScope dest prompt.
+        include_noncode: When ``True``, also include the non-code tokens (the
+            prompt text outside the ``<code>…</code>`` segment — e.g. the prefix
+            / instruction) in the returned results and the visualization.  These
+            positions are shown dimmed and are **not** goal-scoped: no steering
+            source is extracted and no generation is run for them.  Extraction /
+            generation still run only over the code segment.
+        save_path: When set (e.g. ``"…/scope.html"``), write the rendered HTML to
+            this path.  Saving happens regardless of ``show``.  ``None`` (default)
+            saves nothing.
 
     Returns:
-        List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` — one
-        entry per token position inside the code segment.
+        List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` and
+        ``"scoped"`` (``True`` for code-segment tokens; ``False`` for non-code
+        tokens when ``include_noncode=True``).  Code-segment entries come first
+        in generation order; with ``include_noncode`` the full list is sorted by
+        ``pos`` so the prompt reads left-to-right.
     """
     from tqdm.auto import tqdm
 
@@ -693,10 +712,27 @@ def apply_goalscope(
                 "pos": seg_positions[chunk_start + i],
                 "token": text_tokens[seg_positions[chunk_start + i]],
                 "patched_gen": gens[i],
+                "scoped": True,
             })
 
+    # Optionally fold in the non-code tokens (everything outside [code_start, code_end))
+    # as display-only, non-scoped context — no source extraction / generation for them.
+    if include_noncode:
+        seg_set = set(seg_positions)
+        noncode = [
+            {"pos": p, "token": text_tokens[p], "patched_gen": "", "scoped": False}
+            for p in range(len(src_ids))
+            if p not in seg_set
+        ]
+        results = sorted(results + noncode, key=lambda r: r["pos"])
+
     if show:
-        show_patchscope(results, title=title)
+        show_patchscope(results, title=title, save_path=save_path)
+    elif save_path is not None:
+        html_str = render_patchscope_html(results, title=title)
+        with open(save_path, "w", encoding="utf-8") as fh:
+            fh.write(html_str)
+        print(f"Saved -> {save_path}")
 
     return results
 

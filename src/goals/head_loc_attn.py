@@ -32,6 +32,7 @@ Mask parameterization:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import random
@@ -962,6 +963,35 @@ def src_replacement_hooks(
             h.remove()
 
 
+@contextmanager
+def _extra_patch_hooks(mt, patches):
+    """Apply a list of ``PatchSpec`` on module *outputs* via baukit for the duration of the
+    ``with`` block.  Single-pass (prefill) semantics: ``on_pass`` is ignored — every patch is
+    applied on the one forward this wraps.  Reuses ``src.functional._apply_patch_to_state`` so
+    the replace/add + dtype/device handling matches ``generate_with_patch`` exactly.
+
+    Used to layer an MLP-output *restore* (clean-cached activations) on top of the head
+    transplant in :func:`forward_with_src_replacement` — the sufficiency test that asks whether
+    downstream MLPs are needed to turn the head-pooled signal into the move-on / stay decision."""
+    from src.functional import _apply_patch_to_state
+
+    modules_to_patches: dict[str, list] = {}
+    for p in patches:
+        modules_to_patches.setdefault(p.location[0], []).append(p)
+
+    def edit_output(output, layer):
+        is_tuple = isinstance(output, tuple)
+        actual = output[0] if is_tuple else output
+        for p in modules_to_patches.get(layer, []):
+            _apply_patch_to_state(actual, p.location[1], p.patch, p.strategy)
+        return (actual,) + output[1:] if is_tuple else actual
+
+    with baukit.TraceDict(
+        mt._model, list(modules_to_patches), edit_output=edit_output
+    ):
+        yield
+
+
 def make_head_replacement_patch_interface(
     src_head_inps: torch.Tensor,
     mask: HeadMask,
@@ -998,6 +1028,7 @@ def forward_with_src_replacement(
     alpha: float = 1.0,
     patch_positions: Optional[list[int]] = None,
     return_past_key_values: bool = False,
+    extra_patches: Optional[list] = None,
 ) -> torch.Tensor:
     """Run dest_inputs with mask-weighted per-head o_proj input replacement.
 
@@ -1045,6 +1076,15 @@ def forward_with_src_replacement(
             ``(logits, past_key_values)`` so callers can thread the cache into
             the next call.  Patched K/V written into the cache during this
             forward pass will persist there for subsequent decode steps.
+        extra_patches: Optional ``list[PatchSpec]`` applied to module *outputs*
+            (via baukit ``edit_output``) inside the same forward, on top of the
+            head transplant.  Used for the MLP-output *restore* sufficiency test:
+            pass clean-cached MLP activations (e.g. from
+            ``get_hs(mt, dest_inputs, [(mlp_name, pos), …], return_dict=True)``)
+            as ``PatchSpec(location=(mlp_name, pos), patch=…, strategy="replace")``
+            to clamp downstream MLPs to their clean values while the heads are
+            patched.  Single forward → ``on_pass`` is ignored.  ``None`` (default)
+            leaves the pure head-transplant behavior unchanged.
 
     Returns:
         ``(vocab_size,)`` float32 logits for 2D input (single instance), or
@@ -1054,7 +1094,12 @@ def forward_with_src_replacement(
     """
     squeeze_output = src_head_inps.dim() == 2
 
-    with src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions):
+    extra_cm = (
+        _extra_patch_hooks(mt, extra_patches)
+        if extra_patches
+        else contextlib.nullcontext()
+    )
+    with src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions), extra_cm:
         call_kwargs = dict(dest_inputs)
         if return_past_key_values:
             call_kwargs.setdefault("use_cache", True)
