@@ -235,6 +235,28 @@ def replicate_inputs(inputs: dict, batch: int) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _norm_spec(mod):
+    """Snapshot a q_norm/k_norm module as ``(detached_weight, eps)`` for manual RMSNorm, or
+    ``None`` if the model has no QK-norm (e.g. Qwen2.5). Detached because the model is frozen
+    during mask training (mirrors the detached q_proj/k_proj weights)."""
+    if mod is None:
+        return None
+    eps = getattr(mod, "variance_epsilon", getattr(mod, "eps", 1e-6))
+    return (mod.weight.detach(), float(eps))
+
+
+def _rmsnorm(y, spec):
+    """Apply RMSNorm ``(y / rms(y)) * weight`` over the last dim, in float32 (matching HF's
+    Olmo/Gemma/Qwen3 RMSNorm). ``spec`` = ``(weight, eps)`` or ``None`` (identity)."""
+    if spec is None:
+        return y
+    w, eps = spec
+    dt = y.dtype
+    yf = y.float()
+    yf = yf * torch.rsqrt(yf.pow(2).mean(-1, keepdim=True) + eps)
+    return (w.to(yf.device) * yf).to(dt)
+
+
 class GazeScorer:
     """Computes the raw Q·K gaze affinity on the locked gaze heads, ourselves.
 
@@ -262,6 +284,11 @@ class GazeScorer:
 
         # frozen q_proj/k_proj weights+biases for the gaze layers, extracted once
         self.W = {}
+        # frozen QK-norm specs (weight, eps) per gaze layer — Olmo2/3, Gemma2, Qwen3, … apply
+        # RMSNorm to q/k *after* projection and *before* reshape+RoPE. Absent on Qwen2.5 (→ None,
+        # no-op). We replicate it with the *detached* weight (model is frozen during mask training,
+        # matching the detached q_proj/k_proj weights above) so its manual Q·K matches real attention.
+        self.qk_norm = {}
         for l in self.gaze_layers:
             base = mt.attn_module_name_format.format(l)
             qp = get_module_nnsight(mt._model, base + ".q_proj")
@@ -272,11 +299,17 @@ class GazeScorer:
                 kp.weight.detach(),
                 None if kp.bias is None else kp.bias.detach(),
             )
+            attn = get_module_nnsight(mt._model, base)
+            self.qk_norm[l] = (
+                _norm_spec(getattr(attn, "q_norm", None)),
+                _norm_spec(getattr(attn, "k_norm", None)),
+            )
 
-    def _proj(self, x, W, b, n_heads):
+    def _proj(self, x, W, b, n_heads, norm_spec=None):
         y = torch.matmul(x, W.t().to(x.dtype))
         if b is not None:
             y = y + b.to(x.dtype)
+        y = _rmsnorm(y, norm_spec)   # QK-norm (Olmo2/3 etc.); no-op when norm_spec is None
         return y.view(*x.shape[:-1], n_heads, self.head_dim)
 
     def _rope(self, vec, pos):
@@ -338,8 +371,9 @@ class GazeScorer:
         for l, hs in self.heads_by_layer.items():
             x = lat[l]
             Wq, bq, Wk, bk = self.W[l]
-            Q = self._rope(self._proj(x[:, -1:, :], Wq, bq, self.n_q), pos[-1:])[:, 0]  # (B, n_q, D)
-            K = self._rope(self._proj(x, Wk, bk, self.n_kv), pos)                       # (B, seq, n_kv, D)
+            qn, kn = self.qk_norm[l]
+            Q = self._rope(self._proj(x[:, -1:, :], Wq, bq, self.n_q, qn), pos[-1:])[:, 0]  # (B, n_q, D)
+            K = self._rope(self._proj(x, Wk, bk, self.n_kv, kn), pos)                       # (B, seq, n_kv, D)
             for h in hs:
                 qh = Q[:, h, :]                          # (B, D)
                 kh = K[:, :, h // self.gqa, :]           # (B, seq, D) — GQA mapping
@@ -381,8 +415,9 @@ class GazeScorer:
         for l, hs in self.heads_by_layer.items():
             x = lat[l]
             Wq, bq, Wk, bk = self.W[l]
-            Q = self._rope(self._proj(x[:, -1:, :], Wq, bq, self.n_q), pos_q)[:, 0]  # (B, n_q, D)
-            K = self._rope(self._proj(x, Wk, bk, self.n_kv), pos_all)               # (B, seq, n_kv, D)
+            qn, kn = self.qk_norm[l]
+            Q = self._rope(self._proj(x[:, -1:, :], Wq, bq, self.n_q, qn), pos_q)[:, 0]  # (B, n_q, D)
+            K = self._rope(self._proj(x, Wk, bk, self.n_kv, kn), pos_all)               # (B, seq, n_kv, D)
             for h in hs:
                 qh = Q[:, h, :]                          # (B, D)
                 kh = K[:, :, h // self.gqa, :]           # (B, seq, D) — GQA mapping
