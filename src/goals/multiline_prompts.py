@@ -70,6 +70,7 @@ def build_example(
     lang: Lang = "python",
     chunky: bool = False,
     datatype: DataType = "int",
+    prior_style: Optional[str] = None,
 ) -> dict:
     """One forced-prefill example for the 'stay vs move-on' test.
 
@@ -139,9 +140,16 @@ def build_example(
             return [pred.render_singleline(prm, var, lang=lang)]
         return pred.render_multiline(prm, var, lang=lang)
 
-    # priors: force-filled COMPLETE, random single/multi mix, but >=1 multiline.
-    # chunky predicates have no single-line form → all priors are full multiline blocks.
-    if chunky:
+    # priors: force-filled COMPLETE. `prior_style` pins every prior's style:
+    #   None (default) — random single/multi mix, but >=1 multiline (the 'when' setup, so the
+    #                    model has in-context precedent that a var MAY span lines);
+    #   "singleline"  — every prior is single-line (the 'where' setup, so a multi-line prior
+    #                    doesn't nudge the target var toward a multi-line implementation);
+    #   "multiline"   — every prior is a full multi-line block.
+    # A prior predicate lacking a single-line form (chunky) still renders multi-line regardless.
+    if prior_style in ("singleline", "multiline"):
+        prior_styles = [prior_style] * target_slot
+    elif chunky:
         prior_styles = ["multiline"] * target_slot
     else:
         prior_styles = [rng.choice(["multiline", "singleline"]) for _ in range(target_slot)]

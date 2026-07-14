@@ -15,7 +15,7 @@ def ask_claude(
     max_tokens: int = 6000,
     temperature: float = 0.6,
     use_cache: bool = True,
-    model_name: str = "claude-sonnet-4-6",
+    model_name: str = "claude-sonnet-5",
     system_prompt: str = "You are a helpful assistant.",
 ) -> str:
     ##################################################

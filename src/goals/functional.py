@@ -28,6 +28,9 @@ def apply_chat_template(
             "content": f"<code>\n{incomplete_code}",
         },
     ]
+    if "gemma-2" in mt.name.lower():
+        messages.pop(0)  # Gemma-2 doesn't support system prompts in chat templates
+        messages[0]["content"] = f"{system_prompt}\n\n{user_query}" # prepend system prompt to user query instead
 
     prompt = mt.tokenizer.apply_chat_template(
         messages,
