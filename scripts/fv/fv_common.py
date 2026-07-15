@@ -38,10 +38,10 @@ from src.tokens import prepare_input
 PREFIXES = {"input": "Q:", "output": "A:", "instructions": ""}
 SEPARATORS = {"input": "\n", "output": "\n\n", "instructions": ""}
 
-# repo checkout: external/function_vectors (see clone in the FV localization work)
+# Tracked copy of the FV dataset_files (from ericwtodd/function_vectors); we only use abstractive.
 DEFAULT_ABSTRACTIVE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "external", "function_vectors", "dataset_files", "abstractive",
+    "data", "FV_dataset", "abstractive",
 )
 
 # the 6 tasks the paper foregrounds; a sensible small default for quick runs
