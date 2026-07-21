@@ -526,7 +526,6 @@ for _p in INT_PREDICATES:
 # flags included — is `{var}` (or `{var}_<suffix>` for a distinct intermediate), so swapping
 # the result letter renames the whole block; loop variables stay plain (`d`, `ch`, `i`).
 # helper functions used by chunky-predicate oracles (auto-collected)
-import math
 def _collatz_steps(n):
     steps = 0
     while n > 1:

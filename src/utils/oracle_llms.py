@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 def ask_claude(
     prompt: str,
-    max_tokens: int = 6000,
-    temperature: float = 0.6,
+    max_tokens: int = 2048,
+    # temperature: float = 0.6,
     use_cache: bool = True,
     model_name: str = "claude-sonnet-5",
     system_prompt: str = "You are a helpful assistant.",
@@ -24,7 +24,7 @@ def ask_claude(
     )
     ##################################################
     hash_val = hashlib.md5(
-        f"{prompt}__{temperature=}__{max_tokens=}".encode()
+        f"{prompt}__{max_tokens=}".encode()
     ).hexdigest()
     if use_cache:
         cache_file = os.path.join(CLAUDE_CACHE_DIR, f"{hash_val}.json")
@@ -37,7 +37,7 @@ def ask_claude(
     response = client.messages.create(
         model=model_name,
         max_tokens=max_tokens,
-        temperature=temperature,
+        # temperature=temperature, # deptricated starting from the 5 series of anthropic models
         system=system_prompt,
         messages=[
             {
@@ -60,7 +60,8 @@ def ask_claude(
                 "response": response,
                 "model": model_name,
                 "hash": hash_val,
-                "temperature": temperature,
+                # "temperature": temperature,
+                # "max_tokens": max_tokens,
                 "system_prompt": system_prompt,
             },
             f,

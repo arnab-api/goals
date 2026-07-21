@@ -528,6 +528,7 @@ def apply_goalscope(
     goalscope_prompt: Optional[str] = None,
     include_noncode: bool = False,
     save_path: Optional[str] = None,
+    token_positions: Optional[list[int]] = None,
 ) -> list[dict]:
     """Run GoalScope on a single prompt.
 
@@ -575,6 +576,11 @@ def apply_goalscope(
         save_path: When set (e.g. ``"…/scope.html"``), write the rendered HTML to
             this path.  Saving happens regardless of ``show``.  ``None`` (default)
             saves nothing.
+        token_positions: Absolute token indices (in the tokenization of ``prompt``) to
+            extract + generate at.  Must fall inside the ``<code>`` segment.  ``None``
+            (default) uses every code-segment token.  Restricting to a handful of
+            positions (e.g. the anchors) skips generation for all others and is much
+            faster.
 
     Returns:
         List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` and
@@ -625,6 +631,17 @@ def apply_goalscope(
         code_start, code_end = 0, len(src_ids)
 
     seg_positions = list(range(code_start, code_end))
+    if token_positions is not None:
+        # Restrict extraction + generation to the requested positions (must lie inside the
+        # <code> segment). Steering-source extraction and generation both key off seg_positions,
+        # so this is all that's needed to skip the other code tokens — much faster.
+        allowed = set(seg_positions)
+        seg_positions = [int(p) for p in token_positions if int(p) in allowed]
+        if not seg_positions:
+            raise ValueError(
+                "token_positions is empty after intersecting with the <code> segment "
+                f"[{code_start}, {code_end})"
+            )
     n_seg = len(seg_positions)
 
     # Tokenize GoalScope dest once

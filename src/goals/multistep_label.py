@@ -172,7 +172,6 @@ def label_generation(
     full_prompt: str,
     generation: str,
     use_cache: bool = True,
-    oracle_temperature: float = 0.0,
     oracle_max_tokens: int = 4000,
 ) -> LabeledGeneration:
     """Label which token range in `full_prompt + generation` implements which step.
@@ -201,7 +200,6 @@ def label_generation(
         oracle_prompt,
         use_cache=use_cache,
         max_tokens=oracle_max_tokens,
-        temperature=oracle_temperature,
         system_prompt=_ORACLE_SYSTEM,
     )
     parsed = parse_oracle_response(resp, n_steps=len(sample.steps))
