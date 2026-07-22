@@ -513,7 +513,7 @@ def _build_goalscope_prompt(mt) -> str:
 
 
 def apply_goalscope(
-    prompt: str,
+    prompt: "str | TokenizerOutput",
     *,
     mt,
     selected_heads: list[tuple[int, int]],
@@ -550,7 +550,12 @@ def apply_goalscope(
       ``headpatched_generate_batch``.
 
     Args:
-        prompt: Full text (prompt + generation) to analyse.
+        prompt: Full text (prompt + generation) to analyse, OR a pre-tokenized
+            ``TokenizerOutput``.  A string is tokenized here and the ``<code>``
+            segment is auto-located.  A ``TokenizerOutput`` is used as-is — token
+            positions then align exactly with the caller's own tokenization and
+            the prompt is not re-tokenized, but the whole sequence is scoped (no
+            string to find ``<code>`` in), so pass ``token_positions`` to restrict.
         mt: ModelandTokenizer.
         selected_heads: ``(layer, head_idx)`` pairs from the trained head mask.
         strategy: ``"additive"`` (default) or ``"replace"``.  See above.
@@ -608,38 +613,50 @@ def apply_goalscope(
     if goalscope_prompt is None:
         goalscope_prompt = _build_goalscope_prompt(mt)
 
-    # Tokenize with offsets
-    src_tokenized = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
-    src_offsets = src_tokenized.pop("offset_mapping")[0]
-    src_ids = src_tokenized["input_ids"][0].tolist()
-    text_tokens = [mt.tokenizer.decode([t]) for t in src_ids]
+    # Source tokenization — accept a raw ``str`` (tokenized here) or a pre-tokenized
+    # ``TokenizerOutput`` (used as-is, so token positions align EXACTLY with the caller's own
+    # tokenization and the prompt is not re-tokenized).  With a ``TokenizerOutput`` there is no
+    # string to locate ``<code>`` in, so the whole sequence is scoped — pass ``token_positions`` to
+    # restrict it.
+    if isinstance(prompt, TokenizerOutput):
+        src_tokenized = prompt
+        if "offset_mapping" in src_tokenized:
+            src_tokenized.pop("offset_mapping")
+        src_ids = src_tokenized["input_ids"][0].tolist()
+        text_tokens = [mt.tokenizer.decode([t]) for t in src_ids]
+        code_start, code_end = 0, len(src_ids)
+    else:
+        src_tokenized = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
+        src_offsets = src_tokenized.pop("offset_mapping")[0]
+        src_ids = src_tokenized["input_ids"][0].tolist()
+        text_tokens = [mt.tokenizer.decode([t]) for t in src_ids]
 
-    # Find <code> … </code> segment; fall back to full sequence
-    try:
-        code_start, _ = find_token_range(
-            string=prompt, substring="<code>", tokenizer=mt.tokenizer,
-            occurrence=1, offset_mapping=src_offsets,
-        )
-        if prompt.count("</code>") > 1:
-            _, code_end = find_token_range(
-                string=prompt, substring="</code>", tokenizer=mt.tokenizer,
+        # Find <code> … </code> segment; fall back to full sequence
+        try:
+            code_start, _ = find_token_range(
+                string=prompt, substring="<code>", tokenizer=mt.tokenizer,
                 occurrence=1, offset_mapping=src_offsets,
             )
-        else:
-            code_end = len(src_ids)
-    except Exception:
-        code_start, code_end = 0, len(src_ids)
+            if prompt.count("</code>") > 1:
+                _, code_end = find_token_range(
+                    string=prompt, substring="</code>", tokenizer=mt.tokenizer,
+                    occurrence=1, offset_mapping=src_offsets,
+                )
+            else:
+                code_end = len(src_ids)
+        except Exception:
+            code_start, code_end = 0, len(src_ids)
 
     seg_positions = list(range(code_start, code_end))
     if token_positions is not None:
-        # Restrict extraction + generation to the requested positions (must lie inside the
-        # <code> segment). Steering-source extraction and generation both key off seg_positions,
-        # so this is all that's needed to skip the other code tokens — much faster.
+        # Restrict extraction + generation to the requested positions (must lie inside the scoped
+        # segment). Steering-source extraction and generation both key off seg_positions, so this is
+        # all that's needed to skip the other tokens — much faster.
         allowed = set(seg_positions)
         seg_positions = [int(p) for p in token_positions if int(p) in allowed]
         if not seg_positions:
             raise ValueError(
-                "token_positions is empty after intersecting with the <code> segment "
+                "token_positions is empty after intersecting with the scoped segment "
                 f"[{code_start}, {code_end})"
             )
     n_seg = len(seg_positions)
