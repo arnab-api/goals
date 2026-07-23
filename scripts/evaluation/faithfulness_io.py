@@ -44,6 +44,7 @@ def run_leaf_name(config: dict) -> str:
         f"layers={lr[0]}-{lr[1]}",
         f"nsteer={config['n_steer_tokens']}",
         f"maxnew={config['max_new_tokens']}",
+        f"span={config.get('span_source', 'rule')}",
         f"dtype={config.get('datatype', 'int')}",
         f"nspec={config['n_specs']}",
         f"nc={'-'.join(map(str, config['num_conditions']))}",

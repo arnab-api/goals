@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def ask_claude(
     prompt: str,
     max_tokens: int = 2048,
-    # temperature: float = 0.6,
+    temperature: float = 0.6,
     use_cache: bool = True,
     model_name: str = "claude-sonnet-5",
     system_prompt: str = "You are a helpful assistant.",
@@ -24,7 +24,7 @@ def ask_claude(
     )
     ##################################################
     hash_val = hashlib.md5(
-        f"{prompt}__{max_tokens=}".encode()
+        f"{system_prompt}__{prompt}__{max_tokens=}".encode()
     ).hexdigest()
     if use_cache:
         cache_file = os.path.join(CLAUDE_CACHE_DIR, f"{hash_val}.json")
@@ -33,13 +33,11 @@ def ask_claude(
             with open(cache_file, "r") as f:
                 json_data = json.load(f)
                 return json_data["response"]
-
-    response = client.messages.create(
-        model=model_name,
-        max_tokens=max_tokens,
-        # temperature=temperature, # deptricated starting from the 5 series of anthropic models
-        system=system_prompt,
-        messages=[
+    request_kwargs = {
+        "model": model_name,
+        "max_tokens": max_tokens,
+        "system": system_prompt,
+        "messages": [
             {
                 "role": "user",
                 "content": [
@@ -50,6 +48,15 @@ def ask_claude(
                 ],
             }
         ],
+    }
+    if "-5" not in model_name:
+        request_kwargs["temperature"] = temperature
+    else:
+        logger.warning(
+            f"temperature parameter is deprecated for {model_name} - ignoring"
+        )
+    response = client.messages.create(
+        **request_kwargs
     )
     response = response.content[0].text
 
@@ -60,8 +67,8 @@ def ask_claude(
                 "response": response,
                 "model": model_name,
                 "hash": hash_val,
-                # "temperature": temperature,
-                # "max_tokens": max_tokens,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
                 "system_prompt": system_prompt,
             },
             f,

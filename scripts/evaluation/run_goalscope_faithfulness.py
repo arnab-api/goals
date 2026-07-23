@@ -160,6 +160,34 @@ def generate_completion(mt, prompt, max_new_tokens):
     return greedy_continue(mt, **inp, max_new_tokens=max_new_tokens)
 
 
+def rule_based_spans(full_text, gen_char_start, n_conditions):
+    """Per-condition impl_span for naming="letters", purely rule-based (no oracle).
+    span[k] = code between `<letter_k> =` and the next present `<letter> =` line; for the last
+    present letter, up to the terminal print/return. Returns list[str|None] (None if not found)."""
+    gen = full_text[gen_char_start:]
+    starts = []
+    for k in range(n_conditions):
+        letter = chr(97 + k)
+        m = re.search(rf"(?m)^[ \t]*{re.escape(letter)}\s*=(?!=)", gen)  # assignment, not `==`
+        starts.append(m.start() if m else None)
+    present = [s for s in starts if s is not None]
+    if not present:
+        return [None] * n_conditions
+    last_start = max(present)
+    mterm = re.search(r"(?m)^[ \t]*(?:print|return)\b", gen[last_start:])  # terminal statement
+    term = last_start + mterm.start() if mterm else len(gen)
+    spans = []
+    for k in range(n_conditions):
+        s = starts[k]
+        if s is None:
+            spans.append(None)
+            continue
+        later = [t for t in starts[k + 1:] if t is not None and t > s]
+        e = min(later) if later else term
+        spans.append(gen[s:e].strip())
+    return spans
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Anchors
 # ══════════════════════════════════════════════════════════════════════════════
@@ -195,19 +223,21 @@ def line_anchors(full_text, offsets, var, gen_char_start):
     return {k: v for k, v in out.items() if v is not None}
 
 
-def anchors_for_sample(mt, full_text, prompt, labeled):
+def anchors_for_sample(mt, full_text, prompt, conditions, impl_spans):
+    """Per-condition rows {cond, var, condition, impl_span, anchors}. `conditions` and `impl_spans`
+    are aligned by index (letter k -> chr(97+k)); source-agnostic (rule- or oracle-derived)."""
     enc = prepare_input(prompts=full_text, tokenizer=mt, return_offsets_mapping=True)
     offsets = [tuple(p) for p in enc.pop("offset_mapping")[0].tolist()]
     gen_char_start = len(prompt)
     rows = []
-    for k, sl in enumerate(labeled.labels):
+    for k, (cond_text, impl) in enumerate(zip(conditions, impl_spans)):
         var = chr(97 + k)
         rows.append(
             dict(
                 cond=k,
                 var=var,
-                condition=sl.step_text,
-                impl_span=sl.gen_code.strip(),
+                condition=cond_text,
+                impl_span=(impl or "").strip(),
                 anchors=line_anchors(full_text, offsets, var, gen_char_start),
             )
         )
@@ -320,6 +350,10 @@ def parse_args():
     ap.add_argument(
         "--gen_max_new_tokens", type=int, default=256, help="body generation budget"
     )
+    ap.add_argument(
+        "--span_source", default="rule", choices=["rule", "oracle"],
+        help="impl-span labelling: 'rule' (letters-based, no oracle) | 'oracle' (label_generation)",
+    )
     ap.add_argument("--overwrite", action="store_true")
     logging_utils.add_logging_args(ap)  # -v (DEBUG) / -q (WARNING); default INFO
     return ap.parse_args()
@@ -357,6 +391,7 @@ def main():
         num_conditions=list(args.num_conditions),
         seed=args.seed,
         gen_max_new_tokens=args.gen_max_new_tokens,
+        span_source=args.span_source,
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
         hard_rubric_tag=_HARD_TAG,
@@ -398,8 +433,22 @@ def main():
         prompt = build_prompt(mt, sample)
         completion = generate_completion(mt, prompt, args.gen_max_new_tokens)
         full_text = prompt + completion
-        labeled = label_generation(mt, sample, prompt, completion, use_cache=True)
-        rows = anchors_for_sample(mt, full_text, prompt, labeled)
+
+        # impl-span + condition text, either rule-based (letters, no oracle) or oracle-labelled
+        if args.span_source == "rule":
+            conditions = list(sample.spec.spec_texts)                    # ground-truth descriptions
+            impl_spans = rule_based_spans(full_text, len(prompt), len(sample.spec.predicate_ids))
+            labels_meta = [dict(step_text=c, gen_code=(s or ""), gen_token_range=None)
+                           for c, s in zip(conditions, impl_spans)]
+        else:  # oracle
+            labeled = label_generation(mt, sample, prompt, completion, use_cache=True)
+            conditions = [sl.step_text for sl in labeled.labels]
+            impl_spans = [sl.gen_code.strip() for sl in labeled.labels]
+            labels_meta = [dict(step_text=sl.step_text, gen_code=sl.gen_code,
+                                gen_token_range=list(sl.gen_token_range) if sl.gen_token_range else None)
+                           for sl in labeled.labels]
+
+        rows = anchors_for_sample(mt, full_text, prompt, conditions, impl_spans)
         conds = [r["condition"] for r in rows]
         apos = sorted({p for r in rows for p in r["anchors"].values()})
         if not apos:
@@ -455,16 +504,7 @@ def main():
                 predicate_ids=list(sample.spec.predicate_ids),
                 prompt=prompt,
                 completion=completion,
-                labels=[
-                    dict(
-                        step_text=sl.step_text,
-                        gen_code=sl.gen_code,
-                        gen_token_range=list(sl.gen_token_range)
-                        if sl.gen_token_range
-                        else None,
-                    )
-                    for sl in labeled.labels
-                ],
+                labels=labels_meta,
                 anchors=[
                     dict(cond=r["cond"], var=r["var"], anchors=r["anchors"])
                     for r in rows
