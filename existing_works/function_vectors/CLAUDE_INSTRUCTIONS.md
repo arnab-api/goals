@@ -56,27 +56,58 @@ Qwen is not in that list, so to reproduce the real localization you must run CIE
 task, average the `indirect_effect` tensors, then take top-k. The `antonym` job alone gives you
 single-task CIE, not the universal head set.
 
-## Running (reference script)
-```bash
-cd existing_works/function_vectors/src
-HF_CACHE=/disk/u/models TOKENIZERS_PARALLELISM=false ../.venv/bin/python \
-  compute_indirect_effect.py \
-  --model_name Qwen/Qwen2.5-Coder-32B-Instruct \
-  --dataset_name antonym --device auto \
-  --n_shots 10 --n_trials 25 --seed 42 \
-  --save_path_root ../results
-```
-- Auto-computes `mean_head_activations` first if absent, then the CIE sweep.
-- Outputs → `../results/<dataset>/<dataset>_{mean_head_activations,indirect_effect}.pt`.
-- `--device auto` shards across visible GPUs; the script warns loudly if any layer is
-  offloaded to CPU/disk (that makes each forward ~100× slower — give it more GPUs instead).
+## Running — full multi-task localization (recommended: the port)
 
-Job entry: `job_list/qwen32b_fv_head_cma.json` (parent repo).
+We drive runs with the numerically-identical port `scripts/fv/localize_fv_cma.py` (parent repo).
+Per-dataset CIE, run from the **project root** (the port resolves FV src + `dataset_files`
+via absolute paths, so no `cd` needed):
+```bash
+HF_CACHE=/disk/u/models TOKENIZERS_PARALLELISM=false \
+  existing_works/function_vectors/.venv/bin/python scripts/fv/localize_fv_cma.py \
+  --model_name Qwen/Qwen2.5-Coder-32B-Instruct --dataset_name antonym --device auto \
+  --n_shots 10 --n-examples-per-relation 200 --seed 42 \
+  --save_path_root existing_works/function_vectors/results
+```
+- `--n-examples-per-relation` (default **200**) = how many test examples per relation to
+  CMA-sweep for the CIE. `--n_trials` (default 25) controls only the mean-activation prep step.
+- Auto-computes `mean_head_activations` first if absent (cached + reused on restart), then
+  the CIE sweep.
+- Outputs → `results/<dataset>/<dataset>_{mean_head_activations,indirect_effect}.pt`
+  (`indirect_effect` is `(n_examples_per_relation, n_layers, n_heads)`).
+- `--device auto` shards across visible GPUs; warns loudly on CPU/disk offload (~100× slower).
+- **CIE checkpointing (default on):** after every swept example the partial tensor is dumped
+  atomically to `results/<dataset>/<dataset>_indirect_effect.ckpt.pt`. Re-run the identical
+  command to resume from the last completed example (a resumed run is **bit-for-bit identical**
+  to an uninterrupted one — the RNG stream is replayed). The checkpoint is deleted on
+  completion; a finished dataset (final `.pt` present, no checkpoint) is skipped, so re-running
+  the 57-job list is idempotent. `--overwrite` forces a clean recompute.
+
+**Job list:** `job_list/qwen32b_fv_head_cma.json` (parent repo) has **one job per dataset** for
+the full 57-task suite. ⚠️ Cost: 200 examples × 64L × 40H ≈ 0.5 M patched forwards/dataset
+(~hours each on 32B). Run the jobs across **disjoint GPU sets**, and/or trim the job list to a
+subset — the repo's canonical eval set is `antonym, capitalize, country-capital, english-french,
+present-past, singular-plural`.
+
+### Aggregate → universal FV heads
+Once the per-dataset `indirect_effect.pt`s exist, average them into the universal head set:
+```bash
+existing_works/function_vectors/.venv/bin/python scripts/fv/aggregate_fv_heads.py \
+  --results_root existing_works/function_vectors/results \
+  --n_top_heads 10 --model_name Qwen/Qwen2.5-Coder-32B-Instruct \
+  --out existing_works/function_vectors/results/universal_fv_heads.json
+```
+Task-equal weighting by default (each relation weighted equally, as in the paper); pass
+`--weight example` to weight every swept example equally, or `--datasets a b c` for a subset.
+Writes the ranked `top_heads` JSON + a `*_grid.pt` of the full averaged `(L, H)` effect.
+
+### Reference script (kept as the exact-match baseline, unchanged)
+`src/compute_indirect_effect.py` is pure upstream + the Qwen branch; the port reproduces it
+bit-for-bit. Use it only to re-verify parity — new runs should use the port.
 
 ## Smoke test (fast, small model)
 ```bash
-cd existing_works/function_vectors/src
-HF_CACHE=/disk/u/models ../.venv/bin/python compute_indirect_effect.py \
-  --model_name Qwen/Qwen2.5-Coder-7B-Instruct --dataset_name antonym \
-  --device auto --n_shots 4 --n_trials 2 --seed 42 --save_path_root ../results
+HF_CACHE=/disk/u/models existing_works/function_vectors/.venv/bin/python \
+  scripts/fv/localize_fv_cma.py --model_name Qwen/Qwen2.5-Coder-7B-Instruct \
+  --dataset_name antonym --device auto --n_shots 4 --n_trials 2 \
+  --n-examples-per-relation 2 --seed 42 --save_path_root /tmp/fv_port
 ```

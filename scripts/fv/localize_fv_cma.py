@@ -18,7 +18,8 @@ Runs in the FV uv venv (needs FV src on sys.path + matched torch/transformers):
 
     existing_works/function_vectors/.venv/bin/python scripts/fv/localize_fv_cma.py \
         --model_name Qwen/Qwen2.5-Coder-7B-Instruct --dataset_name antonym \
-        --device cuda --n_shots 4 --n_trials 2 --seed 42 --save_path_root /tmp/fv_port
+        --device cuda --n_shots 4 --n_trials 2 --n-examples-per-relation 2 \
+        --seed 42 --save_path_root /tmp/fv_port
 
 Validation (see --compare_*): reproduces the reference on Qwen2.5-Coder-7B antonym.
 """
@@ -58,6 +59,13 @@ _T0 = time.time()
 def log(msg):
     el = int(time.time() - _T0)
     print(f"[+{el // 60:02d}:{el % 60:02d}] {msg}", flush=True)
+
+
+def _atomic_save(obj, path):
+    """Write then os.replace so a crash never leaves a half-written checkpoint."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -162,24 +170,46 @@ def head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer)
     return out
 
 
-def compute_indirect_effect(dataset, mean_activations, model, mc, tokenizer, n_shots, n_trials, prefixes, separators):
+def compute_indirect_effect(dataset, mean_activations, model, mc, tokenizer, n_shots, n_trials,
+                            prefixes, separators, ckpt_path=None, meta=None, overwrite=False):
     """CIE tensor (n_trials, n_layers, n_heads). Mirrors FV compute_indirect_effect
-    (shuffle_labels=True per trial, last_token_only)."""
+    (shuffle_labels=True per trial, last_token_only).
+
+    Per-trial checkpointing (when ckpt_path is given): after each completed trial the partial
+    tensor + done-count are dumped atomically. On resume the tensor is restored and the loop
+    fast-forwards past done trials — but it STILL rebuilds each skipped trial's prompt so the
+    numpy RNG stream is advanced identically, keeping a resumed run bit-for-bit equal to an
+    uninterrupted one (head_sweep_trial itself consumes no RNG)."""
     dummy = get_dummy_token_labels(n_shots, tokenizer=tokenizer, prefixes=prefixes,
                                    separators=separators, model_config=mc)
     filter_set = np.arange(len(dataset["valid"]))
     prepend_bos = not mc["prepend_bos"]
     indirect_effect = torch.zeros(n_trials, mc["n_layers"], mc["n_heads"])
 
+    resume_from = 0
+    if ckpt_path and not overwrite and os.path.exists(ckpt_path):
+        blob = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        if blob.get("meta") != meta:
+            raise SystemExit(f"[checkpoint] config mismatch at {ckpt_path}; pass --overwrite to discard.\n"
+                             f"  existing: {blob.get('meta')}\n  current:  {meta}")
+        resume_from = blob["done_trials"]
+        indirect_effect = blob["indirect_effect"]
+        log(f"resuming CIE from checkpoint {ckpt_path}: {resume_from}/{n_trials} trials already done")
+
     for n in range(n_trials):
+        # build the prompt every trial (this is what consumes the RNG) so resume stays exact
         word_pairs = dataset["train"][np.random.choice(len(dataset["train"]), n_shots, replace=False)]
         word_pairs_test = dataset["valid"][np.random.choice(filter_set, 1, replace=False)]
         prompt_data = word_pairs_to_prompt_data(
             word_pairs, query_target_pair=word_pairs_test, shuffle_labels=True,
             prepend_bos_token=prepend_bos, prefixes=prefixes, separators=separators,
         )
+        if n < resume_from:
+            continue  # RNG advanced above; this trial's result is already in the restored tensor
         indirect_effect[n] = head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer)
-        log(f"  trial {n + 1}/{n_trials} done")
+        if ckpt_path:
+            _atomic_save({"done_trials": n + 1, "indirect_effect": indirect_effect, "meta": meta}, ckpt_path)
+        log(f"  trial {n + 1}/{n_trials} done" + (" [checkpointed]" if ckpt_path else ""))
     return indirect_effect
 
 
@@ -214,12 +244,19 @@ def parse_args():
     ap.add_argument("--save_path_root", type=str, required=True, help="results go to <root>/<dataset>/")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n_shots", type=int, default=10)
-    ap.add_argument("--n_trials", type=int, default=25)
+    ap.add_argument("--n_trials", type=int, default=25,
+                    help="trials for the mean-head-activation extraction (task-mean prep step)")
+    ap.add_argument("--n-examples-per-relation", dest="n_examples_per_relation", type=int, default=200,
+                    help="how many test examples per relation (dataset) to CMA-sweep for the CIE "
+                         "(= number of indirect-effect trials). Note: to reproduce a golden CIE "
+                         "bit-for-bit via --compare_indirect_effect, set this to the golden's trial count.")
     ap.add_argument("--test_split", type=float, default=0.3)
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--mean_activations_path", type=str, default=None,
                     help="load a precomputed mean-activation .pt instead of computing it")
     ap.add_argument("--stage", choices=["mean", "cie", "both"], default="both")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="ignore any existing CIE checkpoint / completed indirect_effect.pt and recompute")
     ap.add_argument("--prefixes", type=json.loads, default={"input": "Q:", "output": "A:", "instructions": ""})
     ap.add_argument("--separators", type=json.loads, default={"input": "\n", "output": "\n\n", "instructions": ""})
     ap.add_argument("--revision", type=str, default=None)
@@ -270,18 +307,33 @@ def main():
         log("stage=mean: skipping indirect effect. done.")
         return
 
-    # ── causal indirect effect ──
-    log(f"computing indirect effect: {args.n_trials} trials x {mc['n_layers']}L x {mc['n_heads']}H "
-        f"= {args.n_trials * mc['n_layers'] * mc['n_heads']} patched forwards ...")
-    indirect_effect = compute_indirect_effect(
-        dataset, mean_activations, model, mc, tokenizer, args.n_shots, args.n_trials, args.prefixes, args.separators
-    )
+    # ── causal indirect effect (per-trial checkpointed) ──
+    n_cie = args.n_examples_per_relation
     ie_path = os.path.join(save_path_root, f"{args.dataset_name}_indirect_effect.pt")
-    torch.save(indirect_effect, ie_path)
-    with open(os.path.join(save_path_root, "indirect_effect_args.txt"), "w") as f:
-        json.dump({**vars(args), "save_path_root": save_path_root, "n_layers": mc["n_layers"],
-                   "n_heads": mc["n_heads"]}, f, indent=2)
-    log(f"DONE: indirect_effect {tuple(indirect_effect.shape)} -> {ie_path}")
+    ckpt_path = os.path.join(save_path_root, f"{args.dataset_name}_indirect_effect.ckpt.pt")
+    cie_meta = {"model_name": args.model_name, "dataset_name": args.dataset_name, "seed": args.seed,
+                "n_shots": args.n_shots, "n_examples_per_relation": n_cie, "test_split": args.test_split,
+                "prefixes": args.prefixes, "separators": args.separators,
+                "n_layers": mc["n_layers"], "n_heads": mc["n_heads"], "prepend_bos": mc["prepend_bos"]}
+
+    if os.path.exists(ie_path) and not os.path.exists(ckpt_path) and not args.overwrite:
+        # dataset already finished on a prior run -> skip the sweep (re-runnable job list)
+        log(f"indirect effect already complete <- {ie_path} (pass --overwrite to recompute); skipping CIE")
+        indirect_effect = torch.load(ie_path, map_location="cpu")
+    else:
+        log(f"computing indirect effect: {n_cie} examples/relation x {mc['n_layers']}L x {mc['n_heads']}H "
+            f"= {n_cie * mc['n_layers'] * mc['n_heads']} patched forwards ...")
+        indirect_effect = compute_indirect_effect(
+            dataset, mean_activations, model, mc, tokenizer, args.n_shots, n_cie, args.prefixes, args.separators,
+            ckpt_path=ckpt_path, meta=cie_meta, overwrite=args.overwrite,
+        )
+        torch.save(indirect_effect, ie_path)
+        with open(os.path.join(save_path_root, "indirect_effect_args.txt"), "w") as f:
+            json.dump({**vars(args), "save_path_root": save_path_root, "n_layers": mc["n_layers"],
+                       "n_heads": mc["n_heads"]}, f, indent=2)
+        if os.path.exists(ckpt_path):
+            os.remove(ckpt_path)  # completed -> drop the resume checkpoint
+        log(f"DONE: indirect_effect {tuple(indirect_effect.shape)} -> {ie_path}")
 
     if args.compare_indirect_effect:
         report_match("indirect_effect", indirect_effect, args.compare_indirect_effect)
