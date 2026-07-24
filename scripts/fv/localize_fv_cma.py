@@ -1,202 +1,290 @@
 #!/usr/bin/env python
-"""Script 1 — FV head localization via per-head causal mediation analysis (Todd et al. 2024).
+"""Independent port of the Function-Vectors head-level CMA (causal indirect effect, CIE).
 
-Replicates the AIE computation of `function_vectors/src/compute_indirect_effect.py` in this
-codebase, on Qwen2.5-Coder-32B-Instruct, so the resulting FV heads can be compared head-for-head
-against the goal / goalscope / gaze heads.
+Reimplements the *method* — per-head mean-activation extraction and the systematic
+(layer, head) causal sweep — in a single clean driver, while REUSING the FV repo's
+deterministic data/prompt plumbing (dataset split, ICL prompt construction, token
+labelling, answer-token id). Because the plumbing + seed order are identical, at a
+fixed seed this reproduces the reference
+``existing_works/function_vectors/src/compute_indirect_effect.py`` bit-for-bit — which
+is the point: if our port matches, we own a clean entrypoint we can build on.
 
-Method (one attention head at a time):
-  1. For each task t, compute the mean head activation ā_ℓj^t = mean o_proj input at the last
-     token over `--mean-trials` CLEAN N-shot ICL prompts (fv_common.compute_mean_head_activations).
-  2. Build `--n-trials` CORRUPTED prompts p̃ (shuffle_labels=True) per task, each with a real query
-     whose true first answer-token id we track.
-  3. Baseline: p̃'s probability of the target first token, unpatched.
-  4. For every (layer ℓ, head j): replace ONLY that head's o_proj-input slice at the last token
-     with ā_ℓj^t (alpha=1 full replace, mask=1 on the single head) via forward_with_src_replacement,
-     and measure CIE = f(p̃ | a_ℓj:=ā)[y_q] − f(p̃)[y_q] on the target's FIRST token.
-  5. AIE(ℓ,j) = mean CIE over trials within a task, then equal-weighted mean over tasks (Eq 4).
+The reimplemented pieces (what could actually diverge, hence what the exact-match test
+guards): the mean-activation trial loop + per-head averaging, and the head-sweep
+intervention (split o_proj input by head, overwrite the last query-token's head slice
+with its task-mean, recompute the bias-free o_proj output).
 
-Only layer ℓ is hooked per head, so downstream layers propagate the perturbation naturally — exact
-CMA, 64× fewer hooks than masking all layers. Corrupted prompts are batched across tasks (each row
-carries its own task mean and target id), so one forward per (ℓ,j) covers a whole chunk.
+Runs in the FV uv venv (needs FV src on sys.path + matched torch/transformers):
 
-The AIE tensor is saved to results/fv/<model>/aie_<tag>.pt for threshold/top-K selection in a
-notebook. Nothing is thresholded here.
+    existing_works/function_vectors/.venv/bin/python scripts/fv/localize_fv_cma.py \
+        --model_name Qwen/Qwen2.5-Coder-7B-Instruct --dataset_name antonym \
+        --device cuda --n_shots 4 --n_trials 2 --seed 42 --save_path_root /tmp/fv_port
 
-Usage:
-    conda run -n goals python scripts/fv/localize_fv_cma.py \
-        --model Qwen/Qwen2.5-Coder-32B-Instruct --tasks all --n-trials 25 --mean-trials 100
+Validation (see --compare_*): reproduces the reference on Qwen2.5-Coder-7B antonym.
 """
 import argparse
+import json
 import os
-import random
+import re
 import sys
 import time
 
-sys.path.append(".")
-
 import numpy as np
 import torch
-from tqdm import tqdm
+from baukit import TraceDict
 
-from src.models import ModelandTokenizer
-from src.goals.head_loc_attn import HeadMask, forward_with_src_replacement
-from src.tokens import prepare_input
-from src.utils import env_utils
-import logging
-
-from scripts.fv.fv_common import (
-    REPRESENTATIVE_TASKS,
-    build_icl_prompt,
-    compute_mean_head_activations,
-    first_answer_token_id,
-    list_abstractive_tasks,
-    load_fv_task,
+# ── bootstrap the FV repo src onto the path (deterministic plumbing we reuse) ──
+FV_SRC = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "existing_works", "function_vectors", "src")
 )
+if FV_SRC not in sys.path:
+    sys.path.insert(0, FV_SRC)
 
-logger = logging.getLogger(__name__)
+from utils.model_utils import load_gpt_model_and_tokenizer, set_seed          # noqa: E402
+from utils.prompt_utils import (                                              # noqa: E402
+    load_dataset,
+    word_pairs_to_prompt_data,
+    get_dummy_token_labels,
+    get_token_meta_labels,
+    compute_duplicated_labels,
+    update_idx_map,
+)
+from utils.eval_utils import get_answer_id                                    # noqa: E402
+from utils.intervention_utils import get_module                              # noqa: E402
 
-
-def _resolve_tasks(spec: str) -> list[str]:
-    if spec == "all":
-        return list_abstractive_tasks()
-    if spec == "representative":
-        return REPRESENTATIVE_TASKS
-    return [t.strip() for t in spec.split(",") if t.strip()]
-
-
-@torch.inference_mode()
-def _last_token_probs(mt, inputs, token_ids: torch.Tensor) -> torch.Tensor:
-    """Plain (unpatched) forward → softmax at last token → gather `token_ids` (batch,)."""
-    out = mt._model(**dict(inputs))
-    probs = torch.softmax(out.logits[:, -1, :].float(), dim=-1)  # (b, vocab)
-    return probs.gather(1, token_ids.view(-1, 1).to(probs.device)).squeeze(1).cpu()
+_T0 = time.time()
 
 
-@torch.inference_mode()
-def _patched_probs(mt, inputs, src_layer, mask, layer, token_ids) -> torch.Tensor:
-    """Single-head patched forward at last token → p(target first token) per row (batch,)."""
-    logits = forward_with_src_replacement(
-        mt, inputs, src_layer, mask, layers=[layer], alpha=1.0, patch_positions=[-1],
-    )  # (b, vocab)
-    probs = torch.softmax(logits.float(), dim=-1)
-    return probs.gather(1, token_ids.view(-1, 1).to(probs.device)).squeeze(1).cpu()
+def log(msg):
+    el = int(time.time() - _T0)
+    print(f"[+{el // 60:02d}:{el % 60:02d}] {msg}", flush=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Reimplemented method
+# ══════════════════════════════════════════════════════════════════════════════
+def _split_by_head(activations, mc):
+    """(..., resid_dim) -> (..., n_heads, head_dim) over the query heads (GQA-safe)."""
+    head_dim = mc["resid_dim"] // mc["n_heads"]
+    return activations.view(*activations.size()[:-1], mc["n_heads"], head_dim)
+
+
+def compute_mean_head_activations(dataset, model, mc, tokenizer, n_shots, n_trials, prefixes, separators):
+    """Task-mean of every head's o_proj-input activation, condensing multi-token words
+    into one slot. Mirrors FV get_mean_head_activations (shuffle_labels=False)."""
+    dummy = get_dummy_token_labels(n_shots, tokenizer=tokenizer, prefixes=prefixes,
+                                   separators=separators, model_config=mc)
+    head_dim = mc["resid_dim"] // mc["n_heads"]
+    store = torch.zeros(n_trials, mc["n_layers"], mc["n_heads"], len(dummy), head_dim)
+    filter_set = np.arange(len(dataset["valid"]))
+    prepend_bos = not mc["prepend_bos"]
+
+    for n in range(n_trials):
+        word_pairs = dataset["train"][np.random.choice(len(dataset["train"]), n_shots, replace=False)]
+        word_pairs_test = dataset["valid"][np.random.choice(filter_set, 1, replace=False)]
+        prompt_data = word_pairs_to_prompt_data(
+            word_pairs, query_target_pair=word_pairs_test, prepend_bos_token=prepend_bos,
+            shuffle_labels=False, prefixes=prefixes, separators=separators,
+        )
+        query = prompt_data["query_target"]["input"]
+        token_labels, prompt_string = get_token_meta_labels(
+            prompt_data, tokenizer, query, prepend_bos=mc["prepend_bos"]
+        )
+        inputs = tokenizer([prompt_string], return_tensors="pt").to(model.device)
+        idx_map, idx_avg = compute_duplicated_labels(token_labels, dummy)
+
+        with TraceDict(model, layers=mc["attn_hook_names"], retain_input=True, retain_output=False) as td:
+            model(**inputs)
+
+        # (layers, tokens, heads, head_dim) -> (layers, heads, tokens, head_dim)
+        stack = torch.vstack(
+            [_split_by_head(td[layer].input, mc) for layer in mc["attn_hook_names"]]
+        ).permute(0, 2, 1, 3)
+        filt = stack[:, :, list(idx_map.keys())]
+        for (i, j) in idx_avg.values():  # average activations of multi-token words
+            filt[:, :, idx_map[i]] = stack[:, :, i:j + 1].mean(axis=2)
+        store[n] = filt
+
+    return store.mean(dim=0)
+
+
+def _make_replace_hook(layer, head, mean_activations, qp_token_inds, idx_map, mc, model):
+    """baukit edit_output fn: overwrite the last query-token's (layer, head) slice of the
+    o_proj INPUT with its task-mean, then recompute the (bias-free) o_proj OUTPUT."""
+    head_dim = mc["resid_dim"] // mc["n_heads"]
+
+    def rep(output, layer_name, inputs):
+        if isinstance(inputs, tuple):
+            inputs = inputs[0]
+        original_shape = inputs.shape
+        inputs = inputs.view(*inputs.size()[:-1], mc["n_heads"], head_dim)
+        for token_n in qp_token_inds:  # last_token_only: write into the final position
+            inputs[-1, -1, head] = mean_activations[layer, head, idx_map[token_n]]
+        inputs = inputs.view(*original_shape)
+        out_proj = get_module(model, layer_name).weight  # Qwen/Llama o_proj: bias-free Linear
+        return torch.matmul(inputs, out_proj.T)
+
+    return rep
+
+
+def head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer):
+    """Indirect effect (n_layers, n_heads) for one ICL prompt: for each head, replace its
+    last-token activation with the task-mean and measure Δ prob of the answer token."""
+    device = model.device
+    query = prompt_data["query_target"]["input"]
+    token_labels, prompt_string = get_token_meta_labels(
+        prompt_data, tokenizer, query=query, prepend_bos=mc["prepend_bos"]
+    )
+    idx_map, idx_avg = compute_duplicated_labels(token_labels, dummy)
+    idx_map = update_idx_map(idx_map, idx_avg)
+
+    # query_predictive token position(s) — the slot whose mean we splice in (last_token_only)
+    qp_token_inds = [x[0] for x in token_labels if re.match(r"^query_predictive_token$", x[2])]
+
+    target = prompt_data["query_target"]["output"]
+    token_id_of_interest = get_answer_id(prompt_string, target, tokenizer)
+    if isinstance(token_id_of_interest, list):
+        token_id_of_interest = token_id_of_interest[:1]
+
+    inputs = tokenizer([prompt_string], return_tensors="pt").to(device)
+    clean_probs = torch.softmax(model(**inputs).logits[:, -1, :][0], dim=-1)
+
+    out = torch.zeros(mc["n_layers"], mc["n_heads"])
+    tid = torch.LongTensor(token_id_of_interest).to(device).squeeze()
+    for layer in range(mc["n_layers"]):
+        hook_name = mc["attn_hook_names"][layer]
+        for head in range(mc["n_heads"]):
+            fn = _make_replace_hook(layer, head, mean_activations, qp_token_inds, idx_map, mc, model)
+            with TraceDict(model, layers=[hook_name], edit_output=fn):
+                logits = model(**inputs).logits[:, -1, :]
+            probs = torch.softmax(logits, dim=-1)
+            out[layer, head] = (probs - clean_probs).index_select(1, tid).squeeze()
+    return out
+
+
+def compute_indirect_effect(dataset, mean_activations, model, mc, tokenizer, n_shots, n_trials, prefixes, separators):
+    """CIE tensor (n_trials, n_layers, n_heads). Mirrors FV compute_indirect_effect
+    (shuffle_labels=True per trial, last_token_only)."""
+    dummy = get_dummy_token_labels(n_shots, tokenizer=tokenizer, prefixes=prefixes,
+                                   separators=separators, model_config=mc)
+    filter_set = np.arange(len(dataset["valid"]))
+    prepend_bos = not mc["prepend_bos"]
+    indirect_effect = torch.zeros(n_trials, mc["n_layers"], mc["n_heads"])
+
+    for n in range(n_trials):
+        word_pairs = dataset["train"][np.random.choice(len(dataset["train"]), n_shots, replace=False)]
+        word_pairs_test = dataset["valid"][np.random.choice(filter_set, 1, replace=False)]
+        prompt_data = word_pairs_to_prompt_data(
+            word_pairs, query_target_pair=word_pairs_test, shuffle_labels=True,
+            prepend_bos_token=prepend_bos, prefixes=prefixes, separators=separators,
+        )
+        indirect_effect[n] = head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer)
+        log(f"  trial {n + 1}/{n_trials} done")
+    return indirect_effect
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Comparison helpers
+# ══════════════════════════════════════════════════════════════════════════════
+def report_match(name, ours, golden_path):
+    golden = torch.load(golden_path, map_location="cpu").float()
+    ours = ours.float()
+    if ours.shape != golden.shape:
+        log(f"[{name}] SHAPE MISMATCH ours={tuple(ours.shape)} golden={tuple(golden.shape)}")
+        return
+    exact = bool(torch.equal(ours, golden))
+    max_abs = float((ours - golden).abs().max())
+    log(f"[{name}] torch.equal={exact} | max_abs_diff={max_abs:.3e} | "
+        f"allclose(1e-5)={bool(torch.allclose(ours, golden, atol=1e-5, rtol=0))}")
+    if ours.dim() == 3:  # CIE (trials, L, H) -> top-head overlap of the trial-mean
+        mo, mg = ours.mean(0).flatten(), golden.mean(0).flatten()
+        k = min(10, mo.numel())
+        to, tg = set(torch.topk(mo, k).indices.tolist()), set(torch.topk(mg, k).indices.tolist())
+        log(f"[{name}] top-{k} head overlap = {len(to & tg)}/{k}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Driver
+# ══════════════════════════════════════════════════════════════════════════════
+def parse_args():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    ap.add_argument("--dataset_name", type=str, required=True)
+    ap.add_argument("--root_data_dir", type=str, default=os.path.join(FV_SRC, "..", "dataset_files"))
+    ap.add_argument("--save_path_root", type=str, required=True, help="results go to <root>/<dataset>/")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--n_shots", type=int, default=10)
+    ap.add_argument("--n_trials", type=int, default=25)
+    ap.add_argument("--test_split", type=float, default=0.3)
+    ap.add_argument("--device", type=str, default="cuda")
+    ap.add_argument("--mean_activations_path", type=str, default=None,
+                    help="load a precomputed mean-activation .pt instead of computing it")
+    ap.add_argument("--stage", choices=["mean", "cie", "both"], default="both")
+    ap.add_argument("--prefixes", type=json.loads, default={"input": "Q:", "output": "A:", "instructions": ""})
+    ap.add_argument("--separators", type=json.loads, default={"input": "\n", "output": "\n\n", "instructions": ""})
+    ap.add_argument("--revision", type=str, default=None)
+    ap.add_argument("--compare_mean_activations", type=str, default=None, help="golden mean-act .pt to diff against")
+    ap.add_argument("--compare_indirect_effect", type=str, default=None, help="golden CIE .pt to diff against")
+    return ap.parse_args()
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument("--tasks", default="all",
-                    help="'all' | 'representative' | comma-separated task names")
-    ap.add_argument("--n-shots", type=int, default=10)
-    ap.add_argument("--n-trials", type=int, default=25,
-                    help="corrupted prompts per task (CMA trials)")
-    ap.add_argument("--mean-trials", type=int, default=100,
-                    help="clean prompts per task for ā")
-    ap.add_argument("--batch", type=int, default=32, help="corrupted rows per forward chunk")
-    ap.add_argument("--mean-batch", type=int, default=16)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--tag", default=None, help="output filename tag (default: derived)")
-    args = ap.parse_args()
+    args = parse_args()
+    save_path_root = os.path.join(args.save_path_root, args.dataset_name)
+    os.makedirs(save_path_root, exist_ok=True)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     torch.set_grad_enabled(False)
+    log(f"loading model {args.model_name} (device={args.device}) ...")
+    model, tokenizer, mc = load_gpt_model_and_tokenizer(args.model_name, device=args.device, revision=args.revision)
+    log(f"model loaded: {mc['n_layers']} layers x {mc['n_heads']} heads | "
+        f"resid_dim={mc['resid_dim']} | prepend_bos={mc['prepend_bos']}")
+    dm = getattr(model, "hf_device_map", None)
+    if dm and any(str(v) in ("cpu", "disk") for v in dm.values()):
+        log("*** WARNING: part of the model is offloaded to CPU/disk — give this job MORE GPU memory ***")
 
-    tasks = _resolve_tasks(args.tasks)
-    logger.info(f"tasks ({len(tasks)}): {tasks}")
+    set_seed(args.seed)
+    log(f"loading dataset {args.dataset_name} (test_split={args.test_split}) ...")
+    dataset = load_dataset(args.dataset_name, root_data_dir=args.root_data_dir, test_size=args.test_split, seed=args.seed)
+    log(f"dataset: train={len(dataset['train'])} valid={len(dataset['valid'])} test={len(dataset['test'])}")
 
-    mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
-                           device_map="auto", attn_implementation="eager")
-    n_layer, n_head = mt.n_layer, mt.config.num_attention_heads
-    layers = list(range(n_layer))
-    logger.info(f"model {args.model}: n_layer={n_layer} n_head={n_head}")
+    # ── mean head activations (load or compute) ──
+    default_mean_path = os.path.join(save_path_root, f"{args.dataset_name}_mean_head_activations.pt")
+    mean_path = args.mean_activations_path
+    if mean_path is None and os.path.exists(default_mean_path):
+        mean_path = default_mean_path
+    if mean_path is not None and os.path.exists(mean_path):
+        log(f"loading mean activations <- {mean_path}")
+        mean_activations = torch.load(mean_path, map_location=model.device)
+    else:
+        log(f"computing mean head activations (n_shots={args.n_shots}, n_trials={args.n_trials}) ...")
+        mean_activations = compute_mean_head_activations(
+            dataset, model, mc, tokenizer, args.n_shots, args.n_trials, args.prefixes, args.separators
+        )
+        torch.save(mean_activations, default_mean_path)
+        log(f"mean activations done, shape={tuple(mean_activations.shape)} -> {default_mean_path}")
 
-    # ── per-task: mean ā + corrupted rows (prompt, target-first-token id) ──────
-    rng = np.random.RandomState(args.seed)
-    mean_by_task: dict[str, torch.Tensor] = {}
-    rows: list[dict] = []  # {task, prompt, target_id}
-    for t in tasks:
-        task = load_fv_task(t, seed=args.seed)
-        logger.info(f"[{t}] train={len(task.train)} valid={len(task.valid)} — computing ā")
-        mean_by_task[t] = compute_mean_head_activations(
-            mt, task, layers, n_shots=args.n_shots, n_trials=args.mean_trials,
-            batch_size=args.mean_batch, seed=args.seed,
-        )  # (L, n_embd)
-        n_added = 0
-        for _ in range(args.n_trials):
-            demo_idx = rng.choice(len(task.train), args.n_shots, replace=False)
-            q = task.valid[int(rng.choice(len(task.valid)))]
-            demos = [task.train[i] for i in demo_idx]
-            prompt = build_icl_prompt(demos, q["input"], shuffle_labels=True,
-                                      rng=random.Random(int(rng.randint(1 << 30))))
-            try:
-                tid = first_answer_token_id(mt, prompt, q["output"])
-            except AssertionError:
-                continue
-            rows.append({"task": t, "prompt": prompt, "target_id": tid})
-            n_added += 1
-        logger.info(f"[{t}] corrupted rows: {n_added}")
+    if args.compare_mean_activations:
+        report_match("mean_act", mean_activations, args.compare_mean_activations)
 
-    logger.info(f"total corrupted rows: {len(rows)}")
+    if args.stage == "mean":
+        log("stage=mean: skipping indirect effect. done.")
+        return
 
-    # ── CMA sweep — accumulate per-task CIE sums ──────────────────────────────
-    cie_sum = {t: torch.zeros(n_layer, n_head) for t in tasks}
-    cie_cnt = {t: 0 for t in tasks}
-    total_forwards = n_layer * n_head * ((len(rows) + args.batch - 1) // args.batch)
-    logger.info(f"CMA: {n_layer}x{n_head} heads x {len(rows)} rows "
-                f"(~{total_forwards} patched forwards, batch={args.batch})")
+    # ── causal indirect effect ──
+    log(f"computing indirect effect: {args.n_trials} trials x {mc['n_layers']}L x {mc['n_heads']}H "
+        f"= {args.n_trials * mc['n_layers'] * mc['n_heads']} patched forwards ...")
+    indirect_effect = compute_indirect_effect(
+        dataset, mean_activations, model, mc, tokenizer, args.n_shots, args.n_trials, args.prefixes, args.separators
+    )
+    ie_path = os.path.join(save_path_root, f"{args.dataset_name}_indirect_effect.pt")
+    torch.save(indirect_effect, ie_path)
+    with open(os.path.join(save_path_root, "indirect_effect_args.txt"), "w") as f:
+        json.dump({**vars(args), "save_path_root": save_path_root, "n_layers": mc["n_layers"],
+                   "n_heads": mc["n_heads"]}, f, indent=2)
+    log(f"DONE: indirect_effect {tuple(indirect_effect.shape)} -> {ie_path}")
 
-    t0 = time.time()
-    for c0 in range(0, len(rows), args.batch):
-        chunk = rows[c0:c0 + args.batch]
-        prompts = [r["prompt"] for r in chunk]
-        target_ids = torch.tensor([r["target_id"] for r in chunk])
-        chunk_tasks = [r["task"] for r in chunk]
-        inputs = prepare_input(prompts=prompts, tokenizer=mt, padding_side="left")
-        # per-row source means stacked across layers -> (b, L, n_embd)
-        src = torch.stack([mean_by_task[r["task"]] for r in chunk])  # (b, L, n_embd)
-
-        p_base = _last_token_probs(mt, inputs, target_ids)  # (b,)
-
-        for ell in tqdm(layers, desc=f"chunk {c0//args.batch+1}", leave=False):
-            src_ell = src[:, ell:ell + 1, :]  # (b, 1, n_embd)
-            for j in range(n_head):
-                mask = HeadMask(1, n_head)
-                mask.values.data.zero_()
-                mask.values.data[0, j] = 1.0
-                p_pat = _patched_probs(mt, inputs, src_ell, mask, ell, target_ids)  # (b,)
-                cie = (p_pat - p_base)  # (b,)
-                for bi, tk in enumerate(chunk_tasks):
-                    cie_sum[tk][ell, j] += float(cie[bi])
-        for tk in chunk_tasks:
-            cie_cnt[tk] += 1
-        done = c0 + len(chunk)
-        logger.info(f"rows {done}/{len(rows)} | elapsed {time.time()-t0:.0f}s")
-
-    # per-task AIE, then equal-weighted mean over tasks (Eq 4)
-    aie_per_task = {t: (cie_sum[t] / max(cie_cnt[t], 1)) for t in tasks}
-    aie = torch.stack([aie_per_task[t] for t in tasks]).mean(0)  # (n_layer, n_head)
-
-    tag = args.tag or f"{args.tasks}_ns{args.n_shots}_nt{args.n_trials}"
-    out_dir = os.path.join(env_utils.DEFAULT_RESULTS_DIR, "fv", args.model.split("/")[-1])
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"aie_{tag}.pt")
-    torch.save({
-        "aie": aie,                                    # (n_layer, n_head)
-        "aie_per_task": aie_per_task,                  # {task: (n_layer, n_head)}
-        "tasks": tasks,
-        "n_rows_per_task": cie_cnt,
-        "model": args.model, "n_layer": n_layer, "n_head": n_head,
-        "config": vars(args),
-    }, out_path)
-    logger.info(f"saved AIE -> {out_path}")
-
-    # quick peek: top-10 heads by AIE
-    flat = torch.argsort(aie.flatten(), descending=True)[:10]
-    logger.info("top-10 heads by AIE:")
-    for f in flat.tolist():
-        l, h = divmod(f, n_head)
-        logger.info(f"  L{l:>2} H{h:>2}  AIE={aie[l, h]:+.4f}")
+    if args.compare_indirect_effect:
+        report_match("indirect_effect", indirect_effect, args.compare_indirect_effect)
 
 
 if __name__ == "__main__":
