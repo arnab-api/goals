@@ -277,7 +277,7 @@ def hard_faithfulness(readout, impl_span):
     resp = ask_claude(
         prompt=prompt,
         system_prompt=HARD_SYS,
-        max_tokens=8,
+        max_tokens=256,
         use_cache=True,
         model_name=ORACLE_MODEL,
     )
@@ -301,7 +301,7 @@ def kway_assign(readout, conditions):
     resp = ask_claude(
         prompt=prompt,
         system_prompt=_KWAY_SYS,
-        max_tokens=32,
+        max_tokens=256,
         use_cache=True,
         model_name=ORACLE_MODEL,
     )

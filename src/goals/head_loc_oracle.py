@@ -1203,7 +1203,7 @@ def _oracle_verify_pair(
         code_a=_code_with_docstring(sample_a),
         code_b=_code_with_docstring(sample_b),
     )
-    response = ask_claude(prompt, temperature=temperature, max_tokens=128)
+    response = ask_claude(prompt, temperature=temperature, max_tokens=256)
     first_line = response.strip().splitlines()[0] if response.strip() else ""
     verified = "VERDICT: YES" in first_line.upper()
     reason = response.strip()
