@@ -313,6 +313,49 @@ def kway_assign(readout, conditions):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Aggregation
+# ══════════════════════════════════════════════════════════════════════════════
+def compute_summary(records: list[dict], n_samples: int) -> dict:
+    """Per-anchor + overall hard_yes / kway_ok from a flat list of anchor records."""
+    by_anchor = {}
+    for aname in ANCHOR_ORDER:
+        grp = [r for r in records if r["anchor"] == aname]
+        if not grp:
+            continue
+        by_anchor[aname] = dict(
+            n=len(grp),
+            hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])),
+            kway_ok=float(np.mean([r["kway_pred"] == r["kway_true"] for r in grp])),
+        )
+    overall = dict(
+        hard_yes=float(np.mean([r["hard"] == "YES" for r in records]))
+        if records
+        else float("nan"),
+        kway_ok=float(np.mean([r["kway_pred"] == r["kway_true"] for r in records]))
+        if records
+        else float("nan"),
+    )
+    return dict(
+        n_records=len(records), n_samples=n_samples, by_anchor=by_anchor, overall=overall
+    )
+
+
+def log_summary(summary: dict):
+    logger.info("per-anchor faithfulness (hard_yes | kway_ok):")
+    for aname in ANCHOR_ORDER:
+        if aname in summary["by_anchor"]:
+            m = summary["by_anchor"][aname]
+            logger.info(
+                f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}  kway_ok={m['kway_ok']:.3f}"
+            )
+    o = summary["overall"]
+    logger.info(
+        f"  {'OVERALL':10s} n={summary['n_records']:<4d} "
+        f"hard_yes={o['hard_yes']:.3f}  kway_ok={o['kway_ok']:.3f}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Driver
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_args():
@@ -354,7 +397,12 @@ def parse_args():
         "--span_source", default="rule", choices=["rule", "oracle"],
         help="impl-span labelling: 'rule' (letters-based, no oracle) | 'oracle' (label_generation)",
     )
-    ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="wipe an existing run dir and redo it; default is to RESUME from the last "
+        "completed sample (same args => same run dir)",
+    )
     logging_utils.add_logging_args(ap)  # -v (DEBUG) / -q (WARNING); default INFO
     return ap.parse_args()
 
@@ -397,10 +445,35 @@ def main():
         hard_rubric_tag=_HARD_TAG,
     )
     run_dir = fio.run_dir_for(config, results_dir)
-    if run_dir.exists() and not args.overwrite:
-        logger.info(f"run dir exists ({run_dir}); pass --overwrite to redo. exiting.")
-        return
+
+    # ── overwrite vs resume ──
+    if args.overwrite and run_dir.exists():
+        for f in ("records.jsonl", "samples.jsonl", "samples.json", "summary.json"):
+            (run_dir / f).unlink(missing_ok=True)
+        logger.info(f"--overwrite: cleared existing run at {run_dir}")
+    run_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"run dir -> {run_dir}")
+
+    # corpus is deterministic from (n_specs, num_conditions, seed, datatype) and needs no model,
+    # so we can compute the full sample set up front and figure out what's already done.
+    samples = build_corpus(args.n_specs, args.num_conditions, args.seed, args.datatype)
+    completed = fio.read_completed_spec_ids(run_dir)
+    kept = fio.prune_orphan_records(run_dir, completed)  # drop rows from a half-finished sample
+    remaining = [s for s in samples if s.spec.spec_id not in set(completed)]
+    logger.info(
+        f"corpus: {len(samples)} samples | already done: {len(completed)} "
+        f"({kept} records kept) | remaining: {len(remaining)}"
+    )
+
+    if not remaining:
+        # nothing to compute — just (re)build the summary from what's on disk and exit.
+        recs = [json.loads(l) for l in fio.records_path(run_dir).read_text().splitlines() if l.strip()] \
+            if fio.records_path(run_dir).exists() else []
+        summary = compute_summary(recs, n_samples=len(completed))
+        fio.write_summary(run_dir, summary)
+        logger.info(f"all samples already complete; summary refreshed -> {run_dir}")
+        log_summary(summary)
+        return
 
     mt = ModelandTokenizer(
         model_key=args.model,
@@ -414,6 +487,7 @@ def main():
     config["n_heads"] = len(heads)
     config["selected_heads"] = [[int(l), int(h)] for l, h in heads]
     config["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    fio.write_config(run_dir, config)  # persist config now so an in-progress run is self-describing
     logger.info(f"heads[{heads_name}] = {len(heads)} (layer,head) pairs")
 
     gs_kwargs = dict(
@@ -425,11 +499,12 @@ def main():
         max_new_tokens=args.max_new_tokens,
     )
 
-    samples = build_corpus(args.n_specs, args.num_conditions, args.seed, args.datatype)
-    logger.info(f"corpus: {len(samples)} samples")
-
-    records, samples_meta = [], []
-    for si, sample in enumerate(samples):
+    # append-mode handles both a fresh run and a resume (existing kept rows/samples are preserved)
+    rec_fh = open(fio.records_path(run_dir), "a")
+    samp_fh = open(fio.samples_path(run_dir), "a")
+    n_done = len(completed)
+    for si, sample in enumerate(remaining):
+        sample_records = []
         prompt = build_prompt(mt, sample)
         completion = generate_completion(mt, prompt, args.gen_max_new_tokens)
         full_text = prompt + completion
@@ -478,7 +553,7 @@ def main():
                 logger.debug("    HARD  verdict=%s  oracle_response=%r", hv["verdict"], hv["response"])
                 logger.debug("    KWAY  pred=%s (true %d)  oracle_response=%r",
                              kv["pred"], row["cond"], kv["response"])
-                records.append(
+                sample_records.append(
                     dict(
                         spec=sample.spec.spec_id,
                         cond=row["cond"],
@@ -498,62 +573,41 @@ def main():
                         kway_response=kv["response"],
                     )
                 )
-        samples_meta.append(
-            dict(
-                spec_id=sample.spec.spec_id,
-                predicate_ids=list(sample.spec.predicate_ids),
-                prompt=prompt,
-                completion=completion,
-                labels=labels_meta,
-                anchors=[
-                    dict(cond=r["cond"], var=r["var"], anchors=r["anchors"])
-                    for r in rows
-                ],
-            )
+        sample_meta = dict(
+            spec_id=sample.spec.spec_id,
+            predicate_ids=list(sample.spec.predicate_ids),
+            prompt=prompt,
+            completion=completion,
+            labels=labels_meta,
+            anchors=[
+                dict(cond=r["cond"], var=r["var"], anchors=r["anchors"])
+                for r in rows
+            ],
         )
+        # write this sample's records FIRST, then its meta line: a sample counts as "done"
+        # only once its meta line lands, so a crash mid-sample leaves recoverable orphan
+        # records (pruned on the next resume) rather than a phantom-complete sample.
+        for r in sample_records:
+            fio.append_jsonl(rec_fh, r)
+        fio.append_jsonl(samp_fh, sample_meta)
+        n_done += 1
         logger.info(
-            f"[{si + 1}/{len(samples)}] {sample.spec.spec_id}: "
+            f"[{n_done}/{len(samples)}] {sample.spec.spec_id}: "
             f"{sum(len(r['anchors']) for r in rows)} anchor read-outs scored"
         )
 
-    # ── aggregate ──
-    by_anchor = {}
-    for aname in ANCHOR_ORDER:
-        grp = [r for r in records if r["anchor"] == aname]
-        if not grp:
-            continue
-        by_anchor[aname] = dict(
-            n=len(grp),
-            hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])),
-            kway_ok=float(np.mean([r["kway_pred"] == r["kway_true"] for r in grp])),
-        )
-    overall = dict(
-        hard_yes=float(np.mean([r["hard"] == "YES" for r in records]))
-        if records
-        else float("nan"),
-        kway_ok=float(np.mean([r["kway_pred"] == r["kway_true"] for r in records]))
-        if records
-        else float("nan"),
-    )
-    summary = dict(
-        n_records=len(records),
-        n_samples=len(samples_meta),
-        by_anchor=by_anchor,
-        overall=overall,
-    )
+    rec_fh.close()
+    samp_fh.close()
 
-    fio.save_run(run_dir, config, records, summary, samples_meta)
+    # ── aggregate from everything on disk (resumed rows included) ──
+    all_records = [
+        json.loads(l) for l in fio.records_path(run_dir).read_text().splitlines() if l.strip()
+    ]
+    n_samples = len(fio.read_completed_spec_ids(run_dir))
+    summary = compute_summary(all_records, n_samples)
+    fio.write_summary(run_dir, summary)
     logger.info(f"saved -> {run_dir}")
-    logger.info("per-anchor faithfulness (hard_yes | kway_ok):")
-    for aname in ANCHOR_ORDER:
-        if aname in by_anchor:
-            m = by_anchor[aname]
-            logger.info(
-                f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}  kway_ok={m['kway_ok']:.3f}"
-            )
-    logger.info(
-        f"  {'OVERALL':10s} n={len(records):<4d} hard_yes={overall['hard_yes']:.3f}  kway_ok={overall['kway_ok']:.3f}"
-    )
+    log_summary(summary)
 
 
 if __name__ == "__main__":

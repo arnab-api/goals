@@ -2,12 +2,15 @@ import hashlib
 import json
 import logging
 import os
+import time
 
 from anthropic import Anthropic
 
 from src.utils.env_utils import CLAUDE_CACHE_DIR, load_env_var
 
 logger = logging.getLogger(__name__)
+
+MAX_TRIES = 5  # request attempts before giving up
 
 
 def ask_claude(
@@ -26,13 +29,19 @@ def ask_claude(
     hash_val = hashlib.md5(
         f"{system_prompt}__{prompt}__{max_tokens=}".encode()
     ).hexdigest()
-    if use_cache:
-        cache_file = os.path.join(CLAUDE_CACHE_DIR, f"{hash_val}.json")
-        if os.path.exists(cache_file):
-            logger.debug(f"found cached claude response for {hash_val} - loading")
+    cache_file = os.path.join(CLAUDE_CACHE_DIR, f"{hash_val}.json")
+    if use_cache and os.path.exists(cache_file):
+        logger.debug(f"found cached claude response for {hash_val} - loading")
+        try:
             with open(cache_file, "r") as f:
-                json_data = json.load(f)
-                return json_data["response"]
+                return json.load(f)["response"]
+        except (json.JSONDecodeError, KeyError, OSError) as e:
+            # empty/partial/corrupt cache file (e.g. crash mid-write, or a
+            # concurrent writer) — ignore it and re-request from the API.
+            logger.warning(
+                f"corrupt cache {cache_file} ({e}); ignoring and re-requesting"
+            )
+
     request_kwargs = {
         "model": model_name,
         "max_tokens": max_tokens,
@@ -55,12 +64,29 @@ def ask_claude(
         logger.warning(
             f"temperature parameter is deprecated for {model_name} - ignoring"
         )
-    response = client.messages.create(
-        **request_kwargs
-    )
-    response = response.content[0].text
 
-    with open(os.path.join(CLAUDE_CACHE_DIR, f"{hash_val}.json"), "w") as f:
+    response = None
+    last_err = None
+    for attempt in range(1, MAX_TRIES + 1):
+        try:
+            response = client.messages.create(**request_kwargs).content[0].text
+            break
+        except Exception as e:  # network / API / malformed-response errors
+            last_err = e
+            logger.warning(
+                f"claude request failed (attempt {attempt}/{MAX_TRIES}): {e}"
+            )
+            if attempt < MAX_TRIES:
+                time.sleep(min(2 ** (attempt - 1), 30))  # 1,2,4,8s backoff
+    if response is None:
+        raise ConnectionError(
+            f"claude request failed after {MAX_TRIES} attempts: {last_err}"
+        ) from last_err
+
+    # atomic write so a crash / concurrent writer never leaves a partial JSON
+    # (which is what made the cache read above raise JSONDecodeError).
+    tmp_file = f"{cache_file}.{os.getpid()}.tmp"
+    with open(tmp_file, "w") as f:
         json.dump(
             {
                 "prompt": prompt,
@@ -73,6 +99,7 @@ def ask_claude(
             },
             f,
         )
+    os.replace(tmp_file, cache_file)
 
     return response
 

@@ -10,7 +10,12 @@ Layout of a run directory::
         records.jsonl    one row per (sample, condition, anchor): read-out, impl_span, condition,
                          the FULL hard/kway oracle prompt + raw response + parsed verdict
         summary.json     per-anchor + overall hard_yes / kway_ok
-        samples.json     per sample: prompt, completion, oracle step labels, anchor token positions
+        samples.jsonl    per sample (one line each): prompt, completion, oracle step labels,
+                         anchor token positions
+
+Both ``records.jsonl`` and ``samples.jsonl`` are written incrementally (one flush per finished
+sample) by the runner, so a run can be **resumed** from the last completed sample and inspected
+while still in progress.
 
 Typical use::
 
@@ -62,17 +67,82 @@ def faithfulness_root(results_root) -> Path:
     return Path(results_root) / FAITH_SUBDIR
 
 
-# ── saving ────────────────────────────────────────────────────────────────────
+# ── paths ─────────────────────────────────────────────────────────────────────
+def records_path(run_dir) -> Path:
+    return Path(run_dir) / "records.jsonl"
+
+
+def samples_path(run_dir) -> Path:
+    return Path(run_dir) / "samples.jsonl"
+
+
+# ── saving (batch) ──────────────────────────────────────────────────────────────
 def save_run(run_dir, config: dict, records: list[dict], summary: dict, samples: list[dict]) -> Path:
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "config.json").write_text(json.dumps(config, indent=2, default=str))
-    with open(run_dir / "records.jsonl", "w") as fh:
+    write_config(run_dir, config)
+    with open(records_path(run_dir), "w") as fh:
         for r in records:
             fh.write(json.dumps(r, default=str) + "\n")
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
-    (run_dir / "samples.json").write_text(json.dumps(samples, indent=2, default=str))
+    write_summary(run_dir, summary)
+    with open(samples_path(run_dir), "w") as fh:
+        for s in samples:
+            fh.write(json.dumps(s, default=str) + "\n")
     return run_dir
+
+
+# ── saving (incremental / resumable) ───────────────────────────────────────────
+def write_config(run_dir, config: dict) -> None:
+    (Path(run_dir) / "config.json").write_text(json.dumps(config, indent=2, default=str))
+
+
+def write_summary(run_dir, summary: dict) -> None:
+    (Path(run_dir) / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+
+
+def append_jsonl(fh, obj: dict) -> None:
+    """Append one object as a line and flush to disk (crash-safe incremental save)."""
+    fh.write(json.dumps(obj, default=str) + "\n")
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+def read_completed_spec_ids(run_dir) -> list[str]:
+    """spec_ids of samples already fully written to samples.jsonl (i.e. safe to skip on resume)."""
+    p = samples_path(run_dir)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line)["spec_id"])
+        except (json.JSONDecodeError, KeyError):
+            continue  # tolerate a torn final line from a crash
+    return out
+
+
+def prune_orphan_records(run_dir, keep_spec_ids) -> int:
+    """Drop records whose sample never finished (spec not in `keep_spec_ids`) so a resumed run
+    doesn't leave duplicate/half rows. Returns the number of records kept."""
+    p = records_path(run_dir)
+    if not p.exists():
+        return 0
+    keep = set(keep_spec_ids)
+    kept = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            if json.loads(line)["spec"] in keep:
+                kept.append(line)
+        except (json.JSONDecodeError, KeyError):
+            continue
+    p.write_text("".join(l + "\n" for l in kept))
+    return len(kept)
 
 
 # ── loading ─────────────────────────────────────────────────────────────────--
@@ -85,7 +155,10 @@ def load_summary(run_dir) -> dict:
 
 
 def load_samples(run_dir) -> list[dict]:
-    return json.loads((Path(run_dir) / "samples.json").read_text())
+    p = samples_path(run_dir)
+    if p.exists():  # current incremental format (one sample per line)
+        return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return json.loads((Path(run_dir) / "samples.json").read_text())  # legacy batch format
 
 
 def records_df(run_dir) -> pd.DataFrame:
