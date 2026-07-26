@@ -14,14 +14,18 @@ guards): the mean-activation trial loop + per-head averaging, and the head-sweep
 intervention (split o_proj input by head, overwrite the last query-token's head slice
 with its task-mean, recompute the bias-free o_proj output).
 
-Runs in the FV uv venv (needs FV src on sys.path + matched torch/transformers):
+Runs in the FV uv venv (needs FV src on sys.path + matched torch/transformers). Sweep the whole
+suite in one process (model loaded once), universal heads = average across relations (aggregate
+with scripts/fv/aggregate_fv_heads.py):
 
-    existing_works/function_vectors/.venv/bin/python scripts/fv/localize_fv_cma.py \
-        --model_name Qwen/Qwen2.5-Coder-7B-Instruct --dataset_name antonym \
-        --device cuda --n_shots 4 --n_trials 2 --n-examples-per-relation 2 \
-        --seed 42 --save_path_root /tmp/fv_port
+    existing_works/function_vectors/.venv/bin/python -m scripts.fv.localize_fv_cma \
+        --model Qwen/Qwen2.5-Coder-32B-Instruct --tasks all \
+        --n-shots 10 --n-trials 25 --mean-trials 100 --batch 32 --tag all_ns10_nt25
 
-Validation (see --compare_*): reproduces the reference on Qwen2.5-Coder-7B antonym.
+`--batch>1` tiles the prompt across the batch dim and patches one head per row (rows are
+independent), so the CIE is functionally identical to the reference one-head-at-a-time sweep — up
+to floating-point batching noise (verify with --compare_indirect_effect: allclose, not torch.equal).
+`--n-trials` = CIE trials (per relation); `--mean-trials` = mean-activation trials.
 """
 import argparse
 import json
@@ -104,9 +108,11 @@ def compute_mean_head_activations(dataset, model, mc, tokenizer, n_shots, n_tria
         with TraceDict(model, layers=mc["attn_hook_names"], retain_input=True, retain_output=False) as td:
             model(**inputs)
 
-        # (layers, tokens, heads, head_dim) -> (layers, heads, tokens, head_dim)
+        # (layers, tokens, heads, head_dim) -> (layers, heads, tokens, head_dim).
+        # .to("cpu") first: with device_map="auto" the layers live on different GPUs, so the
+        # per-layer inputs must be gathered onto one device before vstack (store is CPU anyway).
         stack = torch.vstack(
-            [_split_by_head(td[layer].input, mc) for layer in mc["attn_hook_names"]]
+            [_split_by_head(td[layer].input.to("cpu"), mc) for layer in mc["attn_hook_names"]]
         ).permute(0, 2, 1, 3)
         filt = stack[:, :, list(idx_map.keys())]
         for (i, j) in idx_avg.values():  # average activations of multi-token words
@@ -127,7 +133,7 @@ def _make_replace_hook(layer, head, mean_activations, qp_token_inds, idx_map, mc
         original_shape = inputs.shape
         inputs = inputs.view(*inputs.size()[:-1], mc["n_heads"], head_dim)
         for token_n in qp_token_inds:  # last_token_only: write into the final position
-            inputs[-1, -1, head] = mean_activations[layer, head, idx_map[token_n]]
+            inputs[-1, -1, head] = mean_activations[layer, head, idx_map[token_n]].to(inputs.device)
         inputs = inputs.view(*original_shape)
         out_proj = get_module(model, layer_name).weight  # Qwen/Llama o_proj: bias-free Linear
         return torch.matmul(inputs, out_proj.T)
@@ -135,9 +141,34 @@ def _make_replace_hook(layer, head, mean_activations, qp_token_inds, idx_map, mc
     return rep
 
 
-def head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer):
+def _make_replace_hook_batched(layer, heads_chunk, mean_activations, qp_token_inds, idx_map, mc, model):
+    """Batched twin of _make_replace_hook: the prompt is tiled into len(heads_chunk) IDENTICAL rows;
+    row j gets ONLY head heads_chunk[j] patched (last query token). Rows never interact across the
+    batch dim, so each row's answer-token Δ is exactly the single-head CIE — functionally identical
+    to the one-head-at-a-time sweep, computed len(heads_chunk) at a time."""
+    head_dim = mc["resid_dim"] // mc["n_heads"]
+
+    def rep(output, layer_name, inputs):
+        if isinstance(inputs, tuple):
+            inputs = inputs[0]
+        original_shape = inputs.shape                                   # (B, seq, resid_dim)
+        inputs = inputs.view(*inputs.size()[:-1], mc["n_heads"], head_dim)
+        for j, head in enumerate(heads_chunk):
+            for token_n in qp_token_inds:
+                inputs[j, -1, head] = mean_activations[layer, head, idx_map[token_n]].to(inputs.device)
+        inputs = inputs.view(*original_shape)
+        out_proj = get_module(model, layer_name).weight
+        return torch.matmul(inputs, out_proj.T)
+
+    return rep
+
+
+def head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer, batch=1):
     """Indirect effect (n_layers, n_heads) for one ICL prompt: for each head, replace its
-    last-token activation with the task-mean and measure Δ prob of the answer token."""
+    last-token activation with the task-mean and measure Δ prob of the answer token.
+
+    `batch` heads are swept per forward (within a layer) by tiling the prompt across the batch dim
+    and patching a distinct head in each row (rows are independent → same math as batch=1)."""
     device = model.device
     query = prompt_data["query_target"]["input"]
     token_labels, prompt_string = get_token_meta_labels(
@@ -155,23 +186,36 @@ def head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer)
         token_id_of_interest = token_id_of_interest[:1]
 
     inputs = tokenizer([prompt_string], return_tensors="pt").to(device)
-    clean_probs = torch.softmax(model(**inputs).logits[:, -1, :][0], dim=-1)
+    clean_probs = torch.softmax(model(**inputs).logits[:, -1, :][0], dim=-1)  # (vocab,)
 
     out = torch.zeros(mc["n_layers"], mc["n_heads"])
-    tid = torch.LongTensor(token_id_of_interest).to(device).squeeze()
+    tid = torch.LongTensor(token_id_of_interest).view(-1).to(clean_probs.device)  # (1,), on the logits' device
+    #   (device_map="auto" emits logits on the last shard's device, not model.device)
+    n_heads = mc["n_heads"]
     for layer in range(mc["n_layers"]):
         hook_name = mc["attn_hook_names"][layer]
-        for head in range(mc["n_heads"]):
-            fn = _make_replace_hook(layer, head, mean_activations, qp_token_inds, idx_map, mc, model)
+        for start in range(0, n_heads, batch):
+            heads_chunk = list(range(start, min(start + batch, n_heads)))
+            B = len(heads_chunk)
+            if B == 1:
+                fn = _make_replace_hook(layer, heads_chunk[0], mean_activations,
+                                        qp_token_inds, idx_map, mc, model)
+                cur = inputs
+            else:
+                fn = _make_replace_hook_batched(layer, heads_chunk, mean_activations,
+                                                qp_token_inds, idx_map, mc, model)
+                cur = {k: v.repeat(B, *([1] * (v.dim() - 1))) for k, v in inputs.items()}
             with TraceDict(model, layers=[hook_name], edit_output=fn):
-                logits = model(**inputs).logits[:, -1, :]
+                logits = model(**cur).logits[:, -1, :]                        # (B, vocab)
             probs = torch.softmax(logits, dim=-1)
-            out[layer, head] = (probs - clean_probs).index_select(1, tid).squeeze()
+            deltas = (probs - clean_probs.unsqueeze(0)).index_select(1, tid)  # (B, 1)
+            for j, head in enumerate(heads_chunk):
+                out[layer, head] = deltas[j, 0]
     return out
 
 
 def compute_indirect_effect(dataset, mean_activations, model, mc, tokenizer, n_shots, n_trials,
-                            prefixes, separators, ckpt_path=None, meta=None, overwrite=False):
+                            prefixes, separators, ckpt_path=None, meta=None, overwrite=False, batch=1):
     """CIE tensor (n_trials, n_layers, n_heads). Mirrors FV compute_indirect_effect
     (shuffle_labels=True per trial, last_token_only).
 
@@ -206,7 +250,7 @@ def compute_indirect_effect(dataset, mean_activations, model, mc, tokenizer, n_s
         )
         if n < resume_from:
             continue  # RNG advanced above; this trial's result is already in the restored tensor
-        indirect_effect[n] = head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer)
+        indirect_effect[n] = head_sweep_trial(prompt_data, mean_activations, dummy, model, mc, tokenizer, batch=batch)
         if ckpt_path:
             _atomic_save({"done_trials": n + 1, "indirect_effect": indirect_effect, "meta": meta}, ckpt_path)
         log(f"  trial {n + 1}/{n_trials} done" + (" [checkpointed]" if ckpt_path else ""))
@@ -238,22 +282,32 @@ def report_match(name, ours, golden_path):
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Coder-7B-Instruct")
-    ap.add_argument("--dataset_name", type=str, required=True)
+    ap.add_argument("--model_name", "--model", dest="model_name", type=str,
+                    default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    ap.add_argument("--dataset_name", type=str, default=None, help="a single relation (or use --tasks)")
+    ap.add_argument("--tasks", type=str, default=None,
+                    help="'all' (every relation under root_data_dir) or a comma-list; loops over them, "
+                         "model loaded once. Mutually exclusive with --dataset_name.")
     ap.add_argument("--root_data_dir", type=str, default=os.path.join(FV_SRC, "..", "dataset_files"))
-    ap.add_argument("--save_path_root", type=str, required=True, help="results go to <root>/<dataset>/")
+    ap.add_argument("--save_path_root", type=str, default=os.path.join(FV_SRC, "..", "results"),
+                    help="results go to <root>/[<tag>/]<dataset>/")
+    ap.add_argument("--tag", type=str, default=None, help="optional subdir under save_path_root isolating a config")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--n_shots", type=int, default=10)
-    ap.add_argument("--n_trials", type=int, default=25,
-                    help="trials for the mean-head-activation extraction (task-mean prep step)")
-    ap.add_argument("--n-examples-per-relation", dest="n_examples_per_relation", type=int, default=200,
-                    help="how many test examples per relation (dataset) to CMA-sweep for the CIE "
-                         "(= number of indirect-effect trials). Note: to reproduce a golden CIE "
-                         "bit-for-bit via --compare_indirect_effect, set this to the golden's trial count.")
+    ap.add_argument("--n_shots", "--n-shots", dest="n_shots", type=int, default=10)
+    ap.add_argument("--n-trials", "--n-examples-per-relation", dest="n_examples_per_relation", type=int, default=200,
+                    help="CIE trials = #test examples per relation to CMA-sweep for the indirect effect")
+    ap.add_argument("--mean-trials", "--mean_trials", dest="mean_trials", type=int, default=100,
+                    help="trials for the mean-head-activation extraction (the task-mean prep step)")
+    ap.add_argument("--batch", type=int, default=1,
+                    help="heads swept per forward in the CIE sweep (tiles the prompt across the batch dim; "
+                         "rows are independent so results match batch=1 up to fp noise)")
     ap.add_argument("--test_split", type=float, default=0.3)
+    ap.add_argument("--fp32", action="store_true",
+                    help="cast the (bf16) model to float32 after load — for numerical-equivalence checks "
+                         "(batched vs unbatched collapse to fp noise in fp32). Doubles memory.")
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--mean_activations_path", type=str, default=None,
-                    help="load a precomputed mean-activation .pt instead of computing it")
+                    help="load a precomputed mean-activation .pt instead of computing it (single-task only)")
     ap.add_argument("--stage", choices=["mean", "cie", "both"], default="both")
     ap.add_argument("--overwrite", action="store_true",
                     help="ignore any existing CIE checkpoint / completed indirect_effect.pt and recompute")
@@ -262,81 +316,115 @@ def parse_args():
     ap.add_argument("--revision", type=str, default=None)
     ap.add_argument("--compare_mean_activations", type=str, default=None, help="golden mean-act .pt to diff against")
     ap.add_argument("--compare_indirect_effect", type=str, default=None, help="golden CIE .pt to diff against")
-    return ap.parse_args()
+    args = ap.parse_args()
+    if bool(args.tasks) == bool(args.dataset_name):
+        ap.error("specify exactly one of --tasks or --dataset_name")
+    return args
+
+
+def all_task_names(root_data_dir):
+    """Every relation (abstractive + extractive) under root_data_dir, sorted."""
+    names = []
+    for sub in ("abstractive", "extractive"):
+        d = os.path.join(root_data_dir, sub)
+        if os.path.isdir(d):
+            names += [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
+    return sorted(names)
+
+
+def resolve_tasks(args):
+    if args.tasks:
+        return all_task_names(args.root_data_dir) if args.tasks.strip() == "all" \
+            else [t.strip() for t in args.tasks.split(",") if t.strip()]
+    return [args.dataset_name]
+
+
+def run_dataset(dataset_name, model, tokenizer, mc, args, do_compare):
+    tag_root = os.path.join(args.save_path_root, args.tag) if args.tag else args.save_path_root
+    save_path_root = os.path.join(tag_root, dataset_name)
+    os.makedirs(save_path_root, exist_ok=True)
+
+    set_seed(args.seed)  # per-dataset -> result independent of task order (safe for resume)
+    log(f"[{dataset_name}] loading dataset (test_split={args.test_split}) ...")
+    dataset = load_dataset(dataset_name, root_data_dir=args.root_data_dir, test_size=args.test_split, seed=args.seed)
+    log(f"[{dataset_name}] train={len(dataset['train'])} valid={len(dataset['valid'])} test={len(dataset['test'])}")
+
+    # ── mean head activations (load or compute) ──
+    default_mean_path = os.path.join(save_path_root, f"{dataset_name}_mean_head_activations.pt")
+    mean_path = args.mean_activations_path if do_compare else None  # explicit path only for single-task
+    if mean_path is None and os.path.exists(default_mean_path):
+        mean_path = default_mean_path
+    if mean_path is not None and os.path.exists(mean_path):
+        log(f"[{dataset_name}] loading mean activations <- {mean_path}")
+        mean_activations = torch.load(mean_path, map_location=model.device)
+    else:
+        log(f"[{dataset_name}] computing mean head activations (n_shots={args.n_shots}, mean_trials={args.mean_trials}) ...")
+        mean_activations = compute_mean_head_activations(
+            dataset, model, mc, tokenizer, args.n_shots, args.mean_trials, args.prefixes, args.separators
+        )
+        torch.save(mean_activations, default_mean_path)
+        log(f"[{dataset_name}] mean activations shape={tuple(mean_activations.shape)} -> {default_mean_path}")
+
+    if do_compare and args.compare_mean_activations:
+        report_match("mean_act", mean_activations, args.compare_mean_activations)
+
+    if args.stage == "mean":
+        log(f"[{dataset_name}] stage=mean: skipping indirect effect.")
+        return
+
+    # ── causal indirect effect (per-trial checkpointed) ──
+    n_cie = args.n_examples_per_relation
+    ie_path = os.path.join(save_path_root, f"{dataset_name}_indirect_effect.pt")
+    ckpt_path = os.path.join(save_path_root, f"{dataset_name}_indirect_effect.ckpt.pt")
+    cie_meta = {"model_name": args.model_name, "dataset_name": dataset_name, "seed": args.seed,
+                "n_shots": args.n_shots, "n_examples_per_relation": n_cie, "mean_trials": args.mean_trials,
+                "batch": args.batch, "test_split": args.test_split,
+                "prefixes": args.prefixes, "separators": args.separators,
+                "n_layers": mc["n_layers"], "n_heads": mc["n_heads"], "prepend_bos": mc["prepend_bos"]}
+
+    if os.path.exists(ie_path) and not os.path.exists(ckpt_path) and not args.overwrite:
+        log(f"[{dataset_name}] indirect effect already complete <- {ie_path} (--overwrite to redo); skipping")
+        indirect_effect = torch.load(ie_path, map_location="cpu")
+    else:
+        log(f"[{dataset_name}] CIE: {n_cie} examples x {mc['n_layers']}L x {mc['n_heads']}H "
+            f"(batch={args.batch}) = {n_cie * mc['n_layers'] * mc['n_heads']} head patches ...")
+        indirect_effect = compute_indirect_effect(
+            dataset, mean_activations, model, mc, tokenizer, args.n_shots, n_cie, args.prefixes, args.separators,
+            ckpt_path=ckpt_path, meta=cie_meta, overwrite=args.overwrite, batch=args.batch,
+        )
+        torch.save(indirect_effect, ie_path)
+        with open(os.path.join(save_path_root, "indirect_effect_args.txt"), "w") as f:
+            json.dump({**vars(args), "dataset_name": dataset_name, "save_path_root": save_path_root,
+                       "n_layers": mc["n_layers"], "n_heads": mc["n_heads"]}, f, indent=2)
+        if os.path.exists(ckpt_path):
+            os.remove(ckpt_path)  # completed -> drop the resume checkpoint
+        log(f"[{dataset_name}] DONE: indirect_effect {tuple(indirect_effect.shape)} -> {ie_path}")
+
+    if do_compare and args.compare_indirect_effect:
+        report_match("indirect_effect", indirect_effect, args.compare_indirect_effect)
 
 
 def main():
     args = parse_args()
-    save_path_root = os.path.join(args.save_path_root, args.dataset_name)
-    os.makedirs(save_path_root, exist_ok=True)
-
     torch.set_grad_enabled(False)
     log(f"loading model {args.model_name} (device={args.device}) ...")
     model, tokenizer, mc = load_gpt_model_and_tokenizer(args.model_name, device=args.device, revision=args.revision)
+    if args.fp32:
+        model = model.float()
+        log("cast model to float32 (--fp32)")
     log(f"model loaded: {mc['n_layers']} layers x {mc['n_heads']} heads | "
         f"resid_dim={mc['resid_dim']} | prepend_bos={mc['prepend_bos']}")
     dm = getattr(model, "hf_device_map", None)
     if dm and any(str(v) in ("cpu", "disk") for v in dm.values()):
         log("*** WARNING: part of the model is offloaded to CPU/disk — give this job MORE GPU memory ***")
 
-    set_seed(args.seed)
-    log(f"loading dataset {args.dataset_name} (test_split={args.test_split}) ...")
-    dataset = load_dataset(args.dataset_name, root_data_dir=args.root_data_dir, test_size=args.test_split, seed=args.seed)
-    log(f"dataset: train={len(dataset['train'])} valid={len(dataset['valid'])} test={len(dataset['test'])}")
-
-    # ── mean head activations (load or compute) ──
-    default_mean_path = os.path.join(save_path_root, f"{args.dataset_name}_mean_head_activations.pt")
-    mean_path = args.mean_activations_path
-    if mean_path is None and os.path.exists(default_mean_path):
-        mean_path = default_mean_path
-    if mean_path is not None and os.path.exists(mean_path):
-        log(f"loading mean activations <- {mean_path}")
-        mean_activations = torch.load(mean_path, map_location=model.device)
-    else:
-        log(f"computing mean head activations (n_shots={args.n_shots}, n_trials={args.n_trials}) ...")
-        mean_activations = compute_mean_head_activations(
-            dataset, model, mc, tokenizer, args.n_shots, args.n_trials, args.prefixes, args.separators
-        )
-        torch.save(mean_activations, default_mean_path)
-        log(f"mean activations done, shape={tuple(mean_activations.shape)} -> {default_mean_path}")
-
-    if args.compare_mean_activations:
-        report_match("mean_act", mean_activations, args.compare_mean_activations)
-
-    if args.stage == "mean":
-        log("stage=mean: skipping indirect effect. done.")
-        return
-
-    # ── causal indirect effect (per-trial checkpointed) ──
-    n_cie = args.n_examples_per_relation
-    ie_path = os.path.join(save_path_root, f"{args.dataset_name}_indirect_effect.pt")
-    ckpt_path = os.path.join(save_path_root, f"{args.dataset_name}_indirect_effect.ckpt.pt")
-    cie_meta = {"model_name": args.model_name, "dataset_name": args.dataset_name, "seed": args.seed,
-                "n_shots": args.n_shots, "n_examples_per_relation": n_cie, "test_split": args.test_split,
-                "prefixes": args.prefixes, "separators": args.separators,
-                "n_layers": mc["n_layers"], "n_heads": mc["n_heads"], "prepend_bos": mc["prepend_bos"]}
-
-    if os.path.exists(ie_path) and not os.path.exists(ckpt_path) and not args.overwrite:
-        # dataset already finished on a prior run -> skip the sweep (re-runnable job list)
-        log(f"indirect effect already complete <- {ie_path} (pass --overwrite to recompute); skipping CIE")
-        indirect_effect = torch.load(ie_path, map_location="cpu")
-    else:
-        log(f"computing indirect effect: {n_cie} examples/relation x {mc['n_layers']}L x {mc['n_heads']}H "
-            f"= {n_cie * mc['n_layers'] * mc['n_heads']} patched forwards ...")
-        indirect_effect = compute_indirect_effect(
-            dataset, mean_activations, model, mc, tokenizer, args.n_shots, n_cie, args.prefixes, args.separators,
-            ckpt_path=ckpt_path, meta=cie_meta, overwrite=args.overwrite,
-        )
-        torch.save(indirect_effect, ie_path)
-        with open(os.path.join(save_path_root, "indirect_effect_args.txt"), "w") as f:
-            json.dump({**vars(args), "save_path_root": save_path_root, "n_layers": mc["n_layers"],
-                       "n_heads": mc["n_heads"]}, f, indent=2)
-        if os.path.exists(ckpt_path):
-            os.remove(ckpt_path)  # completed -> drop the resume checkpoint
-        log(f"DONE: indirect_effect {tuple(indirect_effect.shape)} -> {ie_path}")
-
-    if args.compare_indirect_effect:
-        report_match("indirect_effect", indirect_effect, args.compare_indirect_effect)
+    tasks = resolve_tasks(args)
+    single = len(tasks) == 1
+    log(f"tasks ({len(tasks)}): {tasks if len(tasks) <= 12 else tasks[:12] + ['...']}")
+    for i, ds in enumerate(tasks):
+        log(f"===== [{i + 1}/{len(tasks)}] {ds} =====")
+        run_dataset(ds, model, tokenizer, mc, args, do_compare=single)
+    log(f"ALL DONE ({len(tasks)} task(s))")
 
 
 if __name__ == "__main__":
