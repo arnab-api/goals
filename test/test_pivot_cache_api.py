@@ -19,7 +19,6 @@ sys.path.append(".")
 from src.models import ModelandTokenizer
 from src.goals.head_loc_data import HeadLocDataset
 from src.goals.head_loc_attn import (
-    PivotCache,
     augment_pivot_caches,
     cache_pivot_data,
     train_head_mask,

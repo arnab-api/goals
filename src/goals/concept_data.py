@@ -12,13 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional
 
 from dataclasses_json import DataClassJsonMixin, config
 
-from src.utils.env_utils import DEFAULT_DATA_DIR
 
 logger = logging.getLogger(__name__)
 

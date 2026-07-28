@@ -29,6 +29,7 @@ from src.goals.condition_data import (
 from src.goals.functional import apply_chat_template
 from src.models import ModelandTokenizer
 
+
 # multiline-capable predicates (have a `render_multiline`), keyed by language.
 # Populated lazily so a language without impls (e.g. cpp before we add impls to
 # every predicate) simply yields a smaller pool rather than a KeyError.

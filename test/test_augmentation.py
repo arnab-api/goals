@@ -10,11 +10,7 @@ from src.goals.augment import (
     adapt_text_var,
     extract_var_names_from_code,
     extract_short_descriptions,
-    generate_variants,
     generate_variants_incomplete,
-    rename_variable,
-    rename_function,
-    toggle_type_hints,
     swap_predicate_order,
     _toggle_type_hints_in_def,
     _parse_docstring_clauses,
@@ -249,7 +245,8 @@ def test_no_var_vocab_match():
 
 def test_augment_online():
     """Online augmentation: load_dataset(augment=True) expands in-memory; JSON stays clean."""
-    import json, os
+    import json
+    import os
     from src.utils.env_utils import DEFAULT_DATA_DIR
 
     ds = MultiPredicateDataset.load_dataset(augment=True)

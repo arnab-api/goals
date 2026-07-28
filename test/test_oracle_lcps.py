@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 import textwrap
-from collections import Counter, defaultdict
+from collections import Counter
 
 sys.path.insert(0, ".")
 
@@ -34,7 +34,6 @@ from src.goals.head_loc_data import HeadLocDataset, SinglePredicateSample
 from src.goals.head_loc_oracle import (
     ask_claude,
     build_oracle_pair_prompt,
-    get_oracle_lcps,
     parse_oracle_pair_response,
 )
 

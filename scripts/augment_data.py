@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 def run_multi_predicate(extract_descriptions: bool) -> None:
-    from src.goals.augment import extract_short_descriptions
     from src.goals.predicate_data import MultiPredicateDataset
 
     ds = MultiPredicateDataset.load_dataset(augment=True)

@@ -59,7 +59,7 @@ def migrate_tp(tp, dry_run: bool) -> int:
     old_p_plus = list(tp.p_plus.anchor_patterns)
     new_p_plus = convert_anchor_tokens_to_patterns(old_p_plus, all_var_names)
     if old_p_plus != new_p_plus:
-        print(f"\n  [p_plus] anchor_patterns diff:")
+        print("\n  [p_plus] anchor_patterns diff:")
         for o, n in zip(old_p_plus, new_p_plus):
             marker = "  " if o == n else "* "
             print(f"    {marker}{o!r:40s}  →  {n!r}")

@@ -1,6 +1,5 @@
 from transformers import AutoTokenizer
 from typing import *
-from typing import TextIO
 
 import json
 import os

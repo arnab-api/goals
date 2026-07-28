@@ -14,8 +14,6 @@ sys.path.insert(0, ".")
 from src.goals.anchor import (
     convert_anchor_tokens_to_patterns,
     label_predicate_spans,
-    extract_predicate_clauses,
-    show_span_annotation,
 )
 from src.goals.predicate_data import (
     MultiPredicateDataset,

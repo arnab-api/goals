@@ -58,7 +58,6 @@ def fail(msg: str) -> None:
 def run_tests() -> int:
     """Run all tests. Returns the number of failures."""
     from src.functional import PatchSpec, generate_with_patch
-    from src.tokens import prepare_input
 
     # ── Setup ─────────────────────────────────────────────────────────────────
     section("Setup")

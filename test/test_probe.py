@@ -25,14 +25,11 @@ from rich.console import Console
 from rich.panel import Panel
 
 from src.goals.probe import (
-    OutcomeProbs,
-    ContrastivePair,
     compute_outcome_probs,
     collect_nodes_at_depth,
     sample_contrastive_pairs,
     sample_multidepth_pairs,
     summarize_contrastive_pairs,
-    print_contrastive_pairs,
 )
 from src.goals.sampling import MCTSNode
 

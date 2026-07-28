@@ -12,7 +12,6 @@ python scripts/patch_goalscope_tooltip_font.py --dry-run
 """
 
 import argparse
-import re
 import sys
 from pathlib import Path
 

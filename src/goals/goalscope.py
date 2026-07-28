@@ -12,8 +12,17 @@ import keyword as _kw
 from typing import Literal, Optional, Union
 
 import torch
+from tqdm.auto import tqdm
 
-from src.goals.head_loc_attn import forward_with_src_replacement
+from src.functional import PatchSpec, generate_with_patch
+from src.goals.head_loc_attn import (
+    HeadMask,
+    collect_head_steering_vecs,
+    forward_with_src_replacement,
+    get_o_proj_inputs_batch,
+)
+from src.tokens import find_token_range, prepare_input
+from src.utils.typing import TokenizerOutput
 
 # ---------------------------------------------------------------------------
 # Greedy generation helpers
@@ -513,7 +522,7 @@ def _build_goalscope_prompt(mt) -> str:
 
 
 def apply_goalscope(
-    prompt: "str | TokenizerOutput",
+    prompt: str | TokenizerOutput,
     *,
     mt,
     selected_heads: list[tuple[int, int]],
@@ -594,16 +603,6 @@ def apply_goalscope(
         in generation order; with ``include_noncode`` the full list is sorted by
         ``pos`` so the prompt reads left-to-right.
     """
-    from tqdm.auto import tqdm
-
-    from src.functional import PatchSpec, generate_with_patch
-    from src.goals.head_loc_attn import (
-        HeadMask,
-        collect_head_steering_vecs,
-        get_o_proj_inputs_batch,
-    )
-    from src.tokens import TokenizerOutput, find_token_range, prepare_input
-
     if strategy not in ("additive", "replace"):
         raise ValueError(f"strategy must be 'additive' or 'replace', got {strategy!r}")
 
