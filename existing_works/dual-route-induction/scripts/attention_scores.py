@@ -204,7 +204,7 @@ def main(args):
     os.makedirs(path, exist_ok=True)
 
     fname = f'n{args.n}_seqlen{args.sequence_len}'
-    fname += f'_randomtokents' if args.random_tok_entities else ''
+    fname += '_randomtokents' if args.random_tok_entities else ''
     fname += '.json'
     print(path + fname)
 

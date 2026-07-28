@@ -1,6 +1,10 @@
-import os, re, json, time
+import os
+import re
+import json
+import time
 from tqdm import tqdm
-import torch, numpy as np
+import torch
+import numpy as np
 import argparse
 from baukit import TraceDict
 

@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd 
 
 from random import shuffle
-from tqdm import tqdm 
 from collections import defaultdict
 from nnsight import LanguageModel
 from datasets import load_dataset

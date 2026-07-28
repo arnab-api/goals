@@ -1,5 +1,6 @@
 import os
-import torch, numpy as np
+import torch
+import numpy as np
 import argparse
 
 # Include prompt creation helper functions

@@ -1,6 +1,5 @@
 from baukit import TraceDict, get_module
 import torch
-import re
 import bitsandbytes as bnb
 
 def get_module(model, name):

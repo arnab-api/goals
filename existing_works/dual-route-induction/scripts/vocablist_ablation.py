@@ -54,7 +54,7 @@ class VocabListDataset(Dataset):
 
         elif self.language == 'en': # copying 
             # we used conneau words, but nguyen is probably better. 
-            self.word_pairs = pd.read_csv(f'../data/nguyenetal_2017/all_synonyms.csv')
+            self.word_pairs = pd.read_csv('../data/nguyenetal_2017/all_synonyms.csv')
             self.word_pairs['from'] = self.word_pairs['word1']
             self.word_pairs['to'] = self.word_pairs['word1']
         
@@ -64,13 +64,13 @@ class VocabListDataset(Dataset):
             self.word_pairs['to'] = self.word_pairs['word2']
 
         elif self.language == 'title':
-            self.word_pairs = pd.read_csv(f'../data/nguyenetal_2017/all_antonyms.csv')
+            self.word_pairs = pd.read_csv('../data/nguyenetal_2017/all_antonyms.csv')
             self.word_pairs = self.word_pairs.dropna()
             self.word_pairs['from'] = self.word_pairs['word1'].apply(lambda s: s.lower())
             self.word_pairs['to'] = self.word_pairs['word1'].apply(lambda s: s.title())
         
         elif self.language == 'CAPS':
-            self.word_pairs = pd.read_csv(f'../data/nguyenetal_2017/all_antonyms.csv')
+            self.word_pairs = pd.read_csv('../data/nguyenetal_2017/all_antonyms.csv')
             self.word_pairs = self.word_pairs.dropna()
             self.word_pairs['from'] = self.word_pairs['word1'].apply(lambda s: s.lower())
             self.word_pairs['to'] = self.word_pairs['word1'].apply(lambda s: s.upper())
