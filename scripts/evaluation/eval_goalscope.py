@@ -1,7 +1,18 @@
 #!/usr/bin/env python
-"""GoalScope goal-head *faithfulness* eval on the multi-predicate ``check_conditions`` setup.
+"""GoalScope goal-head eval on the multi-predicate ``check_conditions`` setup — two ``--mode``s:
 
-Pipeline (consolidated from ``notebooks/clock/12_goal_eval_scaleup.ipynb``):
+  faithfulness  — read out an NL description at each anchor ("what are you doing at this line?")
+                  and grade whether it faithfully describes the implementation span.
+  causality     — steer the goal encoding into an information-less C++ stub
+                  (``bool check(auto value){``) and grade whether the C++ continuation implements
+                  the same *idea* as the Python implementation span (cross-language transfer).
+
+Both share the whole pipeline; they differ only in the GoalScope destination prompt, the read-out
+post-processing (causality prepends the C++ prefix), and the oracle rubric/prompt. Results save to
+``<results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>/``.
+
+Pipeline (consolidated from ``notebooks/clock/12_goal_eval_scaleup.ipynb`` (faithfulness) and
+``12.1_goal_eval_causality.ipynb`` (causality)):
 
   1. Corpus — sample single-line INT predicates into ``check_conditions(n: int)`` tasks
      (letters naming ``a/b/c``); greedy-decode the body.
@@ -22,12 +33,17 @@ summary, and per-sample generations + labels. Parse with ``scripts.evaluation.fa
 All ``ask_claude`` calls use ``use_cache=True``.
 
 Usage:
-    conda run -n goals python scripts/evaluation/run_goalscope_faithfulness.py \
-        --heads goal --strategy additive --alpha 0.2 --steer_layer_range 35 46 \
-        --n_steer_tokens all --max_new_tokens 64
+    conda run -n goals python scripts/evaluation/eval_goalscope.py \
+        --mode faithfulness --heads goal --strategy additive --alpha 0.2 \
+        --steer_layer_range 35 46 --n_steer_tokens all --max_new_tokens 64
+
+    conda run -n goals python scripts/evaluation/eval_goalscope.py \
+        --mode causality --heads goal --strategy additive --alpha 0.2   # C++ transfer
 
     # a custom head set:
     ... --heads /path/to/heads.json          # json array of [layer_idx, head_idx] pairs
+    # optional k-way oracle (faithfulness only for now):
+    ... --eval-k-way
 """
 
 import argparse
@@ -45,17 +61,17 @@ sys.path.append(".")
 import numpy as np
 import torch
 
-from src.models import ModelandTokenizer
-from src.tokens import prepare_input
-from src.utils import env_utils, experiment_utils, logging_utils
+from scripts.clock.score_condition_heads import load_head_scores
+from scripts.evaluation import faithfulness_io as fio
 from src.goals.condition_data import INT_PREDICATES, materialize, sample_specs
 from src.goals.functional import apply_chat_template, supports_chat_template
 from src.goals.goalscope import apply_goalscope, greedy_continue
 from src.goals.multistep_label import label_generation
 from src.goals.oid_gaze import cache_root
+from src.models import ModelandTokenizer
+from src.tokens import prepare_input
+from src.utils import env_utils, experiment_utils, logging_utils
 from src.utils.oracle_llms import ask_claude
-from scripts.clock.score_condition_heads import load_head_scores
-from scripts.evaluation import faithfulness_io as fio
 
 logger = logging.getLogger(__name__)  # configured in main() via logging_utils
 
@@ -168,13 +184,17 @@ def rule_based_spans(full_text, gen_char_start, n_conditions):
     starts = []
     for k in range(n_conditions):
         letter = chr(97 + k)
-        m = re.search(rf"(?m)^[ \t]*{re.escape(letter)}\s*=(?!=)", gen)  # assignment, not `==`
+        m = re.search(
+            rf"(?m)^[ \t]*{re.escape(letter)}\s*=(?!=)", gen
+        )  # assignment, not `==`
         starts.append(m.start() if m else None)
     present = [s for s in starts if s is not None]
     if not present:
         return [None] * n_conditions
     last_start = max(present)
-    mterm = re.search(r"(?m)^[ \t]*(?:print|return)\b", gen[last_start:])  # terminal statement
+    mterm = re.search(
+        r"(?m)^[ \t]*(?:print|return)\b", gen[last_start:]
+    )  # terminal statement
     term = last_start + mterm.start() if mterm else len(gen)
     spans = []
     for k in range(n_conditions):
@@ -182,7 +202,7 @@ def rule_based_spans(full_text, gen_char_start, n_conditions):
         if s is None:
             spans.append(None)
             continue
-        later = [t for t in starts[k + 1:] if t is not None and t > s]
+        later = [t for t in starts[k + 1 :] if t is not None and t > s]
         e = min(later) if later else term
         spans.append(gen[s:e].strip())
     return spans
@@ -247,7 +267,8 @@ def anchors_for_sample(mt, full_text, prompt, conditions, impl_spans):
 # ══════════════════════════════════════════════════════════════════════════════
 # Oracle scoring  (always use_cache=True)
 # ══════════════════════════════════════════════════════════════════════════════
-HARD_SYS = """You are grading a lightweight interpretability probe (a patchscope). The DESCRIPTION below was read out of a model's hidden state at a SINGLE token while the model was writing one line of Python CODE that checks some property of its input. Because it is squeezed out of one token under a steering/patching setup, the description is usually NOISY: it may be wrapped in chat scaffolding (like 'Sure, but first let us ...'), contain code fences or half-written code, be cut off mid-sentence, or repeat and loop. Look PAST all of that surface noise and grade only the SUBSTANCE.
+# ── faithfulness rubric (NL read-out vs impl) — with the <verdict> tag for robust parsing ──
+FAITH_HARD_SYS = """You are grading a lightweight interpretability probe (a patchscope). The DESCRIPTION below was read out of a model's hidden state at a SINGLE token while the model was writing one line of Python CODE that checks some property of its input. Because it is squeezed out of one token under a steering/patching setup, the description is usually NOISY: it may be wrapped in chat scaffolding (like 'Sure, but first let us ...'), contain code fences or half-written code, be cut off mid-sentence, or repeat and loop. Look PAST all of that surface noise and grade only the SUBSTANCE.
 
 The question: does the description surface ANYTHING genuinely relevant to what the CODE is doing — any relevant operation, quantity, sub-step, or property of the input? Pulling even a small correct fragment out of a single token is a SUCCESS, so grade as leniently as possible.
 
@@ -263,30 +284,95 @@ Answer with exactly one token:
   NO_INFO    - the description is coherent but too generic to indicate any specific aspect of the code (e.g. just 'doing a computation on the number').
   MALFORMED  - the description is contentless: empty, pure punctuation or garbage, or repetition that carries NO relevant meaning.
 
-Grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, or MALFORMED."""
-_HARD_TAG = hashlib.md5(HARD_SYS.encode()).hexdigest()[:8]
+Grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, or MALFORMED.
+Put your final answer inside <verdict>{ans}</verdict> tags, with no other text or explanation, to facilitate automated parsing."""
+
+# ── causality rubric (C++ read-out vs Python impl) — cross-language transfer of the *idea* ──
+CAUSAL_HARD_SYS = """You are grading a lightweight interpretability probe (a patchscope). The DESCRIPTION below was read out of a model's hidden state at a SINGLE token while the model was writing one line of Python CODE that checks some property of its input. The read-out method is a steering setup on a informationless C++ function stub. Because it is squeezed out of one token, the description is usually NOISY: it may half-written code, be cut off mid-generation, be syntactically incorrect, or repeat and loop. Look PAST all of that surface noise and grade only the SUBSTANCE.
+
+The question: does the C++ completion surface **ANYTHING GENUINELY RELEVANT** to what the CODE is doing — any relevant operation, quantity, sub-step, or property of the input? Pulling even a small correct fragment should be considered as a SUCCESS, so grade leniently.
+
+Answer with exactly one token:
+  YES        - the description contains SOME content genuinely relevant to what the code does, however partial, imprecise, or garbled.
+  NO         - the description is coherent and about a specific thing, but that thing is UNRELATED to what the code does.
+  NO_INFO    - the description is coherent but too generic to indicate any specific aspect of the code (e.g. just 'doing a computation on the number').
+  MALFORMED  - the description is contentless: empty, pure punctuation or garbage, or repetition that carries NO relevant meaning.
+
+The following do NOT count against the description (still YES):
+  - Wrong specifics: a wrong constant, threshold, bound, modulus, operator, or comparison. If the code computes some quantity and compares it to a value, naming the quantity alone is enough and the exact value can be wrong or missing. Example: the code implements `count(word, "b") > 5`; a c++ completion that counts the number of a `substr` in the `word` should be judged YES, even if the substr != b and/or the threshold is wrong.
+  - Partial coverage: naming just one relevant ingredient of a multi-part check counts. For `count(word, "b") > 5`, a c++ completion that only counts the number of `substr` in the `word` is still YES, even if it doesn't check the threshold.
+  - Different implementation nuance: different implementation strategies for the same idea. Example: the python code implements nth fibonacci recursively; a c++ completion implements it iteratively. Still YES, because the underlying property is the same.
+  - Broken, repetitive, or looping text, AS LONG AS the repeated content is relevant.
+
+Finally, you should grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, or MALFORMED.
+Put your final answer inside <verdict>{ans}</verdict> tags, with no other text or explanation, to facilitate automated parsing."""
+
+# GoalScope destination prompt for causality: an information-less C++ function stub. The goal
+# encoding is steered in on top of this; the model then continues the C++ body.
+CAUSAL_PREFIX = "bool check(auto value){"
 
 _KWAY_SYS = "You match a description to the closest condition. Output only an integer."
 
 
-def hard_faithfulness(readout, impl_span):
-    """dict(verdict, prompt, system, response). verdict in {YES, NO, NO_INFO, MALFORMED, UNPARSED}."""
+def build_causality_prompt(mt) -> str:
+    """C++ function-body destination prompt (assistant turn == CAUSAL_PREFIX)."""
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant proficient in programming.",
+        },
+        {
+            "role": "user",
+            "content": "You are implementing a simple C++ function that checks for a condition on an integer input. Just write the function body, without any comments or explanations. Assume all the necessary headers are already included.",
+        },
+        {"role": "assistant", "content": CAUSAL_PREFIX},
+    ]
+    kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
+    try:
+        return mt.tokenizer.apply_chat_template(
+            messages, chat_template_kwargs={"enable_thinking": False}, **kw
+        )
+    except TypeError:
+        return mt.tokenizer.apply_chat_template(messages, **kw)
+
+
+def _parse_verdict(resp: str) -> str:
+    """Prefer the <verdict>TOKEN</verdict> tag; fall back to the last bare verdict token."""
+    m = re.search(
+        r"<verdict>\s*(MALFORMED|NO_INFO|YES|NO)\s*</verdict>", resp, re.IGNORECASE
+    )
+    if m:
+        return m.group(1).upper()
+    hits = re.findall(r"\b(MALFORMED|NO_INFO|YES|NO)\b", resp.upper())
+    return hits[-1] if hits else "UNPARSED"
+
+
+def hard_eval(readout, impl_span, mode):
+    """dict(verdict, prompt, system, response). verdict in {YES, NO, NO_INFO, MALFORMED, UNPARSED}.
+    faithfulness: grade NL read-out vs impl; causality: grade C++ read-out vs the Python impl."""
+    hard_sys = CAUSAL_HARD_SYS if mode == "causality" else FAITH_HARD_SYS
     if not readout or not readout.strip():
-        return dict(verdict="MALFORMED", prompt=None, system=HARD_SYS, response=None)
-    prompt = f"[rubric {_HARD_TAG}]\nCode: {impl_span}\nDescription: {readout.strip()}\nAnswer:"
+        return dict(verdict="MALFORMED", prompt=None, system=hard_sys, response=None)
+    if mode == "causality":
+        prompt = (
+            f"Python (gold): {impl_span}\nC++ (read-out): {readout.strip()}\nAnswer:"
+        )
+    else:
+        prompt = f"Code: {impl_span}\nDescription: {readout.strip()}\nAnswer:"
+    # no rubric tag in the user prompt: ask_claude caches on (system_prompt, prompt, max_tokens),
+    # and the rubric lives in system_prompt, so a rubric change already invalidates the cache.
+    # 512 (not 256): on borderline cases the oracle reasons before the <verdict> tag and can
+    # otherwise run out of budget mid-sentence -> UNPARSED.
     resp = ask_claude(
         prompt=prompt,
-        system_prompt=HARD_SYS,
-        max_tokens=256,
+        system_prompt=hard_sys,
+        max_tokens=512,
         use_cache=True,
         model_name=ORACLE_MODEL,
     )
-    r = resp.strip().upper()
-    verdict = next(
-        (t for t in ("MALFORMED", "NO_INFO", "YES", "NO") if r.startswith(t)),
-        "UNPARSED",
+    return dict(
+        verdict=_parse_verdict(resp), prompt=prompt, system=hard_sys, response=resp
     )
-    return dict(verdict=verdict, prompt=prompt, system=HARD_SYS, response=resp)
 
 
 def kway_assign(readout, conditions):
@@ -316,42 +402,53 @@ def kway_assign(readout, conditions):
 # Aggregation
 # ══════════════════════════════════════════════════════════════════════════════
 def compute_summary(records: list[dict], n_samples: int) -> dict:
-    """Per-anchor + overall hard_yes / kway_ok from a flat list of anchor records."""
-    by_anchor = {}
-    for aname in ANCHOR_ORDER:
-        grp = [r for r in records if r["anchor"] == aname]
-        if not grp:
-            continue
-        by_anchor[aname] = dict(
-            n=len(grp),
-            hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])),
-            kway_ok=float(np.mean([r["kway_pred"] == r["kway_true"] for r in grp])),
-        )
-    overall = dict(
-        hard_yes=float(np.mean([r["hard"] == "YES" for r in records]))
-        if records
-        else float("nan"),
-        kway_ok=float(np.mean([r["kway_pred"] == r["kway_true"] for r in records]))
-        if records
-        else float("nan"),
-    )
+    """Per-anchor + overall hard_yes (and kway_ok iff k-way records are present)."""
+    has_kway = bool(records) and all("kway_pred" in r for r in records)
+
+    def _stats(grp):
+        d = dict(n=len(grp), hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])))
+        if has_kway:
+            d["kway_ok"] = float(
+                np.mean([r["kway_pred"] == r["kway_true"] for r in grp])
+            )
+        return d
+
+    by_anchor = {
+        a: _stats(grp)
+        for a in ANCHOR_ORDER
+        if (grp := [r for r in records if r["anchor"] == a])
+    }
+    if records:
+        overall = dict(hard_yes=float(np.mean([r["hard"] == "YES" for r in records])))
+        if has_kway:
+            overall["kway_ok"] = float(
+                np.mean([r["kway_pred"] == r["kway_true"] for r in records])
+            )
+    else:
+        overall = dict(hard_yes=float("nan"))
     return dict(
-        n_records=len(records), n_samples=n_samples, by_anchor=by_anchor, overall=overall
+        n_records=len(records),
+        n_samples=n_samples,
+        by_anchor=by_anchor,
+        overall=overall,
     )
 
 
-def log_summary(summary: dict):
-    logger.info("per-anchor faithfulness (hard_yes | kway_ok):")
+def log_summary(summary: dict, mode: str = "faithfulness"):
+    metric = "causality" if mode == "causality" else "faithfulness"
+    has_kway = any("kway_ok" in m for m in summary["by_anchor"].values())
+    logger.info(
+        f"per-anchor {metric} (hard_yes" + (" | kway_ok):" if has_kway else "):")
+    )
     for aname in ANCHOR_ORDER:
         if aname in summary["by_anchor"]:
             m = summary["by_anchor"][aname]
-            logger.info(
-                f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}  kway_ok={m['kway_ok']:.3f}"
-            )
+            k = f"  kway_ok={m['kway_ok']:.3f}" if "kway_ok" in m else ""
+            logger.info(f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}{k}")
     o = summary["overall"]
+    k = f"  kway_ok={o['kway_ok']:.3f}" if "kway_ok" in o else ""
     logger.info(
-        f"  {'OVERALL':10s} n={summary['n_records']:<4d} "
-        f"hard_yes={o['hard_yes']:.3f}  kway_ok={o['kway_ok']:.3f}"
+        f"  {'OVERALL':10s} n={summary['n_records']:<4d} hard_yes={o['hard_yes']:.3f}{k}"
     )
 
 
@@ -361,6 +458,19 @@ def log_summary(summary: dict):
 def parse_args():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--mode",
+        default="faithfulness",
+        choices=["faithfulness", "causality"],
+        help="faithfulness: NL read-out vs impl | causality: C++ transfer of the idea",
+    )
+    ap.add_argument(
+        "--eval-k-way",
+        dest="eval_k_way",
+        action="store_true",
+        help="also run the k-way oracle (which condition does the read-out name?). "
+        "Default off. Not implemented for --mode causality yet.",
     )
     # ── GOALSCOPE_CONFIG ──
     ap.add_argument(
@@ -394,7 +504,9 @@ def parse_args():
         "--gen_max_new_tokens", type=int, default=256, help="body generation budget"
     )
     ap.add_argument(
-        "--span_source", default="rule", choices=["rule", "oracle"],
+        "--span_source",
+        default="rule",
+        choices=["rule", "oracle"],
         help="impl-span labelling: 'rule' (letters-based, no oracle) | 'oracle' (label_generation)",
     )
     ap.add_argument(
@@ -424,8 +536,14 @@ def main():
     )
     heads_name = resolve_heads_name(args.heads)
 
+    if args.mode == "causality" and args.eval_k_way:
+        raise SystemExit("--eval-k-way is not implemented for --mode causality yet")
+    hard_sys = CAUSAL_HARD_SYS if args.mode == "causality" else FAITH_HARD_SYS
+
     # config (sans selected_heads) — enough to resolve the run dir + skip check before loading the model
     config = dict(
+        mode=args.mode,
+        eval_k_way=args.eval_k_way,
         heads_spec=args.heads,
         heads_name=heads_name,
         strategy=args.strategy,
@@ -442,7 +560,8 @@ def main():
         span_source=args.span_source,
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
-        hard_rubric_tag=_HARD_TAG,
+        readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
+        hard_rubric_tag=hashlib.md5(hard_sys.encode()).hexdigest()[:8],
     )
     run_dir = fio.run_dir_for(config, results_dir)
 
@@ -458,7 +577,9 @@ def main():
     # so we can compute the full sample set up front and figure out what's already done.
     samples = build_corpus(args.n_specs, args.num_conditions, args.seed, args.datatype)
     completed = fio.read_completed_spec_ids(run_dir)
-    kept = fio.prune_orphan_records(run_dir, completed)  # drop rows from a half-finished sample
+    kept = fio.prune_orphan_records(
+        run_dir, completed
+    )  # drop rows from a half-finished sample
     remaining = [s for s in samples if s.spec.spec_id not in set(completed)]
     logger.info(
         f"corpus: {len(samples)} samples | already done: {len(completed)} "
@@ -467,12 +588,19 @@ def main():
 
     if not remaining:
         # nothing to compute — just (re)build the summary from what's on disk and exit.
-        recs = [json.loads(l) for l in fio.records_path(run_dir).read_text().splitlines() if l.strip()] \
-            if fio.records_path(run_dir).exists() else []
+        recs = (
+            [
+                json.loads(l)
+                for l in fio.records_path(run_dir).read_text().splitlines()
+                if l.strip()
+            ]
+            if fio.records_path(run_dir).exists()
+            else []
+        )
         summary = compute_summary(recs, n_samples=len(completed))
         fio.write_summary(run_dir, summary)
         logger.info(f"all samples already complete; summary refreshed -> {run_dir}")
-        log_summary(summary)
+        log_summary(summary, args.mode)
         return
 
     mt = ModelandTokenizer(
@@ -487,7 +615,9 @@ def main():
     config["n_heads"] = len(heads)
     config["selected_heads"] = [[int(l), int(h)] for l, h in heads]
     config["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    fio.write_config(run_dir, config)  # persist config now so an in-progress run is self-describing
+    fio.write_config(
+        run_dir, config
+    )  # persist config now so an in-progress run is self-describing
     logger.info(f"heads[{heads_name}] = {len(heads)} (layer,head) pairs")
 
     gs_kwargs = dict(
@@ -498,6 +628,10 @@ def main():
         n_steer_tokens=n_steer,
         max_new_tokens=args.max_new_tokens,
     )
+    # causality: steer into the C++ stub prompt; faithfulness: apply_goalscope's default NL probe
+    if args.mode == "causality":
+        gs_kwargs["goalscope_prompt"] = build_causality_prompt(mt)
+    readout_prefix = CAUSAL_PREFIX if args.mode == "causality" else ""
 
     # append-mode handles both a fresh run and a resume (existing kept rows/samples are preserved)
     rec_fh = open(fio.records_path(run_dir), "a")
@@ -511,17 +645,28 @@ def main():
 
         # impl-span + condition text, either rule-based (letters, no oracle) or oracle-labelled
         if args.span_source == "rule":
-            conditions = list(sample.spec.spec_texts)                    # ground-truth descriptions
-            impl_spans = rule_based_spans(full_text, len(prompt), len(sample.spec.predicate_ids))
-            labels_meta = [dict(step_text=c, gen_code=(s or ""), gen_token_range=None)
-                           for c, s in zip(conditions, impl_spans)]
+            conditions = list(sample.spec.spec_texts)  # ground-truth descriptions
+            impl_spans = rule_based_spans(
+                full_text, len(prompt), len(sample.spec.predicate_ids)
+            )
+            labels_meta = [
+                dict(step_text=c, gen_code=(s or ""), gen_token_range=None)
+                for c, s in zip(conditions, impl_spans)
+            ]
         else:  # oracle
             labeled = label_generation(mt, sample, prompt, completion, use_cache=True)
             conditions = [sl.step_text for sl in labeled.labels]
             impl_spans = [sl.gen_code.strip() for sl in labeled.labels]
-            labels_meta = [dict(step_text=sl.step_text, gen_code=sl.gen_code,
-                                gen_token_range=list(sl.gen_token_range) if sl.gen_token_range else None)
-                           for sl in labeled.labels]
+            labels_meta = [
+                dict(
+                    step_text=sl.step_text,
+                    gen_code=sl.gen_code,
+                    gen_token_range=list(sl.gen_token_range)
+                    if sl.gen_token_range
+                    else None,
+                )
+                for sl in labeled.labels
+            ]
 
         rows = anchors_for_sample(mt, full_text, prompt, conditions, impl_spans)
         conds = [r["condition"] for r in rows]
@@ -542,37 +687,52 @@ def main():
         for row in rows:
             true_id = sample.spec.predicate_ids[row["cond"]]
             for aname, pos in row["anchors"].items():
-                ro = readouts.get(pos, {}).get("patched_gen", "")
-                hv = hard_faithfulness(ro, row["impl_span"])
-                kv = kway_assign(ro, conds)
+                # causality prepends the C++ stub so the oracle sees a complete-ish snippet
+                ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
+                hv = hard_eval(ro, row["impl_span"], args.mode)
                 logger.debug(
                     "[%s c%d %s] impl=%r cond=%r",
-                    sample.spec.spec_id, row["cond"], aname, row["impl_span"], row["condition"],
+                    sample.spec.spec_id,
+                    row["cond"],
+                    aname,
+                    row["impl_span"],
+                    row["condition"],
                 )
                 logger.debug("    read-out : %r", ro)
-                logger.debug("    HARD  verdict=%s  oracle_response=%r", hv["verdict"], hv["response"])
-                logger.debug("    KWAY  pred=%s (true %d)  oracle_response=%r",
-                             kv["pred"], row["cond"], kv["response"])
-                sample_records.append(
-                    dict(
-                        spec=sample.spec.spec_id,
-                        cond=row["cond"],
-                        var=row["var"],
-                        anchor=aname,
-                        pos=pos,
-                        readout=ro,
-                        impl_span=row["impl_span"],
-                        condition=row["condition"],
-                        true_pred_id=true_id,
-                        hard=hv["verdict"],
-                        hard_prompt=hv["prompt"],
-                        hard_response=hv["response"],
+                logger.debug(
+                    "    HARD  verdict=%s  oracle_response=%r",
+                    hv["verdict"],
+                    hv["response"],
+                )
+                rec = dict(
+                    spec=sample.spec.spec_id,
+                    cond=row["cond"],
+                    var=row["var"],
+                    anchor=aname,
+                    pos=pos,
+                    readout=ro,
+                    impl_span=row["impl_span"],
+                    condition=row["condition"],
+                    true_pred_id=true_id,
+                    hard=hv["verdict"],
+                    hard_prompt=hv["prompt"],
+                    hard_response=hv["response"],
+                )
+                if args.eval_k_way:
+                    kv = kway_assign(ro, conds)
+                    logger.debug(
+                        "    KWAY  pred=%s (true %d)  oracle_response=%r",
+                        kv["pred"],
+                        row["cond"],
+                        kv["response"],
+                    )
+                    rec.update(
                         kway_pred=kv["pred"],
                         kway_true=row["cond"],
                         kway_prompt=kv["prompt"],
                         kway_response=kv["response"],
                     )
-                )
+                sample_records.append(rec)
         sample_meta = dict(
             spec_id=sample.spec.spec_id,
             predicate_ids=list(sample.spec.predicate_ids),
@@ -580,8 +740,7 @@ def main():
             completion=completion,
             labels=labels_meta,
             anchors=[
-                dict(cond=r["cond"], var=r["var"], anchors=r["anchors"])
-                for r in rows
+                dict(cond=r["cond"], var=r["var"], anchors=r["anchors"]) for r in rows
             ],
         )
         # write this sample's records FIRST, then its meta line: a sample counts as "done"
@@ -601,13 +760,15 @@ def main():
 
     # ── aggregate from everything on disk (resumed rows included) ──
     all_records = [
-        json.loads(l) for l in fio.records_path(run_dir).read_text().splitlines() if l.strip()
+        json.loads(l)
+        for l in fio.records_path(run_dir).read_text().splitlines()
+        if l.strip()
     ]
     n_samples = len(fio.read_completed_spec_ids(run_dir))
     summary = compute_summary(all_records, n_samples)
     fio.write_summary(run_dir, summary)
     logger.info(f"saved -> {run_dir}")
-    log_summary(summary)
+    log_summary(summary, args.mode)
 
 
 if __name__ == "__main__":

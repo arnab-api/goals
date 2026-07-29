@@ -1,11 +1,11 @@
 """IO + parsing utils for GoalScope goal-head *faithfulness* eval runs.
 
 Pure ``json`` / ``pandas`` — **no torch, no model import** — so it is cheap to import in a notebook
-just to read results produced by ``run_goalscope_faithfulness.py``.
+just to read results produced by ``eval_goalscope.py`` (either ``--mode``).
 
 Layout of a run directory::
 
-    <results>/evaluation/goalscope/faithfulness/<strategy>/<alpha>/<leaf>/
+    <results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>/
         config.json     resolved config + the selected (layer, head) list + timestamp
         records.jsonl    one row per (sample, condition, anchor): read-out, impl_span, condition,
                          the FULL hard/kway oracle prompt + raw response + parsed verdict
@@ -33,7 +33,9 @@ from pathlib import Path
 
 import pandas as pd
 
-FAITH_SUBDIR = os.path.join("evaluation", "goalscope", "faithfulness")
+GOALSCOPE_SUBDIR = os.path.join("evaluation", "goalscope")
+# per-mode root under the goalscope tree; mode "faithfulness" keeps the original path.
+FAITH_SUBDIR = os.path.join(GOALSCOPE_SUBDIR, "faithfulness")  # back-compat default
 
 
 # ── path construction (shared by the runner and the loaders) ──────────────────
@@ -59,12 +61,15 @@ def run_leaf_name(config: dict) -> str:
 
 
 def run_dir_for(config: dict, results_root) -> Path:
-    return (Path(results_root) / FAITH_SUBDIR / str(config["strategy"])
+    # <results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>; mode defaults to
+    # "faithfulness" so pre-mode runs keep their exact path.
+    mode = config.get("mode", "faithfulness")
+    return (Path(results_root) / GOALSCOPE_SUBDIR / mode / str(config["strategy"])
             / fmt_alpha(config["alpha"]) / run_leaf_name(config))
 
 
-def faithfulness_root(results_root) -> Path:
-    return Path(results_root) / FAITH_SUBDIR
+def faithfulness_root(results_root, mode: str = "faithfulness") -> Path:
+    return Path(results_root) / GOALSCOPE_SUBDIR / mode
 
 
 # ── paths ─────────────────────────────────────────────────────────────────────
@@ -173,9 +178,9 @@ def load_run(run_dir) -> dict:
                 summary=load_summary(run_dir), samples=load_samples(run_dir), dir=str(run_dir))
 
 
-def list_runs(results_root) -> list[Path]:
-    """Every run dir (has config.json) under the faithfulness root, sorted by path."""
-    root = faithfulness_root(results_root)
+def list_runs(results_root, mode: str = "faithfulness") -> list[Path]:
+    """Every run dir (has config.json) under the goalscope <mode> root, sorted by path."""
+    root = faithfulness_root(results_root, mode)
     if not root.exists():
         return []
     return sorted({p.parent for p in root.rglob("config.json")})
