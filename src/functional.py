@@ -1084,7 +1084,7 @@ def get_hs(
             else:
                 attn_module_name, head_idx = is_an_attn_head(layer_name)
                 o_proj_name = attn_module_name + ".o_proj"
-                head_dim = mt.n_embd // mt.model.config.num_attention_heads
+                head_dim = mt.head_dim  # config head_dim (Qwen3 decouples it from n_embd)
                 o_proj = get_module_nnsight(mt, o_proj_name)
                 layer_states[layer_name] = o_proj.input[0][0][
                     :, :, head_idx * head_dim : (head_idx + 1) * head_dim

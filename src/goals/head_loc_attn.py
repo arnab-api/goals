@@ -246,8 +246,8 @@ def collect_head_steering_vecs(
     from collections import defaultdict
 
     n_embd = mt.n_embd
-    n_heads = mt.model.config.num_attention_heads
-    head_dim = n_embd // n_heads
+    n_heads = mt.n_heads
+    head_dim = mt.head_dim  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
 
     batch_size = src_tokenized["input_ids"].shape[0]
 
@@ -309,8 +309,8 @@ def precompute_per_head_deltas_batch_obsolete(
     Returns:
         Float32 CPU tensor of shape ``(batch, n_layers_tested, n_heads, n_embd)``.
     """
-    n_heads = mt.model.config.num_attention_heads
-    head_dim = mt.n_embd // n_heads
+    n_heads = mt.n_heads
+    head_dim = mt.head_dim  # o_proj input is n_heads*head_dim wide; output is n_embd
     batch = src_o_proj_inputs[layers[0]].shape[0]
 
     deltas = torch.zeros(batch, len(layers), n_heads, mt.n_embd)
@@ -339,8 +339,8 @@ def precompute_per_head_deltas_obsolete(
 
     Returns float32 CPU tensor of shape (n_layers_tested, n_heads, n_embd).
     """
-    n_heads = mt.model.config.num_attention_heads
-    head_dim = mt.n_embd // n_heads
+    n_heads = mt.n_heads
+    head_dim = mt.head_dim  # o_proj input is n_heads*head_dim wide; output is n_embd
     n_layers_tested = len(layers)
 
     deltas = torch.zeros(n_layers_tested, n_heads, mt.n_embd)
@@ -894,9 +894,9 @@ def src_replacement_hooks(
     if patch_positions is None:
         patch_positions = [-1]
 
-    n_heads = mt.model.config.num_attention_heads
+    n_heads = mt.n_heads
     n_embd = mt.n_embd
-    head_dim = n_embd // n_heads
+    head_dim = mt.head_dim  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
     mask_vals = mask.values  # (n_layers_tested, n_heads) requires_grad
     src_batch = src_head_inps  # (batch, L, n_embd) float32 CPU
     pos_arg = list(patch_positions)

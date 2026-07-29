@@ -150,10 +150,13 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda', revision=None):
         if device != "auto":
             model = model.to(device)
 
-        assert model.config.hidden_size % model.config.num_attention_heads == 0, \
-            "FV per-head split assumes hidden_size divisible by num_attention_heads"
+        # head_dim is NOT always resid_dim//n_heads: Qwen3 decouples it (Qwen3-32B: hidden 5120,
+        # 64 heads x 128 = 8192 -> o_proj Linear(8192, 5120)). Read the config when it declares one.
+        _head_dim = getattr(model.config, "head_dim", None) or \
+            model.config.hidden_size // model.config.num_attention_heads
         MODEL_CONFIG={"n_heads":model.config.num_attention_heads,
                       "n_layers":model.config.num_hidden_layers,
+                      "head_dim":_head_dim,
                       "resid_dim":model.config.hidden_size,
                       "name_or_path":model.config._name_or_path,
                       "attn_hook_names":[f'model.layers.{layer}.self_attn.o_proj' for layer in range(model.config.num_hidden_layers)],

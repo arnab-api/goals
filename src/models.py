@@ -77,6 +77,27 @@ class ModelandTokenizer(LanguageModel):
     def device(self):
         return determine_device(self._model)
 
+    @property
+    def n_heads(self) -> int:
+        """Number of *query* heads (post repeat_kv width for GQA models)."""
+        return determine_n_heads(self)
+
+    @property
+    def head_dim(self) -> int:
+        """Per-head width of the attention inner space.
+
+        NOT always ``n_embd // n_heads``: Qwen3 (and others) decouple ``head_dim`` from
+        ``hidden_size`` — e.g. Qwen3-32B has hidden_size 5120 but 64 heads x 128 = 8192, with
+        ``o_proj: Linear(8192 -> 5120)``. Always read the config when it declares head_dim.
+        """
+        return determine_head_dim(self)
+
+    @property
+    def attn_inner_size(self) -> int:
+        """Width of the o_proj INPUT (== n_heads * head_dim). Equals n_embd only when the model
+        does not decouple head_dim from hidden_size."""
+        return self.n_heads * self.head_dim
+
     def parse_config(self) -> None:
         fields = {
             "n_layer": None,
@@ -631,6 +652,26 @@ def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
     except AttributeError:
         embed = baukit.get_module(model, determine_embedding_layer_path(model))
         return embed.weight.shape[-1]
+
+
+def determine_n_heads(model: ModelandTokenizer | Model) -> int:
+    """Number of *query* attention heads."""
+    model = unwrap_model(model)
+    return model.config.num_attention_heads
+
+
+def determine_head_dim(model: ModelandTokenizer | Model) -> int:
+    """Per-head width of the attention inner space.
+
+    Prefers the config's explicit ``head_dim``, which some architectures decouple from
+    ``hidden_size`` (Qwen3-32B: hidden 5120, 64 heads x 128 = 8192 -> o_proj Linear(8192, 5120)).
+    Falls back to ``hidden_size // n_heads`` for models that don't declare it (Qwen2, Llama, GLM-4
+    dense, ... — where the two agree anyway)."""
+    model = unwrap_model(model)
+    hd = getattr(model.config, "head_dim", None)
+    if hd:
+        return int(hd)
+    return determine_hidden_size(model) // determine_n_heads(model)
 
 
 def determine_device(model: ModelandTokenizer | Model) -> torch.device | None:

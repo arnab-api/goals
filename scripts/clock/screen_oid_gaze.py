@@ -91,8 +91,8 @@ def main():
     mt = ModelandTokenizer(
         model_key=args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="eager"
     )
-    nH = mt.model.config.num_attention_heads
-    hd = mt.n_embd // nH
+    nH = mt.n_heads
+    hd = mt.head_dim  # config head_dim (Qwen3 decouples it from n_embd)
     layers_below = list(range(0, args.layer_boundary))
 
     gaze_heads = load_gaze_heads(

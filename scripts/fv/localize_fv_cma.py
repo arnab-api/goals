@@ -75,9 +75,15 @@ def _atomic_save(obj, path):
 # ══════════════════════════════════════════════════════════════════════════════
 # Reimplemented method
 # ══════════════════════════════════════════════════════════════════════════════
+def _head_dim(mc):
+    """Per-head width of the o_proj INPUT. NOT always resid_dim//n_heads — Qwen3 decouples
+    head_dim from hidden_size (Qwen3-32B: 5120 hidden, 64x128=8192 -> o_proj Linear(8192, 5120))."""
+    return mc.get("head_dim") or mc["resid_dim"] // mc["n_heads"]
+
+
 def _split_by_head(activations, mc):
     """(..., resid_dim) -> (..., n_heads, head_dim) over the query heads (GQA-safe)."""
-    head_dim = mc["resid_dim"] // mc["n_heads"]
+    head_dim = _head_dim(mc)
     return activations.view(*activations.size()[:-1], mc["n_heads"], head_dim)
 
 
@@ -86,7 +92,7 @@ def compute_mean_head_activations(dataset, model, mc, tokenizer, n_shots, n_tria
     into one slot. Mirrors FV get_mean_head_activations (shuffle_labels=False)."""
     dummy = get_dummy_token_labels(n_shots, tokenizer=tokenizer, prefixes=prefixes,
                                    separators=separators, model_config=mc)
-    head_dim = mc["resid_dim"] // mc["n_heads"]
+    head_dim = _head_dim(mc)
     store = torch.zeros(n_trials, mc["n_layers"], mc["n_heads"], len(dummy), head_dim)
     filter_set = np.arange(len(dataset["valid"]))
     prepend_bos = not mc["prepend_bos"]
@@ -125,7 +131,7 @@ def compute_mean_head_activations(dataset, model, mc, tokenizer, n_shots, n_tria
 def _make_replace_hook(layer, head, mean_activations, qp_token_inds, idx_map, mc, model):
     """baukit edit_output fn: overwrite the last query-token's (layer, head) slice of the
     o_proj INPUT with its task-mean, then recompute the (bias-free) o_proj OUTPUT."""
-    head_dim = mc["resid_dim"] // mc["n_heads"]
+    head_dim = _head_dim(mc)
 
     def rep(output, layer_name, inputs):
         if isinstance(inputs, tuple):
@@ -146,7 +152,7 @@ def _make_replace_hook_batched(layer, heads_chunk, mean_activations, qp_token_in
     row j gets ONLY head heads_chunk[j] patched (last query token). Rows never interact across the
     batch dim, so each row's answer-token Δ is exactly the single-head CIE — functionally identical
     to the one-head-at-a-time sweep, computed len(heads_chunk) at a time."""
-    head_dim = mc["resid_dim"] // mc["n_heads"]
+    head_dim = _head_dim(mc)
 
     def rep(output, layer_name, inputs):
         if isinstance(inputs, tuple):
