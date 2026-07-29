@@ -37,11 +37,18 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 from collections import deque
 from pathlib import Path
+
+
+class DriverInterrupted(Exception):
+    """Raised from a SIGTERM/SIGINT handler so the job loop can mark its in-flight job
+    terminal (state=killed, driver-interrupted) before the process exits — the graceful
+    counterpart to the monitor's PID-liveness check for hard (SIGKILL/reboot) deaths."""
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -105,7 +112,11 @@ class StatusBoard:
     def __init__(self, path: Path, run_id: str, worker_id: str, host: str, gpus: list[int],
                  jobs: list[dict]):
         self.path = path
-        self.meta = {"run_id": run_id, "worker_id": worker_id, "host": host, "gpus": gpus}
+        # `pid` (this driver's OS pid) is the collision-proof liveness signal the monitor probes:
+        # unique per run, unlike the screen *name* (== job name, reused across runs). A status.json
+        # still claiming "running" whose pid is dead is a phantom.
+        self.meta = {"run_id": run_id, "worker_id": worker_id, "host": host, "gpus": gpus,
+                     "pid": os.getpid()}
         self.jobs = [
             {"seq": i + 1, "name": j["name"], "state": "queued",
              "error": None, "error_kind": None, "started": None, "ended": None}
@@ -204,13 +215,21 @@ def run_job(job: dict, gpus: list[int], runlog: Path, job_num: int, total: int) 
         proc = subprocess.Popen(
             full, shell=True, executable="/bin/bash", env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            start_new_session=True,  # own process group so an interrupt can kill the whole tree
         )
-        for line in proc.stdout:  # live: stream to screen AND capture
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            lf.write(line)
-            tail.append(line.rstrip("\n"))
-        proc.wait()
+        try:
+            for line in proc.stdout:  # live: stream to screen AND capture
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                lf.write(line)
+                tail.append(line.rstrip("\n"))
+            proc.wait()
+        except BaseException:  # driver interrupted (SIGTERM/SIGINT) -> tear down the child tree
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                pass
+            raise
 
     if proc.returncode == 0:
         print(f"[{_now()}] ✓ job {job_num}/{total} ({name}) done.", flush=True)
@@ -240,6 +259,15 @@ def main() -> None:
 
     board = StatusBoard(cfg_path.parent / "status.json", run_id, worker_id, host, gpus, jobs)
 
+    # (3) catchable-death handling: on SIGTERM/SIGINT raise DriverInterrupted so the loop below
+    # can mark its in-flight job terminal. (SIGKILL / power loss can't be caught — those are what
+    # the monitor's PID-liveness check covers instead.)
+    def _on_signal(signum, _frame):
+        raise DriverInterrupted(f"driver received signal {signum} ({signal.Signals(signum).name})")
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, _on_signal)
+
     print(">>> worker driver <<<", flush=True)
     print(f"worker_id     : {worker_id}", flush=True)
     print(f"gpus          : {gpus}", flush=True)
@@ -247,18 +275,29 @@ def main() -> None:
     print(f"poll_interval : {poll_sec / 60:.0f} min", flush=True)
     print(f"jobs in queue : {len(jobs)}", flush=True)
 
-    for i, job in enumerate(jobs):
-        print(f"\n{'=' * 80}\n[{_now()}] preparing {i + 1}/{len(jobs)}: {job['name']}\n{'=' * 80}", flush=True)
-        board.update(i, state="waiting")
-        wait_for_gpu_memory(gpus, threshold, poll_sec)
-        board.update(i, state="running", started=time.time())
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", job["name"])
-        runlog = cfg_path.parent / f"job_{i + 1:02d}_{safe}.log"
-        ok, kind, err = run_job(job, gpus, runlog, i + 1, len(jobs))
-        board.update(i, state="done" if ok else "error", error=err, error_kind=kind, ended=time.time())
-        if not ok and not auto_continue:
-            print(f"[{_now()}] stopping queue (auto_continue=False).", flush=True)
-            break
+    cur_idx: int | None = None  # the job currently in flight (for interrupt cleanup)
+    try:
+        for i, job in enumerate(jobs):
+            cur_idx = i
+            print(f"\n{'=' * 80}\n[{_now()}] preparing {i + 1}/{len(jobs)}: {job['name']}\n{'=' * 80}", flush=True)
+            board.update(i, state="waiting")
+            wait_for_gpu_memory(gpus, threshold, poll_sec)
+            board.update(i, state="running", started=time.time())
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", job["name"])
+            runlog = cfg_path.parent / f"job_{i + 1:02d}_{safe}.log"
+            ok, kind, err = run_job(job, gpus, runlog, i + 1, len(jobs))
+            board.update(i, state="done" if ok else "error", error=err, error_kind=kind, ended=time.time())
+            cur_idx = None
+            if not ok and not auto_continue:
+                print(f"[{_now()}] stopping queue (auto_continue=False).", flush=True)
+                break
+    except DriverInterrupted as e:
+        # mark the in-flight job terminal so the monitor never shows a phantom "running"/"waiting"
+        if cur_idx is not None and board.jobs[cur_idx]["state"] not in ("done", "error"):
+            board.update(cur_idx, state="killed", error=str(e),
+                         error_kind="driver-interrupted", ended=time.time())
+        print(f"\n[{_now()}] {e} — marked in-flight job killed; exiting.", flush=True)
+        raise SystemExit(143)
 
     print(f"\n[{_now()}] queue '{worker_id}' finished ({len(jobs)} jobs).", flush=True)
 

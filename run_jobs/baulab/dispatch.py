@@ -447,21 +447,117 @@ def write_manifest(run_id: str, created: str, jobs_out: list[dict]) -> Path:
     return out
 
 
-def summarize_runs() -> list[dict]:
-    """Newest-first summary of every batch with a manifest (for `--list` / kill.py)."""
+_SUMMARY_TERMINAL = {"done", "error", "killed", "cancelled"}  # trusted as-is; never re-probed
+
+
+def _run_on_host(host_key: str, cmd: str, host: str, user: str | None, pw: str | None):
+    """Run cmd locally (host_key=='LOCAL') or via ssh; returns CompletedProcess."""
+    if host_key == "LOCAL":
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, executable="/bin/bash")
+    return subprocess.run(f"{_ssh_prefix(user, pw, host)} {shlex.quote(cmd)}",
+                          shell=True, capture_output=True, text=True, executable="/bin/bash")
+
+
+def _probe_placed(jobs: list[dict], user: str | None, pw: str | None) -> dict[str, tuple[str | None, bool | None]]:
+    """Per placed job (keyed by status_path) -> (status_json_state, alive). Batches ssh per host.
+
+    Signals, in priority order:
+      * status.json state — per-run, authoritative for what the driver last wrote (corrects a
+        manifest that lagged behind an error/done).
+      * alive — liveness for a status.json still frozen at 'running' (hard death). Uses the driver
+        `pid` recorded in status.json (unique per run -> collision-proof) via `kill -0`; falls back
+        to the screen session for OLD runs whose driver never recorded a pid. The screen *name* is
+        the job name (reused across runs), so screen-only liveness is ambiguous — hence pid first."""
+    by_host: dict[str, list[dict]] = {}
+    for j in jobs:
+        by_host.setdefault("LOCAL" if j.get("is_local") else j.get("host"), []).append(j)
+
+    result: dict[str, tuple[str | None, bool | None]] = {}
+    for key, hjobs in by_host.items():
+        if not key:
+            continue
+        host = hjobs[0].get("host")
+        # pass 1: read every status.json on this host + one screen -ls
+        parts = [f"echo '<<<F:{i}>>>'; cat {j['status_path']} 2>/dev/null" for i, j in enumerate(hjobs)]
+        inner = "; ".join(parts) + "; echo '<<<SCREENS>>>'; screen -ls 2>/dev/null || true"
+        res = _run_on_host(key, inner, host, user, pw)
+        if key != "LOCAL" and res.returncode == 255:  # host unreachable -> unknown for all its jobs
+            for j in hjobs:
+                result[j["status_path"]] = (None, None)
+            continue
+        body, _, screen_txt = res.stdout.partition("<<<SCREENS>>>")
+        chunks = re.split(r"<<<F:(\d+)>>>", body)  # [pre, idx, content, idx, content, ...]
+        contents = {int(chunks[i]): chunks[i + 1] for i in range(1, len(chunks) - 1, 2)}
+
+        states: dict[int, str | None] = {}
+        pids: dict[int, int | None] = {}
+        for i in range(len(hjobs)):
+            try:
+                data = json.loads(contents.get(i, ""))
+                states[i] = data["jobs"][0]["state"]
+                pids[i] = int(data["pid"]) if data.get("pid") is not None else None
+            except (json.JSONDecodeError, KeyError, IndexError, ValueError, TypeError):
+                states[i], pids[i] = None, None
+
+        # pass 2 (only if any pids to check): kill -0 them in one shot -> set of live pids
+        live_pids: set[int] = set()
+        want = sorted({p for p in pids.values() if p})
+        if want:
+            probe = "; ".join(f"kill -0 {p} 2>/dev/null && echo {p}" for p in want)
+            live_pids = {int(x) for x in _run_on_host(key, probe, host, user, pw).stdout.split()}
+
+        for i, j in enumerate(hjobs):
+            scr = j.get("screen") or ""
+            if pids[i]:  # collision-proof: this run's own driver pid
+                alive = pids[i] in live_pids
+            elif scr:    # old run (no pid): best-effort screen-name liveness
+                alive = bool(re.search(rf"\.{re.escape(scr)}\s", screen_txt))
+            else:
+                alive = None
+            result[j["status_path"]] = (states[i], alive)
+    return result
+
+
+def summarize_runs(probe: bool = False, user: str | None = None, pw: str | None = None) -> list[dict]:
+    """Newest-first summary of every batch with a manifest (for `--list` / kill.py).
+
+    probe=True: for jobs the manifest still shows non-terminal, read the authoritative per-run
+    status.json (correcting a manifest that lagged behind an error/done) and, if that too is still
+    'running' but the screen session is gone, count it as `stale` — so hard-killed / rebooted runs
+    stop showing a phantom `running`. Batched one ssh per host, so --list stays fast."""
     d = manifests_dir()
     runs: list[dict] = []
     if not d.exists():
         return runs
-    for p in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    manifests = []
+    for p in d.glob("*.json"):
         try:
             m = json.loads(p.read_text())
         except (OSError, json.JSONDecodeError):
             continue
+        m.setdefault("run_id", p.stem)
+        manifests.append(m)
+    # newest first by run_id (== submission timestamp YYYYMMDD_HHMMSS, lexicographically sortable) —
+    # NOT file mtime, which any manifest rewrite (a state update / manual reconcile) would disturb.
+    manifests.sort(key=lambda m: m["run_id"], reverse=True)
+
+    probed: dict[str, tuple[str | None, bool | None]] = {}
+    if probe:
+        placed = [j for m in manifests for j in m.get("jobs", [])
+                  if j.get("status_path") and j.get("state") not in _SUMMARY_TERMINAL]
+        probed = _probe_placed(placed, user, pw)
+
+    for m in manifests:
         counts: dict[str, int] = {}
         for j in m.get("jobs", []):
-            counts[j.get("state", "?")] = counts.get(j.get("state", "?"), 0) + 1
-        runs.append({"run_id": m.get("run_id", p.stem), "created": m.get("created", "?"),
+            state = j.get("state", "?")
+            if probe and j.get("status_path") and state not in _SUMMARY_TERMINAL:
+                sjson_state, alive = probed.get(j["status_path"], (None, None))
+                state = sjson_state or state  # status.json is authoritative when readable
+                if state not in _SUMMARY_TERMINAL and alive is False:
+                    state = "stale"  # still 'running' but its screen session is gone -> phantom
+            counts[state] = counts.get(state, 0) + 1
+        runs.append({"run_id": m.get("run_id", "?"), "created": m.get("created", "?"),
                      "updated": m.get("updated", "?"), "n": len(m.get("jobs", [])), "counts": counts})
     return runs
 
@@ -633,9 +729,10 @@ STATE_STYLE = {
     "error": "bold red",
     "killed": "red",
     "cancelled": "dim red",
+    "stale": "bright_black",  # monitor-derived: status.json says live but the driver pid is dead
     "no-status": "magenta",
 }
-_STATE_ORDER = ["running", "waiting", "queued", "done", "error", "killed", "cancelled", "no-status"]
+_STATE_ORDER = ["running", "waiting", "queued", "done", "error", "killed", "cancelled", "stale", "no-status"]
 
 
 def _reason(kind: str | None) -> str:
@@ -939,8 +1036,9 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
     console.print("=" * 80)
 
 
-def print_runs(console: Console) -> None:
-    runs = summarize_runs()
+def print_runs(console: Console, probe: bool = False,
+               user: str | None = None, pw: str | None = None) -> None:
+    runs = summarize_runs(probe=probe, user=user, pw=pw)
     if not runs:
         console.print("[dim]no batches found.[/]")
         return
