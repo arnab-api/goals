@@ -69,7 +69,17 @@ def ask_claude(
     last_err = None
     for attempt in range(1, MAX_TRIES + 1):
         try:
-            response = client.messages.create(**request_kwargs).content[0].text
+            msg = client.messages.create(**request_kwargs)
+            # content may include non-text blocks (e.g. ThinkingBlock when extended
+            # thinking is on, or tool_use); take the text block(s), not content[0].
+            texts = [b.text for b in msg.content if getattr(b, "type", None) == "text"]
+            if not texts:
+                kinds = [getattr(b, "type", "?") for b in msg.content]
+                raise ValueError(
+                    f"no text block in response (blocks={kinds}, stop_reason={msg.stop_reason}); "
+                    "if thinking is enabled, raise max_tokens or disable thinking"
+                )
+            response = "".join(texts)
             break
         except Exception as e:  # network / API / malformed-response errors
             last_err = e
