@@ -425,6 +425,11 @@ def is_glm_variant(mt: Model | ModelandTokenizer) -> bool:
         mt, transformers.Glm4MoeLiteForCausalLM
     ):
         return True
+    # dense GLM-4 (e.g. zai-org/GLM-4-32B-0414): pure GQA attention, no MoE
+    if hasattr(transformers, "Glm4ForCausalLM") and isinstance(
+        mt, transformers.Glm4ForCausalLM
+    ):
+        return True
     if hasattr(mt, "config"):
         config = mt.config
         if hasattr(config, "_name_or_path"):

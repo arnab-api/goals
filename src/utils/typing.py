@@ -35,6 +35,7 @@ Model = (
     | transformers.DeepseekV2ForCausalLM
     | transformers.Starcoder2ForCausalLM
     | transformers.Glm4MoeLiteForCausalLM
+    | transformers.Glm4ForCausalLM
     | transformers.Qwen3NextForCausalLM
     | transformers.CwmForCausalLM
     | transformers.MistralForCausalLM
