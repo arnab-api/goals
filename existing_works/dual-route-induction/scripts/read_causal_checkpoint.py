@@ -11,6 +11,7 @@ Usage:
       [--topk 30] [--n_heads N] [--out ranking.json]
 '''
 import json
+import os
 import argparse
 import torch
 
@@ -24,6 +25,8 @@ def main():
     ap.add_argument('--n_heads', type=int, default=None,
                     help='heads per layer; default = read from checkpoint meta')
     ap.add_argument('--out', default=None, help='optional json to write full ranking + scores')
+    ap.add_argument('--score', default=None, choices=['m1_prob', 'm2_prob'],
+                    help="which accumulator to difference; default m1 for concept, m2 for token")
     args = ap.parse_args()
 
     blob = torch.load(args.ckpt, map_location='cpu', weights_only=False)
@@ -32,17 +35,21 @@ def main():
     done = blob['done_batches']
     n_examples = int(corrupt['n'])
 
+    scoretype_hint = ('token' if meta.get('random_tok') or 'token' in os.path.basename(args.ckpt)
+                      else 'concept')
     n_heads = args.n_heads or meta.get('n_heads')
     assert n_heads, 'n_heads not found in checkpoint meta; pass --n_heads explicitly'
 
-    # same score as end-of-run: mean m1-prob under head-patch minus mean m1-prob under corrupt
-    diff = patched['m1_prob'] / patched['n'] - corrupt['m1_prob'] / corrupt['n']  # (n_layers*n_heads,)
+    # concept vs token are NOT the same quantity (see convert_causal_scores.py, which writes the
+    # canonical head_orderings):  concept = m1 diff (real entities), token = m2 diff (random toks).
+    field = args.score or ('m2_prob' if scoretype_hint == 'token' else 'm1_prob')
+    diff = patched[field] / patched['n'] - corrupt[field] / corrupt['n']  # (n_layers*n_heads,)
 
     vals, idxs = torch.topk(diff, k=len(diff))
     ranking = [flatidx_to_grididx(int(i), n_heads) for i in idxs]
 
-    scoretype = 'token' if meta.get('random_tok') else 'concept'
-    print(f"# {scoretype} copier heads from checkpoint: {done} batches, {n_examples} examples "
+    scoretype = scoretype_hint
+    print(f"# {scoretype} copier heads [{field}] from checkpoint: {done} batches, {n_examples} examples "
           f"(noisy / possibly length-skewed if early) -- top {args.topk}")
     for r in range(min(args.topk, len(ranking))):
         layer, head = ranking[r]
