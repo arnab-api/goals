@@ -36,9 +36,14 @@ from src.models import ModelandTokenizer
 def _multiline_preds_for(lang: str) -> list:
     return [p for p in INT_PREDICATES if p.is_multiline_for(lang)]
 
+
 MULTILINE_PREDS = _multiline_preds_for("python")  # backward-compat alias (python only)
 VAR_LETTERS = "abcdefghij"
-FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"
+FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = (
+    "<|fim_prefix|>",
+    "<|fim_suffix|>",
+    "<|fim_middle|>",
+)
 
 
 def result_print(letters: list[str]) -> str:
@@ -102,7 +107,9 @@ def build_example(
         raise NotImplementedError(f"mode='fim' is python-only; got lang={lang!r}")
     if chunky:
         if mode == "fim":
-            raise NotImplementedError("mode='fim' is not supported for chunky predicates")
+            raise NotImplementedError(
+                "mode='fim' is not supported for chunky predicates"
+            )
         pool = chunky_predicates_for(datatype)
         assert pool, f"no chunky predicates for datatype={datatype!r}"
     else:
@@ -122,7 +129,7 @@ def build_example(
     else:
         var_names = [VAR_LETTERS[i] for i in range(n_conditions)]
     spec = ConditionSpec(
-        spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10 ** 6):06d}",
+        spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10**6):06d}",
         predicate_ids=[p.id for p in preds],
         predicate_params=params,
         spec_texts=[p.render(pr) for p, pr in zip(preds, params)],
@@ -153,19 +160,25 @@ def build_example(
     elif chunky:
         prior_styles = ["multiline"] * target_slot
     else:
-        prior_styles = [rng.choice(["multiline", "singleline"]) for _ in range(target_slot)]
+        prior_styles = [
+            rng.choice(["multiline", "singleline"]) for _ in range(target_slot)
+        ]
         if "multiline" not in prior_styles:
             prior_styles[rng.randrange(target_slot)] = "multiline"
     body = []
     for j in range(target_slot):
-        body += render_complete(preds[j], params[j], var_names[j],
-                                prefer_singleline=(prior_styles[j] == "singleline"))
+        body += render_complete(
+            preds[j],
+            params[j],
+            var_names[j],
+            prefer_singleline=(prior_styles[j] == "singleline"),
+        )
 
     # target: the test variable
     tp, tvar, tprm = preds[target_slot], var_names[target_slot], params[target_slot]
     if style == "multiline":
         target_impl = tp.render_multiline(tprm, tvar, lang=lang)
-        target_first = target_impl[0]          # incomplete first line -> "continue"
+        target_first = target_impl[0]  # incomplete first line -> "continue"
         target_lines = [target_first]
         expected_rest = "\n".join(target_impl[1:])
         expected_verdict = "continue"
@@ -176,8 +189,8 @@ def build_example(
             target_lines = [tp.render_singleline(tprm, tvar, lang=lang)]
         else:
             target_lines = tp.render_multiline(tprm, tvar, lang=lang)
-        target_first = target_lines[-1]        # pivot line = the completed statement
-        expected_rest = ""                     # complete; nothing left for this var
+        target_first = target_lines[-1]  # pivot line = the completed statement
+        expected_rest = ""  # complete; nothing left for this var
         expected_verdict = "moved_on"
     body += target_lines
 
@@ -210,7 +223,9 @@ def build_example(
         "prior_styles": prior_styles,  # complete priors, >=1 multiline
         "full_prompt": full_prompt,
         "prefill_code": prefix_code,
-        "fim_suffix": fim_suffix.rstrip("\n") if (mode == "fim" and fim_suffix) else None,
+        "fim_suffix": fim_suffix.rstrip("\n")
+        if (mode == "fim" and fim_suffix)
+        else None,
         "target_slot": target_slot,
         "var_names": var_names,
         "target_var": var_names[target_slot],

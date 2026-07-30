@@ -73,7 +73,9 @@ def greedy_continue(
 
 
 def _normalize_input_positions(
-    positions: Optional[list[int]], L_prompt: int, default_last: bool = True,
+    positions: Optional[list[int]],
+    L_prompt: int,
+    default_last: bool = True,
 ) -> list[int]:
     """Normalize prompt-position list: handle negatives, de-dup, sort, validate.
 
@@ -166,7 +168,11 @@ def headpatched_generate(
             if n_steer_tokens is None or step < n_steer_tokens:
                 positions_this_step = prefill_positions if step == 0 else [-1]
                 logits, past_key_values = forward_with_src_replacement(
-                    mt, inputs, src_o_proj_inps, mask, layers,
+                    mt,
+                    inputs,
+                    src_o_proj_inps,
+                    mask,
+                    layers,
                     alpha=alpha,
                     patch_positions=positions_this_step,
                     return_past_key_values=True,
@@ -274,7 +280,11 @@ def headpatched_generate_batch(
             if n_steer_tokens is None or step < n_steer_tokens:
                 positions_this_step = prefill_positions if step == 0 else [-1]
                 logits, past_key_values = forward_with_src_replacement(
-                    mt, inputs, src_o_proj_inps_batch, mask, layers,
+                    mt,
+                    inputs,
+                    src_o_proj_inps_batch,
+                    mask,
+                    layers,
                     alpha=alpha,
                     patch_positions=positions_this_step,
                     return_past_key_values=True,
@@ -476,9 +486,13 @@ def render_patchscope_html(
         # Non-scoped context tokens (e.g. the prompt prefix when include_noncode=True)
         # are shown dimmed for readability, with no goal-scope tooltip.
         if not r.get("scoped", True):
-            spans.append(f'<span class="ps-noncode" style="opacity:0.4">{tok_html}</span>')
+            spans.append(
+                f'<span class="ps-noncode" style="opacity:0.4">{tok_html}</span>'
+            )
             continue
-        tip_text = f'pos {r["pos"]} {r["token"]!r}: {r["patched_gen"].strip() or "(empty)"}'
+        tip_text = (
+            f"pos {r['pos']} {r['token']!r}: {r['patched_gen'].strip() or '(empty)'}"
+        )
         tip_attr = _html.escape(tip_text, quote=True)
         cls = ("ps-tok " + _prism_class(r["token"])).strip()
         spans.append(f'<span class="{cls}" data-tip="{tip_attr}">{tok_html}</span>')
@@ -500,8 +514,14 @@ def render_patchscope_html(
 def _build_goalscope_prompt(mt) -> str:
     """Build the GoalScope destination prompt ("What are you doing at this line?")."""
     messages = [
-        {"role": "system", "content": "You are a helpful assistant proficient in programming."},
-        {"role": "user", "content": "What are you doing at this line of the code. Keep your answer as brief as possible."},
+        {
+            "role": "system",
+            "content": "You are a helpful assistant proficient in programming.",
+        },
+        {
+            "role": "user",
+            "content": "What are you doing at this line of the code. Keep your answer as brief as possible.",
+        },
         {"role": "assistant", "content": ""},
     ]
     try:
@@ -625,7 +645,9 @@ def apply_goalscope(
         text_tokens = [mt.tokenizer.decode([t]) for t in src_ids]
         code_start, code_end = 0, len(src_ids)
     else:
-        src_tokenized = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
+        src_tokenized = prepare_input(
+            prompts=prompt, tokenizer=mt, return_offsets_mapping=True
+        )
         src_offsets = src_tokenized.pop("offset_mapping")[0]
         src_ids = src_tokenized["input_ids"][0].tolist()
         text_tokens = [mt.tokenizer.decode([t]) for t in src_ids]
@@ -633,13 +655,19 @@ def apply_goalscope(
         # Find <code> … </code> segment; fall back to full sequence
         try:
             code_start, _ = find_token_range(
-                string=prompt, substring="<code>", tokenizer=mt.tokenizer,
-                occurrence=1, offset_mapping=src_offsets,
+                string=prompt,
+                substring="<code>",
+                tokenizer=mt.tokenizer,
+                occurrence=1,
+                offset_mapping=src_offsets,
             )
             if prompt.count("</code>") > 1:
                 _, code_end = find_token_range(
-                    string=prompt, substring="</code>", tokenizer=mt.tokenizer,
-                    occurrence=1, offset_mapping=src_offsets,
+                    string=prompt,
+                    substring="</code>",
+                    tokenizer=mt.tokenizer,
+                    occurrence=1,
+                    offset_mapping=src_offsets,
                 )
             else:
                 code_end = len(src_ids)
@@ -675,8 +703,10 @@ def apply_goalscope(
         # collect_head_steering_vecs returns (batch_size, n_seg, n_embd);
         # src_tokenized here has batch_size=1, so squeeze the leading dim.
         steering_vecs = collect_head_steering_vecs(
-            mt=mt, src_tokenized=src_tokenized,
-            selected_heads=selected_heads, token_positions=seg_positions,
+            mt=mt,
+            src_tokenized=src_tokenized,
+            selected_heads=selected_heads,
+            token_positions=seg_positions,
         )[0]  # (n_seg, n_embd)
 
         layer_start, layer_end = steer_layer_range
@@ -686,17 +716,22 @@ def apply_goalscope(
         # Layers come from selected_heads; build a HeadMask over them.
         layers_replace = sorted({layer for (layer, _) in selected_heads})
         n_heads_model = mt.model.config.num_attention_heads
-        mask_module = HeadMask(n_layers_tested=len(layers_replace), n_heads=n_heads_model)
+        mask_module = HeadMask(
+            n_layers_tested=len(layers_replace), n_heads=n_heads_model
+        )
         with torch.no_grad():
             mask_module.values.zero_()
-            for (layer, h) in selected_heads:
+            for layer, h in selected_heads:
                 li = layers_replace.index(layer)
                 mask_module.values[li, h] = 1.0
 
         # Extract per-layer o_proj inputs at every segment position.
         # Shape per layer: (1, n_seg, n_embd); stack → (n_seg, n_layers, n_embd).
         src_o_inputs = get_o_proj_inputs_batch(
-            mt, src_tokenized, layers_replace, token_positions=seg_positions,
+            mt,
+            src_tokenized,
+            layers_replace,
+            token_positions=seg_positions,
         )
         src_head_vals_all = torch.stack(
             [src_o_inputs[layer][0] for layer in layers_replace], dim=1
@@ -709,44 +744,59 @@ def apply_goalscope(
         chunk_end = min(chunk_start + batch_size, n_seg)
         B = chunk_end - chunk_start
 
-        tiled = TokenizerOutput(data=dict(
-            input_ids=dest_ids.expand(B, -1).clone(),
-            attention_mask=dest_attn.expand(B, -1).clone(),
-        ))
+        tiled = TokenizerOutput(
+            data=dict(
+                input_ids=dest_ids.expand(B, -1).clone(),
+                attention_mask=dest_attn.expand(B, -1).clone(),
+            )
+        )
 
         if strategy == "additive":
             sv_batch = alpha * steering_vecs[chunk_start:chunk_end]  # (B, n_embd)
             patches = [
                 PatchSpec(
                     location=(mt.layer_name_format.format(li), -1),
-                    patch=sv_batch, strategy="add", on_pass="all",
+                    patch=sv_batch,
+                    strategy="add",
+                    on_pass="all",
                 )
                 for li in steer_layers
             ]
             gens = generate_with_patch(
-                mt, tiled, max_new_tokens=max_new_tokens, patches=patches,
+                mt,
+                tiled,
+                max_new_tokens=max_new_tokens,
+                patches=patches,
                 n_steer_tokens=n_steer,
-                do_sample=False, patch_interface="baukit",
-                remove_prefix=True, skip_special_tokens=True,
+                do_sample=False,
+                patch_interface="baukit",
+                remove_prefix=True,
+                skip_special_tokens=True,
             )
         else:  # replace
-            src_chunk = src_head_vals_all[chunk_start:chunk_end]  # (B, n_layers, n_embd)
+            src_chunk = src_head_vals_all[
+                chunk_start:chunk_end
+            ]  # (B, n_layers, n_embd)
             gens = headpatched_generate_batch(
-                mt=mt, dest_inputs=tiled,
+                mt=mt,
+                dest_inputs=tiled,
                 src_o_proj_inps_batch=src_chunk,
-                mask=mask_module, layers=layers_replace,
+                mask=mask_module,
+                layers=layers_replace,
                 max_new_tokens=max_new_tokens,
                 n_steer_tokens=n_steer,
                 alpha=alpha,
             )
 
         for i in range(B):
-            results.append({
-                "pos": seg_positions[chunk_start + i],
-                "token": text_tokens[seg_positions[chunk_start + i]],
-                "patched_gen": gens[i],
-                "scoped": True,
-            })
+            results.append(
+                {
+                    "pos": seg_positions[chunk_start + i],
+                    "token": text_tokens[seg_positions[chunk_start + i]],
+                    "patched_gen": gens[i],
+                    "scoped": True,
+                }
+            )
 
     # Optionally fold in the non-code tokens (everything outside [code_start, code_end))
     # as display-only, non-scoped context — no source extraction / generation for them.
