@@ -3,6 +3,7 @@ import logging
 import torch
 
 from src.models import ModelandTokenizer
+from src.models import supports_chat_template as _supports_chat_template
 from src.tokens import prepare_input
 
 logger = logging.getLogger(__name__)
@@ -43,23 +44,10 @@ def apply_chat_template(
 
 
 def supports_chat_template(mt: ModelandTokenizer) -> bool:
-    """
-    Heuristic to determine if the model supports chat templates.
-    """
-    instruct_signatures = [
-        "instruct",
-        "it",
-        "chat",
-        "oss",
-        "zai-org/glm",
-        "next",
-        "cwm",
-        "distill",
-        "qwen3.5",
-    ]
-    return any(
-        inst_signature in mt.name.lower() for inst_signature in instruct_signatures
-    )
+    """Does the model expose a chat template? Kept here for backward compatibility —
+    delegates to ``src.models.supports_chat_template``, which asks the tokenizer instead of
+    pattern-matching the model name (the name heuristic missed e.g. ``Qwen/Qwen3-32B``)."""
+    return _supports_chat_template(mt)
 
 
 @torch.inference_mode()

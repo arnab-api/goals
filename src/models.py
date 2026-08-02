@@ -9,7 +9,7 @@ from nnsight import LanguageModel
 from transformers import AutoTokenizer
 
 from src.utils.env_utils import DEFAULT_MODELS_DIR, HF_CACHE_DIR
-from src.utils.typing import Layer, Model, Sequence
+from src.utils.typing import Layer, Model, Sequence, Tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +458,52 @@ def is_glm_variant(mt: Model | ModelandTokenizer) -> bool:
             lowered = name.lower()
             return "glm" in lowered or "glm4" in lowered
     return False
+
+
+# Legacy model-name signatures — only used when no tokenizer is reachable (see below).
+INSTRUCT_NAME_SIGNATURES = (
+    "instruct",
+    "it",
+    "chat",
+    "oss",
+    "zai-org/glm",
+    "next",
+    "cwm",
+    "distill",
+    "qwen3.5",
+)
+
+
+def supports_chat_template(mt: Model | ModelandTokenizer | Tokenizer) -> bool:
+    """Does this model expose a chat template (i.e. is it instruct/chat-tuned)?
+
+    Capability check, not a name heuristic: base models ship no ``chat_template`` while
+    instruct/chat models do, so asking the tokenizer is authoritative and needs no per-model
+    upkeep. The old name-substring list only survives as a fallback for when no tokenizer is
+    reachable (e.g. a bare ``Model`` was passed).
+
+    Motivating case: ``Qwen/Qwen3-32B`` is instruct-tuned but carries no ``-Instruct`` suffix
+    (it is the hybrid instruct/thinking release), so every name-based signature missed it and
+    callers silently fell back to raw-text prompting.
+    """
+    tok = getattr(mt, "tokenizer", None)
+    if tok is None and hasattr(mt, "apply_chat_template"):
+        tok = mt  # a bare tokenizer was passed in
+    if tok is not None:
+        try:
+            if getattr(tok, "chat_template", None):
+                return True
+            get_ct = getattr(tok, "get_chat_template", None)
+            if callable(get_ct):  # some versions expose it only via this accessor
+                return bool(get_ct())
+            return False
+        except Exception as e:  # noqa: BLE001 — fall through to the name heuristic
+            logger.debug(f"chat_template lookup failed ({e}); falling back to name heuristic")
+
+    name = getattr(mt, "name", None) or getattr(
+        getattr(mt, "config", None), "_name_or_path", ""
+    )
+    return any(sig in str(name).lower() for sig in INSTRUCT_NAME_SIGNATURES)
 
 
 def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None:
