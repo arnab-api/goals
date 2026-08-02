@@ -917,15 +917,15 @@ def src_replacement_hooks(
     Used by ``forward_with_src_replacement`` (logits / KV-cache decoding) and by
     ``make_head_replacement_patch_interface`` (attention extraction)."""
     if src_head_inps.dim() == 2:
-        src_head_inps = src_head_inps.unsqueeze(0)  # (1, L, n_embd)
+        src_head_inps = src_head_inps.unsqueeze(0)  # (1, L, n_heads*head_dim)
     if patch_positions is None:
         patch_positions = [-1]
 
     n_heads = mt.n_heads
-    n_embd = mt.n_embd
     head_dim = mt.head_dim  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
+    attn_inner = mt.attn_inner_size  # == n_heads*head_dim: the o_proj INPUT width
     mask_vals = mask.values  # (n_layers_tested, n_heads) requires_grad
-    src_batch = src_head_inps  # (batch, L, n_embd) float32 CPU
+    src_batch = src_head_inps  # (batch, L, n_heads*head_dim) float32 CPU
     pos_arg = list(patch_positions)
 
     handles = []
@@ -936,7 +936,7 @@ def src_replacement_hooks(
 
             def make_hook(li_: int):
                 def pre_hook(module, args):
-                    x = args[0]  # (batch, seq, n_embd) bfloat16 — live cascade input
+                    x = args[0]  # (batch, seq, n_heads*head_dim) bf16 — live cascade o_proj input
                     dev = x.device
                     dtype = x.dtype
                     B_ = x.shape[0]
@@ -955,7 +955,7 @@ def src_replacement_hooks(
                         return None  # no patching, pass through unchanged
 
                     # Source vals for this layer — float32 for gradient precision
-                    src = src_batch[:, li_].to(dev)  # (batch, n_embd) float32
+                    src = src_batch[:, li_].to(dev)  # (batch, n_heads*head_dim) float32
                     src_3d = src.view(B_, n_heads, head_dim)
 
                     # Per-head interpolation weight; requires_grad via mask_vals
@@ -971,9 +971,11 @@ def src_replacement_hooks(
                         if p > prev:
                             pieces.append(x[:, prev:p, :])
                         cas_3d = x[:, p, :].float().view(B_, n_heads, head_dim)
+                        # back to the o_proj INPUT width = n_heads*head_dim, which is NOT
+                        # n_embd when head_dim is decoupled (Qwen3-32B: 64*128=8192 vs 5120).
                         new_p = (alpha * m * src_3d + (1 - m) * cas_3d).view(
-                            B_, n_embd
-                        )  # (B, n_embd)
+                            B_, attn_inner
+                        )  # (B, n_heads*head_dim)
                         pieces.append(new_p.to(dtype).unsqueeze(1))
                         prev = p + 1
                     if prev < seq_len:
