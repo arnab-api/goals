@@ -82,10 +82,10 @@ ORACLE_MODEL = "claude-sonnet-4-6"
 # ══════════════════════════════════════════════════════════════════════════════
 # Head sets
 # ══════════════════════════════════════════════════════════════════════════════
-def load_goal_heads(model_name, results_dir, threshold=0.9, band=(25, 56)):
+def load_goal_heads(model_name, results_dir, threshold=0.9, band=(25, 56), tag="lam20"):
     ck = torch.load(
         os.path.join(
-            results_dir, f"localization/{model_name.split('/')[-1]}/head_mask.pt"
+            results_dir, f"localization/{model_name.split('/')[-1]}/{tag}/head_mask.pt"
         ),
         map_location="cpu",
     )

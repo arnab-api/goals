@@ -33,6 +33,7 @@ Mask parameterization:
 from __future__ import annotations
 
 import contextlib
+import os
 import dataclasses
 import logging
 import random
@@ -130,6 +131,32 @@ class HeadMask(nn.Module):
 # ---------------------------------------------------------------------------
 # Utility: o_proj weight (obsolete — used only by delta-based functions)
 # ---------------------------------------------------------------------------
+
+
+DEFAULT_GOAL_MASK_TAG = "lam20"
+
+
+def goal_mask_path(model_name: str, tag: str | None = DEFAULT_GOAL_MASK_TAG,
+                   results_dir: str | None = None) -> str:
+    """Path of a trained goal head_mask.pt.
+
+    Layout mirrors what ``scripts/train_head_mask.py --tag`` writes:
+        <results>/localization/<model-short>/<tag>/head_mask.pt
+    A run trained without ``--tag`` lands at the flat ``<model-short>/head_mask.pt``; we fall
+    back to it so pre-tag checkpoints still resolve. ``tag=None`` forces the flat path.
+    """
+    from src.utils import env_utils
+
+    root = results_dir or env_utils.DEFAULT_RESULTS_DIR
+    short = model_name.split("/")[-1]
+    base = os.path.join(root, "localization", short)
+    tagged = os.path.join(base, tag, "head_mask.pt") if tag else None
+    flat = os.path.join(base, "head_mask.pt")
+    if tagged and os.path.exists(tagged):
+        return tagged
+    if os.path.exists(flat):
+        return flat
+    return tagged or flat          # not found: report the tagged path we expected
 
 
 def _get_o_proj_weight_obsolete(mt, layer: int) -> torch.Tensor:

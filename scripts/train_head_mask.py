@@ -82,6 +82,12 @@ def main() -> None:
         help="AdamW learning rate (default: 1e-2)",
     )
     parser.add_argument(
+        "--tag",
+        default=None,
+        help="optional subdir under results/localization/<model>/ isolating this run "
+             "(e.g. --tag lam20). Default: write straight to <model>/head_mask.pt.",
+    )
+    parser.add_argument(
         "--lambda-sparse",
         type=float,
         default=20.0,
@@ -237,9 +243,14 @@ def main() -> None:
     # Train head mask
     # ------------------------------------------------------------------
     logger.info("=== Training head mask ===")
-    checkpoint_dir = os.path.join(
-        DEFAULT_RESULTS_DIR, "localization", model_short_name, "checkpoints"
-    )
+    # --tag isolates a run so a lambda sweep doesn't race on one head_mask.pt (mirrors
+    # train_completion_mask's per-config dir). No tag -> the historical flat path, so every
+    # existing loader (results/localization/<model>/head_mask.pt) keeps working.
+    out_root = os.path.join(DEFAULT_RESULTS_DIR, "localization", model_short_name)
+    if args.tag:
+        out_root = os.path.join(out_root, args.tag)
+    checkpoint_dir = os.path.join(out_root, "checkpoints")
+    logger.info(f"output root: {out_root}")
     mask, history = train_head_mask(
         mt,
         pivot_caches,
@@ -260,7 +271,7 @@ def main() -> None:
     # Save checkpoint
     # ------------------------------------------------------------------
     selected_heads = mask.selected_heads(layers)
-    save_dir = os.path.join(DEFAULT_RESULTS_DIR, "localization", model_short_name)
+    save_dir = out_root
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, "head_mask.pt")
 
@@ -278,6 +289,7 @@ def main() -> None:
         },
         "config": {
             "model": args.model_key,
+            "tag": args.tag,
             "n_instances": len(pivot_caches),
             "n_epochs": args.n_epochs,
             "lr": args.lr,

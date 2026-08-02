@@ -63,6 +63,9 @@ def parse_args():
                          "usually junk the rule-based span cut can't rescue. Pass --no-stop-at-newline to "
                          "generate the full --max-new and rule-cut instead.")
     # head-set construction knobs (result-changing -> folded into the dir tag via a short hash)
+    ap.add_argument("--goal-tag", type=str, default="lam20",
+                    help="subdir under results/localization/<model>/ holding the trained goal "
+                         "head_mask.pt (train_head_mask --tag); e.g. lam20")
     ap.add_argument("--goal-threshold", type=float, default=0.9)
     ap.add_argument("--goal-band", nargs=2, type=int, default=[25, 56], metavar=("LO", "HI"))
     ap.add_argument("--gaze-qspan", type=int, default=15)
@@ -140,7 +143,7 @@ def main():
     # ── output dir keyed by every result-changing arg (so --overwrite can't bleed) ──
     model_short = args.model.split("/")[-1]
     lo, hi = args.k_range
-    knob_str = (f"gt{args.goal_threshold}_gb{args.goal_band[0]}-{args.goal_band[1]}"
+    knob_str = (f"gtag{args.goal_tag}_gt{args.goal_threshold}_gb{args.goal_band[0]}-{args.goal_band[1]}"
                 f"_gq{args.gaze_qspan}_dt{args.dec_tag}_dh{args.dec_threshold}_v{args.head_version}")
     knob_hash = hashlib.md5(knob_str.encode()).hexdigest()[:6]
     mnew_seg = f"mnew{args.max_new}" + ("nl" if args.stop_at_newline else "full")
@@ -174,7 +177,7 @@ def main():
     def load_head_sets():
         # goal — trained mask @ threshold, restricted to a layer band
         gck = torch.load(os.path.join(env_utils.DEFAULT_RESULTS_DIR,
-                         f"localization/{model_short}/head_mask.pt"), map_location="cpu")
+                         f"localization/{model_short}/{args.goal_tag}/head_mask.pt"), map_location="cpu")
         goal_layers = [int(x) for x in gck["layers"]]
         gmask = gck["mask_values"].numpy().copy()
         gmask[: args.goal_band[0]] = 0; gmask[args.goal_band[1]:] = 0
