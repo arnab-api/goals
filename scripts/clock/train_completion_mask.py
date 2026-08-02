@@ -123,7 +123,10 @@ def _extract_src_hv(mt, inputs, layers, patch_tokens):
                 return pre
 
             handles.append(op.register_forward_pre_hook(mk(li)))
-        mt._model(**dict(inputs), use_cache=False)
+        # logits_to_keep=1: we only hook o_proj inputs here, so the lm_head projection over all
+        # ~400 positions is pure waste (1.9 GB bf16 at B=16 on Qwen3's 151936-token vocab) and it
+        # lands entirely on the last device shard, which is the memory bottleneck.
+        mt._model(**dict(inputs), use_cache=False, logits_to_keep=1)
     finally:
         for h in handles:
             h.remove()
@@ -167,7 +170,10 @@ def completion_score(mt, dest_inputs, target_ans, dst_ans, pre_hooks):
     source's. Differentiable through any mask in ``pre_hooks``."""
     handles = [mod.register_forward_pre_hook(fn) for mod, fn in pre_hooks]
     try:
-        out = mt._model(**dict(dest_inputs), use_cache=False)
+        # logits_to_keep=1: only position -1 is read below, so computing (and keeping in the
+        # autograd graph) the full-sequence logits just burdens the last shard. out.logits keeps
+        # its (B, seq, vocab) rank with seq==1, so the [:, -1, :] indexing below is unchanged.
+        out = mt._model(**dict(dest_inputs), use_cache=False, logits_to_keep=1)
     finally:
         for h in handles:
             h.remove()
@@ -192,6 +198,15 @@ def parse_args():
     p.add_argument("--version", default="conditions")
     p.add_argument("--mode", default="chat", choices=["chat", "fim"])
     p.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (e.g. '4,5,6,7')")
+    p.add_argument("--attn-impl", default="sdpa", choices=["sdpa", "eager"],
+                   help="attention kernel. This script only hooks o_proj inputs — it never reads "
+                        "attention weights — so `sdpa` is behaviourally equivalent to `eager` and "
+                        "avoids materializing the (B, n_heads, L, L) probs (bf16 + an fp32 softmax "
+                        "copy) at EVERY masked layer. Since the mask patches layer 0 upward and the "
+                        "readout is at the final logits, that whole stack is retained for backward: "
+                        "on Qwen3-32B (64 heads, L~400) it is ~1 GB/layer at batch 16, i.e. ~64 GB "
+                        "of pure overhead, which OOMs 3x A100-80GB. Use `eager` only to reproduce "
+                        "masks trained before this flag existed (e.g. the Qwen2.5-Coder-32B runs).")
     # patch / mask geometry
     p.add_argument("--patch-tokens", default="-2",
                    help="comma-separated token indices to transplant (e.g. '-2' or '-2,-1')")
@@ -230,7 +245,8 @@ def main():
     logging_utils.configure(args)  # reads args.log_level (-v -> DEBUG)
 
     mt = ModelandTokenizer(
-        model_key=args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="eager"
+        model_key=args.model, dtype=torch.bfloat16, device_map="auto",
+        attn_implementation=args.attn_impl,
     )
     nH = mt.model.config.num_attention_heads
     hd = getattr(mt.model.config, "head_dim", mt.n_embd // nH)
@@ -238,7 +254,8 @@ def main():
     layers = list(range(args.layer_lo, layer_hi))
     patch_tokens = [int(x) for x in args.patch_tokens.split(",")]
     logger.info(f"layers {layers[0]}..{layers[-1]} ({len(layers)} masked) · patch_tokens={patch_tokens} "
-                f"· direction={args.direction} · same={args.same} · batch_size={args.batch_size} · accum={args.accum}")
+                f"· direction={args.direction} · same={args.same} · batch_size={args.batch_size} · accum={args.accum} "
+                f"· attn_impl={args.attn_impl}")
 
     pairs = build_completion_pairs(
         mt,
@@ -301,6 +318,7 @@ def main():
                     "target_slots": args.target_slots, "max_conditions": args.max_conditions,
                     "n_pairs": len(pairs), "n_epochs": args.n_epochs, "lr": args.lr,
                     "batch_size": args.batch_size, "accum": args.accum,
+                    "attn_impl": args.attn_impl,
                     "lambda_sparse": args.lambda_sparse, "sel_threshold": args.sel_threshold,
                 },
             },
