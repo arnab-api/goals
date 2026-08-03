@@ -511,17 +511,19 @@ def render_patchscope_html(
     )
 
 
+# Content of the GoalScope destination prompt, exposed so other read-out mechanisms (e.g. the
+# activation oracle in scripts/evaluation/eval_act_oracles.py) can pose the *same* question.
+GOALSCOPE_SYS = "You are a helpful assistant proficient in programming."
+GOALSCOPE_QUESTION = (
+    "What are you doing at this line of the code. Keep your answer as brief as possible."
+)
+
+
 def _build_goalscope_prompt(mt) -> str:
     """Build the GoalScope destination prompt ("What are you doing at this line?")."""
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant proficient in programming.",
-        },
-        {
-            "role": "user",
-            "content": "What are you doing at this line of the code. Keep your answer as brief as possible.",
-        },
+        {"role": "system", "content": GOALSCOPE_SYS},
+        {"role": "user", "content": GOALSCOPE_QUESTION},
         {"role": "assistant", "content": ""},
     ]
     try:

@@ -65,7 +65,7 @@ from scripts.clock.score_condition_heads import load_head_scores
 from scripts.evaluation import faithfulness_io as fio
 from src.goals.condition_data import INT_PREDICATES, materialize, sample_specs
 from src.goals.functional import apply_chat_template, supports_chat_template
-from src.goals.goalscope import apply_goalscope, greedy_continue
+from src.goals.goalscope import GOALSCOPE_SYS, apply_goalscope, greedy_continue
 from src.goals.multistep_label import label_generation
 from src.goals.oid_gaze import cache_root
 from src.models import ModelandTokenizer
@@ -310,6 +310,12 @@ Put your final answer inside <verdict>{ans}</verdict> tags, with no other text o
 # GoalScope destination prompt for causality: an information-less C++ function stub. The goal
 # encoding is steered in on top of this; the model then continues the C++ body.
 CAUSAL_PREFIX = "bool check(auto value){"
+# exposed so other read-out mechanisms (eval_act_oracles.py) can pose the *same* instruction
+CAUSAL_INSTRUCTION = (
+    "You are implementing a simple C++ function that checks for a condition. "
+    "Just write the function body, without any comments or explanations. Assume all the necessary "
+    "headers are already included."
+)
 
 _KWAY_SYS = "You match a description to the closest condition. Output only an integer."
 
@@ -317,14 +323,8 @@ _KWAY_SYS = "You match a description to the closest condition. Output only an in
 def build_causality_prompt(mt) -> str:
     """C++ function-body destination prompt (assistant turn == CAUSAL_PREFIX)."""
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant proficient in programming.",
-        },
-        {
-            "role": "user",
-            "content": "You are implementing a simple C++ function that checks for a condition on an integer input. Just write the function body, without any comments or explanations. Assume all the necessary headers are already included.",
-        },
+        {"role": "system", "content": GOALSCOPE_SYS},
+        {"role": "user", "content": CAUSAL_INSTRUCTION},
         {"role": "assistant", "content": CAUSAL_PREFIX},
     ]
     kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)

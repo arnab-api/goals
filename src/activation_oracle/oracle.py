@@ -16,7 +16,7 @@ Original code: https://github.com/adamkarvonen/activation_oracles
 from __future__ import annotations
 
 import contextlib
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -51,6 +51,27 @@ def _hook(module, hook_fn):
         yield
     finally:
         handle.remove()
+
+
+# ── Oracle prompt construction ────────────────────────────────────────────────
+
+def activation_prefix(extract_layer: int) -> str:
+    """The ``"Layer: N\\n ? \\n"`` preamble carrying the activation placeholder token.
+
+    Any custom oracle prompt MUST embed this (or at least ``SPECIAL_TOKEN``) somewhere, since
+    ``query_oracle`` injects the activation at the placeholder's position. Keeping the exact spacing
+    of the paper-faithful prompt guarantees ``SPECIAL_TOKEN`` stays its own token after tokenization.
+    """
+    return f"Layer: {extract_layer}\n{SPECIAL_TOKEN} \n"
+
+
+def default_oracle_prompt(tokenizer, question: str, extract_layer: int) -> str:
+    """Paper-faithful oracle prompt: a single user turn, ``activation_prefix + question``."""
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": activation_prefix(extract_layer) + question}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -110,6 +131,7 @@ def query_oracle(
     injection_layer: int = INJECTION_LAYER,
     max_new_tokens: int = 60,
     steering_coeff: float = 1.0,
+    prompt_builder: Optional[Callable[..., str]] = None,
 ) -> str:
     """Ask the oracle a question about a single activation vector.
 
@@ -125,17 +147,28 @@ def query_oracle(
         injection_layer: Where to inject into the oracle (default: layer 1).
         max_new_tokens: Max tokens for oracle to generate.
         steering_coeff: Scales the injected vector (1.0 = norm-matched).
+        prompt_builder: Optional ``(tokenizer, question, extract_layer) -> str`` (called with
+            keywords) that builds the whole oracle prompt — e.g. to mirror another read-out
+            mechanism's probe prompt (system turn, assistant prefill, ...). It **must** embed
+            ``SPECIAL_TOKEN``, normally via ``activation_prefix(extract_layer)``, or this raises.
+            ``None`` (default) uses ``default_oracle_prompt`` — the paper-faithful single user turn.
 
     Returns:
-        Oracle's generated response string.
+        Oracle's generated response string. With a ``prompt_builder`` that ends in an assistant
+        prefill, this is the *continuation* of that prefill (the prefill itself is not repeated).
     """
     # ── Build oracle prompt ───────────────────────────────────────────────────
-    prefix = f"Layer: {extract_layer}\n{SPECIAL_TOKEN} \n"
-    oracle_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prefix + question}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+    if prompt_builder is None:
+        oracle_prompt = default_oracle_prompt(tokenizer, question, extract_layer)
+    else:
+        oracle_prompt = prompt_builder(
+            tokenizer=tokenizer, question=question, extract_layer=extract_layer
+        )
+    if SPECIAL_TOKEN not in oracle_prompt:
+        raise ValueError(
+            f"oracle prompt does not contain the activation placeholder {SPECIAL_TOKEN!r} — the "
+            f"activation would never be injected. Include activation_prefix(extract_layer)."
+        )
     enc = tokenizer(oracle_prompt, return_tensors="pt", add_special_tokens=False)
     device = next(peft_model.parameters()).device
     input_ids = enc["input_ids"].to(device)
@@ -159,6 +192,14 @@ def query_oracle(
         ph_pos = next(
             (i for i, (cs, ce) in enumerate(offsets) if cs <= char_pos < ce),
             None,
+        )
+    if ph_pos is None:
+        # Fail loudly: the hook below silently no-ops on ph_pos=None, which would return a
+        # read-out that never saw the activation at all.
+        raise ValueError(
+            f"could not locate the {SPECIAL_TOKEN!r} placeholder token in the oracle prompt — the "
+            f"activation would not be injected. It likely merged with a neighbouring token; keep "
+            f"the spacing of activation_prefix()."
         )
 
     # ── Injection hook ────────────────────────────────────────────────────────

@@ -3,9 +3,14 @@
 Pure ``json`` / ``pandas`` — **no torch, no model import** — so it is cheap to import in a notebook
 just to read results produced by ``eval_goalscope.py`` (either ``--mode``).
 
+Also serves ``eval_act_oracles.py`` (activation-oracle read-outs): it writes the *same* record /
+summary schema into a sibling tree, so every loader here works on it — see
+``act_oracle_run_dir_for`` / ``list_act_oracle_runs`` / ``act_oracle_grid_df``.
+
 Layout of a run directory::
 
-    <results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>/
+    <results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>/        (eval_goalscope)
+    <results>/evaluation/act_oracle/<mode>/<target-model>/<leaf>/          (eval_act_oracles)
         config.json     resolved config + the selected (layer, head) list + timestamp
         records.jsonl    one row per (sample, condition, anchor): read-out, impl_span, condition,
                          the FULL hard/kway oracle prompt + raw response + parsed verdict
@@ -36,6 +41,9 @@ import pandas as pd
 GOALSCOPE_SUBDIR = os.path.join("evaluation", "goalscope")
 # per-mode root under the goalscope tree; mode "faithfulness" keeps the original path.
 FAITH_SUBDIR = os.path.join(GOALSCOPE_SUBDIR, "faithfulness")  # back-compat default
+# activation-oracle runs (``eval_act_oracles.py``) live in a sibling tree; same record schema,
+# so every loader below works on them unchanged — only the path/leaf layout differs.
+ACT_ORACLE_SUBDIR = os.path.join("evaluation", "act_oracle")
 
 
 # ── path construction (shared by the runner and the loaders) ──────────────────
@@ -70,6 +78,34 @@ def run_dir_for(config: dict, results_root) -> Path:
 
 def faithfulness_root(results_root, mode: str = "faithfulness") -> Path:
     return Path(results_root) / GOALSCOPE_SUBDIR / mode
+
+
+# ── activation-oracle paths (``eval_act_oracles.py``) ─────────────────────────
+def act_oracle_leaf_name(config: dict) -> str:
+    """Deterministic leaf directory name for an activation-oracle run config."""
+    parts = [
+        f"L={config['extract_layer']}",
+        f"style={config.get('prompt_style', 'paper')}",
+        f"q={config['question_tag']}",
+        f"coeff={float(config['steering_coeff']):g}",
+        f"maxnew={config['oracle_max_new_tokens']}",
+        f"span={config.get('span_source', 'rule')}",
+        f"dtype={config.get('datatype', 'int')}",
+        f"nspec={config['n_specs']}",
+        f"nc={'-'.join(map(str, config['num_conditions']))}",
+        f"seed={config['seed']}",
+    ]
+    return "__".join(parts)
+
+
+def act_oracle_run_dir_for(config: dict, results_root) -> Path:
+    # <results>/evaluation/act_oracle/<mode>/<target-model>/<leaf>
+    return (Path(results_root) / ACT_ORACLE_SUBDIR / config.get("mode", "faithfulness")
+            / str(config["model"]).split("/")[-1] / act_oracle_leaf_name(config))
+
+
+def act_oracle_root(results_root, mode: str = "faithfulness") -> Path:
+    return Path(results_root) / ACT_ORACLE_SUBDIR / mode
 
 
 # ── paths ─────────────────────────────────────────────────────────────────────
@@ -178,23 +214,37 @@ def load_run(run_dir) -> dict:
                 summary=load_summary(run_dir), samples=load_samples(run_dir), dir=str(run_dir))
 
 
-def list_runs(results_root, mode: str = "faithfulness") -> list[Path]:
-    """Every run dir (has config.json) under the goalscope <mode> root, sorted by path."""
-    root = faithfulness_root(results_root, mode)
+def _list_runs_under(root) -> list[Path]:
+    root = Path(root)
     if not root.exists():
         return []
     return sorted({p.parent for p in root.rglob("config.json")})
 
 
+def list_runs(results_root, mode: str = "faithfulness") -> list[Path]:
+    """Every run dir (has config.json) under the goalscope <mode> root, sorted by path."""
+    return _list_runs_under(faithfulness_root(results_root, mode))
+
+
+def list_act_oracle_runs(results_root, mode: str = "faithfulness") -> list[Path]:
+    """Every activation-oracle run dir under the act_oracle <mode> root, sorted by path."""
+    return _list_runs_under(act_oracle_root(results_root, mode))
+
+
 # ── tabular views ──────────────────────────────────────────────────────────────
 _CFG_COLS = ["strategy", "alpha", "heads_name", "n_heads", "steer_layer_range",
              "n_steer_tokens", "max_new_tokens", "seed"]
+# activation-oracle runs have no heads/steering; these are the knobs that vary instead.
+_AO_CFG_COLS = ["model", "extract_layer", "layer_pct", "prompt_style", "question_tag",
+                "steering_coeff", "oracle_max_new_tokens", "oracle_lora", "seed"]
 
 
 def summary_df(run_dir) -> pd.DataFrame:
-    """One run's per-anchor summary, with the run's config columns attached."""
+    """One run's per-anchor summary, with the run's config columns attached.
+    Works for both goalscope and activation-oracle runs (config columns differ)."""
     cfg, s = load_config(run_dir), load_summary(run_dir)
-    cfg_vals = {c: cfg.get(c) for c in _CFG_COLS}
+    cols = _AO_CFG_COLS if cfg.get("eval_kind") == "act_oracle" else _CFG_COLS
+    cfg_vals = {c: cfg.get(c) for c in cols}
     rows = [dict(anchor=anchor, **cfg_vals, **metrics) for anchor, metrics in s["by_anchor"].items()]
     rows.append(dict(anchor="OVERALL", **cfg_vals, **s["overall"], n=s["n_records"]))
     return pd.DataFrame(rows)
@@ -203,6 +253,12 @@ def summary_df(run_dir) -> pd.DataFrame:
 def grid_df(results_root) -> pd.DataFrame:
     """Every run's per-anchor summary concatenated — for sweeping design choices."""
     frames = [summary_df(d) for d in list_runs(results_root)]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def act_oracle_grid_df(results_root, mode: str = "faithfulness") -> pd.DataFrame:
+    """Every activation-oracle run's per-anchor summary — for sweeping layer / question / coeff."""
+    frames = [summary_df(d) for d in list_act_oracle_runs(results_root, mode)]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
