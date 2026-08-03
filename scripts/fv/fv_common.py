@@ -126,23 +126,50 @@ def first_answer_token_id(mt, prompt: str, answer: str, prepend_space: bool = Tr
 
 
 # ── mean head activations ā_ℓj^t ──────────────────────────────────────────────
+def _drop_pairs_touching(pairs: list[dict], words: set[str]) -> list[dict]:
+    """Pairs whose input AND output both avoid `words` (case-insensitive)."""
+    w = {s.lower().strip() for s in words}
+    return [p for p in pairs
+            if p["input"].lower().strip() not in w and p["output"].lower().strip() not in w]
+
+
 @torch.inference_mode()
 def compute_mean_head_activations(mt, task: FVTask, layers: list[int],
                                   n_shots: int = 10, n_trials: int = 100,
-                                  batch_size: int = 16, seed: int = 42) -> torch.Tensor:
-    """Mean o_proj input (per layer) at the last token over `n_trials` CLEAN ICL prompts.
+                                  batch_size: int = 16, seed: int = 42,
+                                  shuffle_labels: bool = False,
+                                  exclude_words: set[str] | None = None) -> torch.Tensor:
+    """Mean o_proj input (per layer) at the last token over `n_trials` ICL prompts.
 
     Returns `(len(layers), n_embd)` float32 CPU — stacked across `layers`. Each layer's
     row, reshaped to (n_heads, head_dim), gives the per-head mean OV output ā_ℓj^t that
-    the intervention transplants. Clean = correct (un-shuffled) labels."""
+    the intervention transplants. Clean = correct (un-shuffled) labels.
+
+    `shuffle_labels=True` averages over *corrupted* prompts instead — the demo outputs are
+    permuted so no systematic x→y relation remains. This is the source-side null control:
+    the resulting ā should not carry the task, so transplanting it should not trigger it.
+
+    `exclude_words` drops every pair (from both the demo pool and the query pool) whose
+    input or output is one of those strings, so the returned ā is guaranteed not to have
+    seen the held-out eval words — including as the trailing query, which the demo pool
+    alone does not cover."""
+    train_pool, valid_pool = task.train, task.valid
+    if exclude_words:
+        train_pool = _drop_pairs_touching(train_pool, exclude_words)
+        valid_pool = _drop_pairs_touching(valid_pool, exclude_words)
+        if len(train_pool) < n_shots or not valid_pool:
+            raise ValueError(
+                f"[{task.name}] exclude_words left too small a pool: "
+                f"{len(train_pool)} train (need >= {n_shots}), {len(valid_pool)} valid")
     rng = np.random.RandomState(seed)
     prompts = []
     for _ in range(n_trials):
-        demo_idx = rng.choice(len(task.train), n_shots, replace=False)
-        q_idx = int(rng.choice(len(task.valid)))
-        demos = [task.train[i] for i in demo_idx]
-        prompts.append(build_icl_prompt(demos, task.valid[q_idx]["input"],
-                                        shuffle_labels=False))
+        demo_idx = rng.choice(len(train_pool), n_shots, replace=False)
+        q_idx = int(rng.choice(len(valid_pool)))
+        demos = [train_pool[i] for i in demo_idx]
+        prompts.append(build_icl_prompt(demos, valid_pool[q_idx]["input"],
+                                        shuffle_labels=shuffle_labels,
+                                        rng=random.Random(int(rng.randint(1 << 30)))))
     acc = {ly: [] for ly in layers}
     for i in range(0, len(prompts), batch_size):
         batch = prompts[i:i + batch_size]
