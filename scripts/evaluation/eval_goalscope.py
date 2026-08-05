@@ -82,7 +82,35 @@ ORACLE_MODEL = "claude-sonnet-4-6"
 # ══════════════════════════════════════════════════════════════════════════════
 # Head sets
 # ══════════════════════════════════════════════════════════════════════════════
-def load_goal_heads(model_name, results_dir, threshold=0.9, band=(25, 56), tag="lam20"):
+# Layer band the goal heads are read from, per model (mirrors clock/12 cell 4). The trained mask
+# covers every layer; the band restricts selection to the region where that model's goal heads
+# actually live. A model missing here falls back to the full depth, which is deliberately
+# conservative — set its band explicitly once you have looked at the mask heatmap.
+GOAL_BANDS = {
+    "Qwen2.5-Coder-32B-Instruct": (25, 56),
+    "Qwen2.5-32B-Instruct": (25, 56),  # code axis: matched to Coder (both 64 layers)
+    "Llama-3.3-70B-Instruct": (18, 45),
+    "Olmo-3.1-32B-Instruct": (10, 36),
+    "Olmo-3.1-32B-Instruct-SFT": (10, 36),  # RL axis: matched to Olmo Instruct
+}
+
+
+def default_goal_band(model_name, n_layer=None):
+    """`GOAL_BANDS[model]`, else the full depth (needs `n_layer`) — never a foreign model's band."""
+    slug = model_name.split("/")[-1]
+    if slug in GOAL_BANDS:
+        return GOAL_BANDS[slug]
+    if n_layer is None:
+        raise ValueError(
+            f"no GOAL_BANDS entry for {slug!r} — pass --goal_band explicitly (or add it to "
+            f"GOAL_BANDS). Falling back to another model's band would select the wrong heads."
+        )
+    logger.warning(f"no GOAL_BANDS entry for {slug!r} — using the full depth (0, {n_layer})")
+    return (0, n_layer)
+
+
+def load_goal_heads(model_name, results_dir, threshold=0.9, band=None, tag="lam20",
+                    n_layer=None):
     ck = torch.load(
         os.path.join(
             results_dir, f"localization/{model_name.split('/')[-1]}/{tag}/head_mask.pt"
@@ -91,6 +119,8 @@ def load_goal_heads(model_name, results_dir, threshold=0.9, band=(25, 56), tag="
     )
     layers = [int(x) for x in ck["layers"]]
     m = ck["mask_values"].numpy().copy()
+    if band is None:
+        band = default_goal_band(model_name, n_layer=n_layer)
     m[: band[0]] = 0
     m[band[1] :] = 0
     return [(layers[li], int(h)) for li, h in np.argwhere(m > threshold)]
@@ -128,18 +158,21 @@ def resolve_heads_name(spec: str) -> str:
     return f"json:{Path(spec).stem}" if spec.endswith(".json") else spec
 
 
-def load_head_set(spec, model_name, results_dir, n_heads):
+def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
+                  goal_band=None, n_layer=None):
     """Return list[(layer, head)] for spec in {'goal','gaze','decision', <path>.json}."""
+    goal_kw = dict(threshold=goal_threshold, band=goal_band, n_layer=n_layer)
     if spec.endswith(".json"):
         arr = json.loads(Path(spec).read_text())
         return [(int(l), int(h)) for l, h in arr]
     if spec == "goal":
-        return load_goal_heads(model_name, results_dir)
+        return load_goal_heads(model_name, results_dir, **goal_kw)
     if spec == "decision":
         return load_decision_heads(model_name)
     if spec == "gaze":  # equal-N to goal (matches 09.1)
         return load_gaze_heads(
-            model_name, n_heads, topk=len(load_goal_heads(model_name, results_dir))
+            model_name, n_heads,
+            topk=len(load_goal_heads(model_name, results_dir, **goal_kw)),
         )
     raise ValueError(
         f"unknown --heads spec: {spec!r} (want goal|gaze|decision|<path>.json)"
@@ -476,6 +509,16 @@ def parse_args():
     ap.add_argument(
         "--heads", default="goal", help="goal | gaze | decision | <path>.json"
     )
+    ap.add_argument(
+        "--goal_threshold", type=float, default=0.9,
+        help="mask-value cutoff for --heads goal (default 0.9)",
+    )
+    ap.add_argument(
+        "--goal_band", type=int, nargs=2, default=None, metavar=("START", "END"),
+        help="layer band the goal heads are read from; default is per-model (GOAL_BANDS). "
+        "Passing this explicitly also adds band=START-END to the run dir, so band sweeps "
+        "do not overwrite each other.",
+    )
     ap.add_argument("--strategy", default="additive", choices=["additive", "replace"])
     ap.add_argument(
         "--alpha",
@@ -546,6 +589,10 @@ def main():
         eval_k_way=args.eval_k_way,
         heads_spec=args.heads,
         heads_name=heads_name,
+        goal_threshold=args.goal_threshold,
+        # resolved below once mt.n_layer is known if it is neither given nor registered
+        goal_band=list(args.goal_band) if args.goal_band else None,
+        goal_band_explicit=args.goal_band is not None,  # -> band=A-B in the run dir
         strategy=args.strategy,
         alpha=alpha,
         steer_layer_range=list(args.steer_layer_range),
@@ -611,7 +658,18 @@ def main():
     )
     n_heads = mt.model.config.num_attention_heads
 
-    heads = load_head_set(args.heads, args.model, results_dir, n_heads)
+    heads = load_head_set(
+        args.heads, args.model, results_dir, n_heads,
+        goal_threshold=args.goal_threshold, goal_band=args.goal_band, n_layer=mt.n_layer,
+    )
+    if args.heads == "goal":  # record the band actually used, resolved or not
+        band = tuple(args.goal_band) if args.goal_band else default_goal_band(
+            args.model, n_layer=mt.n_layer
+        )
+        config["goal_band"] = list(band)
+        logger.info(
+            f"goal heads: band {band[0]}-{band[1] - 1} @ >{args.goal_threshold} -> {len(heads)} heads"
+        )
     config["n_heads"] = len(heads)
     config["selected_heads"] = [[int(l), int(h)] for l, h in heads]
     config["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")

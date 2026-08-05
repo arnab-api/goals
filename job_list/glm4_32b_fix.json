@@ -1,0 +1,34 @@
+[
+    {
+        "name": "01b_glm4_32b_goal_lamb_5",
+        "command": "mkdir -p logs/goal/glm4_32b && python -m scripts.train_head_mask --model-key=zai-org/GLM-4-32B-0414 --lambda-sparse=5 --tag=lam5 --n-epochs=50 --batch-size=32 |& tee logs/goal/glm4_32b/01b_goal_lam5.log"
+    },
+    {
+        "name": "01b_glm4_32b_goal_lamb_20",
+        "command": "mkdir -p logs/goal/glm4_32b && python -m scripts.train_head_mask --model-key=zai-org/GLM-4-32B-0414 --lambda-sparse=20 --tag=lam20 --n-epochs=50 --batch-size=32 |& tee logs/goal/glm4_32b/01b_goal_lam20.log"
+    },
+    {
+        "name": "01b_glm4_32b_goal_lamb_50",
+        "command": "mkdir -p logs/goal/glm4_32b && python -m scripts.train_head_mask --model-key=zai-org/GLM-4-32B-0414 --lambda-sparse=50 --tag=lam50 --n-epochs=50 --batch-size=32 |& tee logs/goal/glm4_32b/01b_goal_lam50.log"
+    },
+    {
+        "name": "05_glm4_32b_decision_logit_lamb_1",
+        "command": "mkdir -p logs/decision/glm4_32b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=zai-org/GLM-4-32B-0414 --version=conditions --lambda-sparse=1.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/glm4_32b/05_decision_logit_lam1.log"
+    },
+    {
+        "name": "05_glm4_32b_decision_logit_lamb_10",
+        "command": "mkdir -p logs/decision/glm4_32b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=zai-org/GLM-4-32B-0414 --version=conditions --lambda-sparse=10.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/glm4_32b/05_decision_logit_lam10.log"
+    },
+    {
+        "name": "05_glm4_32b_decision_logit_lamb_25",
+        "command": "mkdir -p logs/decision/glm4_32b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=zai-org/GLM-4-32B-0414 --version=conditions --lambda-sparse=25.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/glm4_32b/05_decision_logit_lam25.log"
+    },
+    {
+        "name": "05_glm4_32b_decision_logit_lamb_50",
+        "command": "mkdir -p logs/decision/glm4_32b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=zai-org/GLM-4-32B-0414 --version=conditions --lambda-sparse=50.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/glm4_32b/05_decision_logit_lam50.log"
+    },
+    {
+        "name": "05_glm4_32b_decision_logit_lamb_100",
+        "command": "mkdir -p logs/decision/glm4_32b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=zai-org/GLM-4-32B-0414 --version=conditions --lambda-sparse=100.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/glm4_32b/05_decision_logit_lam100.log"
+    }
+]

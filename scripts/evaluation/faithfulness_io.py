@@ -9,8 +9,10 @@ summary schema into a sibling tree, so every loader here works on it — see
 
 Layout of a run directory::
 
-    <results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>/        (eval_goalscope)
-    <results>/evaluation/act_oracle/<mode>/<target-model>/<leaf>/          (eval_act_oracles)
+    <results>/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/   (eval_goalscope)
+    <results>/evaluation/act_oracle/<model>/<mode>/<leaf>/                     (eval_act_oracles)
+
+Both trees group by model first, so one model's runs live under one directory.
         config.json     resolved config + the selected (layer, head) list + timestamp
         records.jsonl    one row per (sample, condition, anchor): read-out, impl_span, condition,
                          the FULL hard/kway oracle prompt + raw response + parsed verdict
@@ -65,19 +67,44 @@ def run_leaf_name(config: dict) -> str:
         f"nc={'-'.join(map(str, config['num_conditions']))}",
         f"seed={config['seed']}",
     ]
+    # Only an EXPLICIT --goal_band lands in the path: the per-model default is a property of the
+    # model (already a path component), so omitting it keeps existing run dirs stable, while a
+    # deliberate band sweep still gets its own dir instead of overwriting the default run.
+    if config.get("goal_band_explicit") and config.get("goal_band"):
+        b = config["goal_band"]
+        parts.append(f"band={b[0]}-{b[1]}")
     return "__".join(parts)
 
 
+def model_slug(config: dict) -> str:
+    """Short model name used as a path component (``Qwen/X-32B-Instruct`` -> ``X-32B-Instruct``)."""
+    return str(config.get("model", "unknown-model")).split("/")[-1]
+
+
+def config_mode(config: dict) -> str:
+    """``config['mode']`` with a default — tolerates pre-``--mode`` runs that stored ``null``."""
+    return config.get("mode") or "faithfulness"
+
+
 def run_dir_for(config: dict, results_root) -> Path:
-    # <results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>; mode defaults to
-    # "faithfulness" so pre-mode runs keep their exact path.
-    mode = config.get("mode", "faithfulness")
-    return (Path(results_root) / GOALSCOPE_SUBDIR / mode / str(config["strategy"])
-            / fmt_alpha(config["alpha"]) / run_leaf_name(config))
+    # <results>/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>
+    # The model comes FIRST so every run of one model sits under one dir. Without it, two models
+    # sharing a config resolved to the same run dir and the second run would "resume" the first
+    # model's samples.
+    return (Path(results_root) / GOALSCOPE_SUBDIR / model_slug(config) / config_mode(config)
+            / str(config["strategy"]) / fmt_alpha(config["alpha"]) / run_leaf_name(config))
+
+
+def goalscope_root(results_root) -> Path:
+    """Root of the goalscope eval tree — the parent of the per-model dirs."""
+    return Path(results_root) / GOALSCOPE_SUBDIR
 
 
 def faithfulness_root(results_root, mode: str = "faithfulness") -> Path:
-    return Path(results_root) / GOALSCOPE_SUBDIR / mode
+    """Back-compat: the tree root, so ``run_dir.relative_to(faithfulness_root(RES))`` still works
+    (it now yields ``<model>/<mode>/...`` instead of ``<strategy>/...``) and ``root / run_name``
+    still round-trips. ``mode`` is accepted but ignored — it is no longer a top-level directory."""
+    return goalscope_root(results_root)
 
 
 # ── activation-oracle paths (``eval_act_oracles.py``) ─────────────────────────
@@ -99,13 +126,16 @@ def act_oracle_leaf_name(config: dict) -> str:
 
 
 def act_oracle_run_dir_for(config: dict, results_root) -> Path:
-    # <results>/evaluation/act_oracle/<mode>/<target-model>/<leaf>
-    return (Path(results_root) / ACT_ORACLE_SUBDIR / config.get("mode", "faithfulness")
-            / str(config["model"]).split("/")[-1] / act_oracle_leaf_name(config))
+    # <results>/evaluation/act_oracle/<target-model>/<mode>/<leaf> — model first, matching
+    # run_dir_for, so both trees group by model.
+    return (Path(results_root) / ACT_ORACLE_SUBDIR / model_slug(config) / config_mode(config)
+            / act_oracle_leaf_name(config))
 
 
 def act_oracle_root(results_root, mode: str = "faithfulness") -> Path:
-    return Path(results_root) / ACT_ORACLE_SUBDIR / mode
+    """Root of the act-oracle tree — the parent of the per-model dirs. ``mode`` is accepted but
+    ignored (it is no longer a top-level directory); kept so callers need not change."""
+    return Path(results_root) / ACT_ORACLE_SUBDIR
 
 
 # ── paths ─────────────────────────────────────────────────────────────────────
@@ -221,18 +251,41 @@ def _list_runs_under(root) -> list[Path]:
     return sorted({p.parent for p in root.rglob("config.json")})
 
 
-def list_runs(results_root, mode: str = "faithfulness") -> list[Path]:
-    """Every run dir (has config.json) under the goalscope <mode> root, sorted by path."""
-    return _list_runs_under(faithfulness_root(results_root, mode))
+def _select_runs(root, mode: str, model: str | None) -> list[Path]:
+    """Run dirs under `root` whose own config.json matches `mode` (and `model`, if given).
+
+    Filtering on the config rather than on path structure means this finds runs written under the
+    current ``<model>/<mode>/...`` layout *and* any left at a legacy path.
+    """
+    want = model.split("/")[-1] if model else None
+    out = []
+    for d in _list_runs_under(root):
+        try:
+            cfg = load_config(d)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if config_mode(cfg) != mode:
+            continue
+        if want and model_slug(cfg) != want:
+            continue
+        out.append(d)
+    return sorted(out)
 
 
-def list_act_oracle_runs(results_root, mode: str = "faithfulness") -> list[Path]:
-    """Every activation-oracle run dir under the act_oracle <mode> root, sorted by path."""
-    return _list_runs_under(act_oracle_root(results_root, mode))
+def list_runs(results_root, mode: str = "faithfulness", model: str | None = None) -> list[Path]:
+    """Every goalscope run dir for `mode` (and optionally one `model`), sorted by path.
+    `model` may be a full id or a slug (``Qwen/Qwen2.5-32B-Instruct`` or ``Qwen2.5-32B-Instruct``)."""
+    return _select_runs(goalscope_root(results_root), mode, model)
+
+
+def list_act_oracle_runs(results_root, mode: str = "faithfulness",
+                         model: str | None = None) -> list[Path]:
+    """Every activation-oracle run dir for `mode` (and optionally one `model`), sorted by path."""
+    return _select_runs(act_oracle_root(results_root), mode, model)
 
 
 # ── tabular views ──────────────────────────────────────────────────────────────
-_CFG_COLS = ["strategy", "alpha", "heads_name", "n_heads", "steer_layer_range",
+_CFG_COLS = ["model", "strategy", "alpha", "heads_name", "n_heads", "steer_layer_range",
              "n_steer_tokens", "max_new_tokens", "seed"]
 # activation-oracle runs have no heads/steering; these are the knobs that vary instead.
 _AO_CFG_COLS = ["model", "extract_layer", "layer_pct", "prompt_style", "question_tag",
@@ -256,9 +309,10 @@ def grid_df(results_root) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def act_oracle_grid_df(results_root, mode: str = "faithfulness") -> pd.DataFrame:
+def act_oracle_grid_df(results_root, mode: str = "faithfulness",
+                       model: str | None = None) -> pd.DataFrame:
     """Every activation-oracle run's per-anchor summary — for sweeping layer / question / coeff."""
-    frames = [summary_df(d) for d in list_act_oracle_runs(results_root, mode)]
+    frames = [summary_df(d) for d in list_act_oracle_runs(results_root, mode, model)]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
