@@ -178,6 +178,21 @@ def append_jsonl(fh, obj: dict) -> None:
     os.fsync(fh.fileno())
 
 
+def read_config(run_dir) -> dict | None:
+    """The config of a previous run in this dir, or None if there isn't one (or it is unreadable).
+
+    Used to verify that a resume is resuming the *same* experiment: `run_leaf_name` is built from a
+    whitelist of keys, so any config field outside that list (notably the resolved head set) can
+    differ between two runs that share a run dir."""
+    p = Path(run_dir) / "config.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
 def read_completed_spec_ids(run_dir) -> list[str]:
     """spec_ids of samples already fully written to samples.jsonl (i.e. safe to skip on resume)."""
     p = samples_path(run_dir)

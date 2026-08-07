@@ -40,8 +40,11 @@ Usage:
     conda run -n goals python scripts/evaluation/eval_goalscope.py \
         --mode causality --heads goal --strategy additive --alpha 0.2   # C++ transfer
 
-    # a custom head set:
+    # a custom head set — the way to eval any filtered/ranked selection (fv, concept, top-k, ...):
     ... --heads /path/to/heads.json          # json array of [layer_idx, head_idx] pairs
+    # It supersedes every head-selection flag: combining it with --goal_threshold/--goal_band is an
+    # error, not a silent no-op. The run dir is keyed on the file's STEM, so give distinct files
+    # distinct basenames — two `heads.json` in different dirs would otherwise resume each other.
     # optional k-way oracle (faithfulness only for now):
     ... --eval-k-way
 """
@@ -158,25 +161,79 @@ def resolve_heads_name(spec: str) -> str:
     return f"json:{Path(spec).stem}" if spec.endswith(".json") else spec
 
 
+def load_json_heads(spec, n_layer, n_heads):
+    """Read + validate a ``[[layer, head], ...]`` json head set.
+
+    A hand-supplied head set is the one code path with no schema behind it, so everything is
+    checked here rather than failing deep inside the patching hooks (where an out-of-range head
+    silently indexes the wrong slice of the o_proj input instead of raising)."""
+    p = Path(spec)
+    if not p.exists():
+        raise SystemExit(f"--heads {spec!r}: file not found")
+    try:
+        arr = json.loads(p.read_text())
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"--heads {spec!r}: not valid json ({e})") from None
+    if not isinstance(arr, list) or not arr:
+        raise SystemExit(
+            f"--heads {spec!r}: expected a non-empty json array of [layer, head] pairs, "
+            f"got {type(arr).__name__} of length {len(arr) if hasattr(arr, '__len__') else '?'}"
+        )
+    heads = []
+    for i, item in enumerate(arr):
+        if not (isinstance(item, (list, tuple)) and len(item) == 2):
+            raise SystemExit(f"--heads {spec!r}: entry {i} is {item!r}, want a [layer, head] pair")
+        try:
+            l, h = int(item[0]), int(item[1])
+        except (TypeError, ValueError):
+            raise SystemExit(f"--heads {spec!r}: entry {i} = {item!r} is not a pair of ints") from None
+        if not (0 <= l < n_layer):
+            raise SystemExit(
+                f"--heads {spec!r}: entry {i} has layer {l}, outside [0, {n_layer}) for this model"
+            )
+        if not (0 <= h < n_heads):
+            raise SystemExit(
+                f"--heads {spec!r}: entry {i} has head {h}, outside [0, {n_heads}) for this model"
+            )
+        heads.append((l, h))
+    dupes = {x for x in heads if heads.count(x) > 1}
+    if dupes:
+        raise SystemExit(
+            f"--heads {spec!r}: duplicate entries {sorted(dupes)[:5]}"
+            f"{' …' if len(dupes) > 5 else ''} — a repeated head would be steered twice"
+        )
+    return heads
+
+
 def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
                   goal_band=None, n_layer=None):
     """Return list[(layer, head)] for spec in {'goal','gaze','decision', <path>.json}."""
     goal_kw = dict(threshold=goal_threshold, band=goal_band, n_layer=n_layer)
     if spec.endswith(".json"):
-        arr = json.loads(Path(spec).read_text())
-        return [(int(l), int(h)) for l, h in arr]
-    if spec == "goal":
-        return load_goal_heads(model_name, results_dir, **goal_kw)
-    if spec == "decision":
-        return load_decision_heads(model_name)
-    if spec == "gaze":  # equal-N to goal (matches 09.1)
-        return load_gaze_heads(
+        heads = load_json_heads(spec, n_layer, n_heads)
+    elif spec == "goal":
+        heads = load_goal_heads(model_name, results_dir, **goal_kw)
+    elif spec == "decision":
+        heads = load_decision_heads(model_name)
+    elif spec == "gaze":  # equal-N to goal (matches 09.1)
+        heads = load_gaze_heads(
             model_name, n_heads,
             topk=len(load_goal_heads(model_name, results_dir, **goal_kw)),
         )
-    raise ValueError(
-        f"unknown --heads spec: {spec!r} (want goal|gaze|decision|<path>.json)"
-    )
+    else:
+        raise SystemExit(
+            f"unknown --heads spec: {spec!r} (want goal|gaze|decision|<path>.json). "
+            f"A path must end in .json."
+        )
+    # An empty set is not a no-op experiment: apply_goalscope would run with nothing steered and
+    # the summary would look like a real result. Fail instead.
+    if not heads:
+        raise SystemExit(
+            f"--heads {spec!r} selected 0 heads"
+            + (f" (threshold {goal_threshold} too high for this mask?)"
+               if spec in ("goal", "gaze") else "")
+        )
+    return heads
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -510,8 +567,10 @@ def parse_args():
         "--heads", default="goal", help="goal | gaze | decision | <path>.json"
     )
     ap.add_argument(
-        "--goal_threshold", type=float, default=0.9,
-        help="mask-value cutoff for --heads goal (default 0.9)",
+        "--goal_threshold", type=float, default=None,
+        help="mask-value cutoff for --heads goal (default 0.9). Default is None rather than 0.9 so "
+        "that passing it explicitly is detectable: it is meaningless for a .json head set and "
+        "combining the two is rejected rather than silently ignored.",
     )
     ap.add_argument(
         "--goal_band", type=int, nargs=2, default=None, metavar=("START", "END"),
@@ -559,7 +618,25 @@ def parse_args():
         "completed sample (same args => same run dir)",
     )
     logging_utils.add_logging_args(ap)  # -v (DEBUG) / -q (WARNING); default INFO
-    return ap.parse_args()
+    args = ap.parse_args()
+
+    # A .json head set is the complete specification of which heads to steer. Anything that would
+    # also select heads is therefore rejected — even when it happens to agree — so a run dir can
+    # never claim a selection knob that had no effect on the heads actually used.
+    if args.heads.endswith(".json"):
+        conflicting = [
+            name for name, val in (("--goal_threshold", args.goal_threshold),
+                                   ("--goal_band", args.goal_band)) if val is not None
+        ]
+        if conflicting:
+            ap.error(
+                f"{', '.join(conflicting)} cannot be combined with --heads {args.heads!r}: a json "
+                f"head set supersedes every head-selection flag. Drop it, or bake the filtering "
+                f"into the json."
+            )
+    if args.goal_threshold is None:
+        args.goal_threshold = 0.9  # materialise the documented default for the mask-based specs
+    return args
 
 
 def main():
@@ -617,6 +694,17 @@ def main():
         for f in ("records.jsonl", "samples.jsonl", "samples.json", "summary.json"):
             (run_dir / f).unlink(missing_ok=True)
         logger.info(f"--overwrite: cleared existing run at {run_dir}")
+    prev = None if args.overwrite else fio.read_config(run_dir)
+    # The run dir is keyed on `json:<stem>` for a json head set, so two different files with the
+    # same basename (results/a/heads.json, results/b/heads.json) resolve to the SAME dir and the
+    # second invocation would silently resume the first one's samples under a different head set.
+    # Refuse rather than mix. The selected_heads check below catches an edited file at the same path.
+    if prev is not None and prev.get("heads_spec") not in (None, args.heads):
+        raise SystemExit(
+            f"run dir {run_dir} already holds a run with --heads {prev['heads_spec']!r}, but this "
+            f"invocation passed {args.heads!r}. Two head sets sharing a run name resume each "
+            f"other's samples — rename the json, or pass --overwrite."
+        )
     run_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"run dir -> {run_dir}")
 
@@ -672,6 +760,18 @@ def main():
         )
     config["n_heads"] = len(heads)
     config["selected_heads"] = [[int(l), int(h)] for l, h in heads]
+    # Same-name/different-content case: the json at this path (or the mask behind `goal`) changed
+    # since the samples already on disk were produced. Resuming would splice two head sets into one
+    # summary, and nothing downstream could tell.
+    if prev is not None and prev.get("selected_heads") is not None:
+        old = [[int(l), int(h)] for l, h in prev["selected_heads"]]
+        if old != config["selected_heads"] and fio.read_completed_spec_ids(run_dir):
+            raise SystemExit(
+                f"run dir {run_dir} holds {len(fio.read_completed_spec_ids(run_dir))} samples "
+                f"produced with a DIFFERENT head set ({len(old)} heads, now {len(heads)}; "
+                f"{len(set(map(tuple, old)) ^ set(map(tuple, config['selected_heads'])))} differ). "
+                f"Resuming would mix them — pass --overwrite to redo the run."
+            )
     config["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
     fio.write_config(
         run_dir, config
