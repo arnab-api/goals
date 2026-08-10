@@ -2343,10 +2343,17 @@ class ConditionSample(DataClassJsonMixin):
         return f"{self.spec.spec_id}__{self.lang}__{self.modularity}"
 
     # --- rendering ---------------------------------------------------------
-    def render_instruction(self, name_rule: str = "letters", multistep: bool = False) -> str:
+    def render_instruction(self, name_rule: str = "letters", multistep: bool = False,
+                           letter_start: str = "a") -> str:
         """`name_rule="letters"` mandates lowercase-letter result vars (`a`, `b`, …);
         any other value drops the naming constraint entirely (lets the model/prefill
         choose), used by build_example(naming="natural"|"indexed").
+
+        `letter_start` shifts that alphabet: `"p"` mandates `p`, `q`, `r`, … . The instruction
+        text has to move with the prefill, otherwise the prompt asks for `a, b, c` while the
+        forced prefill writes `p, q, r` — an instruction/prefill *mismatch*, which is a
+        different experiment from an out-of-distribution naming scheme. Default `"a"`
+        reproduces the previous string byte-for-byte.
 
         `multistep=True` adds a clause asking the model to implement each check step-by-step
         with explicit loops/intermediate variables rather than a one-line expression or
@@ -2364,10 +2371,12 @@ class ConditionSample(DataClassJsonMixin):
         # separable statement, not hidden inside a print) + a single aggregation
         # print at the end (individual + collective pass).
         if name_rule == "letters":
+            _l0 = letter_start
+            _l1 = chr(ord(letter_start) + 1)
             assign_rule = (
                 "For each condition, in the order listed, assign the boolean result of "
                 "the check to its own local variable, using single lowercase letters in "
-                "order — `a` for the first condition, `b` for the second, and so on. "
+                f"order — `{_l0}` for the first condition, `{_l1}` for the second, and so on. "
                 "After all conditions have been checked, use a SINGLE print statement that, "
                 "using those variables, reports whether each condition passed individually "
                 "and whether all of them passed collectively."

@@ -38,7 +38,9 @@ def _multiline_preds_for(lang: str) -> list:
 
 
 MULTILINE_PREDS = _multiline_preds_for("python")  # backward-compat alias (python only)
-VAR_LETTERS = "abcdefghij"
+# Full alphabet so `letter_start` can shift the naming scheme out of distribution (p, q, r, …).
+# Only the first `n_conditions` are ever used, so a<->j behaviour is unchanged.
+VAR_LETTERS = "abcdefghijklmnopqrstuvwxyz"
 FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = (
     "<|fim_prefix|>",
     "<|fim_suffix|>",
@@ -72,6 +74,7 @@ def build_example(
     mode: str = "chat",
     style: str = "multiline",
     naming: str = "letters",
+    letter_start: str = "a",
     aug: Optional[Callable[[str], str]] = None,
     lang: Lang = "python",
     chunky: bool = False,
@@ -88,6 +91,8 @@ def build_example(
         "natural" — each predicate's `var_name` (e.g. `is_even`); instruction drops the
                     naming constraint. Names are unique because predicate classes are distinct.
         "indexed" — `var_1`, `var_2`, …; instruction drops the naming constraint.
+    `letter_start` shifts the "letters" alphabet (e.g. "p" -> p, q, r, …) in BOTH the
+    prefill and the instruction, so the two never disagree. Default "a" is a no-op.
     Predicate CLASSES are always distinct within an example (no repeated `id`, even with
     different params), so e.g. `divisible by 20` and `divisible by 26` can't co-occur.
 
@@ -103,6 +108,7 @@ def build_example(
     """
     assert 1 <= target_slot < n_conditions
     assert naming in ("letters", "natural", "indexed"), f"unknown naming={naming!r}"
+    assert letter_start in VAR_LETTERS, f"letter_start={letter_start!r} not in {VAR_LETTERS!r}"
     if mode == "fim" and lang != "python":
         raise NotImplementedError(f"mode='fim' is python-only; got lang={lang!r}")
     if chunky:
@@ -127,7 +133,12 @@ def build_example(
     elif naming == "indexed":
         var_names = [f"var_{i + 1}" for i in range(n_conditions)]
     else:
-        var_names = [VAR_LETTERS[i] for i in range(n_conditions)]
+        _off = VAR_LETTERS.index(letter_start)
+        assert _off + n_conditions <= len(VAR_LETTERS), (
+            f"letter_start={letter_start!r} leaves only {len(VAR_LETTERS) - _off} letters "
+            f"for {n_conditions} conditions"
+        )
+        var_names = [VAR_LETTERS[_off + i] for i in range(n_conditions)]
     spec = ConditionSpec(
         spec_id=f"ml_s{target_slot}_{style[:3]}_{rng.randrange(10**6):06d}",
         predicate_ids=[p.id for p in preds],
@@ -208,7 +219,7 @@ def build_example(
         name_rule = "letters" if naming == "letters" else "free"
         full_prompt = apply_chat_template(
             mt=mt,
-            user_query=sample.render_instruction(name_rule=name_rule).strip(),
+            user_query=sample.render_instruction(name_rule=name_rule, letter_start=letter_start).strip(),
             incomplete_code=prefix_code,
         )
 
