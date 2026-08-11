@@ -1,0 +1,18 @@
+[
+    {
+        "name": "gs_faith_additive_norm_goal_a0.1",
+        "command": "mkdir -p logs/goalscope_eval && python -m scripts.evaluation.eval_goalscope --mode=faithfulness --model=\"Qwen/Qwen2.5-Coder-32B-Instruct\" --heads=\"goal\" --strategy=\"additive_norm\" --alpha=0.1 --steer_layer_range 35 46 --n_specs=512 2>&1 | tee logs/goalscope_eval/32b_faith_additive_norm_goal_a0.1.log"
+    },
+    {
+        "name": "gs_caus_additive_norm_goal_a0.1",
+        "command": "mkdir -p logs/goalscope_eval && python -m scripts.evaluation.eval_goalscope --mode=causality --model=\"Qwen/Qwen2.5-Coder-32B-Instruct\" --heads=\"goal\" --strategy=\"additive_norm\" --alpha=0.1 --steer_layer_range 35 46 --n_specs=512 2>&1 | tee logs/goalscope_eval/32b_caus_additive_norm_goal_a0.1.log"
+    },
+    {
+        "name": "resid_faith_a0.1",
+        "command": "mkdir -p logs/goalscope_eval && python -m scripts.evaluation.eval_residual_patchscope --mode=faithfulness --model=\"Qwen/Qwen2.5-Coder-32B-Instruct\" --alpha=0.1 --source-agg=mean --steer_layer_range 35 46 --n_specs=512 2>&1 | tee logs/goalscope_eval/32b_faith_resid_mean_a0.1.log"
+    },
+    {
+        "name": "resid_caus_a0.1",
+        "command": "mkdir -p logs/goalscope_eval && python -m scripts.evaluation.eval_residual_patchscope --mode=causality --model=\"Qwen/Qwen2.5-Coder-32B-Instruct\" --alpha=0.1 --source-agg=mean --steer_layer_range 35 46 --n_specs=512 2>&1 | tee logs/goalscope_eval/32b_caus_resid_mean_a0.1.log"
+    }
+]
