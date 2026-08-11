@@ -546,7 +546,7 @@ def apply_goalscope(
     *,
     mt,
     selected_heads: list[tuple[int, int]],
-    strategy: Literal["additive", "replace"] = "additive",
+    strategy: Literal["additive", "additive_norm", "replace"] = "additive",
     steer_layer_range: tuple[int, int] = (35, 46),
     batch_size: int = 16,
     alpha: float = 0.2,
@@ -571,6 +571,15 @@ def apply_goalscope(
       into a single residual-stream vector per source position, scale by
       ``alpha``, and add it to the residual stream at every layer in
       ``steer_layer_range`` (last token).  Uses ``generate_with_patch``.
+    - ``"additive_norm"``: the same injection made **norm-relative** —
+      ``h + alpha * ||h|| * g_enc/||g_enc||``.  Under ``"additive"`` the added
+      magnitude is ``alpha * ||g_enc||``, an absolute quantity, while ``||h||``
+      grows with depth and ``||g_enc||`` grows with the number of selected heads
+      (it is a *sum* over heads).  A comparison across head sets, layer bands or
+      models at fixed ``alpha`` can therefore read the injection's *magnitude*
+      rather than the encoding's quality.  Here ``alpha`` means "add this
+      fraction of the local residual norm along the goal direction", so its
+      value does NOT carry over from ``"additive"`` and needs re-tuning.
     - ``"replace"``: surgically replace the selected heads' o_proj inputs at the
       destination's last token with the corresponding source o_proj inputs.
       Layers come from ``selected_heads``; ``steer_layer_range`` is ignored.
@@ -587,12 +596,15 @@ def apply_goalscope(
             string to find ``<code>`` in), so pass ``token_positions`` to restrict.
         mt: ModelandTokenizer.
         selected_heads: ``(layer, head_idx)`` pairs from the trained head mask.
-        strategy: ``"additive"`` (default) or ``"replace"``.  See above.
+        strategy: ``"additive"`` (default), ``"additive_norm"`` or
+            ``"replace"``.  See above.
         steer_layer_range: ``(start, end)`` — layers ``range(start, end)``
             receive the additive injection.  **Additive strategy only.**
         batch_size: Token positions per generation call.
         alpha: Steering strength.  Additive: scale of the added vector.
-            Replace: source-side interpolation weight.
+            Additive-norm: added fraction of ``||h||`` (different units — do not
+            reuse an ``"additive"`` alpha).  Replace: source-side interpolation
+            weight.
         max_new_tokens: Max tokens generated per position.
         n_steer_tokens: How many forward passes apply a fresh patch.
             ``"all"`` (default) → patch every step.  An integer ``k`` → patch
@@ -623,8 +635,10 @@ def apply_goalscope(
         in generation order; with ``include_noncode`` the full list is sorted by
         ``pos`` so the prompt reads left-to-right.
     """
-    if strategy not in ("additive", "replace"):
-        raise ValueError(f"strategy must be 'additive' or 'replace', got {strategy!r}")
+    if strategy not in ("additive", "additive_norm", "replace"):
+        raise ValueError(
+            f"strategy must be 'additive', 'additive_norm' or 'replace', got {strategy!r}"
+        )
 
     # Translate n_steer_tokens="all" → None for the underlying APIs
     n_steer = None if n_steer_tokens == "all" else int(n_steer_tokens)
@@ -700,7 +714,7 @@ def apply_goalscope(
     # -----------------------------------------------------------------
     # Strategy-specific source extraction
     # -----------------------------------------------------------------
-    if strategy == "additive":
+    if strategy in ("additive", "additive_norm"):
         # Aggregate selected heads into one residual-stream vector per position.
         # collect_head_steering_vecs returns (batch_size, n_seg, n_embd);
         # src_tokenized here has batch_size=1, so squeeze the leading dim.
@@ -710,6 +724,12 @@ def apply_goalscope(
             selected_heads=selected_heads,
             token_positions=seg_positions,
         )[0]  # (n_seg, n_embd)
+
+        if strategy == "additive_norm":
+            # Hand the patch site a UNIT direction; the magnitude comes from ||h|| there.
+            steering_vecs = steering_vecs / steering_vecs.float().norm(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-6).to(steering_vecs.dtype)
 
         layer_start, layer_end = steer_layer_range
         steer_layers = list(range(layer_start, layer_end))
@@ -753,13 +773,13 @@ def apply_goalscope(
             )
         )
 
-        if strategy == "additive":
+        if strategy in ("additive", "additive_norm"):
             sv_batch = alpha * steering_vecs[chunk_start:chunk_end]  # (B, n_embd)
             patches = [
                 PatchSpec(
                     location=(mt.layer_name_format.format(li), -1),
                     patch=sv_batch,
-                    strategy="add",
+                    strategy="add" if strategy == "additive" else "add_norm",
                     on_pass="all",
                 )
                 for li in steer_layers

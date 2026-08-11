@@ -364,9 +364,16 @@ class PatchSpec:
     location: tuple[str, int]
     patch: torch.Tensor
     clean: Optional[torch.Tensor] = None
-    strategy: Literal["replace", "add"] = "replace"
+    strategy: Literal["replace", "add", "add_norm"] = "replace"
     on_pass: Literal["first", "all"] = "all"
     """
+    ``strategy="add_norm"`` — norm-relative add: ``patch`` is a UNIT direction
+    (scale it by any coefficient before passing it in) and the applied update is
+    ``h + ||h|| * patch``, so the injection is a fixed fraction of the local
+    residual norm instead of a fixed absolute magnitude.  Only the *direction*
+    comes from the caller; the magnitude is read at application time, because
+    ``||h||`` varies by layer, by decode step and by batch item.
+
     ``on_pass="first"`` — apply the patch only during the prefill / first-token
     generation step (the forward pass that consumes the full prompt).
 
@@ -392,8 +399,19 @@ def _apply_patch_to_state(
         current_state[:, index, :] = patch
     elif strategy == "add":
         current_state[:, index, :] += patch
+    elif strategy == "add_norm":
+        # Norm-relative add: `patch` is the (already alpha-scaled) UNIT direction, and the
+        # magnitude is taken from the state being edited, so the injection is a fixed fraction of
+        # the local residual norm rather than a fixed absolute size. This cannot be folded into
+        # the patch tensor: ||h|| differs per layer, per decode step and per batch item, so it has
+        # to be read here, at application time.
+        h = current_state[:, index, :]
+        scale = h.float().norm(dim=-1, keepdim=True).to(h.dtype)
+        current_state[:, index, :] = h + scale * patch
     else:
-        raise ValueError(f"strategy must be 'replace' or 'add', got {strategy!r}")
+        raise ValueError(
+            f"strategy must be 'replace', 'add' or 'add_norm', got {strategy!r}"
+        )
 
 
 def _generate_nnsight(
@@ -889,12 +907,11 @@ def patch_with_baukit(
                 raise ValueError(f"Invalid patch location: {patch.location}")
 
             if head_idx is None:
-                if patch.strategy == "replace":
-                    current_state[:, token_idx, :] = patch.patch
-                elif patch.strategy == "add":
-                    current_state[:, token_idx, :] += patch.patch
-                else:
-                    raise ValueError(f"Unknown patch strategy: {patch.strategy}")
+                # shared with the nnsight path — also handles "add_norm", which needs ||h|| read
+                # here rather than baked into the patch tensor
+                _apply_patch_to_state(
+                    current_state, token_idx, patch.patch, patch.strategy
+                )
             else:
                 current_state = current_state.reshape(
                     batch_size, seq_len, -1, head_dim

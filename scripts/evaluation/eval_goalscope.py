@@ -578,7 +578,13 @@ def parse_args():
         "Passing this explicitly also adds band=START-END to the run dir, so band sweeps "
         "do not overwrite each other.",
     )
-    ap.add_argument("--strategy", default="additive", choices=["additive", "replace"])
+    ap.add_argument(
+        "--strategy", default="additive",
+        choices=["additive", "additive_norm", "replace"],
+        help="additive_norm makes the injection norm-relative "
+        "(h + alpha*||h||*g/||g||) so alpha does not carry over from additive; "
+        "strategy is a run-dir path component, so the two never collide.",
+    )
     ap.add_argument(
         "--alpha",
         type=float,
@@ -649,6 +655,7 @@ def main():
     alpha = (
         args.alpha
         if args.alpha is not None
+        # additive_norm has different units, so it gets no inherited default
         else (0.2 if args.strategy == "additive" else 1.0)
     )
     n_steer = (
