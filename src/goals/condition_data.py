@@ -516,6 +516,236 @@ for _p in INT_PREDICATES:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Simple, INDEPENDENT predicate banks for the non-int datatypes.
+#
+# Same shape and contract as INT_PREDICATES — *not* chunky: each has a canonical two-step
+# `multiline_impl` (compute an intermediate, then compare it) AND a `singleline_impl`, so the
+# stay-vs-move-on test has both states available. Loops are deliberately avoided: a multi-line
+# `for` body can host more than one sub-task, which makes "did it move on" unreadable off the
+# next line. Comprehensions and genexps are fine — one statement cannot host a second sub-task.
+#
+# INDEPENDENCE: every impl reads only the input argument (`s` / `nums` / `words`) and its own
+# `{var}`. No predicate can consume another's result, so any ordering of a spec is correct and
+# the only thing that can govern the order is the prompt.
+#
+# `{var}` reuse convention matches INT_PREDICATES: every assigned variable, intermediates
+# included, is `{var}`, so substituting the condition's result letter renames the whole block.
+# C++ impls are intentionally left empty — these banks exist for the (python-only) move-on
+# evaluation; `_multiline_preds_for("cpp")` simply yields a smaller pool.
+# ──────────────────────────────────────────────────────────────────────────────
+
+STR_PREDICATES: list[Predicate] = [
+    Predicate("str_len_gt", "s is longer than {k} characters", lambda s, k: len(s) > k,
+              {"k": [2, 3, 4, 5, 6]}, datatype="str", id_substrs=["longer", "{k}"],
+              variable_name="is_long",
+              multiline_impl=["    {var} = len(s)", "    {var} = {var} > {k}"],
+              singleline_impl="    {var} = len(s) > {k}"),
+    Predicate("str_vowel_count_ge", "s contains at least {k} vowels",
+              lambda s, k: sum(ch in "aeiou" for ch in s.lower()) >= k,
+              {"k": [1, 2, 3, 4]}, datatype="str", id_substrs=["vowels", "{k}"],
+              variable_name="has_min_vowels",
+              multiline_impl=['    {var} = sum(ch in "aeiou" for ch in s.lower())',
+                              "    {var} = {var} >= {k}"],
+              singleline_impl='    {var} = sum(ch in "aeiou" for ch in s.lower()) >= {k}'),
+    Predicate("str_upper_count_gt", "s contains more than {k} uppercase letters",
+              lambda s, k: sum(ch.isupper() for ch in s) > k,
+              {"k": [0, 1, 2, 3]}, datatype="str", id_substrs=["uppercase", "{k}"],
+              variable_name="has_many_uppercase",
+              multiline_impl=["    {var} = sum(ch.isupper() for ch in s)",
+                              "    {var} = {var} > {k}"],
+              singleline_impl="    {var} = sum(ch.isupper() for ch in s) > {k}"),
+    Predicate("str_digit_count_ge", "s contains at least {k} digits",
+              lambda s, k: sum(ch.isdigit() for ch in s) >= k,
+              {"k": [1, 2, 3]}, datatype="str", id_substrs=["digits", "{k}"],
+              variable_name="has_min_digits",
+              multiline_impl=["    {var} = sum(ch.isdigit() for ch in s)",
+                              "    {var} = {var} >= {k}"],
+              singleline_impl="    {var} = sum(ch.isdigit() for ch in s) >= {k}"),
+    Predicate("str_palindrome", "s reads the same forwards and backwards",
+              lambda s: s == s[::-1], datatype="str", id_substrs=["forwards", "backwards"],
+              variable_name="is_palindrome",
+              multiline_impl=["    {var} = s[::-1]", "    {var} = {var} == s"],
+              singleline_impl="    {var} = s == s[::-1]"),
+    Predicate("str_distinct_gt", "s uses more than {k} distinct characters",
+              lambda s, k: len(set(s)) > k, {"k": [2, 3, 4, 5]}, datatype="str",
+              id_substrs=["distinct", "{k}"], variable_name="has_many_distinct_chars",
+              multiline_impl=["    {var} = set(s)", "    {var} = len({var}) > {k}"],
+              singleline_impl="    {var} = len(set(s)) > {k}"),
+    Predicate("str_starts_vowel", "s starts with a vowel",
+              lambda s: s[:1].lower() in "aeiou" and s[:1] != "", datatype="str",
+              id_substrs=["starts", "vowel"], variable_name="starts_with_vowel",
+              multiline_impl=["    {var} = s[:1].lower()",
+                              '    {var} = {var} != "" and {var} in "aeiou"'],
+              singleline_impl='    {var} = s[:1].lower() != "" and s[:1].lower() in "aeiou"'),
+    Predicate("str_ends_digit", "s ends with a digit", lambda s: s[-1:].isdigit(),
+              datatype="str", id_substrs=["ends", "digit"], variable_name="ends_with_digit",
+              multiline_impl=["    {var} = s[-1:]", "    {var} = {var}.isdigit()"],
+              singleline_impl="    {var} = s[-1:].isdigit()"),
+    Predicate("str_alpha_majority", "more than half the characters of s are letters",
+              lambda s: sum(ch.isalpha() for ch in s) * 2 > len(s), datatype="str",
+              id_substrs=["half", "letters"], variable_name="mostly_letters",
+              multiline_impl=["    {var} = sum(ch.isalpha() for ch in s)",
+                              "    {var} = {var} * 2 > len(s)"],
+              singleline_impl="    {var} = sum(ch.isalpha() for ch in s) * 2 > len(s)"),
+    Predicate("str_contains_char", 's contains the character "{c}"',
+              lambda s, c: c in s, {"c": ["a", "e", "i", "o", "u"]}, datatype="str",
+              id_substrs=["contains", "{c}"], variable_name="contains_char",
+              multiline_impl=['    {var} = s.count("{c}")', "    {var} = {var} > 0"],
+              singleline_impl='    {var} = s.count("{c}") > 0'),
+]
+
+LIST_INT_PREDICATES: list[Predicate] = [
+    Predicate("li_sum_gt", "the sum of nums is greater than {k}", lambda nums, k: sum(nums) > k,
+              {"k": [0, 20, 50, 100]}, datatype="list[int]", id_substrs=["sum", "{k}"],
+              variable_name="has_large_sum",
+              multiline_impl=["    {var} = sum(nums)", "    {var} = {var} > {k}"],
+              singleline_impl="    {var} = sum(nums) > {k}"),
+    Predicate("li_sum_divisible", "the sum of nums is divisible by {k}",
+              lambda nums, k: sum(nums) % k == 0, {"k": [2, 3, 4, 5, 7]},
+              datatype="list[int]", id_substrs=["sum", "divisible", "{k}"],
+              variable_name="sum_divisible",
+              multiline_impl=["    {var} = sum(nums) % {k}", "    {var} = {var} == 0"],
+              singleline_impl="    {var} = sum(nums) % {k} == 0"),
+    Predicate("li_max_ge", "the largest element of nums is at least {k}",
+              lambda nums, k: max(nums) >= k, {"k": [0, 10, 25, 40]}, datatype="list[int]",
+              id_substrs=["largest", "{k}"], variable_name="has_large_max",
+              multiline_impl=["    {var} = max(nums)", "    {var} = {var} >= {k}"],
+              singleline_impl="    {var} = max(nums) >= {k}"),
+    Predicate("li_min_lt", "the smallest element of nums is less than {k}",
+              lambda nums, k: min(nums) < k, {"k": [0, 5, 10, 20]}, datatype="list[int]",
+              id_substrs=["smallest", "{k}"], variable_name="has_small_min",
+              multiline_impl=["    {var} = min(nums)", "    {var} = {var} < {k}"],
+              singleline_impl="    {var} = min(nums) < {k}"),
+    Predicate("li_len_ge", "nums has at least {k} elements", lambda nums, k: len(nums) >= k,
+              {"k": [2, 3, 4, 5]}, datatype="list[int]", id_substrs=["at least", "{k}", "elements"],
+              variable_name="has_min_length",
+              multiline_impl=["    {var} = len(nums)", "    {var} = {var} >= {k}"],
+              singleline_impl="    {var} = len(nums) >= {k}"),
+    Predicate("li_all_even", "every element of nums is even",
+              lambda nums: all(x % 2 == 0 for x in nums), datatype="list[int]",
+              id_substrs=["every", "even"], variable_name="all_even",
+              multiline_impl=["    {var} = [x for x in nums if x % 2 != 0]",
+                              "    {var} = len({var}) == 0"],
+              singleline_impl="    {var} = all(x % 2 == 0 for x in nums)"),
+    Predicate("li_distinct", "all elements of nums are distinct",
+              lambda nums: len(set(nums)) == len(nums), datatype="list[int]",
+              id_substrs=["distinct"], variable_name="all_distinct",
+              multiline_impl=["    {var} = set(nums)", "    {var} = len({var}) == len(nums)"],
+              singleline_impl="    {var} = len(set(nums)) == len(nums)"),
+    Predicate("li_sorted_asc", "nums is sorted in non-decreasing order",
+              lambda nums: list(nums) == sorted(nums), datatype="list[int]",
+              id_substrs=["sorted", "non-decreasing"], variable_name="is_sorted",
+              multiline_impl=["    {var} = sorted(nums)", "    {var} = {var} == nums"],
+              singleline_impl="    {var} = nums == sorted(nums)"),
+    Predicate("li_range_gt", "the difference between the largest and smallest element of nums "
+                             "is greater than {k}",
+              lambda nums, k: max(nums) - min(nums) > k, {"k": [5, 10, 20, 30]},
+              datatype="list[int]", id_substrs=["difference", "largest", "smallest", "{k}"],
+              variable_name="has_wide_range",
+              multiline_impl=["    {var} = max(nums) - min(nums)", "    {var} = {var} > {k}"],
+              singleline_impl="    {var} = max(nums) - min(nums) > {k}"),
+    Predicate("li_count_positive_ge", "at least {k} elements of nums are positive",
+              lambda nums, k: sum(x > 0 for x in nums) >= k, {"k": [1, 2, 3, 4]},
+              datatype="list[int]", id_substrs=["at least", "{k}", "positive"],
+              variable_name="has_min_positives",
+              multiline_impl=["    {var} = sum(x > 0 for x in nums)", "    {var} = {var} >= {k}"],
+              singleline_impl="    {var} = sum(x > 0 for x in nums) >= {k}"),
+]
+
+LIST_STR_PREDICATES: list[Predicate] = [
+    Predicate("ls_len_ge", "words has at least {k} entries", lambda words, k: len(words) >= k,
+              {"k": [2, 3, 4, 5]}, datatype="list[str]", id_substrs=["at least", "{k}", "entries"],
+              variable_name="has_min_entries",
+              multiline_impl=["    {var} = len(words)", "    {var} = {var} >= {k}"],
+              singleline_impl="    {var} = len(words) >= {k}"),
+    Predicate("ls_all_lower", "every word in words is entirely lowercase",
+              lambda words: all(w == w.lower() for w in words), datatype="list[str]",
+              id_substrs=["every", "lowercase"], variable_name="all_lowercase",
+              multiline_impl=["    {var} = [w for w in words if w != w.lower()]",
+                              "    {var} = len({var}) == 0"],
+              singleline_impl="    {var} = all(w == w.lower() for w in words)"),
+    Predicate("ls_total_chars_gt", "the words in words have more than {k} characters in total",
+              lambda words, k: sum(len(w) for w in words) > k, {"k": [10, 15, 20, 30]},
+              datatype="list[str]", id_substrs=["more than", "{k}", "in total"],
+              variable_name="has_many_characters",
+              multiline_impl=["    {var} = sum(len(w) for w in words)", "    {var} = {var} > {k}"],
+              singleline_impl="    {var} = sum(len(w) for w in words) > {k}"),
+    Predicate("ls_longest_ge", "the longest word in words has at least {k} characters",
+              lambda words, k: max(len(w) for w in words) >= k, {"k": [3, 4, 5, 6]},
+              datatype="list[str]", id_substrs=["longest", "{k}"], variable_name="has_long_word",
+              multiline_impl=["    {var} = max(len(w) for w in words)", "    {var} = {var} >= {k}"],
+              singleline_impl="    {var} = max(len(w) for w in words) >= {k}"),
+    Predicate("ls_distinct", "all words in words are distinct",
+              lambda words: len(set(words)) == len(words), datatype="list[str]",
+              id_substrs=["distinct"], variable_name="all_distinct",
+              multiline_impl=["    {var} = set(words)", "    {var} = len({var}) == len(words)"],
+              singleline_impl="    {var} = len(set(words)) == len(words)"),
+    Predicate("ls_sorted_alpha", "the words in words are in alphabetical order",
+              lambda words: list(words) == sorted(words), datatype="list[str]",
+              id_substrs=["alphabetical", "order"], variable_name="is_sorted_alphabetically",
+              multiline_impl=["    {var} = sorted(words)", "    {var} = {var} == words"],
+              singleline_impl="    {var} = words == sorted(words)"),
+    Predicate("ls_same_length", "all words in words have the same length",
+              lambda words: len({len(w) for w in words}) <= 1, datatype="list[str]",
+              id_substrs=["same", "length"], variable_name="all_same_length",
+              multiline_impl=["    {var} = set(len(w) for w in words)",
+                              "    {var} = len({var}) <= 1"],
+              singleline_impl="    {var} = len(set(len(w) for w in words)) <= 1"),
+    Predicate("ls_starts_vowel_ge", "at least {k} words in words start with a vowel",
+              lambda words, k: sum(w[:1].lower() in "aeiou" and w != "" for w in words) >= k,
+              {"k": [1, 2, 3]}, datatype="list[str]", id_substrs=["at least", "{k}", "vowel"],
+              variable_name="has_min_vowel_starts",
+              multiline_impl=['    {var} = sum(w != "" and w[:1].lower() in "aeiou" for w in words)',
+                              "    {var} = {var} >= {k}"],
+              singleline_impl='    {var} = sum(w != "" and w[:1].lower() in "aeiou" for w in words) >= {k}'),
+    Predicate("ls_has_long_word", "words contains a word longer than {k} characters",
+              lambda words, k: any(len(w) > k for w in words), {"k": [3, 4, 5, 6]},
+              datatype="list[str]", id_substrs=["longer than", "{k}"],
+              variable_name="contains_long_word",
+              multiline_impl=["    {var} = [w for w in words if len(w) > {k}]",
+                              "    {var} = len({var}) > 0"],
+              singleline_impl="    {var} = any(len(w) > {k} for w in words)"),
+    Predicate("ls_shares_initial", "two of the words in words start with the same letter",
+              lambda words: len({w[:1].lower() for w in words}) < len(words),
+              datatype="list[str]", id_substrs=["same", "letter"],
+              variable_name="shares_initial",
+              multiline_impl=["    {var} = set(w[:1].lower() for w in words)",
+                              "    {var} = len({var}) < len(words)"],
+              singleline_impl="    {var} = len(set(w[:1].lower() for w in words)) < len(words)"),
+]
+
+# One simple (non-chunky) bank per datatype. `int` keeps its historical name.
+SIMPLE_PREDICATE_BANKS: dict[str, list[Predicate]] = {
+    "int": INT_PREDICATES,
+    "str": STR_PREDICATES,
+    "list[int]": LIST_INT_PREDICATES,
+    "list[str]": LIST_STR_PREDICATES,
+}
+
+for _dt, _bank in SIMPLE_PREDICATE_BANKS.items():
+    for _p in _bank:
+        assert _p.datatype == _dt, f"{_p.id!r} in the {_dt!r} bank but datatype={_p.datatype!r}"
+        assert _p.variable_name, f"simple predicate {_p.id!r} missing variable_name"
+        assert _p.has_singleline_for("python"), f"{_p.id!r} needs a python singleline_impl"
+
+SIMPLE_PREDICATES_BY_ID: dict[str, Predicate] = {
+    p.id: p for bank in SIMPLE_PREDICATE_BANKS.values() for p in bank
+}
+assert len(SIMPLE_PREDICATES_BY_ID) == sum(len(b) for b in SIMPLE_PREDICATE_BANKS.values()), (
+    "duplicate predicate id across the simple banks"
+)
+
+
+def predicates_for(datatype: DataType) -> list[Predicate]:
+    """Simple (non-chunky) predicates for one datatype — the counterpart of
+    `chunky_predicates_for`. A spec never mixes datatypes."""
+    bank = SIMPLE_PREDICATE_BANKS.get(datatype)
+    assert bank, (f"no simple predicate bank for datatype={datatype!r}; "
+                  f"have {sorted(SIMPLE_PREDICATE_BANKS)}")
+    return bank
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # "Chunky" predicates — inherently multi-line (explicit loops / accumulators / flags), with
 # NO single-line form (`singleline_impl` left None → multiline-only, see `has_singleline_for`).
 # Unlike INT_PREDICATES these span both datatypes: `datatype="int"` (arg `n`) and `"str"`
@@ -2257,9 +2487,12 @@ assert len(CHUNKY_PREDICATES_BY_ID) == len(CHUNKY_PREDICATES), (
 # Unified id → Predicate lookup across the int bank + chunky bank (ids are disjoint: chunky
 # ids are suffixed `_chunky`).  Used wherever a spec resolves predicate ids to oracles, since a
 # spec may draw from either bank.
-ALL_PREDICATES_BY_ID: dict[str, Predicate] = {**PREDICATES_BY_ID, **CHUNKY_PREDICATES_BY_ID}
-assert len(ALL_PREDICATES_BY_ID) == len(PREDICATES_BY_ID) + len(CHUNKY_PREDICATES_BY_ID), (
-    "predicate id collision between INT_PREDICATES and CHUNKY_PREDICATES"
+# SIMPLE_PREDICATES_BY_ID already covers INT_PREDICATES plus the str / list[int] / list[str]
+# banks, so a spec built from any simple bank resolves here (ConditionSpec.datatype reads it).
+ALL_PREDICATES_BY_ID: dict[str, Predicate] = {**SIMPLE_PREDICATES_BY_ID,
+                                              **CHUNKY_PREDICATES_BY_ID}
+assert len(ALL_PREDICATES_BY_ID) == len(SIMPLE_PREDICATES_BY_ID) + len(CHUNKY_PREDICATES_BY_ID), (
+    "predicate id collision between the simple banks and CHUNKY_PREDICATES"
 )
 
 # invariants for the seed set: every chunky predicate is multiline-only in python, has a

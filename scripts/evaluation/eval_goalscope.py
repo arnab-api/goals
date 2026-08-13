@@ -66,7 +66,8 @@ import torch
 
 from scripts.clock.score_condition_heads import load_head_scores
 from scripts.evaluation import faithfulness_io as fio
-from src.goals.condition_data import INT_PREDICATES, materialize, sample_specs
+from src.goals.condition_data import (INT_PREDICATES, materialize, predicates_for,
+                                      sample_specs)
 from src.goals.functional import apply_chat_template, supports_chat_template
 from src.goals.goalscope import GOALSCOPE_SYS, apply_goalscope, greedy_continue
 from src.goals.multistep_label import label_generation
@@ -240,7 +241,10 @@ def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
 # Corpus + generation
 # ══════════════════════════════════════════════════════════════════════════════
 def build_corpus(n_specs, num_conditions, seed, datatype="int"):
-    preds = [p for p in INT_PREDICATES if p.has_singleline_for("python")]
+    # `predicates_for`, not INT_PREDICATES: the pool must follow `datatype`, otherwise a
+    # --datatype=str run silently gets int predicates written against the wrong argument name
+    # and only the spec_id reflects the request.
+    preds = [p for p in predicates_for(datatype) if p.has_singleline_for("python")]
     specs = sample_specs(
         n_specs, num_conditions, seed=seed, predicates=preds, allow_repeats=False
     )

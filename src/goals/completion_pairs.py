@@ -37,6 +37,7 @@ import torch
 
 from src.goals.condition_data import ConditionSpec
 from src.goals.multiline_prompts import (
+    _multiline_preds_for,
     MULTILINE_PREDS,
     build_example,
     replace_in_code_newline_with_tabnewline,
@@ -46,7 +47,15 @@ from src.tokens import prepare_input
 
 N_MULTILINE_PREDS = len(
     MULTILINE_PREDS
-)  # n_conditions cannot exceed this (distinct classes)
+)  # int-bank size; kept as a module constant for backward compat
+
+
+def n_multiline_preds(datatype: str = "int") -> int:
+    """Distinct multiline-capable predicates for `datatype` — the hard ceiling on n_conditions.
+    The non-int banks are smaller than the int one (10 vs 23), so this MUST be read per datatype:
+    using the int count would let `_n_conditions` request more predicates than exist and trip the
+    pool assertion inside `build_example`."""
+    return len(_multiline_preds_for("python", datatype))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -116,7 +125,7 @@ def legs_for(direction: str) -> list[str]:
 
 
 def build_prompt(
-    mt: ModelandTokenizer, rng, target_slot, n_conditions, mode, style
+    mt: ModelandTokenizer, rng, target_slot, n_conditions, mode, style, datatype="int"
 ) -> tuple[str, ConditionSpec]:
     """One forced-prefill prompt (naming='letters' → single-token verdicts), tokenization-stable
     (newlines → ``"    \\n"``) with a trailing ``"   "`` so the pivot whitespace tokenizes the
@@ -129,6 +138,7 @@ def build_prompt(
         mode=mode,
         style=style,
         naming="letters",
+        datatype=datatype,
     )
     return replace_in_code_newline_with_tabnewline(ex["full_prompt"]) + "   ", ex["spec"]
 
@@ -140,25 +150,29 @@ def argmax_next(mt: ModelandTokenizer, inputs) -> int:
     return int(out.logits[0, -1, :].argmax())
 
 
-def sample_ncond(rng, ts: int, max_conditions: int) -> int:
+def sample_ncond(rng, ts: int, max_conditions: int, datatype: str = "int") -> int:
     """Sample ``n_conditions`` with a NEXT var available for moved_on (``>= ts + 2``) and capped
     by both ``max_conditions`` and the number of distinct multiline predicates."""
     lo = ts + 2
-    hi = min(max(lo, max_conditions), N_MULTILINE_PREDS)
+    hi = min(max(lo, max_conditions), n_multiline_preds(datatype))
+    assert lo <= hi, (
+        f"target_slot={ts} needs >={lo} conditions but datatype={datatype!r} has only "
+        f"{n_multiline_preds(datatype)} multiline predicates")
     return rng.randint(lo, hi)
 
 
 def build_context(
-    mt: ModelandTokenizer, seed: int, target_slot: int, n_conditions: int, mode: str
+    mt: ModelandTokenizer, seed: int, target_slot: int, n_conditions: int, mode: str,
+    datatype: str = "int"
 ) -> "StyledContext | None":
     """Render one spec in BOTH styles (shared seed → identical spec, only the target line differs)
     and take each style's next-token argmax. Returns ``StyledContext`` or ``None`` if the two
     styles don't yield a genuine stay↔moved_on contrast (``ml_ans == sl_ans``)."""
     ml_prompt, spec = build_prompt(
-        mt, random.Random(seed), target_slot, n_conditions, mode, "multiline"
+        mt, random.Random(seed), target_slot, n_conditions, mode, "multiline", datatype
     )
     sl_prompt, _ = build_prompt(
-        mt, random.Random(seed), target_slot, n_conditions, mode, "singleline"
+        mt, random.Random(seed), target_slot, n_conditions, mode, "singleline", datatype
     )  # same seed → identical spec; reuse the multiline one
     ml = prepare_input(ml_prompt, tokenizer=mt, padding_side="left")
     sl = prepare_input(sl_prompt, tokenizer=mt, padding_side="left")
@@ -217,6 +231,7 @@ def build_completion_pairs(
     match_target_slot: bool = False,
     match_n_cond: bool = False,
     max_conditions: int = 6,
+    datatype: str = "int",
     mode: str = "chat",
     seed: int = 0,
     patch_tokens=(-2,),
@@ -229,7 +244,8 @@ def build_completion_pairs(
     clean answer ``dst_ans`` and the counterfactual ``target_ans`` (its flipped-style sibling), so
     ``target_ans != dst_ans`` holds by construction. The SOURCE only donates head activations;
     ``validate_pair`` applies the per-leg alignment + (non-``same``) ``source_ans != target_ans``
-    gates. ``target_slots`` entries must be in ``{1,2,3,4}``. ``log`` is a progress callback
+    gates. ``target_slots`` entries must be in ``{1,2,3,4}``. ``datatype`` selects the simple
+    predicate bank (int | str | list[int] | list[str]); a spec never mixes datatypes. ``log`` is a progress callback
     (default ``print``; pass e.g. ``logger.info``)."""
     target_slots = [int(x) for x in target_slots]
     assert all(1 <= ts <= 4 for ts in target_slots), "target_slot must be in {1,2,3,4}"
@@ -242,16 +258,16 @@ def build_completion_pairs(
     while len(pairs) < n_pairs and attempts < max_attempts:
         attempts += 1
         ts = prng.choice(target_slots)
-        nc = sample_ncond(prng, ts, max_conditions)
+        nc = sample_ncond(prng, ts, max_conditions, datatype)
 
         if same:
-            source = build_context(mt, prng.randrange(10**9), ts, nc, mode)
+            source = build_context(mt, prng.randrange(10**9), ts, nc, mode, datatype)
             dest = source  # minimal pair: source IS dest
         else:
             ts2 = ts if match_target_slot else prng.choice(target_slots)
-            nc2 = nc if match_n_cond else sample_ncond(prng, ts2, max_conditions)
-            source = build_context(mt, prng.randrange(10**9), ts, nc, mode)
-            dest = build_context(mt, prng.randrange(10**9), ts2, nc2, mode)
+            nc2 = nc if match_n_cond else sample_ncond(prng, ts2, max_conditions, datatype)
+            source = build_context(mt, prng.randrange(10**9), ts, nc, mode, datatype)
+            dest = build_context(mt, prng.randrange(10**9), ts2, nc2, mode, datatype)
         if source is None or dest is None:
             continue
         if not validate_pair(mt, source, dest, legs, patch_tokens, same):

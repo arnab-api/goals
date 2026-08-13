@@ -24,6 +24,7 @@ from src.goals.condition_data import (
     DataType,
     Lang,
     chunky_predicates_for,
+    predicates_for,
     sample_test_inputs,
 )
 from src.goals.functional import apply_chat_template
@@ -33,8 +34,12 @@ from src.models import ModelandTokenizer
 # multiline-capable predicates (have a `render_multiline`), keyed by language.
 # Populated lazily so a language without impls (e.g. cpp before we add impls to
 # every predicate) simply yields a smaller pool rather than a KeyError.
-def _multiline_preds_for(lang: str) -> list:
-    return [p for p in INT_PREDICATES if p.is_multiline_for(lang)]
+def _multiline_preds_for(lang: str, datatype: DataType = "int") -> list:
+    """Simple (non-chunky) predicates with a multi-line impl in `lang`, for ONE datatype.
+
+    Previously hardcoded INT_PREDICATES, which silently ignored `datatype` — a str/list request
+    would have been served int predicates against the wrong argument name."""
+    return [p for p in predicates_for(datatype) if p.is_multiline_for(lang)]
 
 
 MULTILINE_PREDS = _multiline_preds_for("python")  # backward-compat alias (python only)
@@ -119,7 +124,7 @@ def build_example(
         pool = chunky_predicates_for(datatype)
         assert pool, f"no chunky predicates for datatype={datatype!r}"
     else:
-        pool = _multiline_preds_for(lang)
+        pool = _multiline_preds_for(lang, datatype)
     assert n_conditions <= len(pool), (
         f"n_conditions={n_conditions} exceeds {len(pool)} available predicates "
         f"(chunky={chunky}, datatype={datatype!r}, lang={lang!r})"
