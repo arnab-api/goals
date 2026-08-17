@@ -11,6 +11,8 @@ import html as _html
 import keyword as _kw
 from typing import Literal, Optional, Union
 
+import warnings
+
 import torch
 from tqdm.auto import tqdm
 
@@ -105,158 +107,68 @@ def headpatched_generate(
     n_steer_tokens: Optional[int] = None,
     patch_input_positions: Optional[list[int]] = None,
     alpha: float = 1.0,
-) -> str:
-    """Greedy generation with head-replacement patching — KV-cache aware.
+) -> Union[str, list[str]]:
+    """Greedy generation with head-replacement patching — KV-cache aware, single or batched.
+
+    ``src_o_proj_inps`` decides both the batch size and the return type:
+
+    * ``(n_layers, n_embd)``      -> one generation, returns ``str``
+    * ``(B, n_layers, n_embd)``   -> B generations sharing ONE destination prompt, returns
+      ``list[str]`` of length B — even when ``B == 1``.
+
+    Keying the return on the input's *rank* rather than on ``B`` matters: a caller that slices a
+    batch down to one row (``src[i:i+1]``) still gets a list, so batch code never has to special-case
+    its own length.
+
+    The batch axis is over SOURCES, not destinations — ``dest_inputs`` is a single tokenized prompt,
+    tiled internally. Running B different destination prompts is not supported here.
 
     Decoding pattern:
-        Step 0 (prefill): full forward over the prompt, patches every position
-            in ``patch_input_positions`` (default: last prompt token only).
-            Returns ``past_key_values`` so the patched K/V (at layers above the
-            patched o_proj) are written into the cache for those positions.
-        Step >= 1 (decode): 1-token forward reusing the cache.  If still inside
-            the steer window, the new token's o_proj input is patched too and
-            its K/V get cached.  Past patched K/V remain in the cache.
+        Step 0 (prefill): full forward over the prompt, patches every position in
+            ``patch_input_positions`` (default: last prompt token only). Returns
+            ``past_key_values`` so the patched K/V (at layers above the patched o_proj) are
+            written into the cache for those positions.
+        Step >= 1 (decode): 1-token forward reusing the cache. If still inside the steer window,
+            the new token's o_proj input is patched too and its K/V get cached. Past patched K/V
+            remain in the cache.
 
-    ``n_steer_tokens`` controls how many *forward passes* apply a fresh patch.
-    Step 0 counts as the first such pass; ``n_steer_tokens=1`` patches only the
-    prefill.  ``None`` patches every step (legacy behavior).
+    ``n_steer_tokens`` counts *forward passes*, with the prefill as the first; ``n_steer_tokens=1``
+    patches only the prefill. ``None`` patches every step (legacy behavior).
 
     Args:
         mt: ModelandTokenizer.
-        dest_inputs: Tokenized destination prompt dict (input_ids, attention_mask).
-        src_o_proj_inps: (n_layers, n_embd) source o_proj inputs stacked across layers.
-        mask: HeadMask controlling per-head interpolation weights.
-        layers: Layer indices matching src_o_proj_inps axis 0.
-        max_new_tokens: Maximum tokens to generate.
-        stop_ids: Token ids that halt generation.
-        n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens``
-            forward passes (counting the prefill).  ``None`` (default) patches
-            every step.
-        patch_input_positions: Positions within the input prompt to patch during
-            the prefill.  Negative indices supported (``-1`` = last token).
-            Duplicates removed.  ``None`` (default) → ``[L_prompt - 1]`` (legacy
-            behavior: patch only the last prompt token).  All positions are
-            validated to lie in ``[0, L_prompt)`` after normalization.
-
-            Note: the same ``src_o_proj_inps`` snapshot is broadcast across every
-            position in this list; per-position source variation is not
-            supported.  See ``forward_with_src_replacement`` for details.
-
-    Returns:
-        Decoded generated string.
-    """
-    _stop = stop_ids or set()
-    if len(_stop) == 0:
-        _stop = {mt.tokenizer.eos_token_id}
-    input_ids = dest_inputs["input_ids"].clone()
-    attention_mask = dest_inputs["attention_mask"].clone()
-    L_prompt = input_ids.shape[1]
-    prefill_positions = _normalize_input_positions(patch_input_positions, L_prompt)
-
-    generated = []
-    past_key_values = None
-    with torch.no_grad():
-        for step in range(max_new_tokens):
-            cur_input_ids = input_ids if step == 0 else input_ids[:, -1:]
-            inputs = {
-                "input_ids": cur_input_ids,
-                "attention_mask": attention_mask,
-                "past_key_values": past_key_values,
-                "use_cache": True,
-            }
-
-            if n_steer_tokens is None or step < n_steer_tokens:
-                positions_this_step = prefill_positions if step == 0 else [-1]
-                logits, past_key_values = forward_with_src_replacement(
-                    mt,
-                    inputs,
-                    src_o_proj_inps,
-                    mask,
-                    layers,
-                    alpha=alpha,
-                    patch_positions=positions_this_step,
-                    return_past_key_values=True,
-                )
-            else:
-                out = mt._model(**inputs)
-                logits = out.logits[0, -1, :].float()  # (vocab,)
-                past_key_values = out.past_key_values
-
-            next_tok = int(logits.argmax())
-            generated.append(next_tok)
-            if next_tok in _stop:
-                break
-            input_ids = torch.cat(
-                [input_ids, torch.tensor([[next_tok]], device=input_ids.device)], dim=1
-            )
-            attention_mask = torch.cat(
-                [
-                    attention_mask,
-                    torch.ones(
-                        (1, 1), dtype=attention_mask.dtype, device=attention_mask.device
-                    ),
-                ],
-                dim=1,
-            )
-    return mt.tokenizer.decode(generated, skip_special_tokens=True).rstrip()
-
-
-def headpatched_generate_batch(
-    mt,
-    dest_inputs: dict,
-    src_o_proj_inps_batch: torch.Tensor,
-    mask,
-    layers: list[int],
-    max_new_tokens: int,
-    stop_ids: Optional[set[int]] = None,
-    n_steer_tokens: Optional[int] = None,
-    patch_input_positions: Optional[list[int]] = None,
-    alpha: float = 1.0,
-) -> list[str]:
-    """Batched greedy generation with head-replacement patching — KV-cache aware.
-
-    Runs B independent patched generations in parallel — one per source token
-    position.  Each item i in the batch uses src_o_proj_inps_batch[i] as its patch
-    while sharing the same destination prompt.
-
-    Decoding pattern:
-        Step 0 (prefill): full forward over the prompt, patches every position
-            in ``patch_input_positions`` (default: last prompt token only).
-            Returns ``past_key_values`` so the patched K/V (at layers above the
-            patched o_proj) are written into the cache for those positions.
-        Step >= 1 (decode): 1-token forward reusing the cache.  If still inside
-            the steer window, the new token's o_proj input is patched too and
-            its K/V get cached.  Past patched K/V remain in the cache.
-
-    Args:
-        dest_inputs: Tokenized destination prompt (batch=1); tiled internally to B.
-        src_o_proj_inps_batch: (B, n_layers, n_embd) — one row per source position.
-        mask: HeadMask with per-head interpolation weights.
-        layers: Layer indices matching src_o_proj_inps_batch axis 1.
+        dest_inputs: Tokenized destination prompt dict (input_ids, attention_mask), batch 1.
+        src_o_proj_inps: source o_proj inputs — see the shape contract above.
+        mask: HeadMask with per-head interpolation weights. Indexed POSITIONALLY against
+            ``layers`` (row ``li`` <-> ``layers[li]``), not by absolute layer index.
+        layers: Layer indices matching ``src_o_proj_inps``' layer axis, and the rows of ``mask``.
         max_new_tokens: Maximum tokens to generate per item.
         stop_ids: Token ids that halt generation for an item.
-        n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens``
-            forward passes (counting the prefill).  After that, plain forward
-            passes continue, but earlier patched K/V stay in the cache and
-            keep influencing subsequent attention.  ``None`` (default) patches
-            every step.
-        patch_input_positions: Positions within the input prompt to patch during
-            the prefill.  Negative indices supported (``-1`` = last token).
-            Duplicates removed.  ``None`` (default) → ``[L_prompt - 1]`` (legacy
-            behavior: patch only the last prompt token).  All positions are
-            validated to lie in ``[0, L_prompt)`` after normalization.
+        n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens`` forward passes.
+        patch_input_positions: Positions within the prompt to patch during the prefill. Negative
+            indices supported (``-1`` = last token). Duplicates removed. ``None`` (default) ->
+            ``[L_prompt - 1]``. Validated to lie in ``[0, L_prompt)`` after normalization.
 
-            Note: the same ``src_o_proj_inps_batch[i]`` snapshot is broadcast
-            across every position in this list for item ``i``; per-position
-            source variation is not supported.
+            Note: one source snapshot is broadcast across every position in this list; per-position
+            source variation is not supported. See ``forward_with_src_replacement``.
 
     Returns:
-        list[str] of length B — decoded greedy continuations.
+        ``str`` for a 2D source, ``list[str]`` for a 3D source.
     """
     _stop = stop_ids or set()
     if len(_stop) == 0:
         _stop = {mt.tokenizer.eos_token_id}
-    B = src_o_proj_inps_batch.shape[0]
+
+    single = src_o_proj_inps.dim() == 2
+    src = src_o_proj_inps.unsqueeze(0) if single else src_o_proj_inps
+    if src.dim() != 3:
+        raise ValueError(
+            f"src_o_proj_inps must be (n_layers, n_embd) or (B, n_layers, n_embd); "
+            f"got {tuple(src_o_proj_inps.shape)}"
+        )
+    B = src.shape[0]
+    # src is always 3D from here, so forward_with_src_replacement always yields (B, vocab) and the
+    # decode loop needs no rank special-casing.
     input_ids = dest_inputs["input_ids"].expand(B, -1).clone()
     attention_mask = dest_inputs["attention_mask"].expand(B, -1).clone()
     L_prompt = input_ids.shape[1]
@@ -282,7 +194,7 @@ def headpatched_generate_batch(
                 logits, past_key_values = forward_with_src_replacement(
                     mt,
                     inputs,
-                    src_o_proj_inps_batch,
+                    src,
                     mask,
                     layers,
                     alpha=alpha,
@@ -313,9 +225,209 @@ def headpatched_generate_batch(
                 dim=1,
             )
 
-    return [
-        mt.tokenizer.decode(g, skip_special_tokens=True).rstrip() for g in generated
+    outs = [mt.tokenizer.decode(g, skip_special_tokens=True).rstrip() for g in generated]
+    return outs[0] if single else outs
+
+
+def headpatched_generate_batch(*args, **kwargs) -> list[str]:
+    """Deprecated alias — :func:`headpatched_generate` now handles both ranks.
+
+    Kept so existing call sites keep working AND keep returning a list: it forwards unchanged, and
+    a 3D source already yields ``list[str]``.
+    """
+    warnings.warn(
+        "headpatched_generate_batch is deprecated; call headpatched_generate directly — a 3D "
+        "src_o_proj_inps returns list[str].",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    out = headpatched_generate(*args, **kwargs)
+    return [out] if isinstance(out, str) else out
+
+
+def head_additive_generate(
+    mt,
+    dest_inputs: dict,
+    steering_vecs: torch.Tensor,
+    layers: list[int],
+    max_new_tokens: int,
+    strategy: Literal["additive", "additive_norm"] = "additive",
+    stop_ids: Optional[set[int]] = None,
+    n_steer_tokens: Optional[int] = None,
+    patch_input_positions: Optional[list[int]] = None,
+    alpha: float = 1.0,
+) -> Union[str, list[str]]:
+    """Greedy generation with an ADDITIVE residual-stream injection — the counterpart of
+    :func:`headpatched_generate`, which replaces per-head o_proj inputs instead.
+
+    Same interface and the same rank-keyed return contract:
+
+    * ``steering_vecs`` ``(n_embd,)``      -> one generation, returns ``str``
+    * ``steering_vecs`` ``(B, n_embd)``    -> B generations sharing ONE destination prompt,
+      returns ``list[str]`` — even when ``B == 1``.
+    * ``steering_vecs`` ``{layer: tensor}`` -> a DIFFERENT vector per layer (same rank rule). Use
+      this to mirror :func:`headpatched_generate`, which writes each layer's own source value at
+      that layer; a single tensor broadcasts one vector to every layer in ``layers`` and collapses
+      the source's per-layer structure.
+
+    The two strategies differ only in what magnitude is injected:
+
+    * ``"additive"`` — ``h + alpha * g``. The added magnitude is ``alpha * ||g||``, an ABSOLUTE
+      quantity. Since ``||g||`` grows with the number of aggregated heads (it is a sum over them)
+      and ``||h||`` grows with depth, comparing head sets / bands / models at a fixed ``alpha``
+      can measure the injection's magnitude rather than the encoding's quality.
+    * ``"additive_norm"`` — ``h + alpha * ||h|| * g/||g||``. ``alpha`` is then "add this fraction
+      of the local residual norm along the goal direction", which is scale-invariant. Its value
+      does NOT carry over from ``"additive"`` and needs re-tuning.
+
+    Normalisation for ``"additive_norm"`` happens HERE, so callers always pass the raw aggregated
+    vector and the strategy alone decides the semantics.
+
+    Args:
+        mt: ModelandTokenizer.
+        dest_inputs: Tokenized destination prompt dict, batch 1 (tiled internally).
+        steering_vecs: aggregated head output(s) — see the shape contract above. Raw, unnormalised.
+        layers: layer indices to inject at (the steer band), e.g. ``range(35, 46)``.
+        max_new_tokens: Maximum tokens to generate per item.
+        strategy: ``"additive"`` | ``"additive_norm"``.
+        stop_ids: token ids that halt generation, forwarded as HF ``generate``'s ``eos_token_id``
+            (which takes a list). A non-empty set REPLACES the model's default EOS rather than
+            adding to it — same convention as :func:`headpatched_generate`. ``None``/empty keeps
+            the default.
+        n_steer_tokens: how many decode steps apply the patch. ``None`` = every step.
+        patch_input_positions: position(s) to inject at. ``[-1]`` (default) and ``[0]`` are
+            patched at every decode step. Any OTHER position is patched during the prefill only
+            (with a ``RuntimeWarning``): with KV-cache enabled a fixed position like ``-2`` is out
+            of bounds once the key dim is 1. The prefill edit still reaches every later token
+            via the cached K/V above the patched layer, exactly as in :func:`headpatched_generate` —
+            "prefill only" restricts WHERE a fresh patch is written, not how far its effect
+            travels. The two therefore agree at ``n_steer_tokens=1`` (what the move-on setups use)
+            and differ above it, where ``headpatched_generate`` additionally patches each newly
+            generated token at ``-1``.
+        alpha: injection coefficient (see the strategy notes above).
+
+    Returns:
+        ``str`` for a 1D source, ``list[str]`` for a 2D source.
+    """
+    if strategy not in ("additive", "additive_norm"):
+        raise ValueError(
+            f"strategy must be 'additive' or 'additive_norm'; got {strategy!r}. "
+            f"For head replacement use headpatched_generate()."
+        )
+    positions = [-1] if patch_input_positions is None else list(dict.fromkeys(patch_input_positions))
+    # With KV-cache on, a fixed position other than 0/-1 is out of bounds on decode steps (key dim
+    # is 1 there), so those positions are patched during the PREFILL only, via on_pass="first".
+    # That is NOT the same as "the intervention stops": the prefill patch edits the residual stream
+    # at that position, the layers above it compute K/V from the edited residual, and generate()
+    # caches them — so every later token attending back to that position sees the patched keys and
+    # values. headpatched_generate behaves identically in this respect (its docstring: "the patched
+    # K/V ... are written into the cache for those positions").
+    #
+    # What DOES differ above n_steer_tokens=1 is whether each NEWLY GENERATED token also gets a
+    # fresh patch: headpatched_generate drives its own loop and switches to [-1] after step 0
+    # (`positions_this_step = prefill_positions if step == 0 else [-1]`), whereas generate_with_patch
+    # cannot vary the position per step and so applies nothing further.
+    prefill_only = positions not in ([-1], [0])
+    if prefill_only:
+        msg = (f"patch_input_positions={positions}: with KV-cache on, only 0/-1 are valid at every "
+               f"decode step, so these are patched during the PREFILL only (on_pass='first'). The "
+               f"edit still propagates to every later token through the cached K/V above the "
+               f"patched layer — it is not confined to one token.")
+        if n_steer_tokens != 1:
+            msg += (f" But n_steer_tokens={n_steer_tokens} has no additional effect here, whereas "
+                    f"headpatched_generate would ALSO apply a fresh patch at -1 to each newly "
+                    f"generated token for {n_steer_tokens} passes. The two agree at "
+                    f"n_steer_tokens=1.")
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+    # Validate against the prompt length here, the way headpatched_generate does via
+    # _normalize_input_positions. Without this an out-of-range position surfaces as a raw
+    # IndexError from inside the baukit hook ("index -24 is out of bounds for dimension 1"), with
+    # no hint that it came from patch_input_positions. Signs are preserved: -1 must stay negative
+    # so that on_pass="all" lands on the NEW token at each decode step, not a fixed absolute slot.
+    _L = dest_inputs["input_ids"].shape[1]
+    _bad = [p for p in positions if not (-_L <= p < _L)]
+    if _bad:
+        raise ValueError(
+            f"patch_input_positions={_bad} out of range for a {_L}-token prompt "
+            f"(valid: -{_L} .. {_L - 1})"
+        )
+    if _L < 2:
+        raise ValueError(
+            f"prompt is {_L} token(s): the baukit hook detects the prefill as `seq_len > 1`, so a "
+            f"1-token prompt has no distinguishable prefill pass and patches would misfire."
+        )
+
+    # A dict {layer: vec} injects a DIFFERENT vector per layer — the faithful additive analogue of
+    # headpatched_generate, which writes each layer's own source value at that layer. Passing one
+    # tensor broadcasts the SAME vector to every layer in `layers`, which collapses whatever
+    # per-layer structure the source had: if the heads that produced it span layers 11-62 and you
+    # inject at 40-49, roughly half the aggregate lands at the wrong depth.
+    per_layer = isinstance(steering_vecs, dict)
+    if per_layer:
+        missing = [l for l in layers if l not in steering_vecs]
+        if missing:
+            raise ValueError(f"steering_vecs is missing layers {missing[:8]}"
+                             f"{' …' if len(missing) > 8 else ''}")
+        ranks = {v.dim() for v in steering_vecs.values()}
+        if len(ranks) != 1:
+            raise ValueError(f"steering_vecs entries have mixed ranks {sorted(ranks)}")
+        single = ranks.pop() == 1
+        by_layer = {l: (v.unsqueeze(0) if single else v) for l, v in steering_vecs.items()}
+    else:
+        single = steering_vecs.dim() == 1
+        if steering_vecs.dim() not in (1, 2):
+            raise ValueError(
+                f"steering_vecs must be (n_embd,), (B, n_embd) or {{layer: tensor}}; "
+                f"got {tuple(steering_vecs.shape)}"
+            )
+        v = steering_vecs.unsqueeze(0) if single else steering_vecs
+        by_layer = {l: v for l in layers}
+
+    def _prep(v):
+        if strategy == "additive_norm":
+            # Hand the patch site a UNIT direction; the magnitude comes from ||h|| there.
+            v = v / v.float().norm(dim=-1, keepdim=True).clamp_min(1e-6).to(v.dtype)
+        return alpha * v
+    by_layer = {l: _prep(v) for l, v in by_layer.items()}
+    B = next(iter(by_layer.values())).shape[0]
+    if any(v.shape[0] != B for v in by_layer.values()):
+        raise ValueError("steering_vecs entries disagree on batch size")
+
+    tiled = TokenizerOutput(
+        dict(
+            input_ids=dest_inputs["input_ids"].expand(B, -1).clone(),
+            attention_mask=dest_inputs["attention_mask"].expand(B, -1).clone(),
+        )
+    )
+    _strat = "add" if strategy == "additive" else "add_norm"
+    patches = [
+        PatchSpec(
+            location=(mt.layer_name_format.format(li), p),
+            patch=by_layer[li],
+            strategy=_strat,
+            on_pass="first" if prefill_only else "all",
+        )
+        for li in layers
+        for p in positions
     ]
+    # `stop_ids` maps onto HF generate's `eos_token_id`, which accepts a LIST and stops each
+    # sequence on any of them — matching headpatched_generate, where a non-empty `stop_ids`
+    # REPLACES the default EOS rather than adding to it.
+    extra = {"eos_token_id": sorted(stop_ids)} if stop_ids else {}
+    gens = generate_with_patch(
+        mt,
+        tiled,
+        max_new_tokens=max_new_tokens,
+        patches=patches,
+        n_steer_tokens=n_steer_tokens,
+        do_sample=False,
+        patch_interface="baukit",
+        remove_prefix=True,
+        skip_special_tokens=True,
+        **extra,
+    )
+    return gens[0] if single else list(gens)
 
 
 # ---------------------------------------------------------------------------
@@ -725,11 +837,8 @@ def apply_goalscope(
             token_positions=seg_positions,
         )[0]  # (n_seg, n_embd)
 
-        if strategy == "additive_norm":
-            # Hand the patch site a UNIT direction; the magnitude comes from ||h|| there.
-            steering_vecs = steering_vecs / steering_vecs.float().norm(
-                dim=-1, keepdim=True
-            ).clamp_min(1e-6).to(steering_vecs.dtype)
+        # additive_norm's unit-direction normalisation happens inside
+        # head_additive_generate, so `steering_vecs` stays raw here.
 
         layer_start, layer_end = steer_layer_range
         steer_layers = list(range(layer_start, layer_end))
@@ -774,35 +883,24 @@ def apply_goalscope(
         )
 
         if strategy in ("additive", "additive_norm"):
-            sv_batch = alpha * steering_vecs[chunk_start:chunk_end]  # (B, n_embd)
-            patches = [
-                PatchSpec(
-                    location=(mt.layer_name_format.format(li), -1),
-                    patch=sv_batch,
-                    strategy="add" if strategy == "additive" else "add_norm",
-                    on_pass="all",
-                )
-                for li in steer_layers
-            ]
-            gens = generate_with_patch(
-                mt,
-                tiled,
+            gens = head_additive_generate(
+                mt=mt,
+                dest_inputs=tiled,
+                steering_vecs=steering_vecs[chunk_start:chunk_end],  # (B, n_embd), raw
+                layers=steer_layers,
                 max_new_tokens=max_new_tokens,
-                patches=patches,
+                strategy=strategy,
                 n_steer_tokens=n_steer,
-                do_sample=False,
-                patch_interface="baukit",
-                remove_prefix=True,
-                skip_special_tokens=True,
+                alpha=alpha,
             )
         else:  # replace
             src_chunk = src_head_vals_all[
                 chunk_start:chunk_end
             ]  # (B, n_layers, n_embd)
-            gens = headpatched_generate_batch(
+            gens = headpatched_generate(
                 mt=mt,
                 dest_inputs=tiled,
-                src_o_proj_inps_batch=src_chunk,
+                src_o_proj_inps=src_chunk,
                 mask=mask_module,
                 layers=layers_replace,
                 max_new_tokens=max_new_tokens,

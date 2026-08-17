@@ -33,9 +33,9 @@ Mask parameterization:
 from __future__ import annotations
 
 import contextlib
-import os
 import dataclasses
 import logging
+import os
 import random
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -136,8 +136,11 @@ class HeadMask(nn.Module):
 DEFAULT_GOAL_MASK_TAG = "lam20"
 
 
-def goal_mask_path(model_name: str, tag: str | None = DEFAULT_GOAL_MASK_TAG,
-                   results_dir: str | None = None) -> str:
+def goal_mask_path(
+    model_name: str,
+    tag: str | None = DEFAULT_GOAL_MASK_TAG,
+    results_dir: str | None = None,
+) -> str:
     """Path of a trained goal head_mask.pt.
 
     Layout mirrors what ``scripts/train_head_mask.py --tag`` writes:
@@ -156,7 +159,7 @@ def goal_mask_path(model_name: str, tag: str | None = DEFAULT_GOAL_MASK_TAG,
         return tagged
     if os.path.exists(flat):
         return flat
-    return tagged or flat          # not found: report the tagged path we expected
+    return tagged or flat  # not found: report the tagged path we expected
 
 
 def _get_o_proj_weight_obsolete(mt, layer: int) -> torch.Tensor:
@@ -250,7 +253,7 @@ def collect_head_steering_vecs(
     src_tokenized: TokenizerOutput,
     selected_heads: list[tuple[int, int]],
     token_positions: list[int],
-    return_individual_heads: bool = False
+    return_individual_heads: bool = False,
 ) -> torch.Tensor:
     """Compute the summed residual-stream contribution of selected heads at each token position.
 
@@ -274,7 +277,9 @@ def collect_head_steering_vecs(
 
     n_embd = mt.n_embd
     n_heads = mt.n_heads
-    head_dim = mt.head_dim  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
+    head_dim = (
+        mt.head_dim
+    )  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
 
     batch_size = src_tokenized["input_ids"].shape[0]
 
@@ -304,10 +309,10 @@ def collect_head_steering_vecs(
         inp = o_proj_inputs[layer]  # (batch_size, n_positions, n_embd) float32 CPU
 
         for h in heads:
-            h_inp = inp[:, :, h * head_dim : (h + 1) * head_dim]    # (B, n_pos, head_dim)
-            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]       # (n_embd, head_dim)
-            head_outputs = h_inp @ W_o_h.t()                        # (B, n_pos, n_embd)
-            steering_vecs += head_outputs                       
+            h_inp = inp[:, :, h * head_dim : (h + 1) * head_dim]  # (B, n_pos, head_dim)
+            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]  # (n_embd, head_dim)
+            head_outputs = h_inp @ W_o_h.t()  # (B, n_pos, n_embd)
+            steering_vecs += head_outputs
             if return_individual_heads:
                 individual_head_outputs[(layer, h)] = head_outputs
 
@@ -922,7 +927,9 @@ def src_replacement_hooks(
         patch_positions = [-1]
 
     n_heads = mt.n_heads
-    head_dim = mt.head_dim  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
+    head_dim = (
+        mt.head_dim
+    )  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
     attn_inner = mt.attn_inner_size  # == n_heads*head_dim: the o_proj INPUT width
     mask_vals = mask.values  # (n_layers_tested, n_heads) requires_grad
     src_batch = src_head_inps  # (batch, L, n_heads*head_dim) float32 CPU
@@ -936,16 +943,16 @@ def src_replacement_hooks(
 
             def make_hook(li_: int):
                 def pre_hook(module, args):
-                    x = args[0]  # (batch, seq, n_heads*head_dim) bf16 — live cascade o_proj input
+                    x = args[
+                        0
+                    ]  # (batch, seq, n_heads*head_dim) bf16 — live cascade o_proj input
                     dev = x.device
                     dtype = x.dtype
                     B_ = x.shape[0]
                     seq_len = x.shape[1]
 
                     # Normalize negatives, de-dup, sort
-                    norm = sorted({
-                        p if p >= 0 else seq_len + p for p in pos_arg
-                    })
+                    norm = sorted({p if p >= 0 else seq_len + p for p in pos_arg})
                     if norm and (norm[0] < 0 or norm[-1] >= seq_len):
                         raise IndexError(
                             f"patch_positions out of range for seq_len={seq_len}: "
@@ -1015,9 +1022,7 @@ def _extra_patch_hooks(mt, patches):
             _apply_patch_to_state(actual, p.location[1], p.patch, p.strategy)
         return (actual,) + output[1:] if is_tuple else actual
 
-    with baukit.TraceDict(
-        mt._model, list(modules_to_patches), edit_output=edit_output
-    ):
+    with baukit.TraceDict(mt._model, list(modules_to_patches), edit_output=edit_output):
         yield
 
 
@@ -1040,9 +1045,12 @@ def make_head_replacement_patch_interface(
 
     Args mirror :func:`src_replacement_hooks`.  Typically ``patch_positions=[POS]`` (the pivot
     whitespace token) to match how the mask was trained / how steering is applied."""
+
     def patch_interface(mt, inputs, patches=None, model_kwargs=None):
         model_kwargs = dict(model_kwargs or {})
-        with src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions):
+        with src_replacement_hooks(
+            mt, src_head_inps, mask, layers, alpha, patch_positions
+        ):
             return mt._model(**dict(inputs), **model_kwargs)
 
     return patch_interface
@@ -1128,7 +1136,10 @@ def forward_with_src_replacement(
         if extra_patches
         else contextlib.nullcontext()
     )
-    with src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions), extra_cm:
+    with (
+        src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions),
+        extra_cm,
+    ):
         call_kwargs = dict(dest_inputs)
         if return_past_key_values:
             call_kwargs.setdefault("use_cache", True)
