@@ -101,12 +101,14 @@ def headpatched_generate(
     dest_inputs: dict,
     src_o_proj_inps: torch.Tensor,
     mask,
-    layers: list[int],
-    max_new_tokens: int,
+    mask_layers: Optional[list[int]] = None,
+    max_new_tokens: int = 64,
     stop_ids: Optional[set[int]] = None,
     n_steer_tokens: Optional[int] = None,
     patch_input_positions: Optional[list[int]] = None,
     alpha: float = 1.0,
+    *,
+    layers: Optional[list[int]] = None,
 ) -> Union[str, list[str]]:
     """Greedy generation with head-replacement patching — KV-cache aware, single or batched.
 
@@ -139,9 +141,12 @@ def headpatched_generate(
         mt: ModelandTokenizer.
         dest_inputs: Tokenized destination prompt dict (input_ids, attention_mask), batch 1.
         src_o_proj_inps: source o_proj inputs — see the shape contract above.
-        mask: HeadMask with per-head interpolation weights. Indexed POSITIONALLY against
-            ``layers`` (row ``li`` <-> ``layers[li]``), not by absolute layer index.
-        layers: Layer indices matching ``src_o_proj_inps``' layer axis, and the rows of ``mask``.
+        mask: HeadMask with per-head interpolation weights. To limit WHERE the intervention
+            happens, zero the rows outside the band — ``mask.restrict_to_layers(lo, hi)`` — do NOT
+            slice ``mask_layers``, which renumbers the rows and shifts the whole mask.
+        mask_layers: the ordered key decoding the mask's ROWS (row ``li`` <-> ``mask_layers[li]``),
+            also matching ``src_o_proj_inps``' layer axis. ``None`` (default) = identity, which is
+            what a full-depth mask from ``load_head_mask`` wants.
         max_new_tokens: Maximum tokens to generate per item.
         stop_ids: Token ids that halt generation for an item.
         n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens`` forward passes.
@@ -155,6 +160,14 @@ def headpatched_generate(
     Returns:
         ``str`` for a 2D source, ``list[str]`` for a 3D source.
     """
+    if layers is not None:
+        if mask_layers is not None:
+            raise TypeError("pass `mask_layers`, not both it and the deprecated `layers`")
+        warnings.warn("`layers=` is now `mask_layers=` — it decodes the mask's rows rather than "
+                      "selecting layers to intervene at. To limit WHERE the intervention happens, "
+                      "use mask.restrict_to_layers(lo, hi).", DeprecationWarning, stacklevel=2)
+        mask_layers = layers
+
     _stop = stop_ids or set()
     if len(_stop) == 0:
         _stop = {mt.tokenizer.eos_token_id}
@@ -196,7 +209,7 @@ def headpatched_generate(
                     inputs,
                     src,
                     mask,
-                    layers,
+                    mask_layers,
                     alpha=alpha,
                     patch_positions=positions_this_step,
                     return_past_key_values=True,

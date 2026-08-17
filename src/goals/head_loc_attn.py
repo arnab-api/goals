@@ -33,6 +33,7 @@ Mask parameterization:
 from __future__ import annotations
 
 import contextlib
+import warnings
 import dataclasses
 import logging
 import os
@@ -103,14 +104,85 @@ class HeadMask(nn.Module):
     each optimizer step (no sigmoid — raw values used as interpolation weights).
     """
 
-    def __init__(self, n_layers_tested: int, n_heads: int) -> None:
+    def __init__(self, n_layers_tested: int, n_heads: int,
+                 mask_layers: Optional[list[int]] = None) -> None:
         super().__init__()
         self.values = nn.Parameter(torch.ones(n_layers_tested, n_heads))
+        # Which model layer each ROW belongs to, when known. `None` = unknown; callers that build a
+        # full-depth mask by hand (HeadMask(n_layer, n_heads) indexed absolutely) leave it unset and
+        # the identity is assumed. Setting it lets `restrict_to_layers` refuse on a COMPACT mask,
+        # where a layer band would silently select the wrong rows.
+        self.mask_layers = list(mask_layers) if mask_layers is not None else None
 
     def clamp_(self) -> None:
         """Enforce [0, 1] box constraint. Call after every optimizer.step()."""
         with torch.no_grad():
             self.values.clamp_(0.0, 1.0)
+
+    def to_full_depth(self, mask_layers: list[int], n_layer: int) -> "HeadMask":
+        """A copy re-indexed so ROW INDEX == MODEL LAYER, zeros where no row existed.
+
+        Training sizes the mask to the searched band (`HeadMask(len(layers), n_heads)`) because the
+        sparsity term is `lambda * values.mean()` — dead rows for untested layers would change what
+        lambda means from one band to another. That compact form is right for the optimiser and
+        wrong as an inference API: rows are keyed by POSITION in `mask_layers`, so passing a
+        different list silently SHIFTS every row instead of erroring.
+
+        Normalising on load removes the trap downstream — a full-depth mask needs no `mask_layers`
+        at all, because the identity mapping is the default.
+        """
+        out = HeadMask(n_layer, self.values.shape[1], list(range(n_layer)))
+        with torch.no_grad():
+            out.values.zero_()
+            for li, layer in enumerate(mask_layers):
+                if not (0 <= layer < n_layer):
+                    raise ValueError(f"mask_layers[{li}]={layer} outside [0, {n_layer})")
+                out.values[layer] = self.values[li]
+        return out.to(self.values.device)
+
+    def is_full_depth(self, n_layer: Optional[int] = None) -> bool:
+        """True when row index == model layer (so a layer band means what it looks like)."""
+        if self.mask_layers is not None:
+            return self.mask_layers == list(range(len(self.mask_layers)))
+        return True if n_layer is None else self.values.shape[0] == n_layer
+
+    def restrict_to_layers(self, lo: int, hi: int) -> "HeadMask":
+        """A copy with every row outside ``[lo, hi)`` zeroed — the way to limit WHERE an
+        intervention happens.
+
+        The mask decides that, not the layer list: ``mask_layers`` only decodes which model layer
+        each ROW belongs to, so slicing it renumbers the rows and shifts the whole mask. Zeroing
+        rows keeps the row<->layer correspondence intact and simply switches heads off, which is
+        what "restrict to layers 25-40" actually means.
+
+        Requires a full-depth mask (row index == model layer), i.e. one from ``load_head_mask`` or
+        built as ``HeadMask(n_layer, n_heads)``; on a compact mask the row numbers are not layers
+        and the band would be meaningless, so call ``to_full_depth`` first.
+        """
+        rows = self.values.shape[0]
+        if self.mask_layers is not None and not self.is_full_depth():
+            raise ValueError(
+                f"restrict_to_layers needs a full-depth mask (row == layer), but this one maps rows "
+                f"to layers {self.mask_layers[:6]}{' …' if len(self.mask_layers) > 6 else ''}. "
+                f"Call .to_full_depth(mask_layers, n_layer) first, or load it via load_head_mask()."
+            )
+        if hi > rows:
+            raise ValueError(
+                f"band [{lo}, {hi}) exceeds the mask's {rows} rows. If this is a COMPACT mask "
+                f"(rows = tested layers, not model layers) a layer band is meaningless — normalise "
+                f"it with .to_full_depth(mask_layers, n_layer) or load_head_mask() first."
+            )
+        out = HeadMask(rows, self.values.shape[1], self.mask_layers)
+        with torch.no_grad():
+            out.values.copy_(self.values)
+            out.values[:lo] = 0.0
+            out.values[hi:] = 0.0
+        return out.to(self.values.device)
+
+    def n_active(self, threshold: float = 0.0) -> int:
+        """Heads with a value strictly above `threshold` — a quick check that a restriction did
+        what you meant."""
+        return int((self.values.detach() > threshold).sum())
 
     def selected_heads(
         self, layers: list[int], threshold: float = 0.5
@@ -160,6 +232,21 @@ def goal_mask_path(
     if os.path.exists(flat):
         return flat
     return tagged or flat  # not found: report the tagged path we expected
+
+
+def load_head_mask(path: str, n_layer: int, device: str = "cpu") -> HeadMask:
+    """Load a trained mask NORMALISED to full depth — row index == model layer.
+
+    Checkpoints already store `layers` beside `mask_values`; this binds the two together so callers
+    never carry the mapping separately. The result needs no `mask_layers` argument: the hooks
+    default to the identity when it is omitted. Works for both banks (goal `head_mask.pt`,
+    completion `mask.pt`) — they share the schema.
+    """
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    compact = HeadMask(*ck["mask_values"].shape)
+    with torch.no_grad():
+        compact.values.copy_(ck["mask_values"])
+    return compact.to_full_depth([int(x) for x in ck["layers"]], n_layer).to(device)
 
 
 def _get_o_proj_weight_obsolete(mt, layer: int) -> torch.Tensor:
@@ -895,9 +982,11 @@ def src_replacement_hooks(
     mt,
     src_head_inps: torch.Tensor,
     mask: HeadMask,
-    layers: list[int],
+    mask_layers: Optional[list[int]] = None,
     alpha: float = 1.0,
     patch_positions: Optional[list[int]] = None,
+    *,
+    layers: Optional[list[int]] = None,
 ):
     """Register the per-head o_proj-input replacement pre-hooks for the duration of the
     ``with`` block, then remove them.  Single source of truth for the head transplant.
@@ -921,6 +1010,27 @@ def src_replacement_hooks(
 
     Used by ``forward_with_src_replacement`` (logits / KV-cache decoding) and by
     ``make_head_replacement_patch_interface`` (attention extraction)."""
+    # `mask_layers` is the ordered key that decodes the mask's ROWS (row li <-> mask_layers[li]).
+    # It is NOT "which layers to intervene at" — that is what the old name `layers` wrongly implied,
+    # and slicing it silently shifts every row. `None` = identity, which is what a full-depth mask
+    # from `load_head_mask` wants.
+    if layers is not None:
+        if mask_layers is not None:
+            raise TypeError("pass `mask_layers`, not both it and the deprecated `layers`")
+        warnings.warn("`layers=` is now `mask_layers=` — it decodes the mask's rows rather than "
+                      "selecting layers to intervene at.", DeprecationWarning, stacklevel=2)
+        mask_layers = layers
+    if mask_layers is None:
+        mask_layers = (mask.mask_layers if getattr(mask, "mask_layers", None) is not None
+                       else list(range(mask.values.shape[0])))
+    _n_src = src_head_inps.shape[-2]
+    if len(mask_layers) != _n_src or len(mask_layers) != mask.values.shape[0]:
+        raise ValueError(
+            f"mask_layers/source/mask disagree: len(mask_layers)={len(mask_layers)}, "
+            f"src layer axis={_n_src}, mask rows={mask.values.shape[0]}. They align POSITIONALLY "
+            f"(row li <-> mask_layers[li]), so a mismatch SHIFTS every row rather than failing."
+        )
+
     if src_head_inps.dim() == 2:
         src_head_inps = src_head_inps.unsqueeze(0)  # (1, L, n_heads*head_dim)
     if patch_positions is None:
@@ -937,7 +1047,7 @@ def src_replacement_hooks(
 
     handles = []
     try:
-        for li, layer in enumerate(layers):
+        for li, layer in enumerate(mask_layers):
             attn_name = mt.attn_module_name_format.format(layer)
             o_proj = get_module_nnsight(mt._model, attn_name + ".o_proj")
 
@@ -1029,7 +1139,7 @@ def _extra_patch_hooks(mt, patches):
 def make_head_replacement_patch_interface(
     src_head_inps: torch.Tensor,
     mask: HeadMask,
-    layers: list[int],
+    mask_layers: Optional[list[int]] = None,
     patch_positions: Optional[list[int]] = None,
     alpha: float = 1.0,
 ):
@@ -1049,7 +1159,7 @@ def make_head_replacement_patch_interface(
     def patch_interface(mt, inputs, patches=None, model_kwargs=None):
         model_kwargs = dict(model_kwargs or {})
         with src_replacement_hooks(
-            mt, src_head_inps, mask, layers, alpha, patch_positions
+            mt, src_head_inps, mask, mask_layers, alpha, patch_positions
         ):
             return mt._model(**dict(inputs), **model_kwargs)
 
@@ -1061,11 +1171,13 @@ def forward_with_src_replacement(
     dest_inputs: Any,
     src_head_inps: torch.Tensor,
     mask: HeadMask,
-    layers: list[int],
+    mask_layers: Optional[list[int]] = None,
     alpha: float = 1.0,
     patch_positions: Optional[list[int]] = None,
     return_past_key_values: bool = False,
     extra_patches: Optional[list] = None,
+    *,
+    layers: Optional[list[int]] = None,
 ) -> torch.Tensor:
     """Run dest_inputs with mask-weighted per-head o_proj input replacement.
 
@@ -1129,6 +1241,27 @@ def forward_with_src_replacement(
         Differentiable w.r.t. mask.values.
         If ``return_past_key_values=True``, returns ``(logits, past_key_values)``.
     """
+    # `mask_layers` is the ordered key that decodes the mask's ROWS (row li <-> mask_layers[li]).
+    # It is NOT "which layers to intervene at" — that is what the old name `layers` wrongly implied,
+    # and slicing it silently shifts every row. `None` = identity, which is what a full-depth mask
+    # from `load_head_mask` wants.
+    if layers is not None:
+        if mask_layers is not None:
+            raise TypeError("pass `mask_layers`, not both it and the deprecated `layers`")
+        warnings.warn("`layers=` is now `mask_layers=` — it decodes the mask's rows rather than "
+                      "selecting layers to intervene at.", DeprecationWarning, stacklevel=2)
+        mask_layers = layers
+    if mask_layers is None:
+        mask_layers = (mask.mask_layers if getattr(mask, "mask_layers", None) is not None
+                       else list(range(mask.values.shape[0])))
+    _n_src = src_head_inps.shape[-2]
+    if len(mask_layers) != _n_src or len(mask_layers) != mask.values.shape[0]:
+        raise ValueError(
+            f"mask_layers/source/mask disagree: len(mask_layers)={len(mask_layers)}, "
+            f"src layer axis={_n_src}, mask rows={mask.values.shape[0]}. They align POSITIONALLY "
+            f"(row li <-> mask_layers[li]), so a mismatch SHIFTS every row rather than failing."
+        )
+
     squeeze_output = src_head_inps.dim() == 2
 
     extra_cm = (
@@ -1137,7 +1270,7 @@ def forward_with_src_replacement(
         else contextlib.nullcontext()
     )
     with (
-        src_replacement_hooks(mt, src_head_inps, mask, layers, alpha, patch_positions),
+        src_replacement_hooks(mt, src_head_inps, mask, mask_layers, alpha, patch_positions),
         extra_cm,
     ):
         call_kwargs = dict(dest_inputs)
