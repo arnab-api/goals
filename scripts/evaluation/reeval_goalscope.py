@@ -58,8 +58,9 @@ sys.path.append(".")
 from tqdm.auto import tqdm
 
 from scripts.evaluation import faithfulness_io as fio
-from scripts.evaluation.eval_goalscope import (CAUSAL_HARD_SYS, FAITH_HARD_SYS,
-                                               compute_summary, hard_eval)
+from scripts.evaluation.eval_goalscope import (ANCHOR_ORDER, CAUSAL_HARD_SYS,
+                                               FAITH_HARD_SYS, compute_summary,
+                                               hard_eval)
 from src.utils import env_utils
 
 
@@ -108,6 +109,23 @@ def load_pristine_records(run_dir: Path) -> list[dict]:
     if not src.exists():
         src = fio.records_path(run_dir)
     return [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+
+
+# ── per-dir change report: hard_yes v1->v2 + heavy_loop, overall and per pivot token ─────────
+def change_report(records: list[dict]) -> str:
+    def rate(rs, field, val):
+        return (sum(r.get(field) == val for r in rs) / len(rs)) if rs else float("nan")
+
+    groups = [(a, [r for r in records if r["anchor"] == a]) for a in ANCHOR_ORDER]
+    groups = [(a, g) for a, g in groups if g] + [("OVERALL", records)]
+    pad = "            "
+    lines = [f"{pad}{'pivot':<10} {'n':>6}   {'hard_yes v1->v2':<22} {'heavy_loop':>10}"]
+    for a, g in groups:
+        oy, ny = rate(g, "hard_oldeval", "YES"), rate(g, "hard", "YES")
+        hl = rate(g, "hard", "HEAVY_LOOP")
+        lines.append(f"{pad}{a:<10} {len(g):>6}   "
+                     f"{oy:5.3f} -> {ny:5.3f} ({ny - oy:+.3f})   {hl:10.3f}")
+    return "\n".join(lines)
 
 
 # ── re-grading one run ───────────────────────────────────────────────────────────────────────
@@ -176,7 +194,7 @@ def reeval_one(run_dir: Path, workers: int, force: bool) -> str:
     yes = sum(r["hard"] == "YES" for r in records)
     return dict(status=(f"{len(records)} records ({n_calls} calls, {dt:.0f}s) | "
                         f"hard_yes {yes / len(records):.3f} | {flips} verdicts changed"),
-                calls=n_calls, regraded=True)
+                report=change_report(records), calls=n_calls, regraded=True)
 
 
 # ── manifest (book-keeping) ────────────────────────────────────────────────────────────────
@@ -303,6 +321,8 @@ def main():
         total_calls += res["calls"]
         n_regraded += int(res["regraded"])
         print(f"          {res['status']}", flush=True)
+        if res.get("report"):
+            print(res["report"], flush=True)
     dt = time.time() - t_start
     print(f"\ndone: {n_regraded}/{len(metas)} runs re-graded, {len(metas) - n_regraded} skipped | "
           f"{total_calls:,} oracle calls | {dt / 60:.1f} min")
