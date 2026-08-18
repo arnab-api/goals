@@ -364,41 +364,43 @@ def anchors_for_sample(mt, full_text, prompt, conditions, impl_spans):
 # ── faithfulness rubric (NL read-out vs impl) — with the <verdict> tag for robust parsing ──
 FAITH_HARD_SYS = """You are grading a lightweight interpretability probe (a patchscope). The DESCRIPTION below was read out of a model's hidden state at a SINGLE token while the model was writing one line of Python CODE that checks some property of its input. Because it is squeezed out of one token under a steering/patching setup, the description is usually NOISY: it may be wrapped in chat scaffolding (like 'Sure, but first let us ...'), contain code fences or half-written code, be cut off mid-sentence, or repeat and loop. Look PAST all of that surface noise and grade only the SUBSTANCE.
 
-The question: does the description surface ANYTHING genuinely relevant to what the CODE is doing — any relevant operation, quantity, sub-step, or property of the input? Pulling even a small correct fragment out of a single token is a SUCCESS, so grade as leniently as possible.
+The question: does the description surface ANYTHING genuinely relevant to what the CODE is doing — any relevant operation, quantity, sub-step, or property of the input? Pulling even a small correct fragment out of a single token is a SUCCESS, so grade as leniently as possible — EXCEPT that a read-out which has collapsed into a degenerate repeating loop is NOT a success, no matter what tokens the loop contains (see HEAVY_LOOP).
 
-The following do NOT count against the description (still YES):
+Decide in this order — check MALFORMED and HEAVY_LOOP FIRST, and only then YES / NO / NO_INFO:
+
+  MALFORMED  - the description is contentless: empty, pure punctuation or garbage, or repetition that carries NO relevant meaning.
+  HEAVY_LOOP - the description is DOMINATED by a short repeating cycle: a unit of roughly five words/tokens or fewer that repeats over and over (e.g. 'value >= value >= value >= ...', 'len len len len', 'sum sum ( sum % sum == 0' on repeat, 'x % x == x % 0' on repeat). Once you collapse the repetition, little or no coherent description is left. Assign HEAVY_LOOP EVEN IF the looped fragment contains a relevant operator, name, or token — a stuck loop is not a faithful read-out. This takes PRECEDENCE over YES.
+  YES        - the description contains SOME intelligible content genuinely relevant to what the code does, however partial, imprecise, or garbled — and it is NOT merely a short repeating loop.
+  NO         - the description is coherent and about a specific thing, but that thing is COMPLETELY UNRELATED to what the code does. No conceptual sub-parts have been identified correctly.
+  NO_INFO    - the description is coherent but too generic to indicate any specific aspect of the code (e.g. just 'doing a computation on the number').
+
+The following do NOT count against the description (still YES, provided it is not a HEAVY_LOOP):
   - Wrong specifics: a wrong constant, threshold, bound, modulus, operator, or comparison. If the code computes some quantity and compares it to a value, naming the quantity alone is enough and the exact value can be wrong or missing. Example: the code implements `average temperature > 30`; a read-out about `computing the average temperature` is YES even though the `> 30` part is wrong or absent.
   - Wrong implementation nuance: naming a different mechanism for the same idea. Example: the read-out says `sorting with bubble sort` while the code calls .sort() or uses quicksort -> still YES.
-  - Broken, repetitive, or looping text, AS LONG AS the repeated content is relevant. Example: a read-out that keeps repeating the correct operation is YES, not MALFORMED.
   - Partial coverage: naming just one relevant ingredient of a multi-part check counts.
 
-Answer with exactly one token:
-  YES        - the description contains SOME content genuinely relevant to what the code does, however partial, imprecise, or garbled.
-  NO         - the description is coherent and about a specific thing, but that thing is UNRELATED to what the code does.
-  NO_INFO    - the description is coherent but too generic to indicate any specific aspect of the code (e.g. just 'doing a computation on the number').
-  MALFORMED  - the description is contentless: empty, pure punctuation or garbage, or repetition that carries NO relevant meaning.
-
-Grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, or MALFORMED.
+Grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, MALFORMED, or HEAVY_LOOP.
 Put your final answer inside <verdict>{ans}</verdict> tags, with no other text or explanation, to facilitate automated parsing."""
 
 # ── causality rubric (C++ read-out vs Python impl) — cross-language transfer of the *idea* ──
-CAUSAL_HARD_SYS = """You are grading a lightweight interpretability probe (a patchscope). The DESCRIPTION below was read out of a model's hidden state at a SINGLE token while the model was writing one line of Python CODE that checks some property of its input. The read-out method is a steering setup on a informationless C++ function stub. Because it is squeezed out of one token, the description is usually NOISY: it may half-written code, be cut off mid-generation, be syntactically incorrect, or repeat and loop. Look PAST all of that surface noise and grade only the SUBSTANCE.
+CAUSAL_HARD_SYS = """You are grading a lightweight interpretability probe (a patchscope). The DESCRIPTION below was read out of a model's hidden state at a SINGLE token while the model was writing one line of Python CODE that checks some property of its input. The read-out method is a steering setup on a informationless C++ function stub. Because it is squeezed out of one token, the description is usually NOISY: it may be half-written code, be cut off mid-generation, be syntactically incorrect, or repeat and loop. Look PAST all of that surface noise and grade only the SUBSTANCE.
 
-The question: does the C++ completion surface **ANYTHING GENUINELY RELEVANT** to what the CODE is doing — any relevant operation, quantity, sub-step, or property of the input? Pulling even a small correct fragment should be considered as a SUCCESS, so grade leniently.
+The question: does the C++ completion surface **ANYTHING GENUINELY RELEVANT** to what the CODE is doing — any relevant operation, quantity, sub-step, or property of the input? Pulling even a small correct fragment should be considered a SUCCESS, so grade leniently — EXCEPT that a completion which has collapsed into a degenerate repeating loop is NOT a success, no matter what tokens the loop contains (see HEAVY_LOOP).
 
-Answer with exactly one token:
-  YES        - the description contains SOME content genuinely relevant to what the code does, however partial, imprecise, or garbled.
-  NO         - the description is coherent and about a specific thing, but that thing is UNRELATED to what the code does.
-  NO_INFO    - the description is coherent but too generic to indicate any specific aspect of the code (e.g. just 'doing a computation on the number').
-  MALFORMED  - the description is contentless: empty, pure punctuation or garbage, or repetition that carries NO relevant meaning.
+Decide in this order — check MALFORMED and HEAVY_LOOP FIRST, and only then YES / NO / NO_INFO:
 
-The following do NOT count against the description (still YES):
+  MALFORMED  - the completion is contentless: empty, pure punctuation or garbage, or repetition that carries NO relevant meaning.
+  HEAVY_LOOP - the completion is DOMINATED by a short repeating cycle: a unit of roughly five words/tokens or fewer that repeats over and over (e.g. 'value >= value >= value >= ...', '(value(value(value...', 'sum sum ( sum % sum == 0' on repeat, 'value == sum sum sum value ==' on repeat). Once you collapse the repetition, little or no coherent content is left. Assign HEAVY_LOOP EVEN IF the looped fragment contains a relevant operator, name, or token — a stuck loop is not a successful transfer. This takes PRECEDENCE over YES.
+  YES        - the completion contains SOME intelligible content genuinely relevant to what the code does, however partial, imprecise, or garbled — and it is NOT merely a short repeating loop.
+  NO         - the completion is coherent and about a specific thing, but that thing is COMPLETELY UNRELATED to what the code does. No conceptual sub-parts have been identified correctly.
+  NO_INFO    - the completion is coherent but too generic to indicate any specific aspect of the code (e.g. just 'doing a computation on the number').
+
+The following do NOT count against the completion (still YES, provided it is not a HEAVY_LOOP):
   - Wrong specifics: a wrong constant, threshold, bound, modulus, operator, or comparison. If the code computes some quantity and compares it to a value, naming the quantity alone is enough and the exact value can be wrong or missing. Example: the code implements `count(word, "b") > 5`; a c++ completion that counts the number of a `substr` in the `word` should be judged YES, even if the substr != b and/or the threshold is wrong.
   - Partial coverage: naming just one relevant ingredient of a multi-part check counts. For `count(word, "b") > 5`, a c++ completion that only counts the number of `substr` in the `word` is still YES, even if it doesn't check the threshold.
   - Different implementation nuance: different implementation strategies for the same idea. Example: the python code implements nth fibonacci recursively; a c++ completion implements it iteratively. Still YES, because the underlying property is the same.
-  - Broken, repetitive, or looping text, AS LONG AS the repeated content is relevant.
 
-Finally, you should grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, or MALFORMED.
+Finally, grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, MALFORMED, or HEAVY_LOOP.
 Put your final answer inside <verdict>{ans}</verdict> tags, with no other text or explanation, to facilitate automated parsing."""
 
 # GoalScope destination prompt for causality: an information-less C++ function stub. The goal
@@ -433,11 +435,11 @@ def build_causality_prompt(mt) -> str:
 def _parse_verdict(resp: str) -> str:
     """Prefer the <verdict>TOKEN</verdict> tag; fall back to the last bare verdict token."""
     m = re.search(
-        r"<verdict>\s*(MALFORMED|NO_INFO|YES|NO)\s*</verdict>", resp, re.IGNORECASE
+        r"<verdict>\s*(HEAVY_LOOP|MALFORMED|NO_INFO|YES|NO)\s*</verdict>", resp, re.IGNORECASE
     )
     if m:
         return m.group(1).upper()
-    hits = re.findall(r"\b(MALFORMED|NO_INFO|YES|NO)\b", resp.upper())
+    hits = re.findall(r"\b(HEAVY_LOOP|MALFORMED|NO_INFO|YES|NO)\b", resp.upper())
     return hits[-1] if hits else "UNPARSED"
 
 
@@ -500,7 +502,8 @@ def compute_summary(records: list[dict], n_samples: int) -> dict:
     has_kway = bool(records) and all("kway_pred" in r for r in records)
 
     def _stats(grp):
-        d = dict(n=len(grp), hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])))
+        d = dict(n=len(grp), hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])),
+                 heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in grp])))
         if has_kway:
             d["kway_ok"] = float(
                 np.mean([r["kway_pred"] == r["kway_true"] for r in grp])
@@ -513,7 +516,8 @@ def compute_summary(records: list[dict], n_samples: int) -> dict:
         if (grp := [r for r in records if r["anchor"] == a])
     }
     if records:
-        overall = dict(hard_yes=float(np.mean([r["hard"] == "YES" for r in records])))
+        overall = dict(hard_yes=float(np.mean([r["hard"] == "YES" for r in records])),
+                       heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in records])))
         if has_kway:
             overall["kway_ok"] = float(
                 np.mean([r["kway_pred"] == r["kway_true"] for r in records])
@@ -538,11 +542,13 @@ def log_summary(summary: dict, mode: str = "faithfulness"):
         if aname in summary["by_anchor"]:
             m = summary["by_anchor"][aname]
             k = f"  kway_ok={m['kway_ok']:.3f}" if "kway_ok" in m else ""
-            logger.info(f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}{k}")
+            hl = f"  hvy_loop={m['heavy_loop']:.3f}" if "heavy_loop" in m else ""
+            logger.info(f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}{hl}{k}")
     o = summary["overall"]
     k = f"  kway_ok={o['kway_ok']:.3f}" if "kway_ok" in o else ""
+    hl = f"  hvy_loop={o['heavy_loop']:.3f}" if "heavy_loop" in o else ""
     logger.info(
-        f"  {'OVERALL':10s} n={summary['n_records']:<4d} hard_yes={o['hard_yes']:.3f}{k}"
+        f"  {'OVERALL':10s} n={summary['n_records']:<4d} hard_yes={o['hard_yes']:.3f}{hl}{k}"
     )
 
 
