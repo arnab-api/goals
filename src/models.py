@@ -56,6 +56,11 @@ class ModelandTokenizer(LanguageModel):
         self.tokenizer: transformers.AutoTokenizer = (
             tokenizer if tokenizer is not None else self.tokenizer
         )
+        # Left-pad explicitly rather than relying on nnsight's default (or a raw HF tokenizer's,
+        # which is "right" for e.g. Qwen). Every batched intervention here indexes with negative
+        # positions (PATCH_POS=-2, [:, -1]); those only align with the real, right-aligned tokens
+        # under LEFT padding. Set once, at construction, so no downstream call has to remember.
+        self.tokenizer.padding_side = "left"
         self.tokenizer.pad_token = self.tokenizer.eos_token  # for generation
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         if (

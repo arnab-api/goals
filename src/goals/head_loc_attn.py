@@ -291,7 +291,13 @@ def get_o_proj_inputs_batch(
         ``token_positions`` is specified.
     """
     if isinstance(prompts, list) and all(isinstance(p, str) for p in prompts):
-        inputs = prepare_input(prompts=prompts, tokenizer=mt)
+        # Left-pad EXPLICITLY. The extraction below uses negative positions ([:, -1] /
+        # [:, token_positions]), which only align with the real (right-aligned) tokens under LEFT
+        # padding. In practice mt.tokenizer already left-pads (nnsight LanguageModel sets it), so
+        # this is defensive rather than a fix — but a RAW HF tokenizer defaults to right for many
+        # models (e.g. Qwen), so we do not rely on the default. A caller passing a pre-tokenized
+        # TokenizerOutput owns its own padding.
+        inputs = prepare_input(prompts=prompts, tokenizer=mt, padding_side="left")
     elif isinstance(prompts, TokenizerOutput):
         inputs = prompts
     else:
