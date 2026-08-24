@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import html as _html
 import keyword as _kw
-from typing import Literal, Optional, Union
-
 import warnings
+from typing import Callable, Literal, Optional, Union
 
 import torch
 from tqdm.auto import tqdm
@@ -107,6 +106,8 @@ def headpatched_generate(
     n_steer_tokens: Optional[int] = None,
     patch_input_positions: Optional[list[int]] = None,
     alpha: float = 1.0,
+    return_raw_logits: bool = False,
+    return_raw_toks: bool = False,
     *,
     layers: Optional[list[int]] = None,
 ) -> Union[str, list[str]]:
@@ -156,16 +157,29 @@ def headpatched_generate(
 
             Note: one source snapshot is broadcast across every position in this list; per-position
             source variation is not supported. See ``forward_with_src_replacement``.
-
+        return_raw_logits: If True, also return the raw first-forward-pass logits.
+        return_raw_toks: If True, also return the EXACT generated token ids (no re-tokenization),
+            with any trailing stop token stripped so they match the ``skip_special_tokens`` decode.
+            Concatenate these onto the prompt's own token ids to build the full sequence for a
+            downstream forward — this avoids the boundary-merge drift that re-tokenizing
+            ``prompt + decode(gen)`` introduces at the cut token. Shape mirrors the return: a
+            ``list[int]`` for a 2D source, a ``list[list[int]]`` for a 3D source.
     Returns:
-        ``str`` for a 2D source, ``list[str]`` for a 3D source.
+        ``str`` (2D source) or ``list[str]`` (3D source); with ``return_raw_logits`` / and or
+        ``return_raw_toks`` set, a tuple ``(outs, [raw_logits], [raw_toks])`` in that order.
     """
     if layers is not None:
         if mask_layers is not None:
-            raise TypeError("pass `mask_layers`, not both it and the deprecated `layers`")
-        warnings.warn("`layers=` is now `mask_layers=` — it decodes the mask's rows rather than "
-                      "selecting layers to intervene at. To limit WHERE the intervention happens, "
-                      "use mask.restrict_to_layers(lo, hi).", DeprecationWarning, stacklevel=2)
+            raise TypeError(
+                "pass `mask_layers`, not both it and the deprecated `layers`"
+            )
+        warnings.warn(
+            "`layers=` is now `mask_layers=` — it decodes the mask's rows rather than "
+            "selecting layers to intervene at. To limit WHERE the intervention happens, "
+            "use mask.restrict_to_layers(lo, hi).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         mask_layers = layers
 
     _stop = stop_ids or set()
@@ -191,6 +205,8 @@ def headpatched_generate(
     finished = [False] * B
     past_key_values = None
 
+    if return_raw_logits:
+        raw_logits = None
     with torch.no_grad():
         for step in range(max_new_tokens):
             if all(finished):
@@ -219,6 +235,8 @@ def headpatched_generate(
                 logits = out.logits[:, -1, :].float()  # (B, vocab)
                 past_key_values = out.past_key_values
             next_toks = logits.argmax(dim=-1)  # (B,)
+            if return_raw_logits and step == 0:
+                raw_logits = logits.clone()
 
             for i in range(B):
                 if not finished[i]:
@@ -238,8 +256,25 @@ def headpatched_generate(
                 dim=1,
             )
 
-    outs = [mt.tokenizer.decode(g, skip_special_tokens=True).rstrip() for g in generated]
-    return outs[0] if single else outs
+    outs = [
+        mt.tokenizer.decode(g, skip_special_tokens=True).rstrip() for g in generated
+    ]
+    outs = outs[0] if single else outs
+
+    extras = []
+    if return_raw_logits:
+        extras.append(raw_logits)
+    if return_raw_toks:
+        # the exact ids the model emitted, minus a trailing stop token, so this lines up with the
+        # skip_special_tokens decode above and can be appended to the prompt's own token ids.
+        stripped = []
+        for g in generated:
+            g = list(g)
+            while g and g[-1] in _stop:
+                g.pop()
+            stripped.append(g)
+        extras.append(stripped[0] if single else stripped)
+    return (outs, *extras) if extras else outs
 
 
 def headpatched_generate_batch(*args, **kwargs) -> list[str]:
@@ -327,7 +362,11 @@ def head_additive_generate(
             f"strategy must be 'additive' or 'additive_norm'; got {strategy!r}. "
             f"For head replacement use headpatched_generate()."
         )
-    positions = [-1] if patch_input_positions is None else list(dict.fromkeys(patch_input_positions))
+    positions = (
+        [-1]
+        if patch_input_positions is None
+        else list(dict.fromkeys(patch_input_positions))
+    )
     # With KV-cache on, a fixed position other than 0/-1 is out of bounds on decode steps (key dim
     # is 1 there), so those positions are patched during the PREFILL only, via on_pass="first".
     # That is NOT the same as "the intervention stops": the prefill patch edits the residual stream
@@ -342,15 +381,19 @@ def head_additive_generate(
     # cannot vary the position per step and so applies nothing further.
     prefill_only = positions not in ([-1], [0])
     if prefill_only:
-        msg = (f"patch_input_positions={positions}: with KV-cache on, only 0/-1 are valid at every "
-               f"decode step, so these are patched during the PREFILL only (on_pass='first'). The "
-               f"edit still propagates to every later token through the cached K/V above the "
-               f"patched layer — it is not confined to one token.")
+        msg = (
+            f"patch_input_positions={positions}: with KV-cache on, only 0/-1 are valid at every "
+            f"decode step, so these are patched during the PREFILL only (on_pass='first'). The "
+            f"edit still propagates to every later token through the cached K/V above the "
+            f"patched layer — it is not confined to one token."
+        )
         if n_steer_tokens != 1:
-            msg += (f" But n_steer_tokens={n_steer_tokens} has no additional effect here, whereas "
-                    f"headpatched_generate would ALSO apply a fresh patch at -1 to each newly "
-                    f"generated token for {n_steer_tokens} passes. The two agree at "
-                    f"n_steer_tokens=1.")
+            msg += (
+                f" But n_steer_tokens={n_steer_tokens} has no additional effect here, whereas "
+                f"headpatched_generate would ALSO apply a fresh patch at -1 to each newly "
+                f"generated token for {n_steer_tokens} passes. The two agree at "
+                f"n_steer_tokens=1."
+            )
         warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
     # Validate against the prompt length here, the way headpatched_generate does via
@@ -380,13 +423,17 @@ def head_additive_generate(
     if per_layer:
         missing = [l for l in layers if l not in steering_vecs]
         if missing:
-            raise ValueError(f"steering_vecs is missing layers {missing[:8]}"
-                             f"{' …' if len(missing) > 8 else ''}")
+            raise ValueError(
+                f"steering_vecs is missing layers {missing[:8]}"
+                f"{' …' if len(missing) > 8 else ''}"
+            )
         ranks = {v.dim() for v in steering_vecs.values()}
         if len(ranks) != 1:
             raise ValueError(f"steering_vecs entries have mixed ranks {sorted(ranks)}")
         single = ranks.pop() == 1
-        by_layer = {l: (v.unsqueeze(0) if single else v) for l, v in steering_vecs.items()}
+        by_layer = {
+            l: (v.unsqueeze(0) if single else v) for l, v in steering_vecs.items()
+        }
     else:
         single = steering_vecs.dim() == 1
         if steering_vecs.dim() not in (1, 2):
@@ -402,6 +449,7 @@ def head_additive_generate(
             # Hand the patch site a UNIT direction; the magnitude comes from ||h|| there.
             v = v / v.float().norm(dim=-1, keepdim=True).clamp_min(1e-6).to(v.dtype)
         return alpha * v
+
     by_layer = {l: _prep(v) for l, v in by_layer.items()}
     B = next(iter(by_layer.values())).shape[0]
     if any(v.shape[0] != B for v in by_layer.values()):
@@ -683,6 +731,7 @@ def apply_goalscope(
     include_noncode: bool = False,
     save_path: Optional[str] = None,
     token_positions: Optional[list[int]] = None,
+    patch_interface: Optional[Callable] = None,
 ) -> list[dict]:
     """Run GoalScope on a single prompt.
 
@@ -752,6 +801,15 @@ def apply_goalscope(
             (default) uses every code-segment token.  Restricting to a handful of
             positions (e.g. the anchors) skips generation for all others and is much
             faster.
+        patch_interface: optional ``(mt, inputs, patches=None, model_kwargs=None) -> output`` — the
+            same interface ``src.attention.get_attention_matrices`` accepts, typically one from
+            :func:`make_head_replacement_patch_interface`.  When given, the SOURCE forward that reads
+            ``selected_heads`` (the goal heads) runs under it, so an intervention on a DIFFERENT head
+            set (e.g. the boundary heads, transplanted at the pivot) is applied FIRST and its effect
+            is carried into the goal-head signal that is verbalized.  Mirrors the ``patch_interface``
+            of ``get_attention_matrices``.  ``None`` (default) → no intervention; source extraction
+            is unchanged.  Note the intervention's own positions are absolute indices into
+            ``prompt``'s tokenization, exactly like ``token_positions``.
 
     Returns:
         List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` and
@@ -848,6 +906,7 @@ def apply_goalscope(
             src_tokenized=src_tokenized,
             selected_heads=selected_heads,
             token_positions=seg_positions,
+            patch_interface=patch_interface,
         )[0]  # (n_seg, n_embd)
 
         # additive_norm's unit-direction normalisation happens inside
@@ -876,6 +935,7 @@ def apply_goalscope(
             src_tokenized,
             layers_replace,
             token_positions=seg_positions,
+            patch_interface=patch_interface,
         )
         src_head_vals_all = torch.stack(
             [src_o_inputs[layer][0] for layer in layers_replace], dim=1

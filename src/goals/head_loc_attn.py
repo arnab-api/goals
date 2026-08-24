@@ -40,7 +40,7 @@ import os
 import random
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import baukit
 import torch
@@ -273,6 +273,7 @@ def get_o_proj_inputs_batch(
     prompts: list[str] | TokenizerOutput,
     layers: list[int],
     token_positions: list[int] | None = None,
+    patch_interface: Optional[Callable] = None,
 ) -> dict[int, torch.Tensor]:
     """Extract o_proj input for each layer, for a batch of prompts.
 
@@ -284,6 +285,13 @@ def get_o_proj_inputs_batch(
             extracts only the last position, returning ``(batch, n_embd)``.
             When a list of ints is given, extracts those positions and returns
             ``(batch, len(token_positions), n_embd)``.
+        patch_interface: optional ``(mt, inputs, patches=None, model_kwargs=None) -> output`` — the
+            SAME interface ``src.attention.get_attention_matrices`` accepts (e.g. one built by
+            :func:`make_head_replacement_patch_interface`).  When given, the extraction forward runs
+            UNDER it and the o_proj inputs are captured with baukit ``retain_input``, so they reflect
+            the intervention: a boundary-head transplant applied first perturbs the residual stream
+            and therefore the o_proj input of deeper heads.  ``None`` (default) → the plain nnsight
+            trace, unchanged.
 
     Returns:
         ``{layer: tensor}`` where tensor shape is ``(batch, n_embd)`` for the
@@ -305,20 +313,35 @@ def get_o_proj_inputs_batch(
         if isinstance(prompts, list):
             error_msg += f"\nList element types: {[type(p) for p in prompts]}"
         raise ValueError(error_msg)
-    saves: dict[int, Any] = {}
+    if patch_interface is None:
+        saves: dict[int, Any] = {}
+        with mt.trace(inputs, scan=False, validate=False):
+            for layer in layers:
+                attn_name = mt.attn_module_name_format.format(layer)
+                o_proj = get_module_nnsight(mt, attn_name + ".o_proj")
+                if token_positions is None:
+                    saves[layer] = o_proj.input[:, -1, :].save()  # (batch, n_embd)
+                else:
+                    saves[layer] = o_proj.input[
+                        :, token_positions, :
+                    ].save()  # (batch, n_pos, n_embd)
+        return {layer: saves[layer].float().cpu() for layer in layers}
 
-    with mt.trace(inputs, scan=False, validate=False):
-        for layer in layers:
-            attn_name = mt.attn_module_name_format.format(layer)
-            o_proj = get_module_nnsight(mt, attn_name + ".o_proj")
-            if token_positions is None:
-                saves[layer] = o_proj.input[:, -1, :].save()  # (batch, n_embd)
-            else:
-                saves[layer] = o_proj.input[
-                    :, token_positions, :
-                ].save()  # (batch, n_pos, n_embd)
-
-    return {layer: saves[layer].float().cpu() for layer in layers}
+    # Patched extraction — run the forward UNDER `patch_interface` (e.g. a boundary-head transplant)
+    # and capture each o_proj's input with baukit ``retain_input``.  A forward hook stores the input
+    # AFTER any forward-pre-hook the interface registered, so the captured activations already carry
+    # the intervention's effect on this layer's input.
+    o_names = {layer: mt.attn_module_name_format.format(layer) + ".o_proj" for layer in layers}
+    with torch.no_grad(), baukit.TraceDict(
+        mt._model, list(o_names.values()), retain_input=True, retain_output=False
+    ) as td:
+        patch_interface(mt, inputs, model_kwargs=dict(use_cache=False))
+    out: dict[int, torch.Tensor] = {}
+    for layer in layers:
+        inp = td[o_names[layer]].input  # (batch, seq, n_embd), post-intervention
+        sel = inp[:, -1, :] if token_positions is None else inp[:, token_positions, :]
+        out[layer] = sel.float().cpu()
+    return out
 
 
 @torch.inference_mode()
@@ -347,6 +370,7 @@ def collect_head_steering_vecs(
     selected_heads: list[tuple[int, int]],
     token_positions: list[int],
     return_individual_heads: bool = False,
+    patch_interface: Optional[Callable] = None,
 ) -> torch.Tensor:
     """Compute the summed residual-stream contribution of selected heads at each token position.
 
@@ -361,6 +385,8 @@ def collect_head_steering_vecs(
         src_tokenized: Tokenized source prompt(s); supports batch_size >= 1.
         selected_heads: List of (layer, head_idx) pairs identifying which heads to include.
         token_positions: Token positions to extract (absolute indices into src_tokenized).
+        patch_interface: forwarded to :func:`get_o_proj_inputs_batch` — when given, the extraction
+            forward runs under it, so the aggregated head write reflects the intervention.
 
     Returns:
         Float32 CPU tensor of shape ``(batch_size, n_positions, n_embd)`` — one
@@ -383,9 +409,12 @@ def collect_head_steering_vecs(
 
     layers = list(heads_per_layer.keys())
 
-    # Single forward pass — extract o_proj inputs at all requested positions
+    # Single forward pass — extract o_proj inputs at all requested positions. When
+    # `patch_interface` is given, that forward runs under the intervention (e.g. a boundary-head
+    # transplant), so the aggregated goal-head write below reflects it.
     o_proj_inputs = get_o_proj_inputs_batch(
-        mt, src_tokenized, layers, token_positions=token_positions
+        mt, src_tokenized, layers, token_positions=token_positions,
+        patch_interface=patch_interface,
     )  # {layer: (batch_size, n_positions, n_embd)}
 
     n_pos = len(token_positions)
