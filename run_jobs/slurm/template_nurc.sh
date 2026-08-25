@@ -1,8 +1,11 @@
 #!/bin/bash
 #SBATCH --partition=${partition}
 #SBATCH --nodes=${nodes}
+#SBATCH --nodelist=${nodelist}
+#SBATCH --exclude=${exclude}
 #SBATCH --cpus-per-task=${cpus_per_task}
 #SBATCH --gpus=${gpus}
+#SBATCH --mem=${mem}
 #SBATCH --job-name=${name}
 #SBATCH --time=${time}
 #SBATCH -e slurm-%j.err

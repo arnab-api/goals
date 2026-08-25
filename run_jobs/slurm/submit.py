@@ -13,6 +13,7 @@ Field precedence (lowest -> highest):
 
 import argparse
 import json
+import re
 import string
 import subprocess
 import sys
@@ -31,9 +32,14 @@ CLUSTERS = ("delta", "nurc")
 # (via --<field>). Union of what every template consumes; each template
 # only substitutes the ones it references, so extras are silently ignored.
 OVERRIDE_FIELDS = (
-    "mem", "gpus_per_task", "gpus", "nodes", "cpus_per_task",
+    "mem", "gpus_per_task", "gpus", "nodes", "nodelist", "exclude", "cpus_per_task",
     "partition", "account", "time", "cwd",
 )
+
+# An SBATCH directive whose value renders empty (e.g. `mem: ""` -> `#SBATCH --mem=`) is dropped, so a
+# blank field means "omit this directive" rather than emitting an invalid one. Lets a cluster leave
+# `nodelist`/`exclude`/`mem` unset to fall back to the scheduler's own choice.
+_EMPTY_SBATCH = re.compile(r"^#SBATCH\s+\S+=\s*$")
 
 
 def template_path_for(cluster: str) -> Path:
@@ -49,7 +55,10 @@ def render_job(job: dict, template: string.Template, cluster_defaults: dict, cli
     if missing:
         raise ValueError(f"job is missing required field(s): {missing} -- {job}")
     fields = {**cluster_defaults, **job, **cli_overrides}
-    return template.substitute(fields)
+    rendered = template.substitute(fields)
+    # drop any `#SBATCH --flag=` left empty (blank field) so it doesn't become an invalid directive
+    kept = [l for l in rendered.splitlines() if not _EMPTY_SBATCH.match(l)]
+    return "\n".join(kept) + ("\n" if rendered.endswith("\n") else "")
 
 
 def submit(script_path: Path, job_dir: Path, dry_run: bool) -> None:

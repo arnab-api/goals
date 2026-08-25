@@ -5,7 +5,10 @@
 #
 # The templates decide which fields they consume:
 #   template_delta.sh  -> mem, gpus_per_task, partition, account, time, cwd (+ name, command)
-#   template_nurc.sh   -> partition, nodes, cpus_per_task, gpus, account, time, cwd (+ name, command)
+#   template_nurc.sh   -> partition, nodes, nodelist, exclude, cpus_per_task, gpus, mem, time, cwd (+ name, command)
+#
+# An SBATCH line whose value renders empty (e.g. mem: "") is dropped from the script, so leaving a
+# field blank means "don't emit that directive" rather than emitting a broken `--mem=`.
 
 delta:
   mem: 256g
@@ -19,7 +22,13 @@ nurc:
   # `agi` doesn't require --account (SLURM picks the default association); do not set it.
   partition: agi
   nodes: 1
+  nodelist: d4075          # pin to ONE node (== srun -w d4075). Empty ("") -> no pin: SLURM picks
+                           #   any free node in `agi`. A list/comma-set here means "require ALL of
+                           #   them", which conflicts with nodes:1 — to avoid a bad node while
+                           #   sampling, leave nodelist empty and set `exclude` instead.
+  exclude: ""              # nodes SLURM must NOT use, e.g. "d4074" while its inter-GPU link is down
+  mem: ""                  # empty -> omit --mem (partition default applies, as the srun did)
   cpus_per_task: 64
-  gpus: 3
+  gpus: 2
   time: "48:00:00"
   cwd: /projects/baulab/sensharma.a/goals
