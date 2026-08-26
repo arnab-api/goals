@@ -224,9 +224,18 @@ def main() -> None:
     if args.layers_end == -1:
         args.layers_end = mt.n_layer
     layers = list(range(args.layers_start, args.layers_end))
-    logger.info(
-        f"layers:           {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)"
-    )
+    # Hybrid models (e.g. Qwen3.5): only the FULL-attention layers carry self_attn / o_proj (the
+    # rest are linear/DeltaNet and have no heads). `mt.attention_layers` == every layer for a
+    # homogeneous model, so restricting to it is a no-op there and prunes the DeltaNet layers here.
+    _attn = set(mt.attention_layers)
+    _pruned = [l for l in layers if l not in _attn]
+    if _pruned:
+        layers = [l for l in layers if l in _attn]
+        logger.info(
+            f"hybrid model: restricted the {args.layers_start}..{args.layers_end - 1} band to its "
+            f"{len(layers)} full-attention layers (dropped {len(_pruned)} linear/DeltaNet layers)"
+        )
+    logger.info(f"layers:           {layers} ({len(layers)} total)")
 
     logger.info("=== Caching pivot data ===")
     pivot_caches = cache_pivot_data(

@@ -1,0 +1,39 @@
+[
+    {
+        "name": "01_mine_pivots_qwen3_5_27b",
+        "command": "mkdir -p logs/goal/qwen3_5_27b && python -m scripts.mine_pivot_instances --model-key=Qwen/Qwen3.8-27B |& tee logs/goal/qwen3_5_27b/01_mine_pivots.log"
+    },
+    {
+        "name": "02_qwen3_5_27b_goal_lam5",
+        "command": "mkdir -p logs/goal/qwen3_5_27b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.train_head_mask --model-key=Qwen/Qwen3.8-27B --lambda-sparse=5 --tag=lam5 --n-epochs=50 --batch-size=16 |& tee logs/goal/qwen3_5_27b/02_goal_lam5.log",
+        "dependencies": [
+            "01_mine_pivots_qwen3_5_27b"
+        ]
+    },
+    {
+        "name": "02_qwen3_5_27b_goal_lam20",
+        "command": "mkdir -p logs/goal/qwen3_5_27b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.train_head_mask --model-key=Qwen/Qwen3.8-27B --lambda-sparse=20 --tag=lam20 --n-epochs=50 --batch-size=16 |& tee logs/goal/qwen3_5_27b/02_goal_lam20.log",
+        "dependencies": [
+            "01_mine_pivots_qwen3_5_27b"
+        ]
+    },
+    {
+        "name": "02_qwen3_5_27b_goal_lam50",
+        "command": "mkdir -p logs/goal/qwen3_5_27b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.train_head_mask --model-key=Qwen/Qwen3.8-27B --lambda-sparse=50 --tag=lam50 --n-epochs=50 --batch-size=16 |& tee logs/goal/qwen3_5_27b/02_goal_lam50.log",
+        "dependencies": [
+            "01_mine_pivots_qwen3_5_27b"
+        ]
+    },
+    {
+        "name": "03_qwen3_5_27b_decision_lam1",
+        "command": "mkdir -p logs/decision/qwen3_5_27b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen3.8-27B --version=conditions --lambda-sparse=1.0 --n-pairs=600 --batch-size=8 --attn-impl=sdpa -v |& tee logs/decision/qwen3_5_27b/03_decision_lam1.log"
+    },
+    {
+        "name": "03_qwen3_5_27b_decision_lam10",
+        "command": "mkdir -p logs/decision/qwen3_5_27b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen3.8-27B --version=conditions --lambda-sparse=10.0 --n-pairs=600 --batch-size=8 --attn-impl=sdpa -v |& tee logs/decision/qwen3_5_27b/03_decision_lam10.log"
+    },
+    {
+        "name": "03_qwen3_5_27b_decision_lam50",
+        "command": "mkdir -p logs/decision/qwen3_5_27b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen3.8-27B --version=conditions --lambda-sparse=50.0 --n-pairs=600 --batch-size=8 --attn-impl=sdpa -v |& tee logs/decision/qwen3_5_27b/03_decision_lam50.log"
+    }
+]

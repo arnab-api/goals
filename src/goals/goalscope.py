@@ -918,7 +918,7 @@ def apply_goalscope(
     else:  # strategy == "replace"
         # Layers come from selected_heads; build a HeadMask over them.
         layers_replace = sorted({layer for (layer, _) in selected_heads})
-        n_heads_model = mt.model.config.num_attention_heads
+        n_heads_model = mt.n_heads  # VLM/hybrid-safe (top config lacks num_attention_heads)
         mask_module = HeadMask(
             n_layers_tested=len(layers_replace), n_heads=n_heads_model
         )

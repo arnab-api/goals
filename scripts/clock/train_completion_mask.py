@@ -248,10 +248,21 @@ def main():
         model_key=args.model, dtype=torch.bfloat16, device_map="auto",
         attn_implementation=args.attn_impl,
     )
-    nH = mt.model.config.num_attention_heads
-    hd = getattr(mt.model.config, "head_dim", mt.n_embd // nH)
+    nH = mt.n_heads   # VLM/hybrid-safe (top config may not expose num_attention_heads)
+    hd = mt.head_dim  # decoupled from hidden_size on Qwen3/3.5
     layer_hi = args.layer_hi if args.layer_hi is not None else mt.n_layer
     layers = list(range(args.layer_lo, layer_hi))
+    # Hybrid models (Qwen3.5): only full-attention layers have self_attn/o_proj; drop the
+    # linear/DeltaNet layers from the band. `mt.attention_layers` == all layers for a homogeneous
+    # model, so this is a no-op there.
+    _attn = set(mt.attention_layers)
+    _pruned = [l for l in layers if l not in _attn]
+    if _pruned:
+        layers = [l for l in layers if l in _attn]
+        logger.info(
+            f"hybrid model: restricted the band to {len(layers)} full-attention layers "
+            f"(dropped {len(_pruned)} linear/DeltaNet layers)"
+        )
     patch_tokens = [int(x) for x in args.patch_tokens.split(",")]
     logger.info(f"layers {layers[0]}..{layers[-1]} ({len(layers)} masked) · patch_tokens={patch_tokens} "
                 f"· direction={args.direction} · same={args.same} · batch_size={args.batch_size} · accum={args.accum} "

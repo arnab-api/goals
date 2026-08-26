@@ -944,7 +944,7 @@ def patch_with_nnsight(
 ):
     batch_size = inputs.input_ids.shape[0]
     seq_len = inputs.input_ids.shape[1]
-    n_heads = mt.config.num_attention_heads
+    n_heads = mt.n_heads  # VLM/hybrid-safe (config.num_attention_heads may live in text_config)
     # head_dim = mt.config.hidden_size // n_heads
     head_dim = get_module_nnsight(
         mt._model, mt.attn_module_name_format.format(0)

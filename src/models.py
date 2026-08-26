@@ -43,6 +43,30 @@ class ModelandTokenizer(LanguageModel):
                 if HF_CACHE_DIR is not None:
                     kwargs["cache_dir"] = HF_CACHE_DIR
                 model_key = get_full_model_path(model_key)
+            # nnsight's LanguageModel defaults to AutoModelForCausalLM, which cannot load a
+            # *ForConditionalGeneration (VLM) checkpoint. Peek the config and route those to the
+            # image-text-to-text auto class. Text-only use never passes pixel_values, so the vision
+            # tower is loaded but never runs (free it later to reclaim VRAM if needed).
+            if "automodel" not in kwargs:
+                try:
+                    from transformers import AutoConfig
+                    _peek = AutoConfig.from_pretrained(
+                        model_key, cache_dir=kwargs.get("cache_dir")
+                    )
+                    _arch = (getattr(_peek, "architectures", None) or [""])[0]
+                    if _arch.endswith("ForConditionalGeneration") or hasattr(
+                        _peek, "vision_config"
+                    ):
+                        from transformers import AutoModelForImageTextToText
+
+                        kwargs["automodel"] = AutoModelForImageTextToText
+                        logger.info(
+                            f"detected VLM ({_arch}); loading via AutoModelForImageTextToText"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"automodel auto-detect failed ({e}); using nnsight default"
+                    )
             # print(kwargs)
             self.__dict__ = LanguageModel(
                 model_key,
@@ -103,6 +127,19 @@ class ModelandTokenizer(LanguageModel):
         does not decouple head_dim from hidden_size."""
         return self.n_heads * self.head_dim
 
+    @property
+    def n_kv_heads(self) -> int:
+        """Number of key/value heads (GQA). Equals ``n_heads`` for MHA models."""
+        return determine_n_kv_heads(self)
+
+    @property
+    def attention_layers(self) -> tuple[int, ...]:
+        """Decoder layers that are FULL attention (carry ``self_attn`` / ``o_proj``). For hybrid
+        models (Qwen3.5) this is a sparse subset of ``range(n_layer)``; head localization and
+        attention read-outs must iterate this, not every layer. Homogeneous models return all
+        layers."""
+        return determine_attention_layers(self)
+
     def parse_config(self) -> None:
         fields = {
             "n_layer": None,
@@ -139,7 +176,13 @@ class ModelandTokenizer(LanguageModel):
 
         fields["attn_module_name_format"] = None
         fields["mlp_module_name_format"] = None
-        if (
+        if is_qwen3_5_variant(self):
+            # Hybrid stack: `.self_attn` only resolves on the full-attention layers
+            # (`mt.attention_layers`); linear/DeltaNet layers carry `.linear_attn` instead.
+            _p = _qwen3_5_lm_prefix(self)
+            fields["mlp_module_name_format"] = _p + ".layers.{}.mlp"
+            fields["attn_module_name_format"] = _p + ".layers.{}.self_attn"
+        elif (
             is_llama_variant(self)
             or is_gemma_variant(self)
             or is_qwen_variant(self)
@@ -208,10 +251,15 @@ class ModelandTokenizer(LanguageModel):
 
     def set_attn_implementation(self, attn_implementation: Literal["sdpa", "eager"]):
         self.config._attn_implementation = attn_implementation
-        for layer_idx in range(self.config.num_hidden_layers):
+        for layer_idx in range(self.n_layer):
             attn_block_name = self.attn_module_name_format.format(layer_idx)
-            attn_block = baukit.get_module(self._model, attn_block_name)
-            attn_block.config._attn_implementation = attn_implementation
+            try:
+                attn_block = baukit.get_module(self._model, attn_block_name)
+            except Exception:
+                # hybrid models: linear/DeltaNet layers have no `self_attn` module — skip them
+                continue
+            if hasattr(attn_block, "config"):
+                attn_block.config._attn_implementation = attn_implementation
 
 
 class LMHead(torch.nn.Module):
@@ -390,6 +438,61 @@ def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
     return False
 
 
+def is_qwen3_5_variant(mt: Model | ModelandTokenizer) -> bool:
+    """Qwen3.5 hybrid (VLM + Gated-DeltaNet + gated attention), e.g. ``Qwen/Qwen3.8-27B``.
+
+    Detected by class name or ``model_type == 'qwen3_5'`` so it catches both the
+    ``*ForConditionalGeneration`` (VLM) and ``*ForCausalLM`` forms. This family needs special
+    handling everywhere: the decoder config lives under ``config.text_config`` (the top VLM config
+    does NOT proxy ``num_hidden_layers`` etc.), the modules sit under a ``model.language_model.``
+    prefix, and only a subset of layers are full attention — the rest are linear/DeltaNet and have
+    no ``self_attn`` / ``o_proj`` (see :func:`determine_attention_layers`).
+    """
+    if isinstance(mt, (ModelandTokenizer, LanguageModel)):
+        mt = unwrap_model(mt)
+    if type(mt).__name__ in (
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5Model",
+    ):
+        return True
+    cfg = getattr(mt, "config", None)
+    return getattr(cfg, "model_type", None) == "qwen3_5"
+
+
+def _qwen3_5_lm_prefix(model: Model | ModelandTokenizer) -> str:
+    """Module-path prefix to the text decoder. The VLM form nests it under
+    ``model.language_model``; a text-only form would be a plain ``model``."""
+    m = unwrap_model(model)
+    if hasattr(m, "model") and hasattr(m.model, "language_model"):
+        return "model.language_model"
+    return "model"
+
+
+def _decoder_config(model: Model | ModelandTokenizer):
+    """The text-decoder sub-config (``config.text_config`` for the VLM, else the config itself).
+    Every layer/head/size read for this family must go through here — the top VLM config does not
+    expose ``num_hidden_layers`` / ``num_attention_heads`` / ``hidden_size`` / ``head_dim``."""
+    cfg = unwrap_model(model).config
+    return getattr(cfg, "text_config", cfg)
+
+
+def determine_attention_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
+    """Indices of the FULL-attention decoder layers (those with ``self_attn`` / ``o_proj``).
+
+    For the Qwen3.5 hybrid these are sparse — every ``full_attention_interval``-th layer, read off
+    ``text_config.layer_types``. For a homogeneous model every layer is attention, so this reduces
+    to :func:`determine_layers`. Head localization and attention read-outs must iterate THIS rather
+    than ``range(n_layer)``: ``attn_module_name_format.format(i)`` does not resolve on a
+    linear/DeltaNet layer.
+    """
+    model = unwrap_model(model)
+    lt = getattr(_decoder_config(model), "layer_types", None)
+    if lt is not None:
+        return tuple(i for i, t in enumerate(lt) if t == "full_attention")
+    return tuple(determine_layers(model))
+
+
 def is_olmo_variant(mt: Model | ModelandTokenizer) -> bool:
     """Determine if model/tokenizer is olmo2 variant."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
@@ -519,6 +622,8 @@ def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None
 
 def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
+    if is_qwen3_5_variant(model):
+        return f"{_qwen3_5_lm_prefix(model)}.embed_tokens"
     if is_gpt_variant(model):
         return "transformer.wte"
     elif (
@@ -540,6 +645,8 @@ def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
 
 def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
+    if is_qwen3_5_variant(model):
+        return f"{_qwen3_5_lm_prefix(model)}.norm"
     if is_gpt_variant(model):
         return "transformer.ln_f"
     elif (
@@ -585,7 +692,9 @@ def determine_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
     model = unwrap_model(model)
     assert isinstance(model, Model)
 
-    if (
+    if is_qwen3_5_variant(model):
+        n_layer = _decoder_config(model).num_hidden_layers
+    elif (
         is_gpt_variant(model)
         or is_llama_variant(model)
         or is_gemma_variant(model)
@@ -609,6 +718,8 @@ def determine_layer_name_format(
     """Determine the format of layer names."""
     model = unwrap_model(model)
 
+    if is_qwen3_5_variant(model):
+        return f"{_qwen3_5_lm_prefix(model)}.layers.{{}}"
     if is_gpt_variant(model):
         if isinstance(model, transformers.GPTNeoXForCausalLM):
             return "gpt_neox.layers.{}"
@@ -698,6 +809,8 @@ def determine_layer_paths(
 def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
     """Determine hidden rep size for the model."""
     model = unwrap_model(model)
+    if is_qwen3_5_variant(model):
+        return _decoder_config(model).hidden_size
     try:
         return model.config.hidden_size
     except AttributeError:
@@ -708,7 +821,16 @@ def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
 def determine_n_heads(model: ModelandTokenizer | Model) -> int:
     """Number of *query* attention heads."""
     model = unwrap_model(model)
+    if is_qwen3_5_variant(model):
+        return _decoder_config(model).num_attention_heads
     return model.config.num_attention_heads
+
+
+def determine_n_kv_heads(model: ModelandTokenizer | Model) -> int:
+    """Number of key/value heads (GQA). Falls back to n_heads (MHA) when unspecified."""
+    model = unwrap_model(model)
+    cfg = _decoder_config(model) if is_qwen3_5_variant(model) else model.config
+    return getattr(cfg, "num_key_value_heads", None) or determine_n_heads(model)
 
 
 def determine_head_dim(model: ModelandTokenizer | Model) -> int:
@@ -719,7 +841,8 @@ def determine_head_dim(model: ModelandTokenizer | Model) -> int:
     Falls back to ``hidden_size // n_heads`` for models that don't declare it (Qwen2, Llama, GLM-4
     dense, ... — where the two agree anyway)."""
     model = unwrap_model(model)
-    hd = getattr(model.config, "head_dim", None)
+    cfg = _decoder_config(model) if is_qwen3_5_variant(model) else model.config
+    hd = getattr(cfg, "head_dim", None)
     if hd:
         return int(hd)
     return determine_hidden_size(model) // determine_n_heads(model)
