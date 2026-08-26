@@ -41,7 +41,6 @@ Usage:
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 
@@ -71,8 +70,8 @@ from scripts.evaluation.eval_goalscope import (
     log_summary,
     rule_based_spans,
 )
-from src.goals.goalscope import GOALSCOPE_SYS, _build_goalscope_prompt
 from src.functional import PatchSpec, generate_with_patch
+from src.goals.goalscope import _build_goalscope_prompt
 from src.goals.multistep_label import label_generation
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
@@ -213,23 +212,47 @@ def residual_patchscope(
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_args():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", default="faithfulness",
-                    choices=["faithfulness", "causality"])
-    ap.add_argument("--eval-k-way", action="store_true", dest="eval_k_way",
-                    help="also run the k-way oracle (faithfulness only)")
-    ap.add_argument("--source-layers", type=int, nargs=2, default=None,
-                    metavar=("START", "END"),
-                    help="residual layers to read the source latent from, range(START, END). "
-                         "Default: the model's GOAL_BANDS entry, so the residual baseline covers "
-                         "the same depth as the goal heads it is being compared against.")
-    ap.add_argument("--source-agg", default="mean", choices=["mean", "last", "sum"],
-                    help="how to collapse the source-layer axis (default mean)")
-    ap.add_argument("--steer_layer_range", type=int, nargs=2, default=(35, 46),
-                    metavar=("START", "END"))
-    ap.add_argument("--alpha", type=float, default=0.1,
-                    help="injected fraction of ||h_dest|| (norm-relative; default 0.1)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--mode", default="faithfulness", choices=["faithfulness", "causality"]
+    )
+    ap.add_argument(
+        "--eval-k-way",
+        action="store_true",
+        dest="eval_k_way",
+        help="also run the k-way oracle (faithfulness only)",
+    )
+    ap.add_argument(
+        "--source-layers",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("START", "END"),
+        help="residual layers to read the source latent from, range(START, END). "
+        "Default: the model's GOAL_BANDS entry, so the residual baseline covers "
+        "the same depth as the goal heads it is being compared against.",
+    )
+    ap.add_argument(
+        "--source-agg",
+        default="mean",
+        choices=["mean", "last", "sum"],
+        help="how to collapse the source-layer axis (default mean)",
+    )
+    ap.add_argument(
+        "--steer_layer_range",
+        type=int,
+        nargs=2,
+        default=(35, 46),
+        metavar=("START", "END"),
+    )
+    ap.add_argument(
+        "--alpha",
+        type=float,
+        default=0.1,
+        help="injected fraction of ||h_dest|| (norm-relative; default 0.1)",
+    )
     ap.add_argument("--n_steer_tokens", default="all", help="'all' | int")
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
@@ -240,8 +263,11 @@ def parse_args():
     ap.add_argument("--gen_max_new_tokens", type=int, default=256)
     ap.add_argument("--span_source", default="rule", choices=["rule", "oracle"])
     ap.add_argument("--batch_size", type=int, default=16)
-    ap.add_argument("--overwrite", action="store_true",
-                    help="wipe an existing run dir; default is to RESUME")
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="wipe an existing run dir; default is to RESUME",
+    )
     logging_utils.add_logging_args(ap)
     return ap.parse_args()
 
@@ -306,8 +332,12 @@ def main():
 
     mt = None
     if config["heads_name"] is None:
-        mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
-                               device_map="auto", attn_implementation="eager")
+        mt = ModelandTokenizer(
+            model_key=args.model,
+            dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="eager",
+        )
         src_band = default_goal_band(args.model, n_layer=mt.n_layer)
         config["source_layers"] = list(src_band)
         config["heads_name"] = leaf_heads_name(src_band)
@@ -341,7 +371,11 @@ def main():
 
     if not remaining:
         recs = (
-            [json.loads(l) for l in fio.records_path(run_dir).read_text().splitlines() if l.strip()]
+            [
+                json.loads(l)
+                for l in fio.records_path(run_dir).read_text().splitlines()
+                if l.strip()
+            ]
             if fio.records_path(run_dir).exists()
             else []
         )
@@ -352,8 +386,12 @@ def main():
         return
 
     if mt is None:
-        mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
-                               device_map="auto", attn_implementation="eager")
+        mt = ModelandTokenizer(
+            model_key=args.model,
+            dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="eager",
+        )
     source_layers = list(range(*src_band))
     config["n_source_layers"] = len(source_layers)
     config["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -377,7 +415,9 @@ def main():
 
         if args.span_source == "rule":
             conditions = list(sample.spec.spec_texts)
-            impl_spans = rule_based_spans(full_text, len(prompt), len(sample.spec.predicate_ids))
+            impl_spans = rule_based_spans(
+                full_text, len(prompt), len(sample.spec.predicate_ids)
+            )
             labels_meta = [
                 dict(step_text=c, gen_code=(s or ""), gen_token_range=None)
                 for c, s in zip(conditions, impl_spans)
@@ -387,8 +427,13 @@ def main():
             conditions = [sl.step_text for sl in labeled.labels]
             impl_spans = [sl.gen_code.strip() for sl in labeled.labels]
             labels_meta = [
-                dict(step_text=sl.step_text, gen_code=sl.gen_code,
-                     gen_token_range=list(sl.gen_token_range) if sl.gen_token_range else None)
+                dict(
+                    step_text=sl.step_text,
+                    gen_code=sl.gen_code,
+                    gen_token_range=list(sl.gen_token_range)
+                    if sl.gen_token_range
+                    else None,
+                )
                 for sl in labeled.labels
             ]
 
@@ -419,25 +464,47 @@ def main():
             for aname, pos in row["anchors"].items():
                 ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
                 hv = hard_eval(ro, row["impl_span"], args.mode)
-                logger.debug("[%s c%d %s] read-out: %r -> %s",
-                             sample.spec.spec_id, row["cond"], aname, ro, hv["verdict"])
+                logger.debug(
+                    "[%s c%d %s] read-out: %r -> %s",
+                    sample.spec.spec_id,
+                    row["cond"],
+                    aname,
+                    ro,
+                    hv["verdict"],
+                )
                 rec = dict(
-                    spec=sample.spec.spec_id, cond=row["cond"], var=row["var"],
-                    anchor=aname, pos=pos, readout=ro, impl_span=row["impl_span"],
-                    condition=row["condition"], true_pred_id=true_id,
-                    hard=hv["verdict"], hard_prompt=hv["prompt"], hard_response=hv["response"],
+                    spec=sample.spec.spec_id,
+                    cond=row["cond"],
+                    var=row["var"],
+                    anchor=aname,
+                    pos=pos,
+                    readout=ro,
+                    impl_span=row["impl_span"],
+                    condition=row["condition"],
+                    true_pred_id=true_id,
+                    hard=hv["verdict"],
+                    hard_prompt=hv["prompt"],
+                    hard_response=hv["response"],
                 )
                 if args.eval_k_way:
                     kv = kway_assign(ro, conds)
-                    rec.update(kway_pred=kv["pred"], kway_true=row["cond"],
-                               kway_prompt=kv["prompt"], kway_response=kv["response"])
+                    rec.update(
+                        kway_pred=kv["pred"],
+                        kway_true=row["cond"],
+                        kway_prompt=kv["prompt"],
+                        kway_response=kv["response"],
+                    )
                 sample_records.append(rec)
 
         sample_meta = dict(
             spec_id=sample.spec.spec_id,
             predicate_ids=list(sample.spec.predicate_ids),
-            prompt=prompt, completion=completion, labels=labels_meta,
-            anchors=[dict(cond=r["cond"], var=r["var"], anchors=r["anchors"]) for r in rows],
+            prompt=prompt,
+            completion=completion,
+            labels=labels_meta,
+            anchors=[
+                dict(cond=r["cond"], var=r["var"], anchors=r["anchors"]) for r in rows
+            ],
         )
         # records first, then the meta line — a crash mid-sample leaves prunable orphans rather
         # than a phantom-complete sample (same contract as eval_goalscope)
@@ -454,9 +521,13 @@ def main():
     samp_fh.close()
 
     all_records = [
-        json.loads(l) for l in fio.records_path(run_dir).read_text().splitlines() if l.strip()
+        json.loads(l)
+        for l in fio.records_path(run_dir).read_text().splitlines()
+        if l.strip()
     ]
-    summary = compute_summary(all_records, n_samples=len(fio.read_completed_spec_ids(run_dir)))
+    summary = compute_summary(
+        all_records, n_samples=len(fio.read_completed_spec_ids(run_dir))
+    )
     fio.write_summary(run_dir, summary)
     logger.info(f"saved -> {run_dir}")
     log_summary(summary, args.mode)
