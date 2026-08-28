@@ -40,6 +40,7 @@ Model = (
     | transformers.CwmForCausalLM
     | transformers.MistralForCausalLM
     | transformers.Qwen3_5ForCausalLM
+    | transformers.Qwen3VLForConditionalGeneration  # VLM (Qwen/Qwen3-VL-*-Instruct)
 )
 Tokenizer = transformers.PreTrainedTokenizerFast
 TokenizerOffsetMapping = Sequence[tuple[int, int]]

@@ -248,8 +248,8 @@ def main():
         model_key=args.model, dtype=torch.bfloat16, device_map="auto",
         attn_implementation=args.attn_impl,
     )
-    nH = mt.model.config.num_attention_heads
-    hd = getattr(mt.model.config, "head_dim", mt.n_embd // nH)
+    nH = mt.n_heads  # via ModelandTokenizer abstraction (nested-VLM safe)
+    hd = mt.head_dim
     layer_hi = args.layer_hi if args.layer_hi is not None else mt.n_layer
     layers = list(range(args.layer_lo, layer_hi))
     patch_tokens = [int(x) for x in args.patch_tokens.split(",")]

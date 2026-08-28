@@ -43,6 +43,30 @@ class ModelandTokenizer(LanguageModel):
                 if HF_CACHE_DIR is not None:
                     kwargs["cache_dir"] = HF_CACHE_DIR
                 model_key = get_full_model_path(model_key)
+            # nnsight's LanguageModel defaults to AutoModelForCausalLM, which cannot load a
+            # *ForConditionalGeneration (VLM) checkpoint. Peek the config and route those to the
+            # image-text-to-text auto class. Text-only use never passes pixel_values, so the vision
+            # tower loads but never runs (free it later to reclaim VRAM if needed).
+            if "automodel" not in kwargs:
+                try:
+                    from transformers import AutoConfig
+                    _peek = AutoConfig.from_pretrained(
+                        model_key, cache_dir=kwargs.get("cache_dir")
+                    )
+                    _arch = (getattr(_peek, "architectures", None) or [""])[0]
+                    if _arch.endswith("ForConditionalGeneration") or hasattr(
+                        _peek, "vision_config"
+                    ):
+                        from transformers import AutoModelForImageTextToText
+
+                        kwargs["automodel"] = AutoModelForImageTextToText
+                        logger.info(
+                            f"detected VLM ({_arch}); loading via AutoModelForImageTextToText"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"automodel auto-detect failed ({e}); using nnsight default"
+                    )
             # print(kwargs)
             self.__dict__ = LanguageModel(
                 model_key,
@@ -103,6 +127,11 @@ class ModelandTokenizer(LanguageModel):
         does not decouple head_dim from hidden_size."""
         return self.n_heads * self.head_dim
 
+    @property
+    def n_kv_heads(self) -> int:
+        """Number of key/value heads (GQA). Equals ``n_heads`` for MHA models."""
+        return determine_n_kv_heads(self)
+
     def parse_config(self) -> None:
         fields = {
             "n_layer": None,
@@ -139,7 +168,11 @@ class ModelandTokenizer(LanguageModel):
 
         fields["attn_module_name_format"] = None
         fields["mlp_module_name_format"] = None
-        if (
+        if is_nested_vlm(self):
+            _p = _vlm_lm_prefix(self)
+            fields["mlp_module_name_format"] = _p + ".layers.{}.mlp"
+            fields["attn_module_name_format"] = _p + ".layers.{}.self_attn"
+        elif (
             is_llama_variant(self)
             or is_gemma_variant(self)
             or is_qwen_variant(self)
@@ -208,10 +241,14 @@ class ModelandTokenizer(LanguageModel):
 
     def set_attn_implementation(self, attn_implementation: Literal["sdpa", "eager"]):
         self.config._attn_implementation = attn_implementation
-        for layer_idx in range(self.config.num_hidden_layers):
+        for layer_idx in range(self.n_layer):  # n_layer -> VLM-safe (top config lacks num_hidden_layers)
             attn_block_name = self.attn_module_name_format.format(layer_idx)
-            attn_block = baukit.get_module(self._model, attn_block_name)
-            attn_block.config._attn_implementation = attn_implementation
+            try:
+                attn_block = baukit.get_module(self._model, attn_block_name)
+            except Exception:
+                continue  # e.g. a hybrid layer without self_attn
+            if hasattr(attn_block, "config"):
+                attn_block.config._attn_implementation = attn_implementation
 
 
 class LMHead(torch.nn.Module):
@@ -390,6 +427,45 @@ def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
     return False
 
 
+def is_nested_vlm(mt: Model | ModelandTokenizer) -> bool:
+    """A ``*ForConditionalGeneration`` vision-language model whose TEXT decoder is nested at
+    ``model.language_model`` with its own ``config.text_config`` (Qwen2-VL / Qwen2.5-VL /
+    Qwen3-VL, ...). These need the decoder config + module paths redirected: the top VLM config
+    does NOT expose ``num_hidden_layers`` / ``num_attention_heads`` / ``hidden_size`` / ``head_dim``,
+    and the decoder lives under ``model.language_model.*`` rather than ``model.*``.
+
+    Detected structurally on a built model (``.model.language_model`` present) or from the config
+    alone (``text_config`` + a ConditionalGeneration architecture / ``vision_config``), so it also
+    works during loading, before the model exists. The text decoder itself is an ordinary attention
+    stack, so once the paths/config are redirected every intervention behaves as on the non-VL model.
+    """
+    if isinstance(mt, (ModelandTokenizer, LanguageModel)):
+        mt = unwrap_model(mt)
+    if hasattr(mt, "model") and hasattr(getattr(mt, "model", None), "language_model"):
+        return True
+    cfg = getattr(mt, "config", None)
+    if cfg is not None and hasattr(cfg, "text_config"):
+        arch = (getattr(cfg, "architectures", None) or [""])[0]
+        return arch.endswith("ForConditionalGeneration") or hasattr(cfg, "vision_config")
+    return False
+
+
+def _vlm_lm_prefix(model: Model | ModelandTokenizer) -> str:
+    """Module-path prefix to the text decoder — ``model.language_model`` for the nested VLM form,
+    plain ``model`` otherwise."""
+    m = unwrap_model(model)
+    if hasattr(m, "model") and hasattr(m.model, "language_model"):
+        return "model.language_model"
+    return "model"
+
+
+def _decoder_config(model: Model | ModelandTokenizer):
+    """The text-decoder sub-config (``config.text_config`` for a nested VLM, else the config
+    itself). Every layer/head/size read for a VLM must go through here."""
+    cfg = unwrap_model(model).config
+    return getattr(cfg, "text_config", cfg)
+
+
 def is_olmo_variant(mt: Model | ModelandTokenizer) -> bool:
     """Determine if model/tokenizer is olmo2 variant."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
@@ -519,6 +595,8 @@ def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None
 
 def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
+    if is_nested_vlm(model):
+        return f"{_vlm_lm_prefix(model)}.embed_tokens"
     if is_gpt_variant(model):
         return "transformer.wte"
     elif (
@@ -540,6 +618,8 @@ def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
 
 def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
+    if is_nested_vlm(model):
+        return f"{_vlm_lm_prefix(model)}.norm"
     if is_gpt_variant(model):
         return "transformer.ln_f"
     elif (
@@ -561,6 +641,9 @@ def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
 
 def determine_lm_head_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
+    if is_nested_vlm(model):
+        m = unwrap_model(model)
+        return "lm_head" if hasattr(m, "lm_head") else f"{_vlm_lm_prefix(model)}.lm_head"
     if is_gpt_variant(model):
         return "lm_head"
     elif (
@@ -585,7 +668,9 @@ def determine_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
     model = unwrap_model(model)
     assert isinstance(model, Model)
 
-    if (
+    if is_nested_vlm(model):
+        n_layer = _decoder_config(model).num_hidden_layers
+    elif (
         is_gpt_variant(model)
         or is_llama_variant(model)
         or is_gemma_variant(model)
@@ -609,6 +694,8 @@ def determine_layer_name_format(
     """Determine the format of layer names."""
     model = unwrap_model(model)
 
+    if is_nested_vlm(model):
+        return f"{_vlm_lm_prefix(model)}.layers.{{}}"
     if is_gpt_variant(model):
         if isinstance(model, transformers.GPTNeoXForCausalLM):
             return "gpt_neox.layers.{}"
@@ -698,6 +785,8 @@ def determine_layer_paths(
 def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
     """Determine hidden rep size for the model."""
     model = unwrap_model(model)
+    if is_nested_vlm(model):
+        return _decoder_config(model).hidden_size
     try:
         return model.config.hidden_size
     except AttributeError:
@@ -708,7 +797,16 @@ def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
 def determine_n_heads(model: ModelandTokenizer | Model) -> int:
     """Number of *query* attention heads."""
     model = unwrap_model(model)
+    if is_nested_vlm(model):
+        return _decoder_config(model).num_attention_heads
     return model.config.num_attention_heads
+
+
+def determine_n_kv_heads(model: ModelandTokenizer | Model) -> int:
+    """Number of key/value heads (GQA). Falls back to n_heads (MHA) when unspecified."""
+    model = unwrap_model(model)
+    cfg = _decoder_config(model) if is_nested_vlm(model) else model.config
+    return getattr(cfg, "num_key_value_heads", None) or determine_n_heads(model)
 
 
 def determine_head_dim(model: ModelandTokenizer | Model) -> int:
@@ -719,7 +817,8 @@ def determine_head_dim(model: ModelandTokenizer | Model) -> int:
     Falls back to ``hidden_size // n_heads`` for models that don't declare it (Qwen2, Llama, GLM-4
     dense, ... — where the two agree anyway)."""
     model = unwrap_model(model)
-    hd = getattr(model.config, "head_dim", None)
+    cfg = _decoder_config(model) if is_nested_vlm(model) else model.config
+    hd = getattr(cfg, "head_dim", None)
     if hd:
         return int(hd)
     return determine_hidden_size(model) // determine_n_heads(model)

@@ -1462,7 +1462,7 @@ def train_head_mask(
         (trained HeadMask, MaskTrainingHistory)
     """
     n_layers_tested = len(layers)
-    n_heads = mt.model.config.num_attention_heads
+    n_heads = mt.n_heads  # via ModelandTokenizer abstraction (nested-VLM safe)
 
     _has_deltas = (
         pivot_caches[0].per_head_deltas is not None
