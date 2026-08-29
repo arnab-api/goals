@@ -141,7 +141,9 @@ def get_attention_matrices(
     # attentions: list of (batch, heads, seq, seq) per layer
     output.attentions = [attn.cuda() for attn in output.attentions]
     # stack along new layer axis -> (layers, batch, heads, seq, seq) -> (batch, layers, heads, seq, seq)
-    attentions = torch.stack(output.attentions, dim=0).permute(1, 0, 2, 3, 4).contiguous()
+    attentions = (
+        torch.stack(output.attentions, dim=0).permute(1, 0, 2, 3, 4).contiguous()
+    )
 
     if value_weighted:
         pkv = output.past_key_values
@@ -155,14 +157,14 @@ def get_attention_matrices(
         elif hasattr(pkv, "value_cache"):
             value_list = [v.cuda() for v in pkv.value_cache]
         else:
-            value_list = [pkv[i][1].cuda() for i in range(mt.config.num_hidden_layers)]
+            value_list = [pkv[i][1].cuda() for i in range(mt.n_layer)]
         # each layer value: (batch, kv_heads, seq, head_dim)
         values = torch.stack(value_list, dim=0).permute(1, 0, 2, 3, 4).contiguous()
         # values: (batch, layers, kv_heads, seq, head_dim)
-        n_rep = mt.config.num_attention_heads // mt.config.num_key_value_heads
+        n_rep = mt.n_heads // mt.n_kv_heads
         b, L, kvh, s, d = values.shape
         values = repeat_kv(values.reshape(b * L, kvh, s, d), n_rep=n_rep)
-        values = values.reshape(b, L, mt.config.num_attention_heads, s, d)
+        values = values.reshape(b, L, mt.n_heads, s, d)
         # attentions: (b, L, H, q, s); value norms: (b, L, H, s) -> broadcast over q
         attentions = torch.einsum("blhqs,blhs->blhqs", attentions, values.norm(dim=-1))
 
@@ -260,7 +262,7 @@ def visualize_average_attn_matrix(
             avg_attn_module_matrix = torch.stack(
                 [
                     attn_matrices[layer][h_idx].squeeze()
-                    for h_idx in range(mt.config.num_attention_heads)
+                    for h_idx in range(mt.n_heads)
                 ]
             ).mean(dim=0)[q_index]
 
@@ -315,7 +317,9 @@ def _html_escape(s: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _token_char_offsets(tokenized_prompt: list[str]) -> tuple[str, list[int], list[int]]:
+def _token_char_offsets(
+    tokenized_prompt: list[str],
+) -> tuple[str, list[int], list[int]]:
     """Reconstruct the literal prompt string from the stored (decoded) token pieces and
     return ``(text, starts, ends)`` where ``starts[i]``/``ends[i]`` are the [inclusive,
     exclusive) char offsets of token ``i`` in ``text``.
@@ -352,7 +356,9 @@ def _extract_spec_texts(obj) -> Optional[list[str]]:
     return None
 
 
-def _normalize_track_conditions(track_conditions) -> tuple[Optional[list[str]], list[list[str]]]:
+def _normalize_track_conditions(
+    track_conditions,
+) -> tuple[Optional[list[str]], list[list[str]]]:
     """Coerce ``track_conditions`` into ``(cond_texts | None, cond_substrs)``, both ordered.
 
     Accepts: a single ConditionSpec/ConditionSample-like object (exposes ``.id_substrs`` →
@@ -364,7 +370,9 @@ def _normalize_track_conditions(track_conditions) -> tuple[Optional[list[str]], 
         return None, []
 
     # single spec-like object
-    if hasattr(track_conditions, "id_substrs") and not isinstance(track_conditions, (list, tuple)):
+    if hasattr(track_conditions, "id_substrs") and not isinstance(
+        track_conditions, (list, tuple)
+    ):
         return _extract_spec_texts(track_conditions), list(track_conditions.id_substrs)
 
     seq = list(track_conditions)
@@ -422,7 +430,8 @@ def _condition_token_spans(
             else:
                 logger.warning(
                     "track_conditions: spec_text for condition %d not found in prompt; "
-                    "falling back to first-occurrence match.", ci
+                    "falling back to first-occurrence match.",
+                    ci,
                 )
 
         tok_idxs: set[int] = set()
@@ -441,7 +450,9 @@ def _condition_token_spans(
                 continue
             if region is None and not have_texts:
                 cursor = local + len(sub)
-            tok_idxs.update(_char_span_to_token_idxs(starts, ends, local, local + len(sub)))
+            tok_idxs.update(
+                _char_span_to_token_idxs(starts, ends, local, local + len(sub))
+            )
         spans.append(sorted(tok_idxs))
     return spans
 
@@ -556,7 +567,9 @@ def interactive_attention_html(
     # condition's tokens.  Spans are computed on the FULL sequence then mapped into the displayed
     # slice; tokens outside [start_from, end_at) are unscoreable and dropped.
     if condition_agg not in ("sum", "mean"):
-        raise ValueError(f"Unknown condition_agg={condition_agg!r}; expected 'sum' | 'mean'")
+        raise ValueError(
+            f"Unknown condition_agg={condition_agg!r}; expected 'sum' | 'mean'"
+        )
     cond_texts, cond_substrs = _normalize_track_conditions(track_conditions)
     cond_labels: list[str] = []
     cond_of_token = [-1] * n
@@ -630,8 +643,14 @@ def interactive_attention_html(
 
     # Categorical palette for condition membership (avoids the query-outline red #d62728).
     COND_PALETTE = [
-        "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e",
-        "#17becf", "#8c564b", "#e377c2", "#bcbd22",
+        "#1f77b4",
+        "#2ca02c",
+        "#9467bd",
+        "#ff7f0e",
+        "#17becf",
+        "#8c564b",
+        "#e377c2",
+        "#bcbd22",
     ]
 
     def _cond_color(ci: int) -> str:
@@ -665,9 +684,7 @@ def interactive_attention_html(
     tokens_html = "".join(token_spans)
 
     # Heads summary for header.
-    heads_summary = (
-        f"{len(selected_heads)} heads · agg={agg} · norm={normalize}"
-    )
+    heads_summary = f"{len(selected_heads)} heads · agg={agg} · norm={normalize}"
     head_pairs_short = ", ".join(
         f"({layer},{head})" for layer, head in selected_heads[:12]
     )
@@ -675,13 +692,15 @@ def interactive_attention_html(
         head_pairs_short += f", … (+{len(selected_heads) - 12} more)"
 
     intervened_legend = (
-        " · <span style=\"border-bottom:3px solid #8e44ad;font-weight:700;\">intervened</span>"
+        ' · <span style="border-bottom:3px solid #8e44ad;font-weight:700;">intervened</span>'
         f" position{'s' if len(interv_set) != 1 else ''} ({len(interv_set)})"
-        if interv_set else ""
+        if interv_set
+        else ""
     )
 
     import json as _json
     import uuid as _uuid
+
     colors_json = _json.dumps(colors)
     text_colors_json = _json.dumps(text_colors)
     # Aggregated, causal-masked attention actually being plotted (A[q, k]); shown live in the
@@ -704,7 +723,7 @@ def interactive_attention_html(
         cond_items = "".join(
             f'<div style="margin:2px 0;"><span class="swatch" '
             f'style="background:{_cond_color(ci)};"></span>'
-            f'c{ci}: {_html_escape(lab)}</div>'
+            f"c{ci}: {_html_escape(lab)}</div>"
             for ci, lab in enumerate(cond_labels)
         )
         conditions_block = (

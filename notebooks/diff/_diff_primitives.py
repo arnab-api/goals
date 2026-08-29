@@ -17,22 +17,22 @@ The helper functions look up the module-global ``mt`` (and ``GROUP``, head sets,
 resolve those names at call time.
 """
 
+import logging
 import os
 import sys
 import types
-import logging
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 
-import torch
-import numpy as np
 import baukit
+import numpy as np
+import torch
 from rich.console import Console
-from rich.theme import Theme
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
 from rich.markup import escape
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.theme import Theme
 
 # ── path bootstrap: make `src` importable regardless of the caller's cwd ──
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,15 +40,16 @@ _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _ROOT not in sys.path:
     sys.path.append(_ROOT)
 
-from src.utils import logging_utils, env_utils
-from src.tokens import prepare_input
-from src.models import ModelandTokenizer
-from src.goals.head_loc_attn import HeadMask, collect_head_steering_vecs
-from src.goals.goalscope import apply_goalscope, head_additive_generate
-from src.goals.oid_gaze import cache_root
-from src.attention import get_attention_matrices, _safe_token
 from circuitsvis.tokens import colored_tokens
 from IPython.display import display
+
+from src.attention import _safe_token
+from src.goals.goalscope import apply_goalscope
+from src.goals.head_loc_attn import HeadMask, collect_head_steering_vecs
+from src.goals.oid_gaze import cache_root
+from src.models import ModelandTokenizer
+from src.tokens import prepare_input
+from src.utils import env_utils, logging_utils
 
 logging_utils.configure(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -86,14 +87,22 @@ def mask_bin(heads):
     return m
 
 
-def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct",
-          cuda_visible_devices="0, 2, 3",
-          goal_threshold=0.9,
-          boundary_cos_thr=0.7,
-          boundary_sel_thr=0.8):
+def setup(
+    model_name="Qwen/Qwen2.5-Coder-32B-Instruct",
+    cuda_visible_devices="0, 2, 3",
+    goal_threshold=0.9,
+    boundary_cos_thr=0.7,
+    boundary_sel_thr=0.8,
+):
     """Load the model + trained head masks once; bind module globals. Returns a namespace."""
     global mt, MODEL_NAME, GROUP, N_KV, N_LAYER, N_HEADS
-    global GOAL_HEADS, BOUNDARY_HEADS, UNION_HEADS, GOAL_MASK, BOUNDARY_MASK, READOUT_HEADS
+    global \
+        GOAL_HEADS, \
+        BOUNDARY_HEADS, \
+        UNION_HEADS, \
+        GOAL_MASK, \
+        BOUNDARY_MASK, \
+        READOUT_HEADS
 
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", cuda_visible_devices)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -110,13 +119,18 @@ def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct",
     N_LAYER = mt.n_layer
     N_HEADS = mt.model.config.num_attention_heads
     print(mt.name)
-    print(f"n_heads={mt.n_heads}  n_kv_heads={N_KV}  group={GROUP}  "
-          f"head_dim={mt.head_dim}  n_layer={mt.n_layer}")
+    print(
+        f"n_heads={mt.n_heads}  n_kv_heads={N_KV}  group={GROUP}  "
+        f"head_dim={mt.head_dim}  n_layer={mt.n_layer}"
+    )
 
     # GOAL heads (READOUT) — trained localization mask (lam20), mid-band, thresholded.
     _gckpt = torch.load(
-        os.path.join(RES, f"localization/{model_name.split('/')[-1]}/lam20/head_mask.pt"),
-        map_location="cpu")
+        os.path.join(
+            RES, f"localization/{model_name.split('/')[-1]}/lam20/head_mask.pt"
+        ),
+        map_location="cpu",
+    )
     GOAL_LAYERS = _gckpt["layers"]
     _goal_trained = HeadMask(len(GOAL_LAYERS), _gckpt["mask_values"].shape[1])
     with torch.no_grad():
@@ -124,36 +138,63 @@ def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct",
         if model_name.split("/")[-1] == "Qwen2.5-Coder-32B-Instruct":
             _goal_trained.values[0:25] = 0
             _goal_trained.values[56:] = 0
-    GOAL_HEADS = sorted(_goal_trained.selected_heads(GOAL_LAYERS, threshold=goal_threshold))
+    GOAL_HEADS = sorted(
+        _goal_trained.selected_heads(GOAL_LAYERS, threshold=goal_threshold)
+    )
     GOAL_MASK = mask_bin(GOAL_HEADS)
 
     # BOUNDARY heads (DECISION) — move-on/stay separation (cos < thr) from clock/15's aff_sep.
     _bnd_root = os.path.join(cache_root(model_name, "conditions"), "completion_mask")
-    _bnd_dir = max((t for t in os.listdir(_bnd_root)
-                    if os.path.isdir(os.path.join(_bnd_root, t)) and "lam10.0" in t),
-                   key=lambda t: os.path.getmtime(os.path.join(_bnd_root, t)))
-    _DCK = torch.load(os.path.join(_bnd_root, _bnd_dir, "mask.pt"),
-                      map_location="cpu", weights_only=False)
+    _bnd_dir = max(
+        (
+            t
+            for t in os.listdir(_bnd_root)
+            if os.path.isdir(os.path.join(_bnd_root, t)) and "lam10.0" in t
+        ),
+        key=lambda t: os.path.getmtime(os.path.join(_bnd_root, t)),
+    )
+    _DCK = torch.load(
+        os.path.join(_bnd_root, _bnd_dir, "mask.pt"),
+        map_location="cpu",
+        weights_only=False,
+    )
     _dec_layers = [int(x) for x in _DCK["layers"]]
     _dmv = _DCK["mask_values"].numpy()
-    _ = sorted((_dec_layers[li], int(h)) for li, h in np.argwhere(_dmv > boundary_sel_thr))  # BOUNDARY_ALL
-    _aff = torch.load(os.path.join(RES, "notebook_caches/15_order_dependency/aff_sep__d5fbad08ba.pt"),
-                      map_location="cpu", weights_only=False)["value"]
+    _ = sorted(
+        (_dec_layers[li], int(h)) for li, h in np.argwhere(_dmv > boundary_sel_thr)
+    )  # BOUNDARY_ALL
+    _aff = torch.load(
+        os.path.join(RES, "notebook_caches/15_order_dependency/aff_sep__d5fbad08ba.pt"),
+        map_location="cpu",
+        weights_only=False,
+    )["value"]
     BOUNDARY_HEADS = sorted(lh for lh, c in _aff.items() if c < boundary_cos_thr)
     BOUNDARY_MASK = mask_bin(BOUNDARY_HEADS)
 
     UNION_HEADS = sorted(set(GOAL_HEADS) | set(BOUNDARY_HEADS))
     READOUT_HEADS = GOAL_HEADS
-    print(f"GOAL_HEADS     : {len(GOAL_HEADS):3d}  "
-          f"(layers {min(l for l, _ in GOAL_HEADS)}–{max(l for l, _ in GOAL_HEADS)})")
-    print(f"BOUNDARY_HEADS : {len(BOUNDARY_HEADS):3d}  "
-          f"(layers {min(l for l, _ in BOUNDARY_HEADS)}–{max(l for l, _ in BOUNDARY_HEADS)})")
+    print(
+        f"GOAL_HEADS     : {len(GOAL_HEADS):3d}  "
+        f"(layers {min(l for l, _ in GOAL_HEADS)}–{max(l for l, _ in GOAL_HEADS)})"
+    )
+    print(
+        f"BOUNDARY_HEADS : {len(BOUNDARY_HEADS):3d}  "
+        f"(layers {min(l for l, _ in BOUNDARY_HEADS)}–{max(l for l, _ in BOUNDARY_HEADS)})"
+    )
     print(f"UNION_HEADS    : {len(UNION_HEADS):3d}")
 
     return types.SimpleNamespace(
-        mt=mt, GROUP=GROUP, N_KV=N_KV, N_LAYER=N_LAYER, N_HEADS=N_HEADS,
-        GOAL_HEADS=GOAL_HEADS, BOUNDARY_HEADS=BOUNDARY_HEADS, UNION_HEADS=UNION_HEADS,
-        GOAL_MASK=GOAL_MASK, BOUNDARY_MASK=BOUNDARY_MASK)
+        mt=mt,
+        GROUP=GROUP,
+        N_KV=N_KV,
+        N_LAYER=N_LAYER,
+        N_HEADS=N_HEADS,
+        GOAL_HEADS=GOAL_HEADS,
+        BOUNDARY_HEADS=BOUNDARY_HEADS,
+        UNION_HEADS=UNION_HEADS,
+        GOAL_MASK=GOAL_MASK,
+        BOUNDARY_MASK=BOUNDARY_MASK,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -175,8 +216,12 @@ def exact_prompt(prompt, tail_tokens=None, patch_pos=[-1], emphasize_tokens=None
             s = EOPEN + s + ECLOSE
         parts.append(s)
     txt = escape("".join(parts))
-    txt = (txt.replace(OPEN, "[bold black on salmon1]").replace(CLOSE, "[/bold black on salmon1]")
-              .replace(EOPEN, "[yellow]").replace(ECLOSE, "[/yellow]"))
+    txt = (
+        txt.replace(OPEN, "[bold black on salmon1]")
+        .replace(CLOSE, "[/bold black on salmon1]")
+        .replace(EOPEN, "[yellow]")
+        .replace(ECLOSE, "[/yellow]")
+    )
     head = f"[grey42]… {lo} earlier tokens elided …[/grey42]\n" if lo else ""
     return head + txt
 
@@ -198,11 +243,18 @@ def token_span(prompt, substring):
 
 
 def show_prompt(tag, prompt, span):
-    rich_print(Panel(
-        Text.from_markup(exact_prompt(prompt, patch_pos=[-1], emphasize_tokens=range(*span))),
-        title=f"[bold]{tag}[/bold]  TASK span {span}  ·  pivot={pivot_token(prompt)!r}  ·  "
-              f"L={prepare_input(prompts=prompt, tokenizer=mt)['input_ids'].shape[1]}",
-        title_align="left", border_style="grey42", padding=(1, 1)))
+    rich_print(
+        Panel(
+            Text.from_markup(
+                exact_prompt(prompt, patch_pos=[-1], emphasize_tokens=range(*span))
+            ),
+            title=f"[bold]{tag}[/bold]  TASK span {span}  ·  pivot={pivot_token(prompt)!r}  ·  "
+            f"L={prepare_input(prompts=prompt, tokenizer=mt)['input_ids'].shape[1]}",
+            title_align="left",
+            border_style="grey42",
+            padding=(1, 1),
+        )
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -210,14 +262,21 @@ def show_prompt(tag, prompt, span):
 # ══════════════════════════════════════════════════════════════════════════════
 def get_prompt(question, prefill):
     messages = [
-        {"role": "system", "content": "You are a helpful assistant proficient in programming. "
-         "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain."},
+        {
+            "role": "system",
+            "content": "You are a helpful assistant proficient in programming. "
+            "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.",
+        },
         {"role": "user", "content": question},
         {"role": "assistant", "content": prefill},
     ]
     return mt.tokenizer.apply_chat_template(
-        messages, add_generation_prompt=False, continue_final_message=True,
-        tokenize=False, chat_template_kwargs={"enable_thinking": False})
+        messages,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        tokenize=False,
+        chat_template_kwargs={"enable_thinking": False},
+    )
 
 
 def _proj_name(l, which):  # which in {'q','k','v'}
@@ -228,16 +287,22 @@ def cache_src_proj(prompt, positions, layers, which):
     """{layer: (len(positions), width)} — source {which}_proj outputs at `positions` (pre-RoPE for q/k)."""
     tok = prepare_input(prompts=prompt, tokenizer=mt)
     names = {l: _proj_name(l, which) for l in layers}
-    with torch.no_grad(), baukit.TraceDict(mt._model, list(names.values()),
-                                           retain_input=False, retain_output=True) as tr:
-        mt._model(**{k: v for k, v in tok.items() if k in ("input_ids", "attention_mask")})
+    with (
+        torch.no_grad(),
+        baukit.TraceDict(
+            mt._model, list(names.values()), retain_input=False, retain_output=True
+        ) as tr,
+    ):
+        mt._model(
+            **{k: v for k, v in tok.items() if k in ("input_ids", "attention_mask")}
+        )
     return {l: tr[names[l]].output[0, positions].detach().float().cpu() for l in layers}
 
 
 def heads_per_layer(head_set, which, layers=None):
     """{layer: set(head)} — q-head index for which=="q", else kv-head index (h // GROUP)."""
     d = defaultdict(set)
-    for (l, h) in head_set:
+    for l, h in head_set:
         if layers is None or l in layers:
             d[l].add(h if which == "q" else h // GROUP)
     return dict(d)
@@ -257,10 +322,15 @@ def proj_patch_hooks(mt, patch_specs):
     handles = []
     try:
         for spec in patch_specs:
-            which, cache, headmap, positions = spec["which"], spec["cache"], spec["heads"], spec["positions"]
+            which, cache, headmap, positions = (
+                spec["which"],
+                spec["cache"],
+                spec["heads"],
+                spec["positions"],
+            )
             for layer, hset in headmap.items():
                 mod = baukit.get_module(mt._model, _proj_name(layer, which))
-                src_l = cache[layer]           # (K, width)
+                src_l = cache[layer]  # (K, width)
 
                 def make(hset, src_l, positions):
                     def hook(module, inp, out):
@@ -275,7 +345,9 @@ def proj_patch_hooks(mt, patch_specs):
                             for r, p in keep:
                                 o[:, p, sl] = src_l[r, sl].to(o.dtype).to(o.device)
                         return o
+
                     return hook
+
                 handles.append(mod.register_forward_hook(make(hset, src_l, positions)))
         yield
     finally:
@@ -287,12 +359,13 @@ def make_patch_interface(mt, patch_specs):
     def iface(mt, inputs, patches=None, model_kwargs=None):
         with proj_patch_hooks(mt, patch_specs):
             return mt._model(**dict(inputs), **dict(model_kwargs or {}))
+
     return iface
 
 
 def pivot_attn(info, heads, positions, pivot):
     """mean over `heads` of value-weighted attention from `pivot` onto `positions` -> (len(positions),)."""
-    A = info.attention_matrices                # (L, H, q, s)
+    A = info.attention_matrices  # (L, H, q, s)
     return np.stack([A[l, h, pivot, positions] for (l, h) in heads]).mean(0)
 
 
@@ -307,19 +380,42 @@ def attn_table(title, toks, a_ref, a_patch, ref_name):
         col = "green" if d > 0 else "red"
         tbl.add_row(escape(repr(t)), f"{c:.3f}", f"{p:.3f}", f"[{col}]{d:+.3f}[/{col}]")
     rich_print(tbl)
-    print(f"total mass on span:  {ref_name}={a_ref.sum():.3f}  patched={a_patch.sum():.3f}")
+    print(
+        f"total mass on span:  {ref_name}={a_ref.sum():.3f}  patched={a_patch.sum():.3f}"
+    )
 
 
-def goalscope_readout(tag, prompt, pivot, heads=None, iface=None,
-                      strategy="additive_norm", alpha=0.1, layers=(35, 46), maxnew=128):
-    res = apply_goalscope(prompt=prompt, mt=mt, selected_heads=heads or READOUT_HEADS,
-                          strategy=strategy, alpha=alpha, steer_layer_range=layers, batch_size=1,
-                          max_new_tokens=maxnew, goalscope_prompt=globals().get("gsp"),
-                          token_positions=[pivot], include_noncode=False, show=False,
-                          patch_interface=iface)
+def goalscope_readout(
+    tag,
+    prompt,
+    pivot,
+    heads=None,
+    iface=None,
+    strategy="additive_norm",
+    alpha=0.1,
+    layers=(35, 46),
+    maxnew=128,
+):
+    res = apply_goalscope(
+        prompt=prompt,
+        mt=mt,
+        selected_heads=heads or READOUT_HEADS,
+        strategy=strategy,
+        alpha=alpha,
+        steer_layer_range=layers,
+        batch_size=1,
+        max_new_tokens=maxnew,
+        goalscope_prompt=globals().get("gsp"),
+        token_positions=[pivot],
+        include_noncode=False,
+        show=False,
+        patch_interface=iface,
+    )
     for r in res:
-        rich_print(f"[bold]{tag}[/bold]  pos={r['pos']} {r['token']!r} => "
-                   f"[italic]{escape(r['patched_gen'])}[/italic]")
+        rich_print(
+            f"[bold]{tag}[/bold]  pos={r['pos']} {r['token']!r} => "
+            f"[italic]{escape(r['patched_gen'])}[/italic]"
+        )
     return res
 
 
@@ -339,7 +435,12 @@ def greedy(tok, prefill_specs=None, decode_specs=None, n_steer=1, max_new=64):
             use = decode_specs if (decode_specs and step < n_steer) else None
             ctx = proj_patch_hooks(mt, use) if use else nullcontext()
             with ctx:
-                out = mt._model(input_ids=nxt, attention_mask=am, past_key_values=pkv, use_cache=True)
+                out = mt._model(
+                    input_ids=nxt,
+                    attention_mask=am,
+                    past_key_values=pkv,
+                    use_cache=True,
+                )
             pkv = out.past_key_values
             nxt = out.logits[:, -1].argmax(-1, keepdim=True)
             t = int(nxt)
@@ -355,8 +456,16 @@ def show_delta_tokens(tokens, delta, label=""):
     M = float(np.abs(d).max()) or 1.0
     if label:
         rich_print(f"[grey58]{label}   (green +Δ / red −Δ, |Δ|max={M:.3f})[/grey58]")
-    display(colored_tokens(tokens=[_safe_token(t) for t in tokens], values=d,
-                           min_value=-M, max_value=M, negative_color="red", positive_color="green"))
+    display(
+        colored_tokens(
+            tokens=[_safe_token(t) for t in tokens],
+            values=d,
+            min_value=-M,
+            max_value=M,
+            negative_color="red",
+            positive_color="green",
+        )
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -377,7 +486,9 @@ def head_write(prompt, heads, positions, iface=None):
     Wraps ``collect_head_steering_vecs`` (sum over heads of o_proj_input[h] @ W_o[:, h].T).
     Returns (len(positions), n_embd) float32 CPU.  `iface` runs the extraction under an intervention."""
     tok = prepare_input(prompts=prompt, tokenizer=mt)
-    vecs = collect_head_steering_vecs(mt, tok, list(heads), list(positions), patch_interface=iface)
+    vecs = collect_head_steering_vecs(
+        mt, tok, list(heads), list(positions), patch_interface=iface
+    )
     return vecs[0]  # (n_pos, n_embd)
 
 
@@ -392,7 +503,7 @@ def per_head_cosine(cache_a, cache_b, heads, which):
     `which`=="q" slices q-head h; otherwise slices kv-head h//GROUP.  Returns {(layer,head): cos}."""
     hd = mt.head_dim
     out = {}
-    for (l, h) in heads:
+    for l, h in heads:
         if l not in cache_a or l not in cache_b:
             continue
         idx = h if which == "q" else h // GROUP
