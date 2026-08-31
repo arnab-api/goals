@@ -22,8 +22,8 @@ import os
 import sys
 import types
 from collections import defaultdict
-from dataclasses import dataclass
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 
 import baukit
 import numpy as np
@@ -108,11 +108,20 @@ class Ctx:
         ``from _diff_primitives import *``) — WITHOUT re-running setup() / reloading the model."""
         g = ns.get
         return cls(
-            mt=g("mt"), model_name=g("MODEL_NAME"), group=g("GROUP"), n_kv=g("N_KV"),
-            n_layer=g("N_LAYER"), n_heads=g("N_HEADS"), goal_heads=g("GOAL_HEADS"),
-            boundary_heads=g("BOUNDARY_HEADS"), union_heads=g("UNION_HEADS"),
-            goal_mask=g("GOAL_MASK"), boundary_mask=g("BOUNDARY_MASK"),
-            readout_heads=g("READOUT_HEADS"), gsp=g("gsp"), res=g("RES"),
+            mt=g("mt"),
+            model_name=g("MODEL_NAME"),
+            group=g("GROUP"),
+            n_kv=g("N_KV"),
+            n_layer=g("N_LAYER"),
+            n_heads=g("N_HEADS"),
+            goal_heads=g("GOAL_HEADS"),
+            boundary_heads=g("BOUNDARY_HEADS"),
+            union_heads=g("UNION_HEADS"),
+            goal_mask=g("GOAL_MASK"),
+            boundary_mask=g("BOUNDARY_MASK"),
+            readout_heads=g("READOUT_HEADS"),
+            gsp=g("gsp"),
+            res=g("RES"),
         )
 
 
@@ -224,17 +233,29 @@ def setup(
     print(f"UNION_HEADS    : {len(UNION_HEADS):3d}")
 
     return Ctx(
-        mt=mt, model_name=MODEL_NAME, group=GROUP, n_kv=N_KV, n_layer=N_LAYER, n_heads=N_HEADS,
-        goal_heads=GOAL_HEADS, boundary_heads=BOUNDARY_HEADS, union_heads=UNION_HEADS,
-        goal_mask=GOAL_MASK, boundary_mask=BOUNDARY_MASK, readout_heads=READOUT_HEADS,
-        gsp=gsp, res=RES,
+        mt=mt,
+        model_name=MODEL_NAME,
+        group=GROUP,
+        n_kv=N_KV,
+        n_layer=N_LAYER,
+        n_heads=N_HEADS,
+        goal_heads=GOAL_HEADS,
+        boundary_heads=BOUNDARY_HEADS,
+        union_heads=UNION_HEADS,
+        goal_mask=GOAL_MASK,
+        boundary_mask=BOUNDARY_MASK,
+        readout_heads=READOUT_HEADS,
+        gsp=gsp,
+        res=RES,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # prompt display / spans  (00_diff.ipynb cell 4)
 # ══════════════════════════════════════════════════════════════════════════════
-def exact_prompt(prompt, tail_tokens=None, patch_pos=[-1], emphasize_tokens=None, ctx=None):
+def exact_prompt(
+    prompt, tail_tokens=None, patch_pos=[-1], emphasize_tokens=None, ctx=None
+):
     """Prompt EXACTLY as the model sees it: patch_pos (pivot) in salmon, emphasize_tokens in yellow."""
     _mt = ctx.mt if ctx is not None else mt
     ids = prepare_input(prompts=prompt, tokenizer=_mt).input_ids[0].tolist()
@@ -264,7 +285,9 @@ def exact_prompt(prompt, tail_tokens=None, patch_pos=[-1], emphasize_tokens=None
 def pivot_token(prompt, patch_pos=[-1], ctx=None):
     _mt = ctx.mt if ctx is not None else mt
     ids = prepare_input(prompts=prompt, tokenizer=_mt).input_ids[0].tolist()
-    return [_mt.tokenizer.decode([ids[len(ids) + p if p < 0 else p]]) for p in patch_pos]
+    return [
+        _mt.tokenizer.decode([ids[len(ids) + p if p < 0 else p]]) for p in patch_pos
+    ]
 
 
 def token_span(prompt, substring, ctx=None):
@@ -284,7 +307,9 @@ def show_prompt(tag, prompt, span, ctx=None):
     rich_print(
         Panel(
             Text.from_markup(
-                exact_prompt(prompt, patch_pos=[-1], emphasize_tokens=range(*span), ctx=ctx)
+                exact_prompt(
+                    prompt, patch_pos=[-1], emphasize_tokens=range(*span), ctx=ctx
+                )
             ),
             title=f"[bold]{tag}[/bold]  TASK span {span}  ·  pivot={pivot_token(prompt, ctx=ctx)!r}  ·  "
             f"L={prepare_input(prompts=prompt, tokenizer=_mt)['input_ids'].shape[1]}",
@@ -517,6 +542,7 @@ def greedy(tok, prefill_specs=None, decode_specs=None, n_steer=1, max_new=64, ct
 # source v are precomputed once. The cache is never patched → clean rides it; routing is
 # re-applied inside every forward. Only the patched layers are wrapped.
 
+
 def _attn_module(mt, layer):
     return baukit.get_module(mt._model, mt.attn_module_name_format.format(layer))
 
@@ -532,22 +558,31 @@ def _rope_source_span(mt, k_cache, v_cache, dest_positions, patched_kvheads):
     layers = sorted(patched_kvheads)
     sample = _attn_module(mt, layers[0])
     apply_rope = importlib.import_module(type(sample).__module__).apply_rotary_pos_emb
-    base = mt.layer_name_format.split(".layers")[0]                 # e.g. "model"
+    base = mt.layer_name_format.split(".layers")[0]  # e.g. "model"
     rot = baukit.get_module(mt._model, base + ".rotary_emb")
 
-    pos = torch.tensor([list(dest_positions)], device=dev)         # (1, S)
+    pos = torch.tensor([list(dest_positions)], device=dev)  # (1, S)
     dummy = torch.zeros(1, len(dest_positions), 1, device=dev, dtype=dt)
-    cos, sin = rot(dummy, pos)                                     # (1, S, hd)
-    cos, sin = cos.to(dev), sin.to(dev)  # rotary_emb may live on another shard under device_map="auto"
+    cos, sin = rot(dummy, pos)  # (1, S, hd)
+    cos, sin = (
+        cos.to(dev),
+        sin.to(dev),
+    )  # rotary_emb may live on another shard under device_map="auto"
 
     src_k, src_v = {}, {}
     for L in layers:
         kk, vv = {}, {}
         for kvh in patched_kvheads[L]:
-            k_slice = k_cache[L][:, kvh * hd:(kvh + 1) * hd].to(dev, dt)[None, None]  # (1,1,S,hd)
-            _, k_roped = apply_rope(torch.zeros_like(k_slice), k_slice, cos, sin)     # RoPE @ dest pos
-            kk[kvh] = k_roped[0, 0].to(dt)                          # (S, hd)
-            vv[kvh] = v_cache[L][:, kvh * hd:(kvh + 1) * hd].to(dev, dt)  # (S, hd) — values not RoPE'd
+            k_slice = k_cache[L][:, kvh * hd : (kvh + 1) * hd].to(dev, dt)[
+                None, None
+            ]  # (1,1,S,hd)
+            _, k_roped = apply_rope(
+                torch.zeros_like(k_slice), k_slice, cos, sin
+            )  # RoPE @ dest pos
+            kk[kvh] = k_roped[0, 0].to(dt)  # (S, hd)
+            vv[kvh] = v_cache[L][:, kvh * hd : (kvh + 1) * hd].to(
+                dev, dt
+            )  # (S, hd) — values not RoPE'd
         src_k[L], src_v[L] = kk, vv
     return src_k, src_v
 
@@ -559,8 +594,15 @@ def _make_headwise_forward(sample_module, state):
     eager = m.eager_attention_forward
     apply_rope = m.apply_rotary_pos_emb
 
-    def forward(self, hidden_states, position_embeddings, attention_mask,
-                past_key_values=None, cache_position=None, **kwargs):
+    def forward(
+        self,
+        hidden_states,
+        position_embeddings,
+        attention_mask,
+        past_key_values=None,
+        cache_position=None,
+        **kwargs,
+    ):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
         q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
@@ -570,23 +612,47 @@ def _make_headwise_forward(sample_module, state):
         q, k = apply_rope(q, k, cos, sin)
         if past_key_values is not None:
             k, v = past_key_values.update(
-                k, v, self.layer_idx,
-                {"sin": sin, "cos": cos, "cache_position": cache_position})
+                k,
+                v,
+                self.layer_idx,
+                {"sin": sin, "cos": cos, "cache_position": cache_position},
+            )
         sw = getattr(self, "sliding_window", None)
-        out_clean, w = eager(self, q, k, v, attention_mask, dropout=0.0,
-                             scaling=self.scaling, sliding_window=sw, **kwargs)
+        out_clean, w = eager(
+            self,
+            q,
+            k,
+            v,
+            attention_mask,
+            dropout=0.0,
+            scaling=self.scaling,
+            sliding_window=sw,
+            **kwargs,
+        )
         gh = state["goal_qheads"].get(self.layer_idx)
         if gh:
             span = state["span"]
-            src_k, src_v = state["src_k"][self.layer_idx], state["src_v"][self.layer_idx]
+            src_k, src_v = (
+                state["src_k"][self.layer_idx],
+                state["src_v"][self.layer_idx],
+            )
             k2, v2 = k.clone(), v.clone()
-            for kvh in src_k:                                      # replace span for patched kv-heads only
+            for kvh in src_k:  # replace span for patched kv-heads only
                 k2[:, kvh, span, :] = src_k[kvh].to(k2.device, k2.dtype)
                 v2[:, kvh, span, :] = src_v[kvh].to(v2.device, v2.dtype)
-            out_patched, _ = eager(self, q, k2, v2, attention_mask, dropout=0.0,
-                                   scaling=self.scaling, sliding_window=sw, **kwargs)
+            out_patched, _ = eager(
+                self,
+                q,
+                k2,
+                v2,
+                attention_mask,
+                dropout=0.0,
+                scaling=self.scaling,
+                sliding_window=sw,
+                **kwargs,
+            )
             out = out_clean.clone()
-            out[:, :, gh, :] = out_patched[:, :, gh, :]            # route per query head
+            out[:, :, gh, :] = out_patched[:, :, gh, :]  # route per query head
         else:
             out = out_clean
         attn_output = out.reshape(*input_shape, -1).contiguous()
@@ -596,7 +662,9 @@ def _make_headwise_forward(sample_module, state):
 
 
 @contextmanager
-def headwise_kv_patch(mt, patch_heads, k_cache, v_cache, dest_positions, route_group=False):
+def headwise_kv_patch(
+    mt, patch_heads, k_cache, v_cache, dest_positions, route_group=False
+):
     """Wrap the patched layers' attention so ONLY `patch_heads` (query heads) read the source span k/v;
     all other heads (in-group bled + out-of-group) read the clean dest k/v. Fixes the GQA bleed.
 
@@ -606,19 +674,28 @@ def headwise_kv_patch(mt, patch_heads, k_cache, v_cache, dest_positions, route_g
     route_group=True routes ALL query heads of each patched group (= reproduces the raw bled patch) —
     used only for the equivalence self-test (should match greedy(prefill_specs=patch_specs))."""
     n_kv = getattr(mt, "n_kv_heads", None) or mt.config.num_key_value_heads
-    group = mt.n_heads // n_kv                                     # GQA group size, from mt (not module GROUP)
+    group = mt.n_heads // n_kv  # GQA group size, from mt (not module GROUP)
     sel_q, patched_kv = defaultdict(set), defaultdict(set)
-    for (l, h) in patch_heads:                                    # patch_heads: list of (layer, query_head)
+    for l, h in patch_heads:  # patch_heads: list of (layer, query_head)
         sel_q[l].add(h)
         patched_kv[l].add(h // group)
     patched_kvheads = {l: sorted(kvs) for l, kvs in patched_kv.items()}
-    if route_group:                                               # every query head in a patched group
-        goal_qheads = {l: sorted(g * group + i for g in kvs for i in range(group))
-                       for l, kvs in patched_kvheads.items()}
-    else:                                                         # only the selected query heads
+    if route_group:  # every query head in a patched group
+        goal_qheads = {
+            l: sorted(g * group + i for g in kvs for i in range(group))
+            for l, kvs in patched_kvheads.items()
+        }
+    else:  # only the selected query heads
         goal_qheads = {l: sorted(hs) for l, hs in sel_q.items()}
-    src_k, src_v = _rope_source_span(mt, k_cache, v_cache, dest_positions, patched_kvheads)
-    state = {"goal_qheads": goal_qheads, "span": list(dest_positions), "src_k": src_k, "src_v": src_v}
+    src_k, src_v = _rope_source_span(
+        mt, k_cache, v_cache, dest_positions, patched_kvheads
+    )
+    state = {
+        "goal_qheads": goal_qheads,
+        "span": list(dest_positions),
+        "src_k": src_k,
+        "src_v": src_v,
+    }
     originals = {}
     try:
         for L in goal_qheads:
