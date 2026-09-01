@@ -302,16 +302,16 @@ def token_span(prompt, substring, ctx=None):
     return min(toks), max(toks) + 1
 
 
-def show_prompt(tag, prompt, span, ctx=None):
+def show_prompt(tag, prompt, span, ctx=None, neg_shift=-1):
     _mt = ctx.mt if ctx is not None else mt
     rich_print(
         Panel(
             Text.from_markup(
                 exact_prompt(
-                    prompt, patch_pos=[-1], emphasize_tokens=range(*span), ctx=ctx
+                    prompt, patch_pos=[neg_shift], emphasize_tokens=range(*span), ctx=ctx
                 )
             ),
-            title=f"[bold]{tag}[/bold]  TASK span {span}  ·  pivot={pivot_token(prompt, ctx=ctx)!r}  ·  "
+            title=f"[bold]{tag}[/bold]  TASK span {span}  ·  pivot={pivot_token(prompt, patch_pos=[neg_shift], ctx=ctx)!r}  ·  "
             f"L={prepare_input(prompts=prompt, tokenizer=_mt)['input_ids'].shape[1]}",
             title_align="left",
             border_style="grey42",
