@@ -233,6 +233,15 @@ class QTransferInstance:
             p.description for p in self.task.predicates if p.id == self.expected_next
         )
 
+    @property
+    def dst_next_desc(self) -> str:
+        did = self.meta.get("dst_next")
+        return next(p.description for p in self.task.predicates if p.id == did)
+
+    @property
+    def task_desc(self) -> str:
+        return "; ".join(p.description for p in self.task.predicates)
+
 
 @dataclass
 class KVTransferInstance:
@@ -371,6 +380,14 @@ class FilterTransferInstance:
     @property
     def expected_next_desc(self) -> str:
         return self._cond(self.expected_next).description
+
+    @property
+    def dst_next_desc(self) -> str:
+        return self._cond(self.meta["dst_next"]).description
+
+    @property
+    def task_desc(self) -> str:
+        return self.task_text
 
 
 def materialize(instance, ctx=None) -> dict:
