@@ -39,6 +39,25 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+
+def _preparse_cuda(argv):
+    """Read --cuda from argv BEFORE importing torch. CUDA_VISIBLE_DEVICES is honored only if set
+    before the CUDA context initializes, which happens on the first torch.cuda call — and something
+    in the import chain (transformers/nnsight/src.models) touches it at import time. Setting it in
+    main() is too late (the model then spreads over ALL gpus)."""
+    for i, a in enumerate(argv):
+        if a == "--cuda" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--cuda="):
+            return a.split("=", 1)[1]
+    return None
+
+
+_cuda = _preparse_cuda(sys.argv[1:])
+if _cuda:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _cuda
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import src.diff.data as D  # noqa: E402
 import src.diff.eval as E  # noqa: E402
 import src.diff.functional as P  # noqa: E402
@@ -350,10 +369,12 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.cuda:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # NOTE: --cuda is already applied at import time by _preparse_cuda (must precede the torch
+    # import). args.cuda here is only for logging / sanity.
     logging_utils.configure(level=logging.INFO)
+    if args.cuda:
+        logger.info(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+                    f"(requested {args.cuda})")
 
     ctx = P.setup(args.model)  # loads model + head masks; binds module globals
     mt = ctx.mt
