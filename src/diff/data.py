@@ -1401,8 +1401,11 @@ def q_transfer_setups(
          The test: after patching, does the LM's IMMEDIATE next computation jump to SRC's target?
 
     Requires ``dst_n_prefill < src_n_prefill < k`` and ``dst_n_prefill >= 1`` for every sampled k.
-    Instances are deduped by (task ordering) and reproducible via ``seed`` (drawn in a fixed sequence
-    so a larger ``n_samples`` extends the same prefix — resume-stable).
+    Only the CONCEPT PAIR (SRC target = ids[src_n_prefill], DST frontier = ids[dst_n_prefill]) is the
+    unit of interest — the anchor and other prefilled conditions are nuisance fillers, sampled at
+    random. Instances are therefore deduped by the ORDERED concept pair (src_target, dst_frontier),
+    so ``n_samples`` counts distinct concept pairs (≤ len(bank)*(len(bank)-1)); reproducible via
+    ``seed`` (fixed draw sequence — resume-stable).
 
         naming : result variable names — "natural" (descriptive) or "letters" (a/b/c/d).
     """
@@ -1421,14 +1424,20 @@ def q_transfer_setups(
         if len(out) >= n_samples:
             break
         k = rng.choice(ks)                        # task size for this instance
-        src_len = k - 1 if src_n_prefill is None else src_n_prefill  # SRC frontier = last (default)
-        dst_len = dst_n_prefill                                       # DST frontier (default: 2nd)
-        subset = rng.sample(preds, k)             # random ordered k-subset (the task)
-        ids = [p.id for p in subset]
-        key = (tuple(ids), src_len, dst_len)
-        if key in seen:
+        src_len = k - 1 if src_n_prefill is None else src_n_prefill  # SRC target position (default last)
+        dst_len = dst_n_prefill                                       # DST frontier position (default 1)
+        src_target, dst_frontier = rng.sample(preds, 2)   # the CONCEPT PAIR (dedup unit)
+        ckey = (src_target.id, dst_frontier.id)
+        if ckey in seen:
             continue
-        seen.add(key)
+        seen.add(ckey)
+        # place the concept pair at their split positions; fill the rest with random nuisance preds
+        others = [p for p in preds if p.id not in (src_target.id, dst_frontier.id)]
+        fillers = iter(rng.sample(others, k - 2))
+        slots = [None] * k
+        slots[src_len], slots[dst_len] = src_target, dst_frontier
+        subset = [s if s is not None else next(fillers) for s in slots]
+        ids = [p.id for p in subset]
         task = dataclasses.replace(
             bank, id=f"{bank.id}_k{k}", predicates=tuple(subset)
         )
