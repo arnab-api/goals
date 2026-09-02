@@ -1379,26 +1379,30 @@ def q_transfer_setups(
     n_conditions: "int | list[int]" = (3, 4, 5),
     n_samples: int = 8,
     seed: int = 0,
+    src_n_prefill: Optional[int] = None,
+    dst_n_prefill: int = 1,
     presentation: Presentation = "listed",
     naming: Literal["natural", "letters"] = "natural",
     src_lang: Lang = "python",
     dst_lang: Lang = "python",
 ) -> list[QTransferInstance]:
-    """Sample ``n_samples`` contrastive q-transfer instances (01 A-experiment style). Each instance:
+    """Sample ``n_samples`` contrastive q-transfer instances (01 A-experiment style). SRC.task ==
+    DST.task; only the amount of prefilled PROGRESS differs. Each instance:
 
-      1. draws a random TASK of ``k`` predicates — where ``k`` is ``n_conditions`` if it is an int,
-         else a per-instance random pick from the ``n_conditions`` list (so task SIZE mixes over,
-         e.g., {3,4,5} without multiplying configs). Predicates are independent, commutative, sampled
-         without replacement in random order from the datatype's bank; and
-      2. draws a random CONTIGUOUS contrastive split: both sides prefill a prefix of that task, SRC's
-         strictly LONGER, so their frontiers (= the next predicate to write) differ by construction:
-             DST progress = ids[:dst_len] -> DST frontier = ids[dst_len]
-             SRC progress = ids[:src_len] -> SRC frontier = ids[src_len] = expected_next  (src_len>dst_len)
+      1. draws a random TASK of ``k`` predicates — ``k`` is ``n_conditions`` if int, else a
+         per-instance random pick from the ``n_conditions`` list (task SIZE mixes over, e.g. {3,4,5},
+         without multiplying configs). Independent, commutative predicates, sampled without
+         replacement in random order from the datatype's bank; and
+      2. uses a FIXED contrastive split (randomness is only in *which* predicates):
+             SRC prefills ``src_n_prefill`` (default k-1) -> SRC frontier = ids[src_n_prefill]
+                 (default = the LAST condition = the transplant target)
+             DST prefills ``dst_n_prefill`` (default 1)   -> DST frontier = ids[dst_n_prefill]
+                 (default = only the first condition prefilled)
+         The test: after patching, does the LM's IMMEDIATE next computation jump to SRC's target?
 
-    ``n_conditions`` is the SIZE of each sampled task (typically 3–5), NOT a slice of the bank.
-    Instances are deduped by (task ordering, split) and reproducible via ``seed`` (drawn in a fixed
-    sequence so a larger ``n_samples`` extends the same prefix — resume-stable). ids[0] of each task
-    is its always-prefilled style anchor.
+    Requires ``dst_n_prefill < src_n_prefill < k`` and ``dst_n_prefill >= 1`` for every sampled k.
+    Instances are deduped by (task ordering) and reproducible via ``seed`` (drawn in a fixed sequence
+    so a larger ``n_samples`` extends the same prefix — resume-stable).
 
         naming : result variable names — "natural" (descriptive) or "letters" (a/b/c/d).
     """
@@ -1406,17 +1410,22 @@ def q_transfer_setups(
     preds = list(bank.predicates)
     ks = [n_conditions] if isinstance(n_conditions, int) else list(n_conditions)
     assert ks and all(3 <= k <= len(preds) for k in ks), f"n_conditions must be in [3, {len(preds)}]"
+    for k in ks:  # validate the fixed split against every task size
+        sp = k - 1 if src_n_prefill is None else src_n_prefill
+        assert 1 <= dst_n_prefill < sp < k, (
+            f"need 1 <= dst_n_prefill({dst_n_prefill}) < src_n_prefill({sp}) < n_conditions({k})"
+        )
     rng = random.Random(seed)
     out, seen = [], set()
     for _ in range(n_samples * 200):
         if len(out) >= n_samples:
             break
         k = rng.choice(ks)                        # task size for this instance
+        src_len = k - 1 if src_n_prefill is None else src_n_prefill  # SRC frontier = last (default)
+        dst_len = dst_n_prefill                                       # DST frontier (default: 2nd)
         subset = rng.sample(preds, k)             # random ordered k-subset (the task)
         ids = [p.id for p in subset]
-        dst_len = rng.randint(1, k - 2)           # DST prefix (>=1 anchor)
-        src_len = rng.randint(dst_len + 1, k - 1)  # SRC strictly longer
-        key = (tuple(ids), dst_len, src_len)
+        key = (tuple(ids), src_len, dst_len)
         if key in seen:
             continue
         seen.add(key)

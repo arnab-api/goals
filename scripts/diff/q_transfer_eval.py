@@ -188,6 +188,7 @@ def run_config(mt, args, dt, naming, sl, dl, patch_heads, readout_heads, out_roo
     set_seed(cfg_seed)
     setups = D.q_transfer_setups(
         dt, n_conditions=args.n_conditions, n_samples=args.n_samples, seed=cfg_seed,
+        src_n_prefill=args.src_n_prefill, dst_n_prefill=args.dst_n_prefill,
         presentation="listed", naming=naming or "natural", src_lang=sl, dst_lang=dl,
     )
 
@@ -343,6 +344,15 @@ def parse_args():
         "--n-conditions", type=int, nargs="+", default=[3, 4, 5],
         help="task sizes to sample from (per instance, one is chosen at random from this list); "
              "each = #independent commutative predicates in the task",
+    )
+    p.add_argument(
+        "--src-n-prefill", type=int, default=None,
+        help="#conditions prefilled in SRC (default k-1 => SRC target is the LAST condition)",
+    )
+    p.add_argument(
+        "--dst-n-prefill", type=int, default=1,
+        help="#conditions prefilled in DST (default 1 => only the first prefilled). "
+             "Requires dst_n_prefill < src_n_prefill < n_conditions.",
     )
     p.add_argument(
         "--n-samples", type=int, default=8,

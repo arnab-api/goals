@@ -102,11 +102,14 @@ def classify_concept(
 # 1. causal success — oracle over the patched code continuation
 # ══════════════════════════════════════════════════════════════════════════════
 def judge_causal(inst, patched_gen: str, **kw) -> dict:
-    """Did the patched DST continuation pursue the SRC target (or a non-trivial part)? Returns the
+    """Did the patched DST's IMMEDIATE next computation jump to the SRC target? We judge only the
+    FIRST computation/statement of the continuation — after producing SRC's target the model may go
+    back and do the other conditions, and the intervention is NOT penalized for that. Returns the
     classification dict plus ``triggered`` (label in {src, both})."""
     r = classify_concept(
         patched_gen, inst.expected_next_desc, inst.dst_next_desc, inst.task_desc,
-        kind="the code the model generated to continue the function (after the pivot)", **kw)
+        kind="the code the model generated to continue the function after the pivot. Judge ONLY the "
+             "FIRST computation/statement it performs (ignore anything it does afterwards)", **kw)
     r["triggered"] = r["label"] in ("src", "both")
     return r
 
