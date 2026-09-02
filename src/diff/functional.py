@@ -1,20 +1,27 @@
-"""Shared primitives for the DIFF-mechanism notebooks (01/02/03).
+"""Interventions, generations, and debugging/visualization utilities for the DIFF
+hypothesis — the ``src.diff`` submodule's functional core.
 
-Lifted out of ``00_diff.ipynb`` (cells 1/3/4/6) so the three experiment notebooks
-single-source the model, head sets, prompt builders, q/k/v transplant machinery and
-readouts.
+Originally lifted out of ``00_diff.ipynb`` (cells 1/3/4/6) as
+``notebooks/diff/_diff_primitives.py``; promoted to ``src/diff/functional.py`` so the
+experiment notebooks (00/01/02/03) and the scaled-up scripts single-source the model,
+head sets, prompt builders, q/k/v transplant machinery and readouts.
+
+Sibling modules in this package:
+    ``src.diff.data``  — data generation for Spec-1 (query-transfer) and Spec-2 (kv-transfer).
+    ``src.diff.eval``  — evaluation utils for the q-transfer and kv-transfer interventions.
 
 Usage in a notebook::
 
-    import sys; sys.path.append("..")            # so `_diff_primitives` is importable
-    import _diff_primitives as P
-    P.setup("Qwen/Qwen2.5-Coder-32B-Instruct")   # loads model + head masks (once)
-    from _diff_primitives import *                # pull the helper functions into scope
+    import sys; sys.path.append("../..")             # repo root, so `src` is importable
+    import src.diff.functional as P
+    P.setup("Qwen/Qwen2.5-Coder-32B-Instruct")       # loads model + head masks (once)
+    from src.diff.functional import *                # pull the helper functions into scope
     mt, GOAL_HEADS, BOUNDARY_HEADS = P.mt, P.GOAL_HEADS, P.BOUNDARY_HEADS
 
 The helper functions look up the module-global ``mt`` (and ``GROUP``, head sets, …) that
 ``setup()`` binds, so ``from … import *`` before ``setup()`` is fine — the functions
-resolve those names at call time.
+resolve those names at call time. Prefer passing an explicit ``ctx=`` (a :class:`Ctx`
+from ``setup()``) in library code: it survives ``%autoreload`` and avoids the globals.
 """
 
 import logging
@@ -706,6 +713,45 @@ def headwise_kv_patch(
     finally:
         for L, f in originals.items():
             _attn_module(mt, L).forward = f
+
+
+@contextmanager
+def boost_head_ov(mt, heads, alpha, positions=(-1,)):
+    """Scale the OV contribution of `heads` (query-head (layer, h)) by `alpha` for this forward — i.e.
+    amplify how much those heads WRITE into the residual stream. o_proj is linear (no bias in Qwen2),
+    so scaling a head's o_proj-INPUT slice by `alpha` scales its residual contribution by `alpha`.
+    Applied at `positions` of each forward (default last token = the decision point each decode step;
+    pass `positions=None` for every position). Composable with `headwise_kv_patch` — stack the two
+    `with` blocks. `alpha == 1.0` is a no-op."""
+    hd = mt.head_dim
+    by_layer = defaultdict(list)
+    for l, h in heads:
+        by_layer[l].append(h)
+    handles = []
+    try:
+        for layer, hs in by_layer.items():
+            mod = baukit.get_module(mt._model, _proj_name(layer, "o", mt))
+
+            def make(hs):
+                def pre_hook(module, args):
+                    x = args[0]
+                    seq = x.shape[1]
+                    pos = (list(range(seq)) if positions is None
+                           else [p if p >= 0 else seq + p for p in positions if -seq <= p < seq])
+                    if not pos or alpha == 1.0:
+                        return None
+                    x = x.clone()
+                    for h in hs:
+                        x[:, pos, h * hd:(h + 1) * hd] *= alpha
+                    return (x,) + tuple(args[1:])
+
+                return pre_hook
+
+            handles.append(mod.register_forward_pre_hook(make(hs)))
+        yield
+    finally:
+        for hnd in handles:
+            hnd.remove()
 
 
 def make_headwise_interface(mt, patch_heads, k_cache, v_cache, dest_positions):
