@@ -842,3 +842,98 @@ def cos(u, v):
     u = torch.as_tensor(np.asarray(u), dtype=torch.float32).flatten()
     v = torch.as_tensor(np.asarray(v), dtype=torch.float32).flatten()
     return float((u @ v) / (u.norm() * v.norm()).clamp_min(1e-8))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# q-transfer intervention runner (single source for the 04 notebook + batch eval)
+# ══════════════════════════════════════════════════════════════════════════════
+def run_q_transfer_intervention(
+    mt,
+    inst,
+    patch_heads,
+    readout_heads=None,
+    *,
+    n_steer=16,
+    max_new=96,
+    ctx=None,
+):
+    """Run one q-transfer (or composed-filter) intervention and return all RAW artifacts as
+    JSON-native types. Caches the SRC pivot query over ``patch_heads`` and injects it at the DST
+    pivot (prefill + re-clamped for ``n_steer`` decode steps); collects clean-SRC / clean-DST /
+    patched-DST generations, the three goalscope readouts (over ``readout_heads``, default =
+    ``patch_heads``), and value-weighted pivot→TASK attention (clean & patched) for the gaze eval.
+
+    Works for both ``QTransferInstance`` (TASK = numbered predicate list) and
+    ``FilterTransferInstance`` (TASK = the composed phrase); the span is chosen accordingly.
+    Returns a dict consumed directly by :func:`src.diff.eval.eval_q_transfer`."""
+    from src.attention import get_attention_matrices
+    from src.diff.data import materialize
+
+    readout_heads = readout_heads or patch_heads
+    m = materialize(inst, ctx=ctx)
+    src_prompt, dst_prompt = m["src_prompt"], m["dst_prompt"]
+
+    def _piv(p):
+        return prepare_input(prompts=p, tokenizer=mt)["input_ids"].shape[1] - 1
+
+    piv_src, piv_dst = _piv(src_prompt), _piv(dst_prompt)
+    src_tok = prepare_input(prompts=src_prompt, tokenizer=mt)
+    dst_tok = prepare_input(prompts=dst_prompt, tokenizer=mt)
+
+    # TASK span: composed phrase (filter) or the union over the numbered predicate list (q)
+    if "task_text" in m:
+        lo, hi = token_span(dst_prompt, m["task_text"], ctx=ctx)
+    else:
+        spans = [token_span(dst_prompt, p.description, ctx=ctx) for p in inst.task.predicates]
+        lo, hi = min(s[0] for s in spans), max(s[1] for s in spans)
+    task_positions = list(range(lo, hi))
+    task_tokens = [mt.tokenizer.decode([int(dst_tok["input_ids"][0][j])]) for j in task_positions]
+
+    # query transplant specs
+    q_layers = sorted({l for l, _ in patch_heads})
+    q_src = cache_src_proj(src_prompt, [piv_src], q_layers, "q", ctx=ctx)
+    qh = heads_per_layer(patch_heads, "q", ctx=ctx)
+    pf = [dict(which="q", cache=q_src, heads=qh, positions=[piv_dst])]
+    dc = [dict(which="q", cache=q_src, heads=qh, positions=[-1])]
+    iface = make_patch_interface(mt, pf)
+
+    # generations
+    gen_src = greedy(src_tok, max_new=max_new, ctx=ctx)
+    gen_dst = greedy(dst_tok, max_new=max_new, ctx=ctx)
+    gen_patched = greedy(
+        dst_tok, prefill_specs=pf, decode_specs=dc, n_steer=n_steer, max_new=max_new, ctx=ctx
+    )
+
+    # goalscope readouts (source / destination / patched under the same query patch)
+    def _ro(prompt, piv, iface=None):
+        return goalscope_readout("", prompt, piv, heads=readout_heads, iface=iface, ctx=ctx)[0][
+            "patched_gen"
+        ]
+
+    ro_src = _ro(src_prompt, piv_src)
+    ro_dst = _ro(dst_prompt, piv_dst)
+    ro_patched = _ro(dst_prompt, piv_dst, iface=iface)
+
+    # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched
+    clean_i = get_attention_matrices(dst_tok, mt, value_weighted=True)
+    patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=iface)
+    a_clean = pivot_attn(clean_i, list(readout_heads), task_positions, piv_dst)
+    a_patched = pivot_attn(patched_i, list(readout_heads), task_positions, piv_dst)
+
+    return dict(
+        src_prompt=src_prompt,
+        dst_prompt=dst_prompt,
+        piv_src=piv_src,
+        piv_dst=piv_dst,
+        task_positions=task_positions,
+        task_tokens=task_tokens,
+        gen_src=gen_src,
+        gen_dst=gen_dst,
+        gen_patched=gen_patched,
+        ro_src=ro_src,
+        ro_dst=ro_dst,
+        ro_patched=ro_patched,
+        attn_clean=[float(x) for x in a_clean],
+        attn_patched=[float(x) for x in a_patched],
+        attn_delta=[float(x) for x in (a_patched - a_clean)],
+    )
