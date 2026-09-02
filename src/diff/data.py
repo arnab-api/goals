@@ -1376,7 +1376,7 @@ FILTER_TASKS: dict[str, FilterTask] = {
 # ══════════════════════════════════════════════════════════════════════════════
 def q_transfer_setups(
     datatype: str,
-    n_conditions: int = 4,
+    n_conditions: "int | list[int]" = (3, 4, 5),
     n_samples: int = 8,
     seed: int = 0,
     presentation: Presentation = "listed",
@@ -1386,14 +1386,16 @@ def q_transfer_setups(
 ) -> list[QTransferInstance]:
     """Sample ``n_samples`` contrastive q-transfer instances (01 A-experiment style). Each instance:
 
-      1. draws a random ``n_conditions``-predicate TASK — independent, commutative predicates sampled
-         (without replacement, in random order) from the datatype's bank; and
+      1. draws a random TASK of ``k`` predicates — where ``k`` is ``n_conditions`` if it is an int,
+         else a per-instance random pick from the ``n_conditions`` list (so task SIZE mixes over,
+         e.g., {3,4,5} without multiplying configs). Predicates are independent, commutative, sampled
+         without replacement in random order from the datatype's bank; and
       2. draws a random CONTIGUOUS contrastive split: both sides prefill a prefix of that task, SRC's
          strictly LONGER, so their frontiers (= the next predicate to write) differ by construction:
              DST progress = ids[:dst_len] -> DST frontier = ids[dst_len]
              SRC progress = ids[:src_len] -> SRC frontier = ids[src_len] = expected_next  (src_len>dst_len)
 
-    So ``n_conditions`` is the SIZE of each sampled task (typically 3–5), NOT a slice of the bank.
+    ``n_conditions`` is the SIZE of each sampled task (typically 3–5), NOT a slice of the bank.
     Instances are deduped by (task ordering, split) and reproducible via ``seed`` (drawn in a fixed
     sequence so a larger ``n_samples`` extends the same prefix — resume-stable). ids[0] of each task
     is its always-prefilled style anchor.
@@ -1402,22 +1404,24 @@ def q_transfer_setups(
     """
     bank = QTASKS[datatype]
     preds = list(bank.predicates)
-    assert 3 <= n_conditions <= len(preds), f"n_conditions must be in [3, {len(preds)}]"
+    ks = [n_conditions] if isinstance(n_conditions, int) else list(n_conditions)
+    assert ks and all(3 <= k <= len(preds) for k in ks), f"n_conditions must be in [3, {len(preds)}]"
     rng = random.Random(seed)
     out, seen = [], set()
     for _ in range(n_samples * 200):
         if len(out) >= n_samples:
             break
-        subset = rng.sample(preds, n_conditions)  # random ordered k-subset (the task)
+        k = rng.choice(ks)                        # task size for this instance
+        subset = rng.sample(preds, k)             # random ordered k-subset (the task)
         ids = [p.id for p in subset]
-        dst_len = rng.randint(1, n_conditions - 2)  # DST prefix (>=1 anchor)
-        src_len = rng.randint(dst_len + 1, n_conditions - 1)  # SRC strictly longer
+        dst_len = rng.randint(1, k - 2)           # DST prefix (>=1 anchor)
+        src_len = rng.randint(dst_len + 1, k - 1)  # SRC strictly longer
         key = (tuple(ids), dst_len, src_len)
         if key in seen:
             continue
         seen.add(key)
         task = dataclasses.replace(
-            bank, id=f"{bank.id}_k{n_conditions}", predicates=tuple(subset)
+            bank, id=f"{bank.id}_k{k}", predicates=tuple(subset)
         )
         out.append(
             QTransferInstance(

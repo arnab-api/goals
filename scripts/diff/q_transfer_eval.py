@@ -210,7 +210,7 @@ def run_config(mt, args, dt, naming, sl, dl, patch_heads, readout_heads, out_roo
         key = _inst_key(inst)
         # contrastive concept pair: SRC frontier (transplant target) -> DST frontier (clean)
         logger.info(
-            f"[{tag}] ({j}/{len(todo)}) [{inst.naming}] "
+            f"[{tag}] ({j}/{len(todo)}) [k={len(inst.task.predicates)},{inst.naming}] "
             f"SRC {inst.expected_next!r} -> DST {inst.meta['dst_next']!r}"
             f"  |  {inst.expected_next_desc!r}  vs  {inst.dst_next_desc!r}"
         )
@@ -340,8 +340,9 @@ def parse_args():
         help="heads carrying the query transplant (also the readout/gaze heads)",
     )
     p.add_argument(
-        "--n-conditions", type=int, default=4,
-        help="number of predicates per sampled task (independent, commutative; typically 3-5)",
+        "--n-conditions", type=int, nargs="+", default=[3, 4, 5],
+        help="task sizes to sample from (per instance, one is chosen at random from this list); "
+             "each = #independent commutative predicates in the task",
     )
     p.add_argument(
         "--n-samples", type=int, default=8,
