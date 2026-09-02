@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import random
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -425,206 +426,482 @@ def _P(id, description, result_name, py, cpp):
 
 
 QTASKS: dict[str, QTransferTask] = {
-    'list[str]': QTransferTask('wordflags', 'list[str]', ('words', 'arr'), (
-        _P('has_palindrome', 'whether any word is a palindrome', 'has_palindrome',
-           '{res} = any(w == w[::-1] for w in {arg})',
-           'bool {res} = false;\n    for (auto& w : {arg}) { std::string rv(w.rbegin(), w.rend()); if (w == rv) { {res} = true; break; } }'),
-        _P('total_length', 'the total number of characters across all words', 'total_length',
-           '{res} = sum(len(w) for w in {arg})',
-           'int {res} = 0;\n    for (auto& w : {arg}) {res} += w.size();'),
-        _P('count_long', 'the number of words longer than five characters', 'count_long',
-           '{res} = sum(1 for w in {arg} if len(w) > 5)',
-           'int {res} = 0;\n    for (auto& w : {arg}) if (w.size() > 5) {res}++;'),
-        _P('count_capitalized', 'the number of capitalized words', 'count_capitalized',
-           '{res} = sum(1 for w in {arg} if w[:1].isupper())',
-           'int {res} = 0;\n    for (auto& w : {arg}) if (!w.empty() && std::isupper((unsigned char)w[0])) {res}++;'),
-        _P('distinct_count', 'the number of distinct words', 'distinct_count',
-           '{res} = len(set({arg}))',
-           'std::set<std::string> {res}_s({arg}.begin(), {arg}.end());\n    int {res} = {res}_s.size();'),
-        _P('count_starts_vowel', 'the number of words that start with a vowel', 'starts_vowel_count',
-           '{res} = sum(1 for w in {arg} if w and w[0].lower() in "aeiou")',
-           "int {res} = 0;\nfor(auto &{res}_w : {arg}){ if(!{res}_w.empty()){ char {res}_c = std::tolower((unsigned char){res}_w[0]); if({res}_c=='a'||{res}_c=='e'||{res}_c=='i'||{res}_c=='o'||{res}_c=='u') {res}++; } }"),
-        _P('count_with_digit', 'the number of words that contain a digit', 'words_with_digit',
-           '{res} = sum(1 for w in {arg} if any(c.isdigit() for c in w))',
-           'int {res} = 0;\nfor(auto &{res}_w : {arg}){ bool {res}_f = false; for(char {res}_c : {res}_w) if(std::isdigit((unsigned char){res}_c)) {res}_f = true; if({res}_f) {res}++; }'),
-        _P('count_all_lowercase', 'the number of words written entirely in lowercase letters', 'all_lower_count',
-           '{res} = sum(1 for w in {arg} if w.islower())',
-           'int {res} = 0;\nfor(auto &{res}_w : {arg}){ bool {res}_has = false, {res}_ok = true; for(char {res}_c : {res}_w){ if(std::isalpha((unsigned char){res}_c)){ {res}_has = true; if(std::isupper((unsigned char){res}_c)) {res}_ok = false; } } if({res}_has && {res}_ok) {res}++; }'),
-        _P('count_short', 'the number of words shorter than three characters', 'short_word_count',
-           '{res} = sum(1 for w in {arg} if len(w) < 3)',
-           'int {res} = 0;\nfor(auto &{res}_w : {arg}) if({res}_w.size() < 3) {res}++;'),
-        _P('longest_word_length', 'the length of the longest word', 'longest_len',
-           '{res} = max(len(w) for w in {arg})',
-           'int {res} = 0;\nfor(auto &{res}_w : {arg}) if((int){res}_w.size() > {res}) {res} = (int){res}_w.size();'),
-        _P('shortest_word_length', 'the length of the shortest word', 'shortest_len',
-           '{res} = min(len(w) for w in {arg})',
-           'int {res} = INT_MAX;\nfor(auto &{res}_w : {arg}) if((int){res}_w.size() < {res}) {res} = (int){res}_w.size();'),
-        _P('total_vowels', 'the total number of vowels across all words', 'vowel_total',
-           '{res} = sum(1 for w in {arg} for c in w if c.lower() in "aeiou")',
-           "int {res} = 0;\nfor(auto &{res}_w : {arg}) for(char {res}_c : {res}_w){ char {res}_l = std::tolower((unsigned char){res}_c); if({res}_l=='a'||{res}_l=='e'||{res}_l=='i'||{res}_l=='o'||{res}_l=='u') {res}++; }"),
-        _P('any_empty', 'whether any word is empty', 'has_empty_word',
-           '{res} = any(len(w) == 0 for w in {arg})',
-           'bool {res} = false;\nfor(auto &{res}_w : {arg}) if({res}_w.empty()) {res} = true;'),
-        _P('all_unique_lengths', 'whether all words have distinct lengths', 'unique_lengths',
-           '{res} = len(set(len(w) for w in {arg})) == len({arg})',
-           'std::set<int> {res}_s;\nfor(auto &{res}_w : {arg}) {res}_s.insert((int){res}_w.size());\nbool {res} = {res}_s.size() == {arg}.size();'),
-        _P('count_ends_consonant', 'the number of words that end with a consonant', 'ends_consonant_count',
-           '{res} = sum(1 for w in {arg} if w and w[-1].isalpha() and w[-1].lower() not in "aeiou")',
-           "int {res} = 0;\nfor(auto &{res}_w : {arg}){ if(!{res}_w.empty()){ char {res}_c = {res}_w.back(); if(std::isalpha((unsigned char){res}_c)){ char {res}_l = std::tolower((unsigned char){res}_c); if(!({res}_l=='a'||{res}_l=='e'||{res}_l=='i'||{res}_l=='o'||{res}_l=='u')) {res}++; } } }"),
-        _P('total_uppercase_letters', 'the total number of uppercase letters across all words', 'uppercase_total',
-           '{res} = sum(1 for w in {arg} for c in w if c.isupper())',
-           'int {res} = 0;\nfor(auto &{res}_w : {arg}) for(char {res}_c : {res}_w) if(std::isupper((unsigned char){res}_c)) {res}++;'),
-    )),
-    'list[int]': QTransferTask('numflags', 'list[int]', ('nums', 'arr'), (
-        _P('has_even', 'whether any value is even', 'has_even',
-           '{res} = any(x % 2 == 0 for x in {arg})',
-           'bool {res} = false;\n    for (int x : {arg}) if (x % 2 == 0) {res} = true;'),
-        _P('total_sum', 'the sum of all values', 'total_sum',
-           '{res} = sum({arg})',
-           'int {res} = 0;\n    for (int x : {arg}) {res} += x;'),
-        _P('max_val', 'the largest value', 'max_val',
-           '{res} = max({arg})',
-           'int {res} = *std::max_element({arg}.begin(), {arg}.end());'),
-        _P('count_positive', 'the number of positive values', 'count_positive',
-           '{res} = sum(1 for x in {arg} if x > 0)',
-           'int {res} = 0;\n    for (int x : {arg}) if (x > 0) {res}++;'),
-        _P('has_duplicate', 'whether any value appears more than once', 'has_duplicate',
-           '{res} = len(set({arg})) != len({arg})',
-           'std::set<int> {res}_s({arg}.begin(), {arg}.end());\n    bool {res} = {res}_s.size() != {arg}.size();'),
-        _P('count_even', 'the number of even values', 'even_count',
-           '{res} = sum(1 for x in {arg} if x % 2 == 0)',
-           'int {res} = count_if({arg}.begin(), {arg}.end(), [](int x){ return x % 2 == 0; });'),
-        _P('count_odd', 'the number of odd values', 'odd_count',
-           '{res} = sum(1 for x in {arg} if x % 2 != 0)',
-           'int {res} = count_if({arg}.begin(), {arg}.end(), [](int x){ return x % 2 != 0; });'),
-        _P('count_negative', 'the number of negative values', 'negative_count',
-           '{res} = sum(1 for x in {arg} if x < 0)',
-           'int {res} = count_if({arg}.begin(), {arg}.end(), [](int x){ return x < 0; });'),
-        _P('min_val', 'the minimum value', 'min_value',
-           '{res} = min({arg})',
-           'int {res} = *min_element({arg}.begin(), {arg}.end());'),
-        _P('product_all', 'the product of all values', 'product_value',
-           "{res} = __import__('math').prod({arg})",
-           'long long {res} = 1;\nfor(int x : {arg}) {res} *= x;'),
-        _P('value_range', 'the difference between the maximum and minimum values', 'range_value',
-           '{res} = max({arg}) - min({arg})',
-           'int {res} = *max_element({arg}.begin(), {arg}.end()) - *min_element({arg}.begin(), {arg}.end());'),
-        _P('mean_int', 'the integer mean of the values', 'mean_value',
-           '{res} = sum({arg}) // len({arg})',
-           'long long {res}_s = accumulate({arg}.begin(), {arg}.end(), 0LL);\nint {res} = (int)({res}_s / (long long){arg}.size());'),
-        _P('is_sorted', 'whether the values are sorted in non-decreasing order', 'is_sorted_flag',
-           '{res} = all({arg}[i] <= {arg}[i+1] for i in range(len({arg})-1))',
-           'bool {res} = is_sorted({arg}.begin(), {arg}.end());'),
-        _P('all_positive', 'whether all values are positive', 'all_positive_flag',
-           '{res} = all(x > 0 for x in {arg})',
-           'bool {res} = all_of({arg}.begin(), {arg}.end(), [](int x){ return x > 0; });'),
-        _P('contains_zero', 'whether any value is zero', 'contains_zero_flag',
-           '{res} = 0 in {arg}',
-           'bool {res} = (find({arg}.begin(), {arg}.end(), 0) != {arg}.end());'),
-        _P('distinct_count', 'the number of distinct values', 'distinct_value_count',
-           '{res} = len(set({arg}))',
-           'set<int> {res}_st({arg}.begin(), {arg}.end());\nint {res} = (int){res}_st.size();'),
-    )),
-    'int': QTransferTask('intflags', 'int', ('n', 'x'), (
-        _P('is_even', 'whether the number is even', 'is_even',
-           '{res} = ({arg} % 2 == 0)',
-           'bool {res} = ({arg} % 2 == 0);'),
-        _P('is_positive', 'whether the number is positive', 'is_positive',
-           '{res} = ({arg} > 0)',
-           'bool {res} = ({arg} > 0);'),
-        _P('digit_count', 'the number of digits', 'digit_count',
-           '{res} = len(str(abs({arg})))',
-           'int {res} = std::to_string(std::abs({arg})).size();'),
-        _P('is_multiple_of_3', 'whether the number is a multiple of three', 'is_multiple_of_3',
-           '{res} = ({arg} % 3 == 0)',
-           'bool {res} = ({arg} % 3 == 0);'),
-        _P('is_two_digit', 'whether the number has exactly two digits', 'is_two_digit',
-           '{res} = (10 <= abs({arg}) <= 99)',
-           'bool {res} = (std::abs({arg}) >= 10 && std::abs({arg}) <= 99);'),
-        _P('is_prime', 'whether the number is prime', 'is_prime',
-           '{res} = {arg} > 1 and all({arg} % i != 0 for i in range(2, int({arg}**0.5) + 1))',
-           'bool {res} = {arg} > 1;\nfor(long long i = 2; i*i <= {arg}; i++) if({arg} % i == 0) {res} = false;'),
-        _P('is_perfect_square', 'whether the number is a perfect square', 'is_perfect_square',
-           '{res} = {arg} >= 0 and int({arg}**0.5)**2 == {arg}',
-           'bool {res} = false;\nif({arg} >= 0){ long long {res}_r = (long long)sqrt((double){arg}); for(long long d=-1; d<=1; d++) if(({res}_r+d)*({res}_r+d) == {arg}) {res} = true; }'),
-        _P('is_power_of_two', 'whether the number is a power of two', 'is_power_of_two',
-           '{res} = {arg} > 0 and ({arg} & ({arg} - 1)) == 0',
-           'bool {res} = ({arg} > 0) && (({arg} & ({arg} - 1)) == 0);'),
-        _P('digit_sum', 'the sum of the digits', 'digit_sum',
-           '{res} = sum(int(d) for d in str(abs({arg})))',
-           'int {res} = 0;\nint {res}_x = abs({arg});\ndo { {res} += {res}_x % 10; {res}_x /= 10; } while({res}_x != 0);'),
-        _P('is_palindrome', 'whether the number reads the same forwards and backwards', 'is_palindrome',
-           '{res} = str(abs({arg})) == str(abs({arg}))[::-1]',
-           'string {res}_s = to_string(abs({arg}));\nstring {res}_r = {res}_s;\nreverse({res}_r.begin(), {res}_r.end());\nbool {res} = ({res}_s == {res}_r);'),
-        _P('last_digit', 'the last decimal digit', 'last_digit',
-           '{res} = abs({arg}) % 10',
-           'int {res} = abs({arg}) % 10;'),
-        _P('is_odd', 'whether the number is odd', 'is_odd',
-           '{res} = {arg} % 2 != 0',
-           'bool {res} = ({arg} % 2 != 0);'),
-        _P('absolute_value', 'the absolute value', 'absolute_value',
-           '{res} = abs({arg})',
-           'int {res} = abs({arg});'),
-        _P('sign', 'the sign of the number', 'sign',
-           '{res} = ({arg} > 0) - ({arg} < 0)',
-           'int {res} = ({arg} > 0) - ({arg} < 0);'),
-        _P('is_negative', 'whether the number is negative', 'is_negative',
-           '{res} = {arg} < 0',
-           'bool {res} = ({arg} < 0);'),
-        _P('count_set_bits', 'the number of set bits in the binary representation', 'count_set_bits',
-           '{res} = bin(abs({arg})).count("1")',
-           'int {res} = __builtin_popcount((unsigned)abs({arg}));'),
-    )),
-    'str': QTransferTask('strflags', 'str', ('s', 'text'), (
-        _P('is_palindrome', 'whether the string is a palindrome', 'is_palindrome',
-           '{res} = ({arg} == {arg}[::-1])',
-           'std::string {res}_r({arg}.rbegin(), {arg}.rend());\n    bool {res} = ({arg} == {res}_r);'),
-        _P('length', 'the length of the string', 'length',
-           '{res} = len({arg})',
-           'int {res} = {arg}.size();'),
-        _P('vowel_count', 'the number of vowels', 'vowel_count',
-           "{res} = sum(1 for c in {arg} if c in 'aeiou')",
-           'int {res} = 0;\n    for (char c : {arg}) if (std::string("aeiou").find(c) != std::string::npos) {res}++;'),
-        _P('has_digit', 'whether the string contains a digit', 'has_digit',
-           '{res} = any(c.isdigit() for c in {arg})',
-           'bool {res} = false;\n    for (char c : {arg}) if (std::isdigit((unsigned char)c)) {res} = true;'),
-        _P('starts_upper', 'whether the string starts with an uppercase letter', 'starts_upper',
-           '{res} = {arg}[:1].isupper()',
-           'bool {res} = (!{arg}.empty() && std::isupper((unsigned char){arg}[0]));'),
-        _P('count_letters', 'the number of alphabetic characters', 'letter_count',
-           '{res} = sum(1 for c in {arg} if c.isalpha())',
-           'int {res} = 0;\nfor(char c : {arg}) if(isalpha((unsigned char)c)) {res}++;'),
-        _P('count_digits', 'the number of digit characters', 'digit_count',
-           '{res} = sum(1 for c in {arg} if c.isdigit())',
-           'int {res} = 0;\nfor(char c : {arg}) if(isdigit((unsigned char)c)) {res}++;'),
-        _P('count_spaces', 'the number of space characters', 'space_count',
-           "{res} = {arg}.count(' ')",
-           "int {res} = 0;\nfor(char c : {arg}) if(c==' ') {res}++;"),
-        _P('count_uppercase', 'the number of uppercase letters', 'uppercase_count',
-           '{res} = sum(1 for c in {arg} if c.isupper())',
-           'int {res} = 0;\nfor(char c : {arg}) if(isupper((unsigned char)c)) {res}++;'),
-        _P('count_lowercase', 'the number of lowercase letters', 'lowercase_count',
-           '{res} = sum(1 for c in {arg} if c.islower())',
-           'int {res} = 0;\nfor(char c : {arg}) if(islower((unsigned char)c)) {res}++;'),
-        _P('all_lowercase', 'whether the string has letters and all of them are lowercase', 'is_all_lowercase',
-           '{res} = {arg}.islower()',
-           'bool {res}_has = false;\nbool {res}_ok = true;\nfor(char c : {arg}){ if(isupper((unsigned char)c)) {res}_ok=false; if(islower((unsigned char)c)) {res}_has=true; }\nbool {res} = {res}_has && {res}_ok;'),
-        _P('has_space', 'whether the string contains a space', 'contains_space',
-           "{res} = ' ' in {arg}",
-           "bool {res} = {arg}.find(' ') != std::string::npos;"),
-        _P('is_alnum', 'whether every character is a letter or a digit', 'is_alphanumeric',
-           '{res} = {arg}.isalnum()',
-           'bool {res} = !{arg}.empty();\nfor(char c : {arg}) if(!isalnum((unsigned char)c)) {res} = false;'),
-        _P('first_is_letter', 'whether the first character is a letter', 'first_is_letter',
-           '{res} = {arg}[0].isalpha()',
-           'bool {res} = !{arg}.empty() && isalpha((unsigned char){arg}[0]);'),
-        _P('last_char', 'the last character', 'last_character',
-           '{res} = {arg}[-1]',
-           'std::string {res} = {arg}.empty() ? std::string("") : std::string(1, {arg}.back());'),
-        _P('word_count', 'the number of whitespace-separated words', 'word_count',
-           '{res} = len({arg}.split())',
-           'int {res} = 0;\nbool {res}_in = false;\nfor(char c : {arg}){ if(isspace((unsigned char)c)) {res}_in=false; else if(!{res}_in){ {res}_in=true; {res}++; } }'),
-    )),
+    "list[str]": QTransferTask(
+        "wordflags",
+        "list[str]",
+        ("words", "arr"),
+        (
+            _P(
+                "has_palindrome",
+                "whether any word is a palindrome",
+                "has_palindrome",
+                "{res} = any(w == w[::-1] for w in {arg})",
+                "bool {res} = false;\n    for (auto& w : {arg}) { std::string rv(w.rbegin(), w.rend()); if (w == rv) { {res} = true; break; } }",
+            ),
+            _P(
+                "total_length",
+                "the total number of characters across all words",
+                "total_length",
+                "{res} = sum(len(w) for w in {arg})",
+                "int {res} = 0;\n    for (auto& w : {arg}) {res} += w.size();",
+            ),
+            _P(
+                "count_long",
+                "the number of words longer than five characters",
+                "count_long",
+                "{res} = sum(1 for w in {arg} if len(w) > 5)",
+                "int {res} = 0;\n    for (auto& w : {arg}) if (w.size() > 5) {res}++;",
+            ),
+            _P(
+                "count_capitalized",
+                "the number of capitalized words",
+                "count_capitalized",
+                "{res} = sum(1 for w in {arg} if w[:1].isupper())",
+                "int {res} = 0;\n    for (auto& w : {arg}) if (!w.empty() && std::isupper((unsigned char)w[0])) {res}++;",
+            ),
+            _P(
+                "distinct_count",
+                "the number of distinct words",
+                "distinct_count",
+                "{res} = len(set({arg}))",
+                "std::set<std::string> {res}_s({arg}.begin(), {arg}.end());\n    int {res} = {res}_s.size();",
+            ),
+            _P(
+                "count_starts_vowel",
+                "the number of words that start with a vowel",
+                "starts_vowel_count",
+                '{res} = sum(1 for w in {arg} if w and w[0].lower() in "aeiou")',
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}){ if(!{res}_w.empty()){ char {res}_c = std::tolower((unsigned char){res}_w[0]); if({res}_c=='a'||{res}_c=='e'||{res}_c=='i'||{res}_c=='o'||{res}_c=='u') {res}++; } }",
+            ),
+            _P(
+                "count_with_digit",
+                "the number of words that contain a digit",
+                "words_with_digit",
+                "{res} = sum(1 for w in {arg} if any(c.isdigit() for c in w))",
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}){ bool {res}_f = false; for(char {res}_c : {res}_w) if(std::isdigit((unsigned char){res}_c)) {res}_f = true; if({res}_f) {res}++; }",
+            ),
+            _P(
+                "count_all_lowercase",
+                "the number of words written entirely in lowercase letters",
+                "all_lower_count",
+                "{res} = sum(1 for w in {arg} if w.islower())",
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}){ bool {res}_has = false, {res}_ok = true; for(char {res}_c : {res}_w){ if(std::isalpha((unsigned char){res}_c)){ {res}_has = true; if(std::isupper((unsigned char){res}_c)) {res}_ok = false; } } if({res}_has && {res}_ok) {res}++; }",
+            ),
+            _P(
+                "count_short",
+                "the number of words shorter than three characters",
+                "short_word_count",
+                "{res} = sum(1 for w in {arg} if len(w) < 3)",
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}) if({res}_w.size() < 3) {res}++;",
+            ),
+            _P(
+                "longest_word_length",
+                "the length of the longest word",
+                "longest_len",
+                "{res} = max(len(w) for w in {arg})",
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}) if((int){res}_w.size() > {res}) {res} = (int){res}_w.size();",
+            ),
+            _P(
+                "shortest_word_length",
+                "the length of the shortest word",
+                "shortest_len",
+                "{res} = min(len(w) for w in {arg})",
+                "int {res} = INT_MAX;\nfor(auto &{res}_w : {arg}) if((int){res}_w.size() < {res}) {res} = (int){res}_w.size();",
+            ),
+            _P(
+                "total_vowels",
+                "the total number of vowels across all words",
+                "vowel_total",
+                '{res} = sum(1 for w in {arg} for c in w if c.lower() in "aeiou")',
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}) for(char {res}_c : {res}_w){ char {res}_l = std::tolower((unsigned char){res}_c); if({res}_l=='a'||{res}_l=='e'||{res}_l=='i'||{res}_l=='o'||{res}_l=='u') {res}++; }",
+            ),
+            _P(
+                "any_empty",
+                "whether any word is empty",
+                "has_empty_word",
+                "{res} = any(len(w) == 0 for w in {arg})",
+                "bool {res} = false;\nfor(auto &{res}_w : {arg}) if({res}_w.empty()) {res} = true;",
+            ),
+            _P(
+                "all_unique_lengths",
+                "whether all words have distinct lengths",
+                "unique_lengths",
+                "{res} = len(set(len(w) for w in {arg})) == len({arg})",
+                "std::set<int> {res}_s;\nfor(auto &{res}_w : {arg}) {res}_s.insert((int){res}_w.size());\nbool {res} = {res}_s.size() == {arg}.size();",
+            ),
+            _P(
+                "count_ends_consonant",
+                "the number of words that end with a consonant",
+                "ends_consonant_count",
+                '{res} = sum(1 for w in {arg} if w and w[-1].isalpha() and w[-1].lower() not in "aeiou")',
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}){ if(!{res}_w.empty()){ char {res}_c = {res}_w.back(); if(std::isalpha((unsigned char){res}_c)){ char {res}_l = std::tolower((unsigned char){res}_c); if(!({res}_l=='a'||{res}_l=='e'||{res}_l=='i'||{res}_l=='o'||{res}_l=='u')) {res}++; } } }",
+            ),
+            _P(
+                "total_uppercase_letters",
+                "the total number of uppercase letters across all words",
+                "uppercase_total",
+                "{res} = sum(1 for w in {arg} for c in w if c.isupper())",
+                "int {res} = 0;\nfor(auto &{res}_w : {arg}) for(char {res}_c : {res}_w) if(std::isupper((unsigned char){res}_c)) {res}++;",
+            ),
+        ),
+    ),
+    "list[int]": QTransferTask(
+        "numflags",
+        "list[int]",
+        ("nums", "arr"),
+        (
+            _P(
+                "has_even",
+                "whether any value is even",
+                "has_even",
+                "{res} = any(x % 2 == 0 for x in {arg})",
+                "bool {res} = false;\n    for (int x : {arg}) if (x % 2 == 0) {res} = true;",
+            ),
+            _P(
+                "total_sum",
+                "the sum of all values",
+                "total_sum",
+                "{res} = sum({arg})",
+                "int {res} = 0;\n    for (int x : {arg}) {res} += x;",
+            ),
+            _P(
+                "max_val",
+                "the largest value",
+                "max_val",
+                "{res} = max({arg})",
+                "int {res} = *std::max_element({arg}.begin(), {arg}.end());",
+            ),
+            _P(
+                "count_positive",
+                "the number of positive values",
+                "count_positive",
+                "{res} = sum(1 for x in {arg} if x > 0)",
+                "int {res} = 0;\n    for (int x : {arg}) if (x > 0) {res}++;",
+            ),
+            _P(
+                "has_duplicate",
+                "whether any value appears more than once",
+                "has_duplicate",
+                "{res} = len(set({arg})) != len({arg})",
+                "std::set<int> {res}_s({arg}.begin(), {arg}.end());\n    bool {res} = {res}_s.size() != {arg}.size();",
+            ),
+            _P(
+                "count_even",
+                "the number of even values",
+                "even_count",
+                "{res} = sum(1 for x in {arg} if x % 2 == 0)",
+                "int {res} = count_if({arg}.begin(), {arg}.end(), [](int x){ return x % 2 == 0; });",
+            ),
+            _P(
+                "count_odd",
+                "the number of odd values",
+                "odd_count",
+                "{res} = sum(1 for x in {arg} if x % 2 != 0)",
+                "int {res} = count_if({arg}.begin(), {arg}.end(), [](int x){ return x % 2 != 0; });",
+            ),
+            _P(
+                "count_negative",
+                "the number of negative values",
+                "negative_count",
+                "{res} = sum(1 for x in {arg} if x < 0)",
+                "int {res} = count_if({arg}.begin(), {arg}.end(), [](int x){ return x < 0; });",
+            ),
+            _P(
+                "min_val",
+                "the minimum value",
+                "min_value",
+                "{res} = min({arg})",
+                "int {res} = *min_element({arg}.begin(), {arg}.end());",
+            ),
+            _P(
+                "product_all",
+                "the product of all values",
+                "product_value",
+                "{res} = __import__('math').prod({arg})",
+                "long long {res} = 1;\nfor(int x : {arg}) {res} *= x;",
+            ),
+            _P(
+                "value_range",
+                "the difference between the maximum and minimum values",
+                "range_value",
+                "{res} = max({arg}) - min({arg})",
+                "int {res} = *max_element({arg}.begin(), {arg}.end()) - *min_element({arg}.begin(), {arg}.end());",
+            ),
+            _P(
+                "mean_int",
+                "the integer mean of the values",
+                "mean_value",
+                "{res} = sum({arg}) // len({arg})",
+                "long long {res}_s = accumulate({arg}.begin(), {arg}.end(), 0LL);\nint {res} = (int)({res}_s / (long long){arg}.size());",
+            ),
+            _P(
+                "is_sorted",
+                "whether the values are sorted in non-decreasing order",
+                "is_sorted_flag",
+                "{res} = all({arg}[i] <= {arg}[i+1] for i in range(len({arg})-1))",
+                "bool {res} = is_sorted({arg}.begin(), {arg}.end());",
+            ),
+            _P(
+                "all_positive",
+                "whether all values are positive",
+                "all_positive_flag",
+                "{res} = all(x > 0 for x in {arg})",
+                "bool {res} = all_of({arg}.begin(), {arg}.end(), [](int x){ return x > 0; });",
+            ),
+            _P(
+                "contains_zero",
+                "whether any value is zero",
+                "contains_zero_flag",
+                "{res} = 0 in {arg}",
+                "bool {res} = (find({arg}.begin(), {arg}.end(), 0) != {arg}.end());",
+            ),
+            _P(
+                "distinct_count",
+                "the number of distinct values",
+                "distinct_value_count",
+                "{res} = len(set({arg}))",
+                "set<int> {res}_st({arg}.begin(), {arg}.end());\nint {res} = (int){res}_st.size();",
+            ),
+        ),
+    ),
+    "int": QTransferTask(
+        "intflags",
+        "int",
+        ("n", "x"),
+        (
+            _P(
+                "is_even",
+                "whether the number is even",
+                "is_even",
+                "{res} = ({arg} % 2 == 0)",
+                "bool {res} = ({arg} % 2 == 0);",
+            ),
+            _P(
+                "is_positive",
+                "whether the number is positive",
+                "is_positive",
+                "{res} = ({arg} > 0)",
+                "bool {res} = ({arg} > 0);",
+            ),
+            _P(
+                "digit_count",
+                "the number of digits",
+                "digit_count",
+                "{res} = len(str(abs({arg})))",
+                "int {res} = std::to_string(std::abs({arg})).size();",
+            ),
+            _P(
+                "is_multiple_of_3",
+                "whether the number is a multiple of three",
+                "is_multiple_of_3",
+                "{res} = ({arg} % 3 == 0)",
+                "bool {res} = ({arg} % 3 == 0);",
+            ),
+            _P(
+                "is_two_digit",
+                "whether the number has exactly two digits",
+                "is_two_digit",
+                "{res} = (10 <= abs({arg}) <= 99)",
+                "bool {res} = (std::abs({arg}) >= 10 && std::abs({arg}) <= 99);",
+            ),
+            _P(
+                "is_prime",
+                "whether the number is prime",
+                "is_prime",
+                "{res} = {arg} > 1 and all({arg} % i != 0 for i in range(2, int({arg}**0.5) + 1))",
+                "bool {res} = {arg} > 1;\nfor(long long i = 2; i*i <= {arg}; i++) if({arg} % i == 0) {res} = false;",
+            ),
+            _P(
+                "is_perfect_square",
+                "whether the number is a perfect square",
+                "is_perfect_square",
+                "{res} = {arg} >= 0 and int({arg}**0.5)**2 == {arg}",
+                "bool {res} = false;\nif({arg} >= 0){ long long {res}_r = (long long)sqrt((double){arg}); for(long long d=-1; d<=1; d++) if(({res}_r+d)*({res}_r+d) == {arg}) {res} = true; }",
+            ),
+            _P(
+                "is_power_of_two",
+                "whether the number is a power of two",
+                "is_power_of_two",
+                "{res} = {arg} > 0 and ({arg} & ({arg} - 1)) == 0",
+                "bool {res} = ({arg} > 0) && (({arg} & ({arg} - 1)) == 0);",
+            ),
+            _P(
+                "digit_sum",
+                "the sum of the digits",
+                "digit_sum",
+                "{res} = sum(int(d) for d in str(abs({arg})))",
+                "int {res} = 0;\nint {res}_x = abs({arg});\ndo { {res} += {res}_x % 10; {res}_x /= 10; } while({res}_x != 0);",
+            ),
+            _P(
+                "is_palindrome",
+                "whether the number reads the same forwards and backwards",
+                "is_palindrome",
+                "{res} = str(abs({arg})) == str(abs({arg}))[::-1]",
+                "string {res}_s = to_string(abs({arg}));\nstring {res}_r = {res}_s;\nreverse({res}_r.begin(), {res}_r.end());\nbool {res} = ({res}_s == {res}_r);",
+            ),
+            _P(
+                "last_digit",
+                "the last decimal digit",
+                "last_digit",
+                "{res} = abs({arg}) % 10",
+                "int {res} = abs({arg}) % 10;",
+            ),
+            _P(
+                "is_odd",
+                "whether the number is odd",
+                "is_odd",
+                "{res} = {arg} % 2 != 0",
+                "bool {res} = ({arg} % 2 != 0);",
+            ),
+            _P(
+                "absolute_value",
+                "the absolute value",
+                "absolute_value",
+                "{res} = abs({arg})",
+                "int {res} = abs({arg});",
+            ),
+            _P(
+                "sign",
+                "the sign of the number",
+                "sign",
+                "{res} = ({arg} > 0) - ({arg} < 0)",
+                "int {res} = ({arg} > 0) - ({arg} < 0);",
+            ),
+            _P(
+                "is_negative",
+                "whether the number is negative",
+                "is_negative",
+                "{res} = {arg} < 0",
+                "bool {res} = ({arg} < 0);",
+            ),
+            _P(
+                "count_set_bits",
+                "the number of set bits in the binary representation",
+                "count_set_bits",
+                '{res} = bin(abs({arg})).count("1")',
+                "int {res} = __builtin_popcount((unsigned)abs({arg}));",
+            ),
+        ),
+    ),
+    "str": QTransferTask(
+        "strflags",
+        "str",
+        ("s", "text"),
+        (
+            _P(
+                "is_palindrome",
+                "whether the string is a palindrome",
+                "is_palindrome",
+                "{res} = ({arg} == {arg}[::-1])",
+                "std::string {res}_r({arg}.rbegin(), {arg}.rend());\n    bool {res} = ({arg} == {res}_r);",
+            ),
+            _P(
+                "length",
+                "the length of the string",
+                "length",
+                "{res} = len({arg})",
+                "int {res} = {arg}.size();",
+            ),
+            _P(
+                "vowel_count",
+                "the number of vowels",
+                "vowel_count",
+                "{res} = sum(1 for c in {arg} if c in 'aeiou')",
+                'int {res} = 0;\n    for (char c : {arg}) if (std::string("aeiou").find(c) != std::string::npos) {res}++;',
+            ),
+            _P(
+                "has_digit",
+                "whether the string contains a digit",
+                "has_digit",
+                "{res} = any(c.isdigit() for c in {arg})",
+                "bool {res} = false;\n    for (char c : {arg}) if (std::isdigit((unsigned char)c)) {res} = true;",
+            ),
+            _P(
+                "starts_upper",
+                "whether the string starts with an uppercase letter",
+                "starts_upper",
+                "{res} = {arg}[:1].isupper()",
+                "bool {res} = (!{arg}.empty() && std::isupper((unsigned char){arg}[0]));",
+            ),
+            _P(
+                "count_letters",
+                "the number of alphabetic characters",
+                "letter_count",
+                "{res} = sum(1 for c in {arg} if c.isalpha())",
+                "int {res} = 0;\nfor(char c : {arg}) if(isalpha((unsigned char)c)) {res}++;",
+            ),
+            _P(
+                "count_digits",
+                "the number of digit characters",
+                "digit_count",
+                "{res} = sum(1 for c in {arg} if c.isdigit())",
+                "int {res} = 0;\nfor(char c : {arg}) if(isdigit((unsigned char)c)) {res}++;",
+            ),
+            _P(
+                "count_spaces",
+                "the number of space characters",
+                "space_count",
+                "{res} = {arg}.count(' ')",
+                "int {res} = 0;\nfor(char c : {arg}) if(c==' ') {res}++;",
+            ),
+            _P(
+                "count_uppercase",
+                "the number of uppercase letters",
+                "uppercase_count",
+                "{res} = sum(1 for c in {arg} if c.isupper())",
+                "int {res} = 0;\nfor(char c : {arg}) if(isupper((unsigned char)c)) {res}++;",
+            ),
+            _P(
+                "count_lowercase",
+                "the number of lowercase letters",
+                "lowercase_count",
+                "{res} = sum(1 for c in {arg} if c.islower())",
+                "int {res} = 0;\nfor(char c : {arg}) if(islower((unsigned char)c)) {res}++;",
+            ),
+            _P(
+                "all_lowercase",
+                "whether the string has letters and all of them are lowercase",
+                "is_all_lowercase",
+                "{res} = {arg}.islower()",
+                "bool {res}_has = false;\nbool {res}_ok = true;\nfor(char c : {arg}){ if(isupper((unsigned char)c)) {res}_ok=false; if(islower((unsigned char)c)) {res}_has=true; }\nbool {res} = {res}_has && {res}_ok;",
+            ),
+            _P(
+                "has_space",
+                "whether the string contains a space",
+                "contains_space",
+                "{res} = ' ' in {arg}",
+                "bool {res} = {arg}.find(' ') != std::string::npos;",
+            ),
+            _P(
+                "is_alnum",
+                "whether every character is a letter or a digit",
+                "is_alphanumeric",
+                "{res} = {arg}.isalnum()",
+                "bool {res} = !{arg}.empty();\nfor(char c : {arg}) if(!isalnum((unsigned char)c)) {res} = false;",
+            ),
+            _P(
+                "first_is_letter",
+                "whether the first character is a letter",
+                "first_is_letter",
+                "{res} = {arg}[0].isalpha()",
+                "bool {res} = !{arg}.empty() && isalpha((unsigned char){arg}[0]);",
+            ),
+            _P(
+                "last_char",
+                "the last character",
+                "last_character",
+                "{res} = {arg}[-1]",
+                'std::string {res} = {arg}.empty() ? std::string("") : std::string(1, {arg}.back());',
+            ),
+            _P(
+                "word_count",
+                "the number of whitespace-separated words",
+                "word_count",
+                "{res} = len({arg}.split())",
+                "int {res} = 0;\nbool {res}_in = false;\nfor(char c : {arg}){ if(isspace((unsigned char)c)) {res}_in=false; else if(!{res}_in){ {res}_in=true; {res}++; } }",
+            ),
+        ),
+    ),
 }
 
 KVCLUSTERS: dict[str, KVCluster] = {
@@ -806,156 +1083,291 @@ def _C(id, fragment, py, cpp):  # a filter condition (boolean expr over {elem})
 
 
 FILTER_TASKS: dict[str, FilterTask] = {
-    'list[str]': FilterTask('word_filter', 'list[str]', ('words', 'arr'), 'w', 'words', (
-        _C('palindrome', 'are palindromes',
-           '{elem} == {elem}[::-1]',
-           '{elem} == std::string({elem}.rbegin(), {elem}.rend())'),
-        _C('vowel_start', 'start with a vowel',
-           "{elem}[:1].lower() in 'aeiou'",
-           '!{elem}.empty() && std::string("aeiouAEIOU").find({elem}[0]) != std::string::npos'),
-        _C('long', 'are longer than three characters',
-           'len({elem}) > 3',
-           '{elem}.size() > 3'),
-        _C('all_upper', 'are all uppercase letters',
-           '{elem}.isupper()',
-           '!{elem}.empty() && std::all_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::isupper(c); })'),
-        _C('all_lower', 'are all lowercase letters',
-           '{elem}.islower()',
-           '!{elem}.empty() && std::all_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::islower(c); })'),
-        _C('capitalized', 'start with an uppercase letter',
-           '{elem}[:1].isupper()',
-           '!{elem}.empty() && std::isupper((unsigned char){elem}[0])'),
-        _C('short', 'are shorter than four characters',
-           'len({elem}) < 4',
-           '{elem}.size() < 4'),
-        _C('length_five', 'have exactly five characters',
-           'len({elem}) == 5',
-           '{elem}.size() == 5'),
-        _C('contains_digit', 'contain a digit',
-           'any(c.isdigit() for c in {elem})',
-           'std::any_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::isdigit(c); })'),
-        _C('all_alpha', 'consist only of letters',
-           '{elem}.isalpha()',
-           '!{elem}.empty() && std::all_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::isalpha(c); })'),
-        _C('ends_s', 'end with the letter s',
-           "{elem}.endswith('s')",
-           "!{elem}.empty() && {elem}.back() == 's'"),
-        _C('contains_e', 'contain the letter e',
-           "'e' in {elem}",
-           "{elem}.find('e') != std::string::npos"),
-        _C('starts_a', 'start with the letter a',
-           "{elem}.startswith('a')",
-           "!{elem}.empty() && {elem}.front() == 'a'"),
-        _C('has_double', 'contain a repeated adjacent character',
-           'any({elem}[i] == {elem}[i+1] for i in range(len({elem})-1))',
-           'std::adjacent_find({elem}.begin(), {elem}.end()) != {elem}.end()'),
-        _C('last_is_digit', 'end with a digit',
-           '{elem}[-1:].isdigit()',
-           '!{elem}.empty() && std::isdigit((unsigned char){elem}.back())'),
-        _C('same_reversed', 'are unchanged when reversed',
-           '{elem} == {elem}[::-1]',
-           '{elem} == std::string({elem}.rbegin(), {elem}.rend())'),
-    )),
-    'list[int]': FilterTask('num_filter', 'list[int]', ('nums', 'arr'), 'x', 'values', (
-        _C('even', 'are even',
-           '{elem} % 2 == 0',
-           '{elem} % 2 == 0'),
-        _C('positive', 'are positive',
-           '{elem} > 0',
-           '{elem} > 0'),
-        _C('big', 'are greater than ten',
-           '{elem} > 10',
-           '{elem} > 10'),
-        _C('odd', 'are odd',
-           '{elem} % 2 != 0',
-           '{elem} % 2 != 0'),
-        _C('negative', 'are negative',
-           '{elem} < 0',
-           '{elem} < 0'),
-        _C('non_negative', 'are zero or positive',
-           '{elem} >= 0',
-           '{elem} >= 0'),
-        _C('multiple_of_three', 'are multiples of three',
-           '{elem} % 3 == 0',
-           '{elem} % 3 == 0'),
-        _C('multiple_of_five', 'are multiples of five',
-           '{elem} % 5 == 0',
-           '{elem} % 5 == 0'),
-        _C('multiple_of_ten', 'are multiples of ten',
-           '{elem} % 10 == 0',
-           '{elem} % 10 == 0'),
-        _C('divisible_by_four', 'are divisible by four',
-           '{elem} % 4 == 0',
-           '{elem} % 4 == 0'),
-        _C('single_digit', 'have a single digit in absolute value',
-           '-9 <= {elem} <= 9',
-           '{elem} >= -9 && {elem} <= 9'),
-        _C('two_digit', 'have exactly two digits in absolute value',
-           '10 <= abs({elem}) <= 99',
-           'abs({elem}) >= 10 && abs({elem}) <= 99'),
-        _C('in_range_ten_hundred', 'are between ten and one hundred inclusive',
-           '10 <= {elem} <= 100',
-           '{elem} >= 10 && {elem} <= 100'),
-        _C('abs_over_fifty', 'are greater than fifty in absolute value',
-           'abs({elem}) > 50',
-           'abs({elem}) > 50'),
-        _C('perfect_square', 'are perfect squares',
-           "{elem} >= 0 and __import__('math').isqrt({elem}) ** 2 == {elem}",
-           '[&]{ if ({elem} < 0) return false; long r = (long)llround(sqrt((double){elem})); return r * r == (long){elem}; }()'),
-        _C('is_prime', 'are prime numbers',
-           '{elem} > 1 and all({elem} % d != 0 for d in range(2, int({elem} ** 0.5) + 1))',
-           '[&]{ if ({elem} < 2) return false; for (int d = 2; (long)d * d <= {elem}; ++d) if ({elem} % d == 0) return false; return true; }()'),
-    )),
-    'str': FilterTask('char_filter', 'str', ('s', 'text'), 'c', 'characters', (
-        _C('vowel', 'are vowels',
-           "{elem} in 'aeiou'",
-           'std::string("aeiou").find({elem}) != std::string::npos'),
-        _C('upper', 'are uppercase',
-           '{elem}.isupper()',
-           'std::isupper((unsigned char){elem})'),
-        _C('alpha', 'are alphabetic',
-           '{elem}.isalpha()',
-           'std::isalpha((unsigned char){elem})'),
-        _C('lower', 'are lowercase',
-           '{elem}.islower()',
-           'islower((unsigned char){elem})'),
-        _C('digit', 'are digits',
-           '{elem}.isdigit()',
-           'isdigit((unsigned char){elem})'),
-        _C('alnum', 'are alphanumeric',
-           '{elem}.isalnum()',
-           'isalnum((unsigned char){elem})'),
-        _C('whitespace', 'are whitespace',
-           '{elem}.isspace()',
-           'isspace((unsigned char){elem})'),
-        _C('consonant', 'are consonants',
-           "{elem}.isalpha() and {elem}.lower() not in 'aeiou'",
-           'isalpha((unsigned char){elem}) && std::string("aeiou").find(tolower((unsigned char){elem})) == std::string::npos'),
-        _C('hex_digit', 'are hexadecimal digits',
-           "{elem} in '0123456789abcdefABCDEF'",
-           'isxdigit((unsigned char){elem})'),
-        _C('upper_vowel', 'are uppercase vowels',
-           "{elem} in 'AEIOU'",
-           'std::string("AEIOU").find({elem}) != std::string::npos'),
-        _C('first_half_alpha', 'are letters between a and m',
-           "{elem}.isalpha() and {elem}.lower() >= 'a' and {elem}.lower() <= 'm'",
-           "isalpha((unsigned char){elem}) && tolower((unsigned char){elem}) >= 'a' && tolower((unsigned char){elem}) <= 'm'"),
-        _C('second_half_alpha', 'are letters between n and z',
-           "{elem}.isalpha() and {elem}.lower() >= 'n' and {elem}.lower() <= 'z'",
-           "isalpha((unsigned char){elem}) && tolower((unsigned char){elem}) >= 'n' && tolower((unsigned char){elem}) <= 'z'"),
-        _C('letter_e', 'are the letter e in any case',
-           "{elem}.lower() == 'e'",
-           "tolower((unsigned char){elem}) == 'e'"),
-        _C('even_digit', 'are even digits',
-           '{elem}.isdigit() and int({elem}) % 2 == 0',
-           "isdigit((unsigned char){elem}) && ({elem} - '0') % 2 == 0"),
-        _C('odd_digit', 'are odd digits',
-           '{elem}.isdigit() and int({elem}) % 2 == 1',
-           "isdigit((unsigned char){elem}) && ({elem} - '0') % 2 == 1"),
-        _C('comma_or_period', 'are commas or periods',
-           "{elem} in ',.'",
-           "{elem} == ',' || {elem} == '.'"),
-    )),
+    "list[str]": FilterTask(
+        "word_filter",
+        "list[str]",
+        ("words", "arr"),
+        "w",
+        "words",
+        (
+            _C(
+                "palindrome",
+                "are palindromes",
+                "{elem} == {elem}[::-1]",
+                "{elem} == std::string({elem}.rbegin(), {elem}.rend())",
+            ),
+            _C(
+                "vowel_start",
+                "start with a vowel",
+                "{elem}[:1].lower() in 'aeiou'",
+                '!{elem}.empty() && std::string("aeiouAEIOU").find({elem}[0]) != std::string::npos',
+            ),
+            _C(
+                "long",
+                "are longer than three characters",
+                "len({elem}) > 3",
+                "{elem}.size() > 3",
+            ),
+            _C(
+                "all_upper",
+                "are all uppercase letters",
+                "{elem}.isupper()",
+                "!{elem}.empty() && std::all_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::isupper(c); })",
+            ),
+            _C(
+                "all_lower",
+                "are all lowercase letters",
+                "{elem}.islower()",
+                "!{elem}.empty() && std::all_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::islower(c); })",
+            ),
+            _C(
+                "capitalized",
+                "start with an uppercase letter",
+                "{elem}[:1].isupper()",
+                "!{elem}.empty() && std::isupper((unsigned char){elem}[0])",
+            ),
+            _C(
+                "short",
+                "are shorter than four characters",
+                "len({elem}) < 4",
+                "{elem}.size() < 4",
+            ),
+            _C(
+                "length_five",
+                "have exactly five characters",
+                "len({elem}) == 5",
+                "{elem}.size() == 5",
+            ),
+            _C(
+                "contains_digit",
+                "contain a digit",
+                "any(c.isdigit() for c in {elem})",
+                "std::any_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::isdigit(c); })",
+            ),
+            _C(
+                "all_alpha",
+                "consist only of letters",
+                "{elem}.isalpha()",
+                "!{elem}.empty() && std::all_of({elem}.begin(), {elem}.end(), [](unsigned char c){ return std::isalpha(c); })",
+            ),
+            _C(
+                "ends_s",
+                "end with the letter s",
+                "{elem}.endswith('s')",
+                "!{elem}.empty() && {elem}.back() == 's'",
+            ),
+            _C(
+                "contains_e",
+                "contain the letter e",
+                "'e' in {elem}",
+                "{elem}.find('e') != std::string::npos",
+            ),
+            _C(
+                "starts_a",
+                "start with the letter a",
+                "{elem}.startswith('a')",
+                "!{elem}.empty() && {elem}.front() == 'a'",
+            ),
+            _C(
+                "has_double",
+                "contain a repeated adjacent character",
+                "any({elem}[i] == {elem}[i+1] for i in range(len({elem})-1))",
+                "std::adjacent_find({elem}.begin(), {elem}.end()) != {elem}.end()",
+            ),
+            _C(
+                "last_is_digit",
+                "end with a digit",
+                "{elem}[-1:].isdigit()",
+                "!{elem}.empty() && std::isdigit((unsigned char){elem}.back())",
+            ),
+            _C(
+                "same_reversed",
+                "are unchanged when reversed",
+                "{elem} == {elem}[::-1]",
+                "{elem} == std::string({elem}.rbegin(), {elem}.rend())",
+            ),
+        ),
+    ),
+    "list[int]": FilterTask(
+        "num_filter",
+        "list[int]",
+        ("nums", "arr"),
+        "x",
+        "values",
+        (
+            _C("even", "are even", "{elem} % 2 == 0", "{elem} % 2 == 0"),
+            _C("positive", "are positive", "{elem} > 0", "{elem} > 0"),
+            _C("big", "are greater than ten", "{elem} > 10", "{elem} > 10"),
+            _C("odd", "are odd", "{elem} % 2 != 0", "{elem} % 2 != 0"),
+            _C("negative", "are negative", "{elem} < 0", "{elem} < 0"),
+            _C("non_negative", "are zero or positive", "{elem} >= 0", "{elem} >= 0"),
+            _C(
+                "multiple_of_three",
+                "are multiples of three",
+                "{elem} % 3 == 0",
+                "{elem} % 3 == 0",
+            ),
+            _C(
+                "multiple_of_five",
+                "are multiples of five",
+                "{elem} % 5 == 0",
+                "{elem} % 5 == 0",
+            ),
+            _C(
+                "multiple_of_ten",
+                "are multiples of ten",
+                "{elem} % 10 == 0",
+                "{elem} % 10 == 0",
+            ),
+            _C(
+                "divisible_by_four",
+                "are divisible by four",
+                "{elem} % 4 == 0",
+                "{elem} % 4 == 0",
+            ),
+            _C(
+                "single_digit",
+                "have a single digit in absolute value",
+                "-9 <= {elem} <= 9",
+                "{elem} >= -9 && {elem} <= 9",
+            ),
+            _C(
+                "two_digit",
+                "have exactly two digits in absolute value",
+                "10 <= abs({elem}) <= 99",
+                "abs({elem}) >= 10 && abs({elem}) <= 99",
+            ),
+            _C(
+                "in_range_ten_hundred",
+                "are between ten and one hundred inclusive",
+                "10 <= {elem} <= 100",
+                "{elem} >= 10 && {elem} <= 100",
+            ),
+            _C(
+                "abs_over_fifty",
+                "are greater than fifty in absolute value",
+                "abs({elem}) > 50",
+                "abs({elem}) > 50",
+            ),
+            _C(
+                "perfect_square",
+                "are perfect squares",
+                "{elem} >= 0 and __import__('math').isqrt({elem}) ** 2 == {elem}",
+                "[&]{ if ({elem} < 0) return false; long r = (long)llround(sqrt((double){elem})); return r * r == (long){elem}; }()",
+            ),
+            _C(
+                "is_prime",
+                "are prime numbers",
+                "{elem} > 1 and all({elem} % d != 0 for d in range(2, int({elem} ** 0.5) + 1))",
+                "[&]{ if ({elem} < 2) return false; for (int d = 2; (long)d * d <= {elem}; ++d) if ({elem} % d == 0) return false; return true; }()",
+            ),
+        ),
+    ),
+    "str": FilterTask(
+        "char_filter",
+        "str",
+        ("s", "text"),
+        "c",
+        "characters",
+        (
+            _C(
+                "vowel",
+                "are vowels",
+                "{elem} in 'aeiou'",
+                'std::string("aeiou").find({elem}) != std::string::npos',
+            ),
+            _C(
+                "upper",
+                "are uppercase",
+                "{elem}.isupper()",
+                "std::isupper((unsigned char){elem})",
+            ),
+            _C(
+                "alpha",
+                "are alphabetic",
+                "{elem}.isalpha()",
+                "std::isalpha((unsigned char){elem})",
+            ),
+            _C(
+                "lower",
+                "are lowercase",
+                "{elem}.islower()",
+                "islower((unsigned char){elem})",
+            ),
+            _C(
+                "digit",
+                "are digits",
+                "{elem}.isdigit()",
+                "isdigit((unsigned char){elem})",
+            ),
+            _C(
+                "alnum",
+                "are alphanumeric",
+                "{elem}.isalnum()",
+                "isalnum((unsigned char){elem})",
+            ),
+            _C(
+                "whitespace",
+                "are whitespace",
+                "{elem}.isspace()",
+                "isspace((unsigned char){elem})",
+            ),
+            _C(
+                "consonant",
+                "are consonants",
+                "{elem}.isalpha() and {elem}.lower() not in 'aeiou'",
+                'isalpha((unsigned char){elem}) && std::string("aeiou").find(tolower((unsigned char){elem})) == std::string::npos',
+            ),
+            _C(
+                "hex_digit",
+                "are hexadecimal digits",
+                "{elem} in '0123456789abcdefABCDEF'",
+                "isxdigit((unsigned char){elem})",
+            ),
+            _C(
+                "upper_vowel",
+                "are uppercase vowels",
+                "{elem} in 'AEIOU'",
+                'std::string("AEIOU").find({elem}) != std::string::npos',
+            ),
+            _C(
+                "first_half_alpha",
+                "are letters between a and m",
+                "{elem}.isalpha() and {elem}.lower() >= 'a' and {elem}.lower() <= 'm'",
+                "isalpha((unsigned char){elem}) && tolower((unsigned char){elem}) >= 'a' && tolower((unsigned char){elem}) <= 'm'",
+            ),
+            _C(
+                "second_half_alpha",
+                "are letters between n and z",
+                "{elem}.isalpha() and {elem}.lower() >= 'n' and {elem}.lower() <= 'z'",
+                "isalpha((unsigned char){elem}) && tolower((unsigned char){elem}) >= 'n' && tolower((unsigned char){elem}) <= 'z'",
+            ),
+            _C(
+                "letter_e",
+                "are the letter e in any case",
+                "{elem}.lower() == 'e'",
+                "tolower((unsigned char){elem}) == 'e'",
+            ),
+            _C(
+                "even_digit",
+                "are even digits",
+                "{elem}.isdigit() and int({elem}) % 2 == 0",
+                "isdigit((unsigned char){elem}) && ({elem} - '0') % 2 == 0",
+            ),
+            _C(
+                "odd_digit",
+                "are odd digits",
+                "{elem}.isdigit() and int({elem}) % 2 == 1",
+                "isdigit((unsigned char){elem}) && ({elem} - '0') % 2 == 1",
+            ),
+            _C(
+                "comma_or_period",
+                "are commas or periods",
+                "{elem} in ',.'",
+                "{elem} == ',' || {elem} == '.'",
+            ),
+        ),
+    ),
 }
 
 
@@ -964,59 +1376,63 @@ FILTER_TASKS: dict[str, FilterTask] = {
 # ══════════════════════════════════════════════════════════════════════════════
 def q_transfer_setups(
     datatype: str,
+    n_conditions: int = 4,
+    n_samples: int = 8,
+    seed: int = 0,
     presentation: Presentation = "listed",
+    naming: Literal["natural", "letters"] = "natural",
     src_lang: Lang = "python",
     dst_lang: Lang = "python",
-    n_conditions: Optional[int] = None,
-    naming: Literal["natural", "letters"] = "natural",
-    max_setups: int = 4,
 ) -> list[QTransferInstance]:
-    """Contrastive q-transfer setups (01 A-experiment style). Both sides prefill a CONTIGUOUS
-    prefix of the predicate list; SRC's prefix is strictly LONGER than DST's, so their frontiers
-    (= the next predicate to write) differ by construction:
+    """Sample ``n_samples`` contrastive q-transfer instances (01 A-experiment style). Each instance:
 
-        DST progress = ids[:dst_len]  -> DST frontier = ids[dst_len]
-        SRC progress = ids[:src_len]  -> SRC frontier = ids[src_len] = expected_next   (src_len > dst_len)
+      1. draws a random ``n_conditions``-predicate TASK — independent, commutative predicates sampled
+         (without replacement, in random order) from the datatype's bank; and
+      2. draws a random CONTIGUOUS contrastive split: both sides prefill a prefix of that task, SRC's
+         strictly LONGER, so their frontiers (= the next predicate to write) differ by construction:
+             DST progress = ids[:dst_len] -> DST frontier = ids[dst_len]
+             SRC progress = ids[:src_len] -> SRC frontier = ids[src_len] = expected_next  (src_len>dst_len)
 
-    A non-contiguous "all-but-X" scheme is WRONG here: it leaves a gap that collides with DST's
-    frontier (both sides then write the same left-out predicate — no contrast). Enumerates
-    (dst_len, src_len) pairs up to ``max_setups``. ids[0] is the always-prefilled style anchor.
+    So ``n_conditions`` is the SIZE of each sampled task (typically 3–5), NOT a slice of the bank.
+    Instances are deduped by (task ordering, split) and reproducible via ``seed`` (drawn in a fixed
+    sequence so a larger ``n_samples`` extends the same prefix — resume-stable). ids[0] of each task
+    is its always-prefilled style anchor.
 
-    Knobs:
-        n_conditions : number of predicates the task exposes (uses the first ``n_conditions`` of the
-                       datatype's bank; ``None`` = all). Needs >= 3 for a genuine 3-way contrast.
-        naming       : result variable names — "natural" (descriptive) or "letters" (a/b/c/d, as in
-                       the 01 multi-predicate setup). Affects the prefilled code, not the NL task list.
+        naming : result variable names — "natural" (descriptive) or "letters" (a/b/c/d).
     """
-    task = QTASKS[datatype]
-    if n_conditions is not None:
-        assert 2 <= n_conditions <= len(task.predicates), (
-            f"n_conditions must be in [2, {len(task.predicates)}]"
+    bank = QTASKS[datatype]
+    preds = list(bank.predicates)
+    assert 3 <= n_conditions <= len(preds), f"n_conditions must be in [3, {len(preds)}]"
+    rng = random.Random(seed)
+    out, seen = [], set()
+    for _ in range(n_samples * 200):
+        if len(out) >= n_samples:
+            break
+        subset = rng.sample(preds, n_conditions)  # random ordered k-subset (the task)
+        ids = [p.id for p in subset]
+        dst_len = rng.randint(1, n_conditions - 2)  # DST prefix (>=1 anchor)
+        src_len = rng.randint(dst_len + 1, n_conditions - 1)  # SRC strictly longer
+        key = (tuple(ids), dst_len, src_len)
+        if key in seen:
+            continue
+        seen.add(key)
+        task = dataclasses.replace(
+            bank, id=f"{bank.id}_k{n_conditions}", predicates=tuple(subset)
         )
-        task = dataclasses.replace(task, predicates=task.predicates[:n_conditions])
-    ids = [p.id for p in task.predicates]
-    n = len(ids)
-    out = []
-    for dst_len in range(1, n - 1):  # DST prefix length (>=1 = anchor)
-        for src_len in range(
-            dst_len + 1, n
-        ):  # SRC prefix strictly longer; SRC writes ids[src_len]
-            out.append(
-                QTransferInstance(
-                    task=task,
-                    var_name=task.var_names[0],
-                    presentation=presentation,
-                    src_lang=src_lang,
-                    dst_lang=dst_lang,
-                    src_progress=ids[:src_len],
-                    dst_progress=ids[:dst_len],
-                    expected_next=ids[src_len],
-                    naming=naming,
-                    meta={"datatype": datatype, "dst_next": ids[dst_len]},
-                )
+        out.append(
+            QTransferInstance(
+                task=task,
+                var_name=bank.var_names[0],
+                presentation=presentation,
+                src_lang=src_lang,
+                dst_lang=dst_lang,
+                src_progress=ids[:src_len],
+                dst_progress=ids[:dst_len],
+                expected_next=ids[src_len],
+                naming=naming,
+                meta={"datatype": datatype, "dst_next": ids[dst_len]},
             )
-            if len(out) >= max_setups:
-                return out
+        )
     return out
 
 
@@ -1051,43 +1467,51 @@ def kv_transfer_setups(
 
 def filter_transfer_setups(
     datatype: str,
+    n_samples: int = 8,
+    seed: int = 0,
+    postfix: Literal["return", "targeted"] = "targeted",
     src_lang: Lang = "python",
     dst_lang: Lang = "python",
-    postfix: Literal["return", "targeted"] = "targeted",
-    max_setups: int = 4,
+    n_conditions: int = 2,
 ) -> list[FilterTransferInstance]:
-    """Contrastive composed-filter setups (00_diff TASK_1 style). The task is a pair of commutative
-    filter sub-tasks; SRC and DST prefill DIFFERENT single sub-tasks (as the first ``res = […]``
-    filter), then hit a shared ``postfix`` pivot — so SRC is about to apply its remaining sub-task
-    and clean DST its remaining (the complementary one). Enumerates 2-subsets of the datatype's
-    condition bank × both swap directions, up to ``max_setups``.
+    """Sample ``n_samples`` composed-filter instances (00_diff TASK_1 style). Each task is
+    ``n_conditions`` (fixed at 2 — the two commutative sub-tasks) filter conditions sampled at random
+    from the datatype's bank; SRC and DST prefill DIFFERENT single sub-tasks (as the first
+    ``res = […]`` filter), then hit a shared ``postfix`` pivot — so SRC is about to apply its
+    remaining sub-task and clean DST its remaining (the complementary one). A random swap direction
+    is drawn per instance. Deduped by (pair, src_fill), reproducible via ``seed`` (drawn in a fixed
+    sequence so a larger ``n_samples`` extends the same prefix — resume-stable).
 
         src_fill=T1, dst_fill=T2  ->  expected_next=T2 (SRC's remaining), dst_next=T1 (clean DST's).
     """
-    task = FILTER_TASKS[datatype]
-    conds = list(task.conditions)
-    out = []
-    for ca, cb in itertools.combinations(conds, 2):  # each unordered pair of sub-tasks
-        for src_fill, dst_fill in (
-            (ca.id, cb.id),
-            (cb.id, ca.id),
-        ):  # both swap directions
-            out.append(
-                FilterTransferInstance(
-                    task=task,
-                    pair=(ca.id, cb.id),
-                    var_name=task.var_names[0],
-                    src_lang=src_lang,
-                    dst_lang=dst_lang,
-                    src_fill=src_fill,
-                    dst_fill=dst_fill,
-                    expected_next=dst_fill,  # SRC's remaining == the sub-task DST prefilled
-                    postfix=postfix,
-                    meta={"datatype": datatype, "dst_next": src_fill},
-                )
+    assert n_conditions == 2, "filter tasks are exactly 2 commutative sub-tasks"
+    ft = FILTER_TASKS[datatype]
+    conds = list(ft.conditions)
+    rng = random.Random(seed)
+    out, seen = [], set()
+    for _ in range(n_samples * 200):
+        if len(out) >= n_samples:
+            break
+        ca, cb = rng.sample(conds, 2)  # random 2-subset (the two sub-tasks)
+        src_fill, dst_fill = (ca.id, cb.id) if rng.random() < 0.5 else (cb.id, ca.id)
+        key = ((ca.id, cb.id), src_fill)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            FilterTransferInstance(
+                task=ft,
+                pair=(ca.id, cb.id),
+                var_name=ft.var_names[0],
+                src_lang=src_lang,
+                dst_lang=dst_lang,
+                src_fill=src_fill,
+                dst_fill=dst_fill,
+                expected_next=dst_fill,  # SRC's remaining == the sub-task DST prefilled
+                postfix=postfix,
+                meta={"datatype": datatype, "dst_next": src_fill},
             )
-            if len(out) >= max_setups:
-                return out
+        )
     return out
 
 
