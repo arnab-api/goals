@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,7 @@ import src.diff.data as D  # noqa: E402
 import src.diff.eval as E  # noqa: E402
 import src.diff.functional as P  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
+from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger("q_transfer_eval")
 
@@ -161,17 +163,21 @@ def run_config(mt, args, dt, naming, sl, dl, patch_heads, readout_heads, out_roo
         done = {r["key"]: r for r in json.loads(results_fp.read_text())}
         logger.info(f"[{tag}] resume: {len(done)} instances already done")
 
-    # naming=None => collapse the axis: pick a naming per pair (deterministic). Generate with a
-    # placeholder naming, then override each instance's naming field below.
-    random_naming = naming is None
-    setups = D.q_transfer_setups(
-        dt,
-        presentation="listed",
-        naming=naming or "natural",
-        src_lang=sl,
-        dst_lang=dl,
-        max_setups=args.max_setups,
+    # ALL contrastive pairs, then a REPRODUCIBLE RANDOM SAMPLE of --max-setups of them (a faithful
+    # sample of the full pair distribution, not the first-N prefix). Seed is deterministic per config
+    # (base seed XOR config tag) so the sampled set is identical across runs -> resume-stable.
+    all_setups = D.q_transfer_setups(
+        dt, presentation="listed", naming=naming or "natural",
+        src_lang=sl, dst_lang=dl, max_setups=10**9,
     )
+    n_avail = len(all_setups)
+    cfg_seed = (args.seed + int(hashlib.md5(tag.encode()).hexdigest()[:8], 16)) % (2**32)
+    set_seed(cfg_seed)
+    setups = (random.sample(all_setups, args.max_setups)
+              if (args.max_setups and n_avail > args.max_setups) else list(all_setups))
+
+    # naming=None => collapse the axis: deterministic per-pair naming (independent of the sample).
+    random_naming = naming is None
     if random_naming:
         for inst in setups:
             inst.naming = _pick_naming(tag, _inst_key(inst))
@@ -180,10 +186,9 @@ def run_config(mt, args, dt, naming, sl, dl, patch_heads, readout_heads, out_roo
 
     records: dict[str, dict] = dict(done)
     todo = [inst for inst in setups if _inst_key(inst) not in records or args.force]
-    n_total = len(setups)
     logger.info(
-        f"[{tag}] {n_total} contrastive pairs — {n_total - len(todo)} resumed, "
-        f"{len(todo)} to run"
+        f"[{tag}] sampled {len(setups)} of {n_avail} pairs (seed={cfg_seed}) — "
+        f"{len(setups) - len(todo)} resumed, {len(todo)} to run"
     )
 
     for j, inst in enumerate(todo, 1):
@@ -320,8 +325,11 @@ def parse_args():
         help="heads carrying the query transplant (also the readout/gaze heads)",
     )
     p.add_argument(
-        "--max-setups", type=int, default=4, help="cap contrastive pairs per config"
+        "--max-setups", type=int, default=4,
+        help="RANDOM-sample this many contrastive pairs from ALL pairs per config (reproducible, "
+             "seed-stable). Set 0 or a huge value to use every pair.",
     )
+    p.add_argument("--seed", type=int, default=42, help="base RNG seed for per-config sampling")
     p.add_argument(
         "--max-instances", type=int, default=None, help="further cap instances/config"
     )
