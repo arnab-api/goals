@@ -391,19 +391,36 @@ class FilterTransferInstance:
         return self.task_text
 
 
+def _finalize_prefill(prefill: str) -> str:
+    """Drop a DANGLING trailing space so the pivot lands on a real token, NOT whitespace.
+
+    The intended pivot is the last token of the prefill. Two shapes exist:
+      • indent pivot (q-transfer, kv ``pivot="indent"``): the final line is pure indentation
+        (``…\\n    ``) — this whitespace IS the pivot ("about to write the next line"); KEEP it.
+      • keyword pivot (filter ``… if ``, kv/filter ``… return ``): a content line ending in a
+        stray space — the pivot should be ``if`` / ``return``, so strip the trailing space(s)/tabs.
+    Distinguishing rule: strip trailing spaces/tabs only when the final line has non-space content."""
+    last_nl = prefill.rfind("\n")
+    last_line = prefill[last_nl + 1:]
+    if last_line.strip() == "":  # pure-indent final line -> the indent IS the pivot, keep as-is
+        return prefill
+    return prefill.rstrip(" \t")
+
+
 def materialize(instance, ctx=None) -> dict:
     """Apply the chat template to an instance's src/dst (question, prefill) parts.
 
     Returns ``{"src_prompt", "dst_prompt", ...}`` (+ ``src_task_text``/``dst_task_text`` for kv,
     ``task_text`` for filter). ``ctx`` is a :class:`src.diff.functional.Ctx` (else module-global
-    ``mt``). Imported lazily so dataset inspection needs no model."""
+    ``mt``). Prefills are finalized (``_finalize_prefill``) so a dangling trailing space never
+    becomes the pivot. Imported lazily so dataset inspection needs no model."""
     from src.diff.functional import get_prompt
 
     qs, pfs = instance.src_parts()
     qd, pfd = instance.dst_parts()
     out = {
-        "src_prompt": get_prompt(qs, pfs, ctx=ctx),
-        "dst_prompt": get_prompt(qd, pfd, ctx=ctx),
+        "src_prompt": get_prompt(qs, _finalize_prefill(pfs), ctx=ctx),
+        "dst_prompt": get_prompt(qd, _finalize_prefill(pfd), ctx=ctx),
     }
     if isinstance(instance, KVTransferInstance):
         out["src_task_text"] = instance.task_text(instance.src_task)
