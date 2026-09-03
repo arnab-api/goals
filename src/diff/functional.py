@@ -855,6 +855,8 @@ def run_q_transfer_intervention(
     *,
     n_steer=16,
     max_new=96,
+    alpha=1.0,
+    n_pivot=1,
     ctx=None,
 ):
     """Run one q-transfer (or composed-filter) intervention and return all RAW artifacts as
@@ -862,6 +864,13 @@ def run_q_transfer_intervention(
     pivot (prefill + re-clamped for ``n_steer`` decode steps); collects clean-SRC / clean-DST /
     patched-DST generations, the three goalscope readouts (over ``readout_heads``, default =
     ``patch_heads``), and value-weighted pivot→TASK attention (clean & patched) for the gaze eval.
+
+    ``n_pivot`` > 1 transplants the SRC query over the last ``n_pivot`` pivot tokens on the PREFILL
+    (aligned by offset-from-pivot; only safe where those trailing tokens coincide on SRC/DST — e.g.
+    ``postfix="targeted"``); the decode steer always re-clamps the last token only. ``alpha`` != 1.0
+    boosts the OV write of ``patch_heads`` at the decision token during the PATCHED generation and
+    readout (amplifying how much they write to the residual). Attention (the gaze signal) is always
+    measured under the PLAIN patch — an OV boost scales the write, not the attention weights.
 
     Works for both ``QTransferInstance`` (TASK = numbered predicate list) and
     ``FilterTransferInstance`` (TASK = the composed phrase); the span is chosen accordingly.
@@ -889,22 +898,45 @@ def run_q_transfer_intervention(
     task_positions = list(range(lo, hi))
     task_tokens = [mt.tokenizer.decode([int(dst_tok["input_ids"][0][j])]) for j in task_positions]
 
-    # query transplant specs
+    # query transplant specs — single-pivot (n_pivot=1) or last-n_pivot window on the prefill
     q_layers = sorted({l for l, _ in patch_heads})
-    q_src = cache_src_proj(src_prompt, [piv_src], q_layers, "q", ctx=ctx)
     qh = heads_per_layer(patch_heads, "q", ctx=ctx)
-    pf = [dict(which="q", cache=q_src, heads=qh, positions=[piv_dst])]
-    dc = [dict(which="q", cache=q_src, heads=qh, positions=[-1])]
-    iface = make_patch_interface(mt, pf)
+    if n_pivot <= 1:
+        q_src = cache_src_proj(src_prompt, [piv_src], q_layers, "q", ctx=ctx)
+        pf = [dict(which="q", cache=q_src, heads=qh, positions=[piv_dst])]
+        dc = [dict(which="q", cache=q_src, heads=qh, positions=[-1])]
+    else:
+        src_win = list(range(piv_src - n_pivot + 1, piv_src + 1))  # cache row r -> dst_win[r]
+        dst_win = list(range(piv_dst - n_pivot + 1, piv_dst + 1))
+        q_src = cache_src_proj(src_prompt, src_win, q_layers, "q", ctx=ctx)
+        pf = [dict(which="q", cache=q_src, heads=qh, positions=dst_win)]
+        dcache = {l: q_src[l][-1:] for l in q_src}  # pivot-only (last row) for the decode steer
+        dc = [dict(which="q", cache=dcache, heads=qh, positions=[-1])]
+    iface = make_patch_interface(mt, pf)  # PLAIN patch — used for attention (gaze) regardless of alpha
+
+    # OV boost of patch_heads at the decision token, active only on the PATCHED gen + readout
+    def _boost_ctx():
+        return boost_head_ov(mt, patch_heads, alpha, positions=(-1,)) if alpha != 1.0 else nullcontext()
+
+    def _patched_iface():
+        if alpha == 1.0:
+            return iface
+
+        def _if(mt, inputs, patches=None, model_kwargs=None):
+            with proj_patch_hooks(mt, pf), boost_head_ov(mt, patch_heads, alpha, positions=(-1,)):
+                return mt._model(**dict(inputs), **dict(model_kwargs or {}))
+
+        return _if
 
     # generations
     gen_src = greedy(src_tok, max_new=max_new, ctx=ctx)
     gen_dst = greedy(dst_tok, max_new=max_new, ctx=ctx)
-    gen_patched = greedy(
-        dst_tok, prefill_specs=pf, decode_specs=dc, n_steer=n_steer, max_new=max_new, ctx=ctx
-    )
+    with _boost_ctx():
+        gen_patched = greedy(
+            dst_tok, prefill_specs=pf, decode_specs=dc, n_steer=n_steer, max_new=max_new, ctx=ctx
+        )
 
-    # goalscope readouts (source / destination / patched under the same query patch)
+    # goalscope readouts (source / destination / patched under the same query patch + boost)
     def _ro(prompt, piv, iface=None):
         return goalscope_readout("", prompt, piv, heads=readout_heads, iface=iface, ctx=ctx)[0][
             "patched_gen"
@@ -912,9 +944,9 @@ def run_q_transfer_intervention(
 
     ro_src = _ro(src_prompt, piv_src)
     ro_dst = _ro(dst_prompt, piv_dst)
-    ro_patched = _ro(dst_prompt, piv_dst, iface=iface)
+    ro_patched = _ro(dst_prompt, piv_dst, iface=_patched_iface())
 
-    # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched
+    # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched (PLAIN patch)
     clean_i = get_attention_matrices(dst_tok, mt, value_weighted=True)
     patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=iface)
     a_clean = pivot_attn(clean_i, list(readout_heads), task_positions, piv_dst)

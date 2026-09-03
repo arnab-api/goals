@@ -120,6 +120,8 @@ class ConfigMeta:
     patch_heads: str
     oracle_model: str
     n_instances: int
+    alpha: float = 1.0  # OV boost of patch heads on the patched gen+readout (1.0 = off)
+    n_pivot: int = 1  # #trailing pivot tokens transplanted on the prefill
     # summary rates (over instances with a verdict)
     causal_trigger_rate: Optional[float] = None
     readout_valid_rate: Optional[float] = None
@@ -134,10 +136,15 @@ def _safe(dt: str) -> str:
     return dt.replace("[", "_").replace("]", "").replace(" ", "")
 
 
-def _config_tag(setup, dt, variant, sl, dl) -> str:
+def _config_tag(setup, dt, variant, sl, dl, alpha=1.0, n_pivot=1) -> str:
     # variant = naming (q; None => per-pair random) or postfix (filter)
     v = variant or ("randnm" if setup == "q" else "targeted")
-    return f"{setup}__{_safe(dt)}__{v}__{sl}-{dl}"
+    base = f"{setup}__{_safe(dt)}__{v}__{sl}-{dl}"
+    # the intervention knobs get their own subdir so different settings never collide. Baseline
+    # (alpha=1, n_pivot=1) keeps the bare tag => backward-compatible with the pre-feature result dirs.
+    if alpha == 1.0 and n_pivot == 1:
+        return base
+    return f"{base}__a{alpha:g}_np{n_pivot}"
 
 
 def _setup_dir(setup: str) -> str:
@@ -196,6 +203,18 @@ def _resolve_datatypes(setup: str, requested) -> list[str]:
     return keep
 
 
+def _n_pivot_for(setup: str, variant, override="auto") -> int:
+    """Trailing pivot tokens to transplant on the prefill. Bounded by where SRC/DST trailing tokens
+    coincide: q=1 (SRC/DST differ in the last prefilled line), filter targeted=5 (shared
+    ``return [… for … in res if``), filter return=2 (shared ``\\n    return``). ``override`` ('auto' or
+    None => the rule; else an int) wins — the explicit ``--n-pivot`` value."""
+    if override not in (None, "auto"):
+        return int(override)
+    if setup == "q":
+        return 1
+    return 5 if (variant or "targeted") == "targeted" else 2
+
+
 def _variant_axis(setup: str, args) -> list:
     """q: the naming axis ([None] => collapse to per-pair random). filter: a single postfix."""
     if setup == "q":
@@ -244,7 +263,8 @@ def _summarize(records: list[InstanceRecord]) -> dict:
 # per-config run
 # ══════════════════════════════════════════════════════════════════════════════
 def run_config(mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads, out_root):
-    tag = _config_tag(setup, dt, variant, sl, dl)
+    n_pivot = _n_pivot_for(setup, variant, args.n_pivot)  # trailing pivot tokens to transplant
+    tag = _config_tag(setup, dt, variant, sl, dl, args.alpha, n_pivot)
     outdir = out_root / tag
     outdir.mkdir(parents=True, exist_ok=True)
     results_fp = outdir / "results.json"
@@ -297,7 +317,8 @@ def run_config(mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads,
     records: dict[str, dict] = dict(done)
     todo = [inst for inst in setups if _inst_key(inst) not in records or args.force]
     logger.info(
-        f"[{tag}] sampled {len(setups)} instances ({size_note}, seed={cfg_seed}) — "
+        f"[{tag}] sampled {len(setups)} instances ({size_note}, seed={cfg_seed}, "
+        f"alpha={args.alpha}, n_pivot={n_pivot}) — "
         f"{len(setups) - len(todo)} resumed, {len(todo)} to run"
     )
 
@@ -316,6 +337,8 @@ def run_config(mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads,
             readout_heads=readout_heads,
             n_steer=args.n_steer,
             max_new=args.max_new,
+            alpha=args.alpha,
+            n_pivot=n_pivot,
         )
 
         ev_kw = dict(model_name=args.oracle_model)
@@ -394,6 +417,8 @@ def run_config(mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads,
         patch_heads=args.patch_heads,
         oracle_model=args.oracle_model,
         n_instances=len(recs),
+        alpha=args.alpha,
+        n_pivot=n_pivot,
         **_summarize(recs),
     )
     (outdir / "meta.json").write_text(json.dumps(dataclasses.asdict(meta), indent=2))
@@ -491,6 +516,20 @@ def parse_args():
     )
     p.add_argument("--n-steer", type=int, default=32)
     p.add_argument("--max-new", type=int, default=64)
+    p.add_argument(
+        "--alpha",
+        type=float,
+        default=2.0,
+        help="OV boost of the patch heads at the decision token on the patched gen + readout "
+        "(1.0 = off). Amplifies how much those heads write into the residual after the transplant.",
+    )
+    p.add_argument(
+        "--n-pivot",
+        default="auto",
+        help="#trailing pivot tokens whose SRC query is transplanted on the PREFILL. 'auto' (default) "
+        "= per setup/postfix: q=1, filter targeted=5, filter return=2 — bounded by where the SRC/DST "
+        "trailing tokens coincide; or an int to override. The decode steer always re-clamps last only.",
+    )
     p.add_argument("--oracle-model", default="claude-sonnet-4-6")
     p.add_argument(
         "--no-oracle", action="store_true", help="skip causal+readout (gaze only)"
@@ -548,7 +587,8 @@ def main():
         )
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(
-            f"═══ config {ci}/{len(configs)}: {_config_tag(setup, dt, variant, sl, dl)} ═══"
+            f"═══ config {ci}/{len(configs)}: "
+            f"{_config_tag(setup, dt, variant, sl, dl, args.alpha, _n_pivot_for(setup, variant, args.n_pivot))} ═══"
         )
         meta = run_config(
             mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads, out_root
