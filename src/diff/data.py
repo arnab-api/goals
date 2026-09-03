@@ -1504,6 +1504,128 @@ def kv_transfer_setups(
     ]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# composition rules — when two filter sub-tasks may NOT be composed
+# ══════════════════════════════════════════════════════════════════════════════
+# A composed-filter instance pairs two *commutative, independent* sub-tasks. A pair is DISALLOWED when
+# composing it is degenerate — either the two conditions cannot both hold, or one trivially entails the
+# other (so the composition is redundant and often shares wording). Authored below as a readable
+# source-of-truth; ``FILTER_INCOMPATIBLE`` is the derived symmetric ``{condition_id: [ids it must not be
+# composed with]}`` mapping (implication-closed) that ``filter_transfer_setups`` consults.
+#
+# Three flavours:
+#   (i)   MUTUALLY EXCLUSIVE  — can never be true together        (all_upper / all_lower)
+#   (ii)  IMPLICATION / DUP   — a ⟹ b, so composing is redundant   (starts_a ⟹ vowel_start)
+#   (iii) CONTRADICTION       — a special case of (i)             (all_alpha / contains_digit)
+
+# a ⟹ b  (composing a with b is redundant; also covers duplicates a ⟺ b as one entry each way)
+_FILTER_IMPLIES: list[tuple[str, str]] = [
+    # ── list[str] ──
+    ("same_reversed", "palindrome"), ("palindrome", "same_reversed"),   # identical meaning
+    ("starts_a", "vowel_start"),                 # 'a' is a vowel (+ shared "start with" phrasing)
+    ("all_upper", "capitalized"),                # all-caps ⟹ starts with an uppercase letter
+    ("length_five", "long"),                     # exactly five ⟹ longer than three
+    ("last_is_digit", "contains_digit"),         # ends with a digit ⟹ contains a digit
+    # ── list[int] ──
+    ("positive", "non_negative"),
+    ("in_range_ten_hundred", "positive"),
+    ("multiple_of_ten", "multiple_of_five"), ("multiple_of_ten", "even"),
+    ("divisible_by_four", "even"),
+    # ── str (single char) ──
+    ("vowel", "alpha"), ("consonant", "alpha"), ("upper", "alpha"), ("lower", "alpha"),
+    ("upper_vowel", "upper"), ("upper_vowel", "vowel"),
+    ("first_half_alpha", "alpha"), ("second_half_alpha", "alpha"),
+    ("letter_e", "vowel"), ("letter_e", "first_half_alpha"),
+    ("alpha", "alnum"), ("digit", "alnum"), ("hex_digit", "alnum"),
+    ("digit", "hex_digit"), ("even_digit", "digit"), ("odd_digit", "digit"),
+]
+
+# mutually-exclusive pairs/groups (every pair within a tuple can never be true together)
+_FILTER_MUTEX: list[tuple[str, ...]] = [
+    # ── list[str] ──
+    ("short", "long"), ("length_five", "short"),
+    ("all_upper", "all_lower"), ("all_lower", "capitalized"),
+    ("all_alpha", "contains_digit"), ("all_alpha", "last_is_digit"),
+    ("ends_s", "last_is_digit"),
+    # ── list[int] ──
+    ("even", "odd"), ("positive", "negative"), ("negative", "non_negative"),
+    ("single_digit", "two_digit"), ("single_digit", "big"),
+    ("single_digit", "in_range_ten_hundred"), ("single_digit", "abs_over_fifty"),
+    ("big", "negative"), ("in_range_ten_hundred", "negative"),
+    ("odd", "multiple_of_ten"), ("odd", "divisible_by_four"),
+    ("perfect_square", "is_prime"), ("perfect_square", "negative"), ("is_prime", "negative"),
+    # ── str (single char) ──
+    ("upper", "lower"), ("vowel", "consonant"),
+    ("even_digit", "odd_digit"), ("first_half_alpha", "second_half_alpha"),
+]
+
+# str single-char conditions each hold a character CATEGORY; disjoint categories ⇒ mutually exclusive
+# (L=letter, D=digit, S=whitespace, P=punctuation; "LD" = either). Generates e.g. vowel⊥digit,
+# alpha⊥whitespace, hex_digit⊥whitespace, comma_or_period⊥alnum, … without listing each pair.
+_STR_CHAR_CLASS: dict[str, str] = {
+    "vowel": "L", "consonant": "L", "alpha": "L", "upper": "L", "lower": "L", "upper_vowel": "L",
+    "first_half_alpha": "L", "second_half_alpha": "L", "letter_e": "L",
+    "digit": "D", "even_digit": "D", "odd_digit": "D",
+    "whitespace": "S", "comma_or_period": "P",
+    "alnum": "LD", "hex_digit": "LD",
+}
+
+
+def _build_filter_incompatible() -> dict[str, list[str]]:
+    """Derive the symmetric, implication-closed incompatibility mapping from the rules above."""
+    # implication closure: a ⟹ b, transitively
+    impl: dict[str, set[str]] = {}
+    for a, b in _FILTER_IMPLIES:
+        impl.setdefault(a, set()).add(b)
+    for _ in range(len(impl) + 2):
+        for a in list(impl):
+            for b in list(impl[a]):
+                impl[a] |= impl.get(b, set())
+
+    mutex: dict[str, set[str]] = {}
+
+    def _m(a: str, b: str) -> None:
+        if a != b:
+            mutex.setdefault(a, set()).add(b)
+            mutex.setdefault(b, set()).add(a)
+
+    for grp in _FILTER_MUTEX:
+        for i in range(len(grp)):
+            for j in range(i + 1, len(grp)):
+                _m(grp[i], grp[j])
+    _cls = list(_STR_CHAR_CLASS.items())
+    for i in range(len(_cls)):
+        for j in range(i + 1, len(_cls)):
+            (a, ca), (b, cb) = _cls[i], _cls[j]
+            if not (set(ca) & set(cb)):
+                _m(a, b)
+    # mutex is inherited up implications: if a ⟹ x and x ⊥ y, then a ⊥ y
+    for _ in range(len(impl) + 2):
+        for a, xs in list(impl.items()):
+            for x in list(xs):
+                for y in list(mutex.get(x, ())):
+                    _m(a, y)
+
+    inc: dict[str, set[str]] = {}
+    keys = set(impl) | set(mutex) | {b for _, b in _FILTER_IMPLIES}
+    for a in keys:
+        s = set(mutex.get(a, set())) | impl.get(a, set())
+        s |= {b for b, bs in impl.items() if a in bs}   # reverse implications (b ⟹ a)
+        s.discard(a)
+        if s:
+            inc[a] = sorted(s)
+    return dict(sorted(inc.items()))
+
+
+#: ``{condition_id: [ids it must NOT be composed with]}`` — consulted by ``filter_transfer_setups``.
+FILTER_INCOMPATIBLE: dict[str, list[str]] = _build_filter_incompatible()
+
+
+def filter_compatible(a_id: str, b_id: str) -> bool:
+    """True iff the two filter sub-tasks may be composed (not mutually exclusive / redundant)."""
+    return b_id not in FILTER_INCOMPATIBLE.get(a_id, ())
+
+
 def filter_transfer_setups(
     datatype: str,
     n_samples: int = 8,
@@ -1532,6 +1654,8 @@ def filter_transfer_setups(
         if len(out) >= n_samples:
             break
         ca, cb = rng.sample(conds, 2)  # random 2-subset (the two sub-tasks)
+        if not filter_compatible(ca.id, cb.id):  # skip degenerate pairs (see FILTER_INCOMPATIBLE)
+            continue
         src_fill, dst_fill = (ca.id, cb.id) if rng.random() < 0.5 else (cb.id, ca.id)
         key = ((ca.id, cb.id), src_fill)
         if key in seen:
