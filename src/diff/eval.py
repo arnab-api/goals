@@ -228,6 +228,24 @@ def eval_q_transfer(
     return out
 
 
-# ── kv-transfer eval — deferred (refine later, per the current plan) ──────────
-def eval_kv_transfer(*args, **kwargs):
-    raise NotImplementedError("kv-transfer eval pending — q-transfer first (see module docstring).")
+# ══════════════════════════════════════════════════════════════════════════════
+# kv-transfer (Spec-2) & multi-predicate eval — causal + readout only
+# ══════════════════════════════════════════════════════════════════════════════
+def eval_kv_transfer(
+    inst,
+    patched_gen: Optional[str] = None,
+    readouts: Optional[tuple] = None,          # (source_readout, dest_readout, patched_readout)
+    **kw,
+) -> QTransferEval:
+    """Evaluate one kv-transfer / multi-predicate intervention. Same causal + readout judgements as
+    :func:`eval_q_transfer` (both templates expose ``expected_next_desc`` / ``dst_next_desc`` /
+    ``task_desc``), but **no gaze** — in these setups the SRC target never appears in the DST prompt,
+    so there is no SRC-target span to gaze at (gaze is N/A). ``patched_gen`` -> causal ;
+    ``readouts`` -> readout shift."""
+    out = QTransferEval(meta={"datatype": inst.meta.get("datatype"),
+                              "expected_next": inst.expected_next})
+    if patched_gen is not None:
+        out.causal = judge_causal(inst, patched_gen, **kw)
+    if readouts is not None:
+        out.readout = eval_readouts(inst, *readouts, **kw)
+    return out

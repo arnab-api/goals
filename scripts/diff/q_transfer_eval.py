@@ -127,8 +127,10 @@ class ConfigMeta:
     readout_valid_rate: Optional[float] = None
     readout_shift_rate: Optional[float] = None
     readout_shift_rate_valid: Optional[float] = None  # shift among VALID cases only
-    gaze_shift_rate: Optional[float] = None            # patched gaze(SRC) > gaze(DST)
-    gaze_clean_baseline_rate: Optional[float] = None   # clean gaze(SRC) > gaze(DST) — should be LOW
+    gaze_shift_rate: Optional[float] = None  # patched gaze(SRC) > gaze(DST)
+    gaze_clean_baseline_rate: Optional[float] = (
+        None  # clean gaze(SRC) > gaze(DST) — should be LOW
+    )
     n_parse_error: int = 0  # instances with >=1 oracle PARSE_ERROR (causal or any readout) — re-run these
 
 
@@ -136,15 +138,21 @@ def _safe(dt: str) -> str:
     return dt.replace("[", "_").replace("]", "").replace(" ", "")
 
 
-def _config_tag(setup, dt, variant, sl, dl, alpha=1.0, n_pivot=1) -> str:
-    # variant = naming (q; None => per-pair random) or postfix (filter)
+def _config_tag(setup, dt, variant, sl, dl) -> str:
+    """Per-config DATA axes only (the intervention knobs live in the run tag). variant = naming (q;
+    None => per-pair random) or postfix (filter)."""
     v = variant or ("randnm" if setup == "q" else "targeted")
-    base = f"{setup}__{_safe(dt)}__{v}__{sl}-{dl}"
-    # the intervention knobs get their own subdir so different settings never collide. Baseline
-    # (alpha=1, n_pivot=1) keeps the bare tag => backward-compatible with the pre-feature result dirs.
-    if alpha == 1.0 and n_pivot == 1:
-        return base
-    return f"{base}__a{alpha:g}_np{n_pivot}"
+    return f"{setup}__{_safe(dt)}__{v}__{sl}-{dl}"
+
+
+def _run_tag(patch_heads, alpha, n_pivot_arg="auto") -> str:
+    """Run-level intervention knobs (single-valued per invocation). Each run gets its own subdir —
+    ``.../{model}/{run_tag}/{config_tag}/`` — with its OWN summary.json, so different runs (e.g. a
+    different --patch-heads or --alpha) never overwrite each other."""
+    t = f"ph-{patch_heads}__a{alpha:g}"
+    if n_pivot_arg not in (None, "auto"):
+        t += f"__np{int(n_pivot_arg)}"
+    return t
 
 
 def _setup_dir(setup: str) -> str:
@@ -199,7 +207,9 @@ def _resolve_datatypes(setup: str, requested) -> list[str]:
     keep = [d for d in requested if d in avail]
     skipped = [d for d in requested if d not in avail]
     if skipped:
-        logger.warning(f"[{setup}] datatypes not available for this setup, skipping: {skipped}")
+        logger.warning(
+            f"[{setup}] datatypes not available for this setup, skipping: {skipped}"
+        )
     return keep
 
 
@@ -262,10 +272,14 @@ def _summarize(records: list[InstanceRecord]) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # per-config run
 # ══════════════════════════════════════════════════════════════════════════════
-def run_config(mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads, out_root):
-    n_pivot = _n_pivot_for(setup, variant, args.n_pivot)  # trailing pivot tokens to transplant
-    tag = _config_tag(setup, dt, variant, sl, dl, args.alpha, n_pivot)
-    outdir = out_root / tag
+def run_config(
+    mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads, out_root
+):
+    n_pivot = _n_pivot_for(
+        setup, variant, args.n_pivot
+    )  # trailing pivot tokens to transplant
+    tag = _config_tag(setup, dt, variant, sl, dl)
+    outdir = out_root / tag  # out_root already includes the run tag
     outdir.mkdir(parents=True, exist_ok=True)
     results_fp = outdir / "results.json"
 
@@ -560,9 +574,12 @@ def main():
     ctx = P.setup(args.model)  # loads model + head masks; binds module globals
     mt = ctx.mt
     patch_heads = ctx.goal_heads if args.patch_heads == "goal" else ctx.union_heads
+    # READOUT_HEADS — always the goal heads, kept SEPARATE from the patched heads (not a config axis).
     readout_heads = ctx.goal_heads
 
     model_short = args.model.split("/")[-1]
+    run_tag = _run_tag(args.patch_heads, args.alpha, args.n_pivot)  # groups this run's outputs
+    logger.info(f"run_tag={run_tag}")
 
     # enumerate configs per setup (each setup owns its axes + results subdir)
     configs = []  # (setup, dt, variant, lt)
@@ -584,29 +601,32 @@ def main():
             / "diff"
             / _setup_dir(setup)
             / model_short
+            / run_tag
         )
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(
-            f"═══ config {ci}/{len(configs)}: "
-            f"{_config_tag(setup, dt, variant, sl, dl, args.alpha, _n_pivot_for(setup, variant, args.n_pivot))} ═══"
+            f"═══ config {ci}/{len(configs)}: {run_tag}/{_config_tag(setup, dt, variant, sl, dl)} ═══"
         )
         meta = run_config(
             mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads, out_root
         )
         metas_by_setup.setdefault(setup, []).append(meta)
 
-    # one summary.json per setup subdir
+    # one summary.json per (setup, run_tag) subdir
     for setup, metas in metas_by_setup.items():
         summ_fp = (
             Path(env_utils.DEFAULT_RESULTS_DIR)
             / "diff"
             / _setup_dir(setup)
             / model_short
+            / run_tag
             / "summary.json"
         )
         summ_fp.write_text(json.dumps([dataclasses.asdict(m) for m in metas], indent=2))
         logger.info(f"[{setup}] summary ({len(metas)} configs) at {summ_fp}")
-    logger.info(f"all done — {len(configs)} configs across {len(metas_by_setup)} setup(s)")
+    logger.info(
+        f"all done — {len(configs)} configs across {len(metas_by_setup)} setup(s)"
+    )
 
 
 if __name__ == "__main__":

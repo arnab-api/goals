@@ -29,7 +29,7 @@ import os
 import sys
 import types
 from collections import defaultdict
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 
 import baukit
@@ -356,8 +356,9 @@ def _proj_name(l, which, mt):  # which in {'q','k','v'}
 
 def cache_src_proj(prompt, positions, layers, which, ctx=None):
     _mt = ctx.mt if ctx is not None else mt
-    """{layer: (len(positions), width)} — source {which}_proj outputs at `positions` (pre-RoPE for q/k)."""
-    tok = prepare_input(prompts=prompt, tokenizer=_mt)
+    """{layer: (len(positions), width)} — source {which}_proj outputs at `positions` (pre-RoPE for q/k).
+    `prompt` may be a string OR a pre-tokenized TokenizerOutput (e.g. a token-spliced pad alignment)."""
+    tok = prepare_input(prompts=prompt, tokenizer=_mt) if isinstance(prompt, str) else prompt
     names = {l: _proj_name(l, which, _mt) for l in layers}
     with (
         torch.no_grad(),
@@ -857,6 +858,7 @@ def run_q_transfer_intervention(
     max_new=96,
     alpha=1.0,
     n_pivot=1,
+    compute_gaze=True,
     ctx=None,
 ):
     """Run one q-transfer (or composed-filter) intervention and return all RAW artifacts as
@@ -889,14 +891,18 @@ def run_q_transfer_intervention(
     src_tok = prepare_input(prompts=src_prompt, tokenizer=mt)
     dst_tok = prepare_input(prompts=dst_prompt, tokenizer=mt)
 
-    # TASK span: composed phrase (filter) or the union over the numbered predicate list (q)
-    if "task_text" in m:
-        lo, hi = token_span(dst_prompt, m["task_text"], ctx=ctx)
+    # TASK span (gaze only): composed phrase (filter) or the union over the numbered predicate list
+    # (q). N/A when the instance has no in-prompt SRC-target span (multi-predicate) — skip gaze.
+    if compute_gaze and (("task_text" in m) or hasattr(inst, "task")):
+        if "task_text" in m:
+            lo, hi = token_span(dst_prompt, m["task_text"], ctx=ctx)
+        else:
+            spans = [token_span(dst_prompt, p.description, ctx=ctx) for p in inst.task.predicates]
+            lo, hi = min(s[0] for s in spans), max(s[1] for s in spans)
+        task_positions = list(range(lo, hi))
+        task_tokens = [mt.tokenizer.decode([int(dst_tok["input_ids"][0][j])]) for j in task_positions]
     else:
-        spans = [token_span(dst_prompt, p.description, ctx=ctx) for p in inst.task.predicates]
-        lo, hi = min(s[0] for s in spans), max(s[1] for s in spans)
-    task_positions = list(range(lo, hi))
-    task_tokens = [mt.tokenizer.decode([int(dst_tok["input_ids"][0][j])]) for j in task_positions]
+        task_positions, task_tokens = None, None
 
     # query transplant specs — single-pivot (n_pivot=1) or last-n_pivot window on the prefill
     q_layers = sorted({l for l, _ in patch_heads})
@@ -946,11 +952,20 @@ def run_q_transfer_intervention(
     ro_dst = _ro(dst_prompt, piv_dst)
     ro_patched = _ro(dst_prompt, piv_dst, iface=_patched_iface())
 
-    # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched (PLAIN patch)
-    clean_i = get_attention_matrices(dst_tok, mt, value_weighted=True)
-    patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=iface)
-    a_clean = pivot_attn(clean_i, list(readout_heads), task_positions, piv_dst)
-    a_patched = pivot_attn(patched_i, list(readout_heads), task_positions, piv_dst)
+    # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched (PLAIN patch).
+    # Skipped when there is no SRC-target span (multi-predicate) — gaze is N/A there.
+    if task_positions is not None:
+        clean_i = get_attention_matrices(dst_tok, mt, value_weighted=True)
+        patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=iface)
+        a_clean = pivot_attn(clean_i, list(readout_heads), task_positions, piv_dst)
+        a_patched = pivot_attn(patched_i, list(readout_heads), task_positions, piv_dst)
+        attn = dict(
+            attn_clean=[float(x) for x in a_clean],
+            attn_patched=[float(x) for x in a_patched],
+            attn_delta=[float(x) for x in (a_patched - a_clean)],
+        )
+    else:
+        attn = dict(attn_clean=None, attn_patched=None, attn_delta=None)
 
     return dict(
         src_prompt=src_prompt,
@@ -965,7 +980,162 @@ def run_q_transfer_intervention(
         ro_src=ro_src,
         ro_dst=ro_dst,
         ro_patched=ro_patched,
-        attn_clean=[float(x) for x in a_clean],
-        attn_patched=[float(x) for x in a_patched],
-        attn_delta=[float(x) for x in (a_patched - a_clean)],
+        **attn,
+    )
+
+
+def align_kv_spans(mt, src_prompt, dst_prompt, src_span, dst_span, mode="right",
+                   src_text=None, dst_text=None, ctx=None):
+    """Choose the transplant token windows for a Spec-2 k/v span transplant (the A4 ``ALIGN_KNOB``).
+    Tokenizes both prompts and returns ``(src_tok, dst_tok, src_pos, dst_pos, src_span, dst_span)`` —
+    ``*_tok`` are :class:`TokenizerOutput`s (mode="pad" splices tokens, so there is no clean string).
+
+    ``mode="right"`` — right-edge align: ``K = min(|src|, |dst|)``, the last ``K`` tokens of each span
+    move; token sequences unchanged (the FRONT of the longer span is left out).
+    ``mode="pad"`` — full overwrite: splice ``|len_s − len_d|`` **newline tokens** immediately BEFORE
+    the SHORTER target span (at the token-id level — Qwen merges consecutive ``\\n`` in text, so a
+    string insert would collapse to one token) so both spans become length ``K = max`` and EVERY token
+    in each span is transplanted (no residue). Newlines are neutral padding (vs the EOS pad token,
+    whose semantics bleed). Works cross-language."""
+    _mt = ctx.mt if ctx is not None else mt
+    src_tok = prepare_input(prompts=src_prompt, tokenizer=_mt)
+    dst_tok = prepare_input(prompts=dst_prompt, tokenizer=_mt)
+    len_s, len_d = src_span[1] - src_span[0], dst_span[1] - dst_span[0]
+    if mode == "right":
+        K = min(len_s, len_d)
+        return (src_tok, dst_tok,
+                list(range(src_span[1] - K, src_span[1])),
+                list(range(dst_span[1] - K, dst_span[1])),
+                src_span, dst_span)
+    if mode == "pad":
+        nl = _mt.tokenizer("\n", add_special_tokens=False)["input_ids"][-1]  # atomic newline id
+
+        def _splice(tok, span, n):  # insert n newline ids right before span start (mutate in place)
+            ids, am = tok["input_ids"], tok["attention_mask"]
+            t0 = span[0]
+            row = torch.full((ids.shape[0], n), nl, dtype=ids.dtype, device=ids.device)
+            ones = torch.ones((am.shape[0], n), dtype=am.dtype, device=am.device)
+            tok["input_ids"] = torch.cat([ids[:, :t0], row, ids[:, t0:]], dim=1)
+            tok["attention_mask"] = torch.cat([am[:, :t0], ones, am[:, t0:]], dim=1)
+            return tok, (span[0], span[1] + n)  # span grows by n -> length K = max
+
+        if len_s < len_d:
+            src_tok, src_span = _splice(src_tok, src_span, len_d - len_s)
+        elif len_d < len_s:
+            dst_tok, dst_span = _splice(dst_tok, dst_span, len_s - len_d)
+        # both spans now length K = max; transplant EVERY token in each
+        return (src_tok, dst_tok, list(range(*src_span)), list(range(*dst_span)), src_span, dst_span)
+    raise ValueError(f"align mode must be 'right'|'pad', got {mode!r}")
+
+
+def run_kv_transfer_intervention(
+    mt,
+    inst,
+    patch_heads,
+    readout_heads=None,
+    *,
+    max_new=96,
+    alpha=1.0,
+    align="right",
+    ablate_heads=None,
+    ctx=None,
+):
+    """Run one kv-transfer (Spec-2) intervention and return RAW artifacts as JSON-native types.
+
+    ``SRC.task != DST.task`` but both share the same prefilled progress. Cache the SRC
+    task-DESCRIPTION span key+value over ``patch_heads`` and transplant it onto the DST task span
+    (right-edge aligned — Spec-2 convention), via the GQA-corrected headwise routing
+    (:func:`headwise_kv_patch`, so only ``patch_heads`` read the source span). Collects clean-SRC /
+    clean-DST / patched-DST generations and the three goalscope readouts (over ``readout_heads``,
+    default = ``patch_heads``).
+
+    **No gaze.** In Spec-2 the SRC target never appears in the DST prompt, so there is no SRC-target
+    span to gaze at — the eval is causal + readout only (:func:`src.diff.eval.eval_kv_transfer`).
+
+    ``alpha`` != 1.0 boosts the OV write of ``patch_heads`` at the decision token during the PATCHED
+    generation and readout (as in :func:`run_q_transfer_intervention`). ``align`` ("right" | "pad";
+    see :func:`align_kv_spans`) selects the transplant window: right-edge (drop the longer span's
+    front) or left-pad the shorter span so the dest span is fully overwritten. ``ablate_heads``
+    (query-head ``(layer, head)`` list) has its OV write ZEROED at every position during the PATCHED
+    GENERATION only (never a patched head) — kills the 'backup' goal computation the k/v inconsistency
+    can trigger. The readout is NOT ablated (goalscope injects into a neutral probe, no inconsistency).
+    Returns a dict consumed directly by :func:`src.diff.eval.eval_kv_transfer` (pass ``patched_gen``
+    and ``readouts``)."""
+    from src.diff.data import materialize
+
+    readout_heads = readout_heads or patch_heads
+    m = materialize(inst, ctx=ctx)
+    src_prompt, dst_prompt = m["src_prompt"], m["dst_prompt"]
+    src_span = token_span(src_prompt, m["src_task_text"], ctx=ctx)
+    dst_span = token_span(dst_prompt, m["dst_task_text"], ctx=ctx)
+
+    # align the two task spans per ``align`` ("right" | "pad"); "pad" token-splices the shorter side,
+    # so align returns TokenizerOutputs (not strings) used directly downstream.
+    src_tok, dst_tok, src_pos, dst_pos, src_span, dst_span = align_kv_spans(
+        mt, src_prompt, dst_prompt, src_span, dst_span, mode=align,
+        src_text=m["src_task_text"], dst_text=m["dst_task_text"], ctx=ctx)
+    piv_src = src_tok["input_ids"].shape[1] - 1
+    piv_dst = dst_tok["input_ids"].shape[1] - 1
+
+    # cache SRC key+value over the patched kv-heads (positions from the alignment above)
+    kvheads = heads_per_layer(patch_heads, "k", layers=set(_layers_of(patch_heads, ctx=ctx)), ctx=ctx)
+    k_cache = cache_src_proj(src_tok, src_pos, sorted(kvheads), "k", ctx=ctx)
+    v_cache = cache_src_proj(src_tok, src_pos, sorted(kvheads), "v", ctx=ctx)
+    iface = make_headwise_interface(mt, patch_heads, k_cache, v_cache, dst_pos)  # GQA-corrected
+    # heads whose OV write is ZEROED on the PATCHED run (never a patched head)
+    ablate = [h for h in (ablate_heads or []) if h not in set(patch_heads)]
+
+    # The PATCHED-run context: k/v transplant + (optional) OV boost of patch_heads at the pivot.
+    # ``with_ablate`` adds the OV ablation of `ablate` heads at ALL positions — ON for the GENERATION
+    # (counters the k/v inconsistency), OFF for the READOUT (goalscope injects the goal-head write into
+    # a neutral, information-less probe, which has no cross-context inconsistency to counter, so the
+    # readout logic stays identical across source/dest/patched). Rebuilt per forward (single-use CMs).
+    def _patched_stack(with_ablate):
+        s = ExitStack()
+        s.enter_context(headwise_kv_patch(mt, patch_heads, k_cache, v_cache, dst_pos))
+        if alpha != 1.0:
+            s.enter_context(boost_head_ov(mt, patch_heads, alpha, positions=(-1,)))
+        if with_ablate and ablate:
+            s.enter_context(boost_head_ov(mt, ablate, 0.0, positions=None))
+        return s
+
+    def _patched_iface():  # readout iface — transplant (+ boost), NO ablation
+        if alpha == 1.0:
+            return iface
+
+        def _if(mt, inputs, patches=None, model_kwargs=None):
+            with _patched_stack(with_ablate=False):
+                return mt._model(**dict(inputs), **dict(model_kwargs or {}))
+
+        return _if
+
+    # generations (patched gen counters the k/v inconsistency with the OV ablation)
+    gen_src = greedy(src_tok, max_new=max_new, ctx=ctx)
+    gen_dst = greedy(dst_tok, max_new=max_new, ctx=ctx)
+    with _patched_stack(with_ablate=True):
+        gen_patched = greedy(dst_tok, max_new=max_new, ctx=ctx)
+
+    # goalscope readouts (source / destination / patched under the k+v transplant + boost)
+    def _ro(tok, piv, iface=None):
+        return goalscope_readout("", tok, piv, heads=readout_heads, iface=iface, ctx=ctx)[0][
+            "patched_gen"
+        ]
+
+    ro_src = _ro(src_tok, piv_src)
+    ro_dst = _ro(dst_tok, piv_dst)
+    ro_patched = _ro(dst_tok, piv_dst, iface=_patched_iface())
+
+    return dict(
+        src_prompt=src_prompt,
+        dst_prompt=dst_prompt,
+        piv_src=piv_src,
+        piv_dst=piv_dst,
+        src_span=list(src_span),
+        dst_span=list(dst_span),
+        gen_src=gen_src,
+        gen_dst=gen_dst,
+        gen_patched=gen_patched,
+        ro_src=ro_src,
+        ro_dst=ro_dst,
+        ro_patched=ro_patched,
     )
