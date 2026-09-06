@@ -755,6 +755,69 @@ def boost_head_ov(mt, heads, alpha, positions=(-1,)):
             hnd.remove()
 
 
+@contextmanager
+def restrict_head_attn(mt, heads, block_key_positions, keep=None):
+    """Attention knockout ablation (ABLATION_STRAT="restrict"): let `heads` attend to ALL context
+    tokens EXCEPT the key columns in `block_key_positions` (the <task_span>). For each (layer,
+    query_head) in `heads`, the pre-softmax attention scores at those key columns are set to -inf,
+    so the head can no longer read the task-description span — but it keeps its normal write and can
+    still look everywhere else. Contrast with the "zero" strategy (:func:`boost_head_ov` with
+    alpha=0), which kills the head's OV write at every position.
+
+    Implemented by expanding the additive attention bias to per-head shape (batch, n_heads, q, k) and
+    writing the dtype min at the blocked key columns for the selected heads only. Composes with
+    :func:`headwise_kv_patch` (which forwards the same `attention_mask` straight into `eager`), so the
+    patch heads still read the transplanted span while the ablate heads are blind to it. `keep` heads
+    (default = none) are never blocked — pass PATCH_HEADS so a patched head is never knocked out.
+
+    `block_key_positions` are ABSOLUTE key indices into the (padded) prompt; they stay valid through
+    cached generation since the task span sits in the prompt prefix."""
+    keep = set(keep or [])
+    cols = sorted({int(p) for p in block_key_positions})
+    by_layer = defaultdict(list)
+    for l, h in heads:
+        if (l, h) not in keep:
+            by_layer[l].append(h)
+    if not cols or not by_layer:
+        yield
+        return
+
+    handles = []
+    try:
+        for layer, hs in by_layer.items():
+            mod = _attn_module(mt, layer)
+
+            def make(hs):
+                def pre_hook(module, args, kwargs):
+                    am = kwargs.get("attention_mask", None)
+                    pos_idx = None
+                    if am is None and len(args) >= 3:  # (hidden, pos_emb, attention_mask, ...)
+                        am, pos_idx = args[2], 2
+                    if am is None or am.dim() != 4:
+                        return None  # non-eager / no additive mask — cannot knock out here
+                    B, H, Q, K = am.shape
+                    blk = [c for c in cols if c < K]
+                    if not blk:
+                        return None
+                    am = (am.expand(B, mt.n_heads, Q, K).clone() if H == 1 else am.clone())
+                    minval = torch.finfo(am.dtype).min
+                    for h in hs:
+                        am[:, h, :, blk] = minval  # this head is blind to the task span
+                    if pos_idx is not None:
+                        new = list(args)
+                        new[pos_idx] = am
+                        return (tuple(new), kwargs)
+                    return (args, {**kwargs, "attention_mask": am})
+
+                return pre_hook
+
+            handles.append(mod.register_forward_pre_hook(make(hs), with_kwargs=True))
+        yield
+    finally:
+        for hnd in handles:
+            hnd.remove()
+
+
 def make_headwise_interface(mt, patch_heads, k_cache, v_cache, dest_positions):
     """A goalscope / get_attention_matrices-style ``patch_interface`` that runs the forward under the
     per-query-head *headwise* routing (GQA-bleed-corrected). Drop it in as the ``iface`` for
@@ -1038,6 +1101,7 @@ def run_kv_transfer_intervention(
     alpha=1.0,
     align="right",
     ablate_heads=None,
+    ablation_strat="zero",
     ctx=None,
 ):
     """Run one kv-transfer (Spec-2) intervention and return RAW artifacts as JSON-native types.
@@ -1056,9 +1120,12 @@ def run_kv_transfer_intervention(
     generation and readout (as in :func:`run_q_transfer_intervention`). ``align`` ("right" | "pad";
     see :func:`align_kv_spans`) selects the transplant window: right-edge (drop the longer span's
     front) or left-pad the shorter span so the dest span is fully overwritten. ``ablate_heads``
-    (query-head ``(layer, head)`` list) has its OV write ZEROED at every position during the PATCHED
-    GENERATION only (never a patched head) — kills the 'backup' goal computation the k/v inconsistency
-    can trigger. The readout is NOT ablated (goalscope injects into a neutral probe, no inconsistency).
+    (query-head ``(layer, head)`` list) are ablated during the PATCHED GENERATION only (never a patched
+    head) — kills the 'backup' goal computation the k/v inconsistency can trigger. ``ablation_strat``
+    selects HOW: ``"zero"`` ZEROes their OV write at every position (:func:`boost_head_ov`);
+    ``"restrict"`` keeps their write but knocks out their attention to the DST task span
+    (:func:`restrict_head_attn`) — they can look everywhere except the task description. The readout is
+    NOT ablated (goalscope injects into a neutral probe, no inconsistency).
     Returns a dict consumed directly by :func:`src.diff.eval.eval_kv_transfer` (pass ``patched_gen``
     and ``readouts``)."""
     from src.diff.data import materialize
@@ -1096,7 +1163,11 @@ def run_kv_transfer_intervention(
         if alpha != 1.0:
             s.enter_context(boost_head_ov(mt, patch_heads, alpha, positions=(-1,)))
         if with_ablate and ablate:
-            s.enter_context(boost_head_ov(mt, ablate, 0.0, positions=None))
+            if ablation_strat == "restrict":
+                s.enter_context(restrict_head_attn(
+                    mt, ablate, range(dst_span[0], dst_span[1]), keep=patch_heads))
+            else:  # "zero"
+                s.enter_context(boost_head_ov(mt, ablate, 0.0, positions=None))
         return s
 
     def _patched_iface():  # readout iface — transplant (+ boost), NO ablation

@@ -2412,7 +2412,7 @@ def filter_transfer_setups(
 
 def multi_predicate_setups(
     datatype: str,
-    n_conditions: int = 3,
+    n_conditions: "int | list[int]" = 3,
     n_samples: int = 8,
     seed: int = 0,
     presentation: Presentation = "listed",
@@ -2422,30 +2422,33 @@ def multi_predicate_setups(
 ) -> list[MultiPredicateInstance]:
     """Sample ``n_samples`` multi-predicate divergent-frontier instances (:class:`MultiPredicateInstance`).
 
-    Each instance draws ``n_conditions + 1`` DISTINCT, pairwise-COMPATIBLE predicates from the datatype's
-    :data:`QTASKS` bank (compatible = a non-degenerate contrast, see :func:`qpred_compatible`): the first
-    ``n_conditions - 1`` are the SHARED prefix prefilled in both sides, and the last two are the SRC and
-    DST frontiers. With ``n_conditions=3``: shared = (T1, T2), SRC frontier = T3, DST frontier = T4 — SRC
-    lists (T1, T2, T3) & DST lists (T1, T2, T4), both prefill (T1, T2). The test: after transplanting SRC's
-    pivot query, does clean DST write T3 instead of T4?
+    Each instance draws ``k + 1`` DISTINCT, pairwise-COMPATIBLE predicates from the datatype's
+    :data:`QTASKS` bank (compatible = a non-degenerate contrast, see :func:`qpred_compatible`) — ``k`` is
+    ``n_conditions`` if an int, else a per-instance random pick from the ``n_conditions`` list (task SIZE
+    mixes over, e.g. {2, 3}, without multiplying configs). The first ``k - 1`` are the SHARED prefix
+    prefilled in both sides, and the last two are the SRC and DST frontiers. With ``k=3``: shared =
+    (T1, T2), SRC frontier = T3, DST frontier = T4 — SRC lists (T1, T2, T3) & DST lists (T1, T2, T4), both
+    prefill (T1, T2). The test: after transplanting SRC's pivot query, does clean DST write T3 instead of T4?
 
     Deduped by the ORDERED frontier concept pair (src_frontier, dst_frontier), so ``n_samples`` counts
     distinct frontier contrasts; reproducible via ``seed`` (fixed draw sequence — resume-stable)."""
-    assert n_conditions >= 2, (
-        "n_conditions must be >= 2 (>=1 shared predicate + the divergent frontier)"
-    )
     bank = QTASKS[datatype]
     preds = list(bank.predicates)
-    n_pick = n_conditions + 1  # (n_conditions - 1) shared + 2 frontiers
-    assert n_pick <= len(preds), (
-        f"n_conditions+1 ({n_pick}) exceeds bank size ({len(preds)})"
+    ks = [n_conditions] if isinstance(n_conditions, int) else list(n_conditions)
+    assert ks and all(k >= 2 for k in ks), (
+        "n_conditions must be >= 2 (>=1 shared predicate + the divergent frontier)"
     )
-    n_shared = n_conditions - 1
+    assert all(k + 1 <= len(preds) for k in ks), (
+        f"n_conditions+1 (max {max(ks) + 1}) exceeds bank size ({len(preds)})"
+    )
     rng = random.Random(seed)
     out, seen = [], set()
     for _ in range(n_samples * 400):
         if len(out) >= n_samples:
             break
+        k = rng.choice(ks)  # task size for this instance
+        n_pick = k + 1  # (k - 1) shared + 2 frontiers
+        n_shared = k - 1
         chosen = rng.sample(preds, n_pick)
         # every pair in the chosen set must be a non-degenerate contrast (shared incl.) — avoids a
         # prefilled predicate that is redundant with a frontier, and a degenerate T3-vs-T4 contrast
@@ -2475,7 +2478,7 @@ def multi_predicate_setups(
                 meta={
                     "datatype": datatype,
                     "dst_next": dst_frontier.id,
-                    "n_conditions": n_conditions,
+                    "n_conditions": k,
                 },
             )
         )
