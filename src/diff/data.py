@@ -37,6 +37,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -176,6 +177,28 @@ def _assign_line(
     result variable ({res}) — used to switch between natural names and letter names."""
     code = _fmt(pred.impl[lang], arg=arg, res=res_name or pred.result_name, prog=prog)
     return "\n".join("    " + ln.strip() for ln in code.split("\n") if ln.strip())
+
+
+# C++ type prefix (optionally qualified / templated / ref), used to rewrite a result-var declaration
+# to ``auto`` for the var_eq letter stub. Deliberately conservative: matched only at a line start and
+# only when immediately followed by the exact result-variable name.
+_CPP_TYPE = (
+    r"(?:unsigned\s+|signed\s+|const\s+|long\s+|short\s+)*"
+    r"[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*(?:\s*<[^;{}\n]*>)?\s*[\*&]?"
+)
+
+
+def _cpp_autoify(cpp_block: str, var: str) -> str:
+    """Rewrite the declaration of result variable ``var`` in a rendered C++ block to ``auto`` — so the
+    prefilled shared lines match the ``auto {var} =`` pivot of the ``var_eq`` letter stub. Only the
+    result variable's own declaration is touched; helper vars (``{var}_s`` etc.) and later
+    reassignments (no type prefix) are left untouched (anchored at line start; must be immediately
+    followed by ``var`` then ``=``/``;``)."""
+    pat = re.compile(
+        r"(^[ \t]*)" + _CPP_TYPE + r"\s+(" + re.escape(var) + r")(\s*[=;])",
+        re.MULTILINE,
+    )
+    return pat.sub(lambda m: f"{m.group(1)}auto {m.group(2)}{m.group(3)}", cpp_block)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -448,6 +471,13 @@ class MultiPredicateInstance:
     src_lang: Lang
     dst_lang: Lang
     naming: Literal["natural", "letters"] = "natural"
+    letter_stub: Literal["indent", "var_eq"] = (
+        "indent"  # pivot shape: "indent" = trailing indent (about to write the whole frontier line);
+    )
+    # "var_eq" = also prefill the frontier's variable name up to ``=`` (python ``    d =`` / c++
+    # ``    auto d =`` for k=4), so the model writes only the frontier's VALUE. Intended with
+    # naming="letters" (positional a/b/c/d); the prefilled c++ shared decls are rewritten to ``auto``
+    # too so they match the ``auto d =`` pivot.
     meta: dict = field(default_factory=dict)
 
     def _preds_for(self, frontier: Predicate) -> tuple[Predicate, ...]:
@@ -478,16 +508,25 @@ class MultiPredicateInstance:
             lang,
             self.presentation,
         )
-        lines = [
-            _assign_line(p, self.var_name, lang, res_name=self.var_of(preds, p.id))
-            for p in self.shared
-        ]
-        prefill = (
+        var_eq = self.letter_stub == "var_eq"
+        lines = []
+        for p in self.shared:
+            rn = self.var_of(preds, p.id)
+            ln = _assign_line(p, self.var_name, lang, res_name=rn)
+            if var_eq and lang == "cpp":  # match the ``auto d =`` pivot style
+                ln = _cpp_autoify(ln, rn)
+            lines.append(ln)
+        base = (
             "<code>\n"
             + _signature(self.datatype, self.var_name, lang)
             + ("\n" + "\n".join(lines) if lines else "")
-            + "\n    "  # trailing indent = pivot
         )
+        if var_eq:  # prefill the frontier's var name up to ``=`` (python ``d =`` / c++ ``auto d =``)
+            fv = self.var_of(preds, frontier.id)
+            stub = f"auto {fv} =" if lang == "cpp" else f"{fv} ="
+            prefill = base + "\n    " + stub
+        else:
+            prefill = base + "\n    "  # trailing indent = pivot
         return q, prefill
 
     def src_parts(self):
@@ -2417,6 +2456,7 @@ def multi_predicate_setups(
     seed: int = 0,
     presentation: Presentation = "listed",
     naming: Literal["natural", "letters"] = "natural",
+    letter_stub: Literal["indent", "var_eq"] = "indent",
     src_lang: Lang = "python",
     dst_lang: Lang = "python",
 ) -> list[MultiPredicateInstance]:
@@ -2431,7 +2471,12 @@ def multi_predicate_setups(
     prefill (T1, T2). The test: after transplanting SRC's pivot query, does clean DST write T3 instead of T4?
 
     Deduped by the ORDERED frontier concept pair (src_frontier, dst_frontier), so ``n_samples`` counts
-    distinct frontier contrasts; reproducible via ``seed`` (fixed draw sequence — resume-stable)."""
+    distinct frontier contrasts; reproducible via ``seed`` (fixed draw sequence — resume-stable).
+
+    ``letter_stub`` controls the pivot shape (see :class:`MultiPredicateInstance`): "indent" (default)
+    ends the prefill at the trailing indent; "var_eq" additionally prefills the frontier's variable name
+    up to ``=`` (with ``k=4``: python ``    d =`` / c++ ``    auto d =``), so the model writes only the
+    frontier's VALUE. Intended with ``naming="letters"``."""
     bank = QTASKS[datatype]
     preds = list(bank.predicates)
     ks = [n_conditions] if isinstance(n_conditions, int) else list(n_conditions)
@@ -2475,10 +2520,12 @@ def multi_predicate_setups(
                 src_lang=src_lang,
                 dst_lang=dst_lang,
                 naming=naming,
+                letter_stub=letter_stub,
                 meta={
                     "datatype": datatype,
                     "dst_next": dst_frontier.id,
                     "n_conditions": k,
+                    "letter_stub": letter_stub,
                 },
             )
         )

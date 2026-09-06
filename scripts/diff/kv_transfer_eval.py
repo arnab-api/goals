@@ -13,7 +13,7 @@ two setups share the whole mechanism + eval; they differ only in how instances a
 ``--setups dual_comp multi_pred`` selects which to run (default ``dual_comp``). Config axes (the save folder is decided
 by all of them):
   dual_comp :  datatype × lang-transfer × patch_heads × ablate-range × ablation-strat × alpha × align
-  multi_pred:  datatype × naming × lang-transfer × patch_heads × ablate-range × ablation-strat × alpha × align
+  multi_pred:  datatype × naming × letter_stub × lang-transfer × patch_heads × ablate-range × ablation-strat × alpha × align
 (presentation is fixed: dual_comp=description, multi_pred=listed.) Results live under
 ``results/diff/<model_short>/kv_transfer/<setup>/<run_tag>/<config_tag>/`` with ``results.json``
 (per-instance, written after each instance so a crash is resumable) and ``meta.json`` (config +
@@ -104,6 +104,9 @@ class InstanceRecord:
     expected_next_desc: str
     dst_next: str  # clean DST target
     dst_next_desc: str
+    # multi: frontier-pivot shape ("indent" | "var_eq"); kv: "na". Needed for faithful 05.2 rebuild.
+    # Defaulted + placed last so pre-existing results.json (no such field) still reconstruct.
+    letter_stub: str = "na"
     # raw intervention artifacts (no attention — gaze is N/A for Spec-2)
     raw: dict = field(default_factory=dict)
     # eval verdicts (no gaze)
@@ -117,6 +120,7 @@ class ConfigMeta:
     setup: str
     datatype: str
     naming: str
+    letter_stub: str  # multi: "indent" | "var_eq" ; kv: "na"
     presentation: str
     src_lang: str
     dst_lang: str
@@ -142,9 +146,12 @@ def _safe(dt: str) -> str:
     return dt.replace("[", "_").replace("]", "").replace(" ", "")
 
 
-def _config_tag(setup, dt, variant, sl, dl) -> str:
-    """Per-config DATA axes only (setup is a parent dir now; the intervention knobs live in the run tag)."""
+def _config_tag(setup, dt, variant, sl, dl, letter_stub="na") -> str:
+    """Per-config DATA axes only (setup is a parent dir now; the intervention knobs live in the run tag).
+    multi_pred carries the frontier-pivot shape (``letter_stub``) as its own segment; kv omits it."""
     v = variant or ("randnm" if setup == "multi_pred" else "desc")
+    if setup == "multi_pred":
+        return f"{_safe(dt)}__{v}__{letter_stub}__{sl}-{dl}"
     return f"{_safe(dt)}__{v}__{sl}-{dl}"
 
 
@@ -198,6 +205,13 @@ def _variant_axis(setup: str, args) -> list:
     return ["desc"]
 
 
+def _letter_stub_axis(setup: str, args) -> list:
+    """multi: frontier-pivot shape axis ('indent' | 'var_eq'). kv: n/a (['na'])."""
+    if setup == "multi_pred":
+        return args.letter_stubs if args.letter_stubs else ["indent"]
+    return ["na"]
+
+
 def _parse_ablate_range(s: str) -> tuple[Optional[int], Optional[int], str]:
     """'35,50' / '35-50' -> (35, 50, '35-50'); 'off'/'none'/'' -> (None, None, 'off')."""
     if s is None or s.strip().lower() in ("", "off", "none"):
@@ -248,6 +262,7 @@ def run_config(
     setup,
     dt,
     variant,
+    letter_stub,
     sl,
     dl,
     patch_heads,
@@ -256,7 +271,7 @@ def run_config(
     out_root,
 ):
     _, _, abl_tag = _parse_ablate_range(args.ablate_layer_range)
-    tag = _config_tag(setup, dt, variant, sl, dl)
+    tag = _config_tag(setup, dt, variant, sl, dl, letter_stub)
     outdir = out_root / tag  # out_root already includes the run tag
     outdir.mkdir(parents=True, exist_ok=True)
     results_fp = outdir / "results.json"
@@ -290,10 +305,14 @@ def run_config(
             seed=cfg_seed,
             presentation=presentation,
             naming=variant or "natural",
+            letter_stub=letter_stub,
             src_lang=sl,
             dst_lang=dl,
         )
-        size_note = f"n_conditions={args.n_conditions},naming={variant or 'natural'}"
+        size_note = (
+            f"n_conditions={args.n_conditions},naming={variant or 'natural'},"
+            f"letter_stub={letter_stub}"
+        )
 
     if args.max_instances:
         setups = setups[: args.max_instances]
@@ -352,6 +371,7 @@ def run_config(
             datatype=dt,
             group=_group_of(inst),
             naming=_naming_of(inst),
+            letter_stub=letter_stub,
             presentation=presentation,
             src_lang=sl,
             dst_lang=dl,
@@ -375,6 +395,7 @@ def run_config(
         setup=setup,
         datatype=dt,
         naming=(variant or ("random" if setup == "multi_pred" else "desc")),
+        letter_stub=letter_stub,
         presentation=presentation,
         src_lang=sl,
         dst_lang=dl,
@@ -423,6 +444,16 @@ def parse_args():
         default=["letters"],
         choices=["natural", "letters"],
         help="multi-predicate variable-naming axis (ignored by kv). Default: ['letters'].",
+    )
+    p.add_argument(
+        "--letter-stubs",
+        nargs="+",
+        default=["indent"],
+        choices=["indent", "var_eq"],
+        help="multi-predicate frontier-pivot shape axis (ignored by kv): 'indent' (default) = trailing "
+        "indent, model writes the whole frontier line; 'var_eq' = also prefill the frontier's letter "
+        "var up to '=' (python '    d =' / c++ '    auto d ='), model writes only the frontier VALUE. "
+        "Intended with --namings letters.",
     )
     p.add_argument(
         "--lang-transfers",
@@ -535,19 +566,20 @@ def main():
     )
     logger.info(f"run_tag={run_tag}")
 
-    configs = []  # (setup, dt, variant, lt)
+    configs = []  # (setup, dt, variant, letter_stub, lt)
     for setup in args.setups:
         for dt in _resolve_datatypes(setup, args.datatypes):
             for variant in _variant_axis(setup, args):
-                for lt in args.lang_transfers:
-                    configs.append((setup, dt, variant, lt))
+                for ls in _letter_stub_axis(setup, args):
+                    for lt in args.lang_transfers:
+                        configs.append((setup, dt, variant, ls, lt))
     logger.info(
         f"{len(configs)} configs to process across setups={args.setups} "
-        f"lang_transfers={args.lang_transfers}"
+        f"lang_transfers={args.lang_transfers} letter_stubs={args.letter_stubs}"
     )
 
     metas_by_setup: dict[str, list] = {}
-    for ci, (setup, dt, variant, lt) in enumerate(configs, 1):
+    for ci, (setup, dt, variant, letter_stub, lt) in enumerate(configs, 1):
         sl, dl = LANG_TRANSFERS[lt]
         out_root = (
             Path(env_utils.DEFAULT_RESULTS_DIR)
@@ -559,7 +591,8 @@ def main():
         )
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(
-            f"═══ config {ci}/{len(configs)}: {setup}/{run_tag}/{_config_tag(setup, dt, variant, sl, dl)} ═══"
+            f"═══ config {ci}/{len(configs)}: "
+            f"{setup}/{run_tag}/{_config_tag(setup, dt, variant, sl, dl, letter_stub)} ═══"
         )
         meta = run_config(
             mt,
@@ -567,6 +600,7 @@ def main():
             setup,
             dt,
             variant,
+            letter_stub,
             sl,
             dl,
             patch_heads,
