@@ -9,11 +9,11 @@ Both the RAW intervention artifacts (prompts, generations, readouts, attention) 
 verdicts are saved.
 
 The two setups share the whole mechanism + eval pipeline; they differ only in how instances are
-SAMPLED and keyed. ``--setups q filter`` selects which to run (default ``q``). Config axes:
-  q      :  datatype × naming × lang-transfer   (naming collapses to per-pair random if unset)
-  filter :  datatype × postfix × lang-transfer  (postfix fixed to one value; 2 sub-tasks each)
-(presentation is fixed to ``listed``.) Each config's results live in its own folder under
-``results/diff/{q_transfer,filter_transfer}/<model_short>/<config_tag>/`` with ``results.json``
+SAMPLED and keyed. ``--setups multi_pred filter`` selects which to run (default ``multi_pred``):
+  multi_pred :  datatype × naming × lang-transfer   (naming collapses to per-pair random if unset)
+  filter     :  datatype × postfix × lang-transfer  (postfix fixed to one value; 2 sub-tasks each)
+(presentation is fixed to ``listed``.) Each config's results live under
+``results/diff/<model_short>/q_transfer/<setup>/<run_tag>/<config_tag>/`` with ``results.json``
 (per-instance records, written after each instance so a crash is resumable) and ``meta.json``
 (config + summary rates). ``--resume`` (default) skips instances already present; ``--force``
 re-runs them.
@@ -21,7 +21,7 @@ re-runs them.
 Typical usage
 ─────────────
     conda run -n goals python scripts/diff/q_transfer_eval.py \\
-        --setups q filter --datatypes list[str] list[int] \\
+        --setups multi_pred filter --datatypes list[str] list[int] \\
         --lang-transfers py-py py-cpp --cuda 0,7
 
     # cheap dry pass: rule-based gaze only, cap 2 instances/config
@@ -70,6 +70,8 @@ from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger("q_transfer_eval")
 
+MECHANISM = "q_transfer"  # results tree: diff/<model>/<MECHANISM>/<setup>/<run_tag>/<config_tag>/
+
 LANG_TRANSFERS = {
     "py-py": ("python", "python"),
     "py-cpp": ("python", "cpp"),
@@ -105,7 +107,7 @@ class InstanceRecord:
     causal: Optional[dict] = None
     readout: Optional[dict] = None
     gaze: Optional[dict] = None
-    setup: str = "q"  # "q" | "filter" (default keeps pre-filter records loadable)
+    setup: str = "multi_pred"  # "multi_pred" | "filter"
 
 
 @dataclass
@@ -139,10 +141,10 @@ def _safe(dt: str) -> str:
 
 
 def _config_tag(setup, dt, variant, sl, dl) -> str:
-    """Per-config DATA axes only (the intervention knobs live in the run tag). variant = naming (q;
-    None => per-pair random) or postfix (filter)."""
-    v = variant or ("randnm" if setup == "q" else "targeted")
-    return f"{setup}__{_safe(dt)}__{v}__{sl}-{dl}"
+    """Per-config DATA axes only (setup is a parent dir now; the intervention knobs live in the run
+    tag). variant = naming (multi_pred; None => per-pair random) or postfix (filter)."""
+    v = variant or ("randnm" if setup == "multi_pred" else "targeted")
+    return f"{_safe(dt)}__{v}__{sl}-{dl}"
 
 
 def _run_tag(patch_heads, alpha, n_pivot_arg="auto") -> str:
@@ -153,10 +155,6 @@ def _run_tag(patch_heads, alpha, n_pivot_arg="auto") -> str:
     if n_pivot_arg not in (None, "auto"):
         t += f"__np{int(n_pivot_arg)}"
     return t
-
-
-def _setup_dir(setup: str) -> str:
-    return "q_transfer" if setup == "q" else "filter_transfer"
 
 
 def _pick_naming(tag: str, key: str) -> str:
@@ -201,7 +199,7 @@ def _progress_of(inst) -> tuple[list, list]:
 
 
 def _resolve_datatypes(setup: str, requested) -> list[str]:
-    avail = list(D.QTASKS) if setup == "q" else list(D.FILTER_TASKS)
+    avail = list(D.QTASKS) if setup == "multi_pred" else list(D.FILTER_TASKS)
     if not requested:
         return avail
     keep = [d for d in requested if d in avail]
@@ -220,14 +218,14 @@ def _n_pivot_for(setup: str, variant, override="auto") -> int:
     None => the rule; else an int) wins — the explicit ``--n-pivot`` value."""
     if override not in (None, "auto"):
         return int(override)
-    if setup == "q":
+    if setup == "multi_pred":
         return 1
     return 5 if (variant or "targeted") == "targeted" else 2
 
 
 def _variant_axis(setup: str, args) -> list:
     """q: the naming axis ([None] => collapse to per-pair random). filter: a single postfix."""
-    if setup == "q":
+    if setup == "multi_pred":
         return args.namings if args.namings else [None]
     return [args.postfix]
 
@@ -295,7 +293,7 @@ def run_config(
         2**32
     )
     set_seed(cfg_seed)
-    if setup == "q":
+    if setup == "multi_pred":
         # each instance = a random n_conditions-predicate task + a fixed contrastive split
         setups = D.q_transfer_setups(
             dt,
@@ -424,7 +422,7 @@ def run_config(
         model=args.model,
         setup=setup,
         datatype=dt,
-        naming=(variant or ("random" if setup == "q" else "targeted")),
+        naming=(variant or ("random" if setup == "multi_pred" else "targeted")),
         presentation="listed",
         src_lang=sl,
         dst_lang=dl,
@@ -453,10 +451,10 @@ def parse_args():
     p.add_argument(
         "--setups",
         nargs="+",
-        default=["q"],
-        choices=["q", "filter"],
-        help="which contrastive setup(s) to run: q (q-transfer, default) and/or filter "
-        "(composed-filter). Each has its own config axes + results subdirectory.",
+        default=["multi_pred"],
+        choices=["multi_pred", "filter"],
+        help="which contrastive setup(s) to run: multi_pred (q-transfer ordering, default) and/or "
+        "filter (composed single-line filter). Each is its own results subdirectory.",
     )
     p.add_argument(
         "--datatypes",
@@ -599,13 +597,14 @@ def main():
         out_root = (
             Path(env_utils.DEFAULT_RESULTS_DIR)
             / "diff"
-            / _setup_dir(setup)
             / model_short
+            / MECHANISM
+            / setup
             / run_tag
         )
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(
-            f"═══ config {ci}/{len(configs)}: {run_tag}/{_config_tag(setup, dt, variant, sl, dl)} ═══"
+            f"═══ config {ci}/{len(configs)}: {setup}/{run_tag}/{_config_tag(setup, dt, variant, sl, dl)} ═══"
         )
         meta = run_config(
             mt, args, setup, dt, variant, sl, dl, patch_heads, readout_heads, out_root
@@ -617,8 +616,9 @@ def main():
         summ_fp = (
             Path(env_utils.DEFAULT_RESULTS_DIR)
             / "diff"
-            / _setup_dir(setup)
             / model_short
+            / MECHANISM
+            / setup
             / run_tag
             / "summary.json"
         )

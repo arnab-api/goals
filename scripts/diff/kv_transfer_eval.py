@@ -10,12 +10,12 @@ target?) and readout-shift. **No gaze** — the SRC target never appears in the 
 
 Sibling of ``q_transfer_eval.py`` (same interface, resume/force semantics, per-config folders). The
 two setups share the whole mechanism + eval; they differ only in how instances are SAMPLED/keyed.
-``--setups kv multi`` selects which to run (default ``kv``). Config axes (the save folder is decided
+``--setups dual_comp multi_pred`` selects which to run (default ``dual_comp``). Config axes (the save folder is decided
 by all of them):
-  kv    :  datatype × lang-transfer × patch_heads × ablate-range × ablation-strat × alpha × align
-  multi :  datatype × naming × lang-transfer × patch_heads × ablate-range × ablation-strat × alpha × align
-(presentation is fixed: kv=description, multi=listed.) Results live under
-``results/diff/{kv_transfer,multi_predicate}/<model_short>/<config_tag>/`` with ``results.json``
+  dual_comp :  datatype × lang-transfer × patch_heads × ablate-range × ablation-strat × alpha × align
+  multi_pred:  datatype × naming × lang-transfer × patch_heads × ablate-range × ablation-strat × alpha × align
+(presentation is fixed: dual_comp=description, multi_pred=listed.) Results live under
+``results/diff/<model_short>/kv_transfer/<setup>/<run_tag>/<config_tag>/`` with ``results.json``
 (per-instance, written after each instance so a crash is resumable) and ``meta.json`` (config +
 summary rates). ``--resume`` (default) skips instances already present; ``--force`` re-runs them.
 
@@ -26,7 +26,7 @@ probe, so it carries no cross-context inconsistency and needs no per-config vari
 Typical usage
 ─────────────
     conda run -n goals python scripts/diff/kv_transfer_eval.py \\
-        --setups kv multi --datatypes list[str] list[int] \\
+        --setups dual_comp multi_pred --datatypes list[str] list[int] \\
         --lang-transfers py-py py-cpp --patch-heads goal --align pad \\
         --ablate-layer-range 35,50 --ablation-strat restrict --alpha 1.0 --cuda 0,7
 
@@ -74,6 +74,8 @@ from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger("kv_transfer_eval")
 
+MECHANISM = "kv_transfer"  # results tree: diff/<model>/<MECHANISM>/<setup>/<run_tag>/<config_tag>/
+
 LANG_TRANSFERS = {
     "py-py": ("python", "python"),
     "py-cpp": ("python", "cpp"),
@@ -90,7 +92,7 @@ class InstanceRecord:
     """Everything about one contrastive instance: identity + RAW artifacts + eval verdicts."""
 
     key: str
-    setup: str  # "kv" | "multi"
+    setup: str  # "dual_comp" | "multi_pred"
     datatype: str
     group: str  # kv: cluster id ; multi: the shared prefix (T1,T2) ids
     naming: str  # multi: variable-naming scheme ; kv: "desc" (n/a)
@@ -141,9 +143,9 @@ def _safe(dt: str) -> str:
 
 
 def _config_tag(setup, dt, variant, sl, dl) -> str:
-    """Per-config DATA axes only (the intervention knobs live in the run tag)."""
-    v = variant or ("randnm" if setup == "multi" else "desc")
-    return f"{setup}__{_safe(dt)}__{v}__{sl}-{dl}"
+    """Per-config DATA axes only (setup is a parent dir now; the intervention knobs live in the run tag)."""
+    v = variant or ("randnm" if setup == "multi_pred" else "desc")
+    return f"{_safe(dt)}__{v}__{sl}-{dl}"
 
 
 def _run_tag(patch_heads, abl, ablation_strat, alpha, align) -> str:
@@ -153,10 +155,6 @@ def _run_tag(patch_heads, abl, ablation_strat, alpha, align) -> str:
     only when ablation is ON — ``abl-off`` stays strat-free so those runs keep their existing tag."""
     abl_seg = abl if abl == "off" else f"{abl}-{ablation_strat}"
     return f"ph-{patch_heads}__abl-{abl_seg}__a{alpha:g}__{align}"
-
-
-def _setup_dir(setup: str) -> str:
-    return "kv_transfer" if setup == "kv" else "multi_predicate"
 
 
 def _inst_key(inst) -> str:
@@ -180,7 +178,7 @@ def _naming_of(inst) -> str:
 
 
 def _resolve_datatypes(setup: str, requested) -> list[str]:
-    avail = list(D.KVCLUSTERS) if setup == "kv" else list(D.QTASKS)
+    avail = list(D.KVCLUSTERS) if setup == "dual_comp" else list(D.QTASKS)
     if not requested:
         return avail
     keep = [d for d in requested if d in avail]
@@ -195,7 +193,7 @@ def _resolve_datatypes(setup: str, requested) -> list[str]:
 def _variant_axis(setup: str, args) -> list:
     """multi: the naming axis (default ['natural'] — MultiPredicateInstance is frozen, so no per-pair
     random). kv: no naming axis (['desc'])."""
-    if setup == "multi":
+    if setup == "multi_pred":
         return args.namings if args.namings else ["natural"]
     return ["desc"]
 
@@ -273,8 +271,8 @@ def run_config(
         2**32
     )
     set_seed(cfg_seed)
-    presentation = "description" if setup == "kv" else "listed"
-    if setup == "kv":
+    presentation = "description" if setup == "dual_comp" else "listed"
+    if setup == "dual_comp":
         setups = D.kv_transfer_setups(
             dt,
             presentation=presentation,
@@ -376,7 +374,7 @@ def run_config(
         model=args.model,
         setup=setup,
         datatype=dt,
-        naming=(variant or ("random" if setup == "multi" else "desc")),
+        naming=(variant or ("random" if setup == "multi_pred" else "desc")),
         presentation=presentation,
         src_lang=sl,
         dst_lang=dl,
@@ -407,9 +405,10 @@ def parse_args():
     p.add_argument(
         "--setups",
         nargs="+",
-        default=["kv"],
-        choices=["kv", "multi"],
-        help="which Spec-2 setup(s): kv (kv-cluster, default) and/or multi (multi-predicate).",
+        default=["dual_comp"],
+        choices=["dual_comp", "multi_pred"],
+        help="which Spec-2 setup(s): dual_comp (kv-cluster, default) and/or multi_pred "
+        "(multi-predicate).",
     )
     p.add_argument(
         "--datatypes",
@@ -421,9 +420,9 @@ def parse_args():
     p.add_argument(
         "--namings",
         nargs="+",
-        default="letters",
+        default=["letters"],
         choices=["natural", "letters"],
-        help="multi-predicate variable-naming axis (ignored by kv). Default: ['natural'].",
+        help="multi-predicate variable-naming axis (ignored by kv). Default: ['letters'].",
     )
     p.add_argument(
         "--lang-transfers",
@@ -553,13 +552,14 @@ def main():
         out_root = (
             Path(env_utils.DEFAULT_RESULTS_DIR)
             / "diff"
-            / _setup_dir(setup)
             / model_short
+            / MECHANISM
+            / setup
             / run_tag
         )
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(
-            f"═══ config {ci}/{len(configs)}: {run_tag}/{_config_tag(setup, dt, variant, sl, dl)} ═══"
+            f"═══ config {ci}/{len(configs)}: {setup}/{run_tag}/{_config_tag(setup, dt, variant, sl, dl)} ═══"
         )
         meta = run_config(
             mt,
@@ -580,8 +580,9 @@ def main():
         summ_fp = (
             Path(env_utils.DEFAULT_RESULTS_DIR)
             / "diff"
-            / _setup_dir(setup)
             / model_short
+            / MECHANISM
+            / setup
             / run_tag
             / "summary.json"
         )
