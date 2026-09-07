@@ -122,6 +122,7 @@ class ConfigMeta:
     patch_heads: str
     oracle_model: str
     n_instances: int
+    readout_heads: str = "goal"  # GoalScope readout set ('goal'|'union'|'<label>_<n>')
     alpha: float = 1.0  # OV boost of patch heads on the patched gen+readout (1.0 = off)
     n_pivot: int = 1  # #trailing pivot tokens transplanted on the prefill
     # summary rates (over instances with a verdict)
@@ -147,11 +148,13 @@ def _config_tag(setup, dt, variant, sl, dl) -> str:
     return f"{_safe(dt)}__{v}__{sl}-{dl}"
 
 
-def _run_tag(patch_heads, alpha, n_pivot_arg="auto") -> str:
+def _run_tag(patch_heads, readout_heads, alpha, n_pivot_arg="auto") -> str:
     """Run-level intervention knobs (single-valued per invocation). Each run gets its own subdir —
     ``.../{model}/{run_tag}/{config_tag}/`` — with its OWN summary.json, so different runs (e.g. a
-    different --patch-heads or --alpha) never overwrite each other."""
-    t = f"ph-{patch_heads}__a{alpha:g}"
+    different --patch-heads or --alpha) never overwrite each other. The readout head-set is tagged
+    ``__ro-<label>`` ONLY when it differs from the default 'goal'."""
+    ro_seg = "" if readout_heads == "goal" else f"__ro-{readout_heads}"
+    t = f"ph-{patch_heads}{ro_seg}__a{alpha:g}"
     if n_pivot_arg not in (None, "auto"):
         t += f"__np{int(n_pivot_arg)}"
     return t
@@ -447,6 +450,7 @@ def run_config(
         patch_heads=_patch_heads_tag(args.patch_heads, len(patch_heads)),
         oracle_model=args.oracle_model,
         n_instances=len(recs),
+        readout_heads=_patch_heads_tag(args.readout_heads, len(readout_heads)),
         alpha=args.alpha,
         n_pivot=n_pivot,
         **_summarize(recs),
@@ -507,8 +511,15 @@ def parse_args():
     p.add_argument(
         "--patch-heads",
         default="goal",
-        help="heads carrying the query transplant (also the readout/gaze heads): 'goal' | 'union' | "
-        "a path to a JSON list of [layer, head] pairs. A path is tagged 'ph-<label>_<n>' (e.g. ph-goal_250).",
+        help="heads carrying the query transplant: 'goal' | 'union' | a path to a JSON list of "
+        "[layer, head] pairs. A path is tagged 'ph-<label>_<n>' (e.g. ph-goal_250).",
+    )
+    p.add_argument(
+        "--readout-heads",
+        default="goal",
+        help="heads used for the GoalScope readout/gaze: 'goal' (default) | 'union' | a JSON path. "
+        "Tagged '__ro-<label>_<n>' in the run_tag ONLY when != 'goal'. For a 250-head patch run, set "
+        "this to the same 250-head JSON.",
     )
     p.add_argument(
         "--n-conditions",
@@ -591,12 +602,17 @@ def main():
     mt = ctx.mt
     patch_heads = _resolve_patch_heads(ctx, args.patch_heads)
     ph_tag = _patch_heads_tag(args.patch_heads, len(patch_heads))
-    # READOUT_HEADS — always the goal heads, kept SEPARATE from the patched heads (not a config axis).
-    readout_heads = ctx.goal_heads
-    logger.info(f"patch_heads={args.patch_heads} -> tag '{ph_tag}' (n={len(patch_heads)})")
+    # READOUT_HEADS — GoalScope readout set, SEPARATE from the patched heads; defaults to goal, override
+    # with --readout-heads (tagged __ro-... when != goal).
+    readout_heads = _resolve_patch_heads(ctx, args.readout_heads)
+    ro_tag = _patch_heads_tag(args.readout_heads, len(readout_heads))
+    logger.info(
+        f"patch_heads={args.patch_heads} -> '{ph_tag}' (n={len(patch_heads)}) · "
+        f"readout_heads={args.readout_heads} -> '{ro_tag}' (n={len(readout_heads)})"
+    )
 
     model_short = args.model.split("/")[-1]
-    run_tag = _run_tag(ph_tag, args.alpha, args.n_pivot)  # groups this run's outputs
+    run_tag = _run_tag(ph_tag, ro_tag, args.alpha, args.n_pivot)  # groups this run's outputs
     logger.info(f"run_tag={run_tag}")
 
     # enumerate configs per setup (each setup owns its axes + results subdir)

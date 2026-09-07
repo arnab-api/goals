@@ -155,13 +155,16 @@ def _config_tag(setup, dt, variant, sl, dl, letter_stub="na") -> str:
     return f"{_safe(dt)}__{v}__{sl}-{dl}"
 
 
-def _run_tag(patch_heads, abl, ablation_strat, alpha, align) -> str:
+def _run_tag(patch_heads, readout_heads, abl, ablation_strat, alpha, align) -> str:
     """Run-level intervention knobs (single-valued per invocation). Each run gets its own subdir —
     ``.../{model}/{run_tag}/{config_tag}/`` — with its OWN summary.json, so different runs never
     overwrite each other. The ablation strategy is folded into the ablate segment (``abl-35-50-restrict``)
-    only when ablation is ON — ``abl-off`` stays strat-free so those runs keep their existing tag."""
+    only when ablation is ON — ``abl-off`` stays strat-free so those runs keep their existing tag. The
+    readout head-set is tagged ``__ro-<label>`` ONLY when it differs from the default 'goal', so
+    existing (readout=goal) run tags are unchanged."""
     abl_seg = abl if abl == "off" else f"{abl}-{ablation_strat}"
-    return f"ph-{patch_heads}__abl-{abl_seg}__a{alpha:g}__{align}"
+    ro_seg = "" if readout_heads == "goal" else f"__ro-{readout_heads}"
+    return f"ph-{patch_heads}{ro_seg}__abl-{abl_seg}__a{alpha:g}__{align}"
 
 
 def _resolve_patch_heads(ctx, spec):
@@ -418,7 +421,7 @@ def run_config(
         src_lang=sl,
         dst_lang=dl,
         patch_heads=_patch_heads_tag(args.patch_heads, len(patch_heads)),
-        readout_heads="goal",
+        readout_heads=_patch_heads_tag(args.readout_heads, len(readout_heads)),
         align=args.align,
         ablate_layer_range=abl_tag,
         ablation_strat=args.ablation_strat,
@@ -484,7 +487,15 @@ def parse_args():
         default="goal",
         help="heads whose k/v is transplanted: 'goal' | 'union' | a path to a JSON list of "
         "[layer, head] pairs (e.g. head_sets/<model>/goal_topk/goal__lam20_top250.json). "
-        "A path is tagged 'ph-<label>_<n>' (e.g. ph-goal_250). Readout is ALWAYS the goal heads.",
+        "A path is tagged 'ph-<label>_<n>' (e.g. ph-goal_250).",
+    )
+    p.add_argument(
+        "--readout-heads",
+        default="goal",
+        help="heads used for the GoalScope readout: 'goal' (default) | 'union' | a JSON path of "
+        "[layer, head] pairs. Kept SEPARATE from --patch-heads; tagged '__ro-<label>_<n>' in the "
+        "run_tag ONLY when != 'goal' (so existing readout=goal runs keep their tag). For a 250-head "
+        "patch run, set this to the same 250-head JSON.",
     )
     p.add_argument(
         "--align",
@@ -561,8 +572,10 @@ def main():
     mt = ctx.mt
     patch_heads = _resolve_patch_heads(ctx, args.patch_heads)
     ph_tag = _patch_heads_tag(args.patch_heads, len(patch_heads))
-    # READOUT_HEADS — always the goal heads, kept SEPARATE from the patched heads and NOT a config axis.
-    readout_heads = ctx.goal_heads
+    # READOUT_HEADS — the GoalScope readout set, kept SEPARATE from the patched heads. Defaults to the
+    # goal heads; override with --readout-heads (e.g. match a 250-head patch set). Tagged __ro-... when != goal.
+    readout_heads = _resolve_patch_heads(ctx, args.readout_heads)
+    ro_tag = _patch_heads_tag(args.readout_heads, len(readout_heads))
 
     # ABLATE_HEADS (I2): every head in the ablate layer-range, minus PATCH_HEADS. Zeroed on the
     # patched generation only (the runner also defensively excludes patch_heads).
@@ -574,14 +587,15 @@ def main():
     )
     ablate_heads = [h for h in ablate_all if h not in set(patch_heads)]
     logger.info(
-        f"patch_heads={args.patch_heads} -> tag '{ph_tag}' (n={len(patch_heads)}) · readout_heads=goal "
-        f"(n={len(readout_heads)}) · ablate={abl_tag} (n={len(ablate_heads)}, strat={args.ablation_strat}) "
+        f"patch_heads={args.patch_heads} -> tag '{ph_tag}' (n={len(patch_heads)}) · "
+        f"readout_heads={args.readout_heads} -> tag '{ro_tag}' (n={len(readout_heads)}) · "
+        f"ablate={abl_tag} (n={len(ablate_heads)}, strat={args.ablation_strat}) "
         f"· align={args.align} · alpha={args.alpha}"
     )
 
     model_short = args.model.split("/")[-1]
     # groups this run's outputs (ablation strat folded into the ablate segment when ablation is on)
-    run_tag = _run_tag(ph_tag, abl_tag, args.ablation_strat, args.alpha, args.align)
+    run_tag = _run_tag(ph_tag, ro_tag, abl_tag, args.ablation_strat, args.alpha, args.align)
     logger.info(f"run_tag={run_tag}")
 
     configs = []  # (setup, dt, variant, letter_stub, lt)
