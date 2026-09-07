@@ -63,7 +63,7 @@ Outputs (at completion):
 - `../cache/causal_scores/<model>/{concept,token}_copying_len30_n1024.json` — per-head scores
 - `../cache/head_orderings/<model>/{concept,token}_copying.json` — ranked head list
 
-Job entries: `job_list/qwen32b_dualroute_causal_localization.json` (parent repo) — the concept
+Job entries: `job_list/dualroute/qwen32b_dualroute_causal_localization.json` (parent repo) — the concept
 and token jobs are meant to run on **disjoint GPU sets** (each shards a 32B model).
 
 ### Resuming after a crash

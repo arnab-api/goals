@@ -82,7 +82,7 @@ HF_CACHE=/disk/u/models TOKENIZERS_PARALLELISM=false \
   completion; a finished dataset (final `.pt` present, no checkpoint) is skipped, so re-running
   the 57-job list is idempotent. `--overwrite` forces a clean recompute.
 
-**Job list:** `job_list/qwen32b_fv_head_cma.json` (parent repo) has **one job per dataset** for
+**Job list:** `job_list/fv/qwen32b_fv_head_cma.json` (parent repo) has **one job per dataset** for
 the full 57-task suite. ⚠️ Cost: 200 examples × 64L × 40H ≈ 0.5 M patched forwards/dataset
 (~hours each on 32B). Run the jobs across **disjoint GPU sets**, and/or trim the job list to a
 subset — the repo's canonical eval set is `antonym, capitalize, country-capital, english-french,
