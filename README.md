@@ -156,7 +156,7 @@ conda run -n goals python scripts/train_head_mask.py \
 │       ├── predicates/                # 25 predicate JSONs (Python + C++)
 │       ├── global_pairs.json          # Oracle-verified contrastive predicate pairs
 │       └── pairs/<model>.json         # Model-specific pairs + pivot instances
-├── claude_reports/                    # Analysis notes and design documents
+├── agent_reports/claude/                    # Analysis notes and design documents
 ├── setup_env.sh                       # One-shot environment setup script
 └── env.yml                            # API keys + paths (create from env_demo.yml)
 ```

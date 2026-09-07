@@ -6,7 +6,7 @@ KL(P_patched ∥ P_target).
 
 Based on arxiv:2510.26784 (filter heads via differentiable causal masking),
 adapted for the cross-language interchange design from
-claude_reports/brainstorm_attention_head_localization.md.
+agent_reports/claude/brainstorm_attention_head_localization.md.
 
 Pipeline (current — o_proj pre-hook replacement):
     1. Cache o_proj inputs for source (C++) prompts per layer.

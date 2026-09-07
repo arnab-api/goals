@@ -42,7 +42,7 @@ Usage
     python -m scripts.evaluation.reeval_goalscope --model Qwen2.5-Coder-32B-Instruct --mode causality
 
     # write the book-keeping manifest of every run in the tree:
-    python -m scripts.evaluation.reeval_goalscope --manifest claude_reports/goalscope_reeval_manifest.md --dry-run
+    python -m scripts.evaluation.reeval_goalscope --manifest agent_reports/claude/goalscope_reeval_manifest.md --dry-run
 """
 
 import argparse

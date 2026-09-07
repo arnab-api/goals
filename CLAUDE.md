@@ -173,7 +173,7 @@ Machine in use has 1.5 TB CPU RAM — `precompute_deltas=True` is fine for N=148
 
 ## Reports
 
-When generating analysis or reports, ask the user if they want to save it. If yes, save as `.log` or `.md` file in `claude_reports/` with an appropriate descriptive filename.
+When generating analysis or reports, ask the user if they want to save it. If yes, save as `.log` or `.md` file in `agent_reports/claude/` with an appropriate descriptive filename.
 
 ## Testing Guidelines
 
@@ -206,7 +206,7 @@ When implementing new features (evals, utils, classes, etc.):
 
 ## Design Decisions
 
-- **Contrastive pair negative class**: In contrastive sampling (`src/goals/probe.py`), both **orange** (compiles but tests fail) and **red** (syntax error / crash) leaf nodes are lumped together as "negative" (`p_red`). Whether to separate these is an open question — "compiles but wrong" may carry a different latent signal than "doesn't compile at all." See `claude_reports/mcts_contrastive_design.md` for full details.
+- **Contrastive pair negative class**: In contrastive sampling (`src/goals/probe.py`), both **orange** (compiles but tests fail) and **red** (syntax error / crash) leaf nodes are lumped together as "negative" (`p_red`). Whether to separate these is an open question — "compiles but wrong" may carry a different latent signal than "doesn't compile at all." See `agent_reports/claude/mcts_contrastive_design.md` for full details.
 
 - **Head mask parameterization**: `HeadMask` uses raw `nn.Parameter` initialized to all-ones, clamped to `[0, 1]` after each optimizer step (box-constrained GD, no sigmoid). Sparsity via `λ * mean(mask)` rather than `λ * sum(mask)` — scale-invariant to number of layers tested.
 
@@ -224,6 +224,6 @@ When implementing new features (evals, utils, classes, etc.):
 
 - **Intermittent `UnboundLocalError` in nnsight steering** (Track 1): `generate_with_patch()` occasionally raises `UnboundLocalError` for specific configs (observed: sample_idx=4, prefill="1 -", coeff=0.12, layers 40-50). Errors are logged to `errors.log` in `scripts/test_causality.py`. TODO: implement baukit-based version of `generate_with_patch` for debugging.
 
-- **Ablation effect is weak** (Track 2): Suppressing the selected heads via attention sink doesn't clearly reduce pass rate relative to random-head baseline. Possible causes: threshold/head-count, self-sink preserving goal signal, or the mask-identified heads not being the causal bottleneck for Python-only generation. See `claude_reports/goal_completion_signal_brainstorm.md` for the g+c two-signal hypothesis and proposed diagnostics (multi-predicate function test, sink_pos=0 sanity check).
+- **Ablation effect is weak** (Track 2): Suppressing the selected heads via attention sink doesn't clearly reduce pass rate relative to random-head baseline. Possible causes: threshold/head-count, self-sink preserving goal signal, or the mask-identified heads not being the causal bottleneck for Python-only generation. See `agent_reports/claude/goal_completion_signal_brainstorm.md` for the g+c two-signal hypothesis and proposed diagnostics (multi-predicate function test, sink_pos=0 sanity check).
 
 - **`run_evaluation_timed` verdict is `"PASSED"`** (not `"pass"`): Any code directly calling `evaluate_single_code` and checking `verdict == "pass"` should be migrated to `run_evaluation_timed` (from `scripts/causality/adversarial_persistence.py`) which handles timeouts and corner cases.

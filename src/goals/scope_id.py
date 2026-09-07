@@ -4,7 +4,7 @@ Identifies hierarchical "intent blocks" in a Python source string using the
 ``ast`` module.  An intent block is a contiguous code region corresponding to
 a single sub-goal of the overall task.
 
-Design decisions (see ``claude_reports/goalscope.md`` for full rationale):
+Design decisions (see ``agent_reports/claude/goalscope.md`` for full rationale):
   D1  Input is clean Python code only — code extraction is a separate step.
   D2  Output is a typed dataclass tree with parent/children pointers.
   D3  No condition sub-scopes: ``while queue:`` condition tokens belong to
