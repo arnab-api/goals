@@ -1,0 +1,10 @@
+[
+    {
+        "name": "diff_kvtransfer_qwen32b_multi_top250_noabl",
+        "command": "mkdir -p logs/diff/qwen32b_coder && python -m scripts.diff.kv_transfer_eval --setups multi_pred --model=Qwen/Qwen2.5-Coder-32B-Instruct --patch-heads=head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --align=pad --ablate-layer-range=off --alpha=2.0 --n-conditions 2 3 --namings letters --letter-stubs var_eq --n-samples 32 |& tee logs/diff/qwen32b_coder/kv_transfer_multi_top250_noabl.log"
+    },
+    {
+        "name": "diff_kvtransfer_qwen32b_multi_top250_ablrestrict",
+        "command": "mkdir -p logs/diff/qwen32b_coder && python -m scripts.diff.kv_transfer_eval --setups multi_pred --model=Qwen/Qwen2.5-Coder-32B-Instruct --patch-heads=head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --align=pad --ablate-layer-range=33,43 --ablation-strat=restrict --alpha=2.0 --n-conditions 2 3 --namings letters --letter-stubs var_eq --n-samples 32 |& tee logs/diff/qwen32b_coder/kv_transfer_multi_top250_ablrestrict.log"
+    }
+]

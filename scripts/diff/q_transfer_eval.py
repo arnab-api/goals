@@ -157,6 +157,24 @@ def _run_tag(patch_heads, alpha, n_pivot_arg="auto") -> str:
     return t
 
 
+def _resolve_patch_heads(ctx, spec):
+    """``spec`` is a built-in name ('goal' | 'union') or a path to a JSON list of ``[layer, head]``
+    pairs (e.g. ``head_sets/<model>/goal_topk/goal__lam20_top250.json``)."""
+    if spec == "goal":
+        return ctx.goal_heads
+    if spec == "union":
+        return ctx.union_heads
+    return [tuple(h) for h in json.loads(Path(spec).read_text())]
+
+
+def _patch_heads_tag(spec, n) -> str:
+    """Run-tag label for the patch-head set. Built-ins keep their bare name ('goal'/'union'); a JSON
+    head-set becomes ``<label>_<n>`` (label = filename stem before '__'), e.g. ``goal_250``."""
+    if spec in ("goal", "union"):
+        return spec
+    return f"{Path(spec).stem.split('__')[0] or 'heads'}_{n}"
+
+
 def _pick_naming(tag: str, key: str) -> str:
     """Deterministic per-pair naming when the naming axis is collapsed (no --namings). Stable across
     runs (md5, not the salted built-in hash) so resume assigns the same naming to the same pair."""
@@ -426,7 +444,7 @@ def run_config(
         presentation="listed",
         src_lang=sl,
         dst_lang=dl,
-        patch_heads=args.patch_heads,
+        patch_heads=_patch_heads_tag(args.patch_heads, len(patch_heads)),
         oracle_model=args.oracle_model,
         n_instances=len(recs),
         alpha=args.alpha,
@@ -489,8 +507,8 @@ def parse_args():
     p.add_argument(
         "--patch-heads",
         default="goal",
-        choices=["goal", "union"],
-        help="heads carrying the query transplant (also the readout/gaze heads)",
+        help="heads carrying the query transplant (also the readout/gaze heads): 'goal' | 'union' | "
+        "a path to a JSON list of [layer, head] pairs. A path is tagged 'ph-<label>_<n>' (e.g. ph-goal_250).",
     )
     p.add_argument(
         "--n-conditions",
@@ -571,12 +589,14 @@ def main():
 
     ctx = P.setup(args.model)  # loads model + head masks; binds module globals
     mt = ctx.mt
-    patch_heads = ctx.goal_heads if args.patch_heads == "goal" else ctx.union_heads
+    patch_heads = _resolve_patch_heads(ctx, args.patch_heads)
+    ph_tag = _patch_heads_tag(args.patch_heads, len(patch_heads))
     # READOUT_HEADS — always the goal heads, kept SEPARATE from the patched heads (not a config axis).
     readout_heads = ctx.goal_heads
+    logger.info(f"patch_heads={args.patch_heads} -> tag '{ph_tag}' (n={len(patch_heads)})")
 
     model_short = args.model.split("/")[-1]
-    run_tag = _run_tag(args.patch_heads, args.alpha, args.n_pivot)  # groups this run's outputs
+    run_tag = _run_tag(ph_tag, args.alpha, args.n_pivot)  # groups this run's outputs
     logger.info(f"run_tag={run_tag}")
 
     # enumerate configs per setup (each setup owns its axes + results subdir)

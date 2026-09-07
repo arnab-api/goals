@@ -164,6 +164,24 @@ def _run_tag(patch_heads, abl, ablation_strat, alpha, align) -> str:
     return f"ph-{patch_heads}__abl-{abl_seg}__a{alpha:g}__{align}"
 
 
+def _resolve_patch_heads(ctx, spec):
+    """``spec`` is a built-in name ('goal' | 'union') or a path to a JSON list of ``[layer, head]``
+    pairs (e.g. ``head_sets/<model>/goal_topk/goal__lam20_top250.json``)."""
+    if spec == "goal":
+        return ctx.goal_heads
+    if spec == "union":
+        return ctx.union_heads
+    return [tuple(h) for h in json.loads(Path(spec).read_text())]
+
+
+def _patch_heads_tag(spec, n) -> str:
+    """Run-tag label for the patch-head set. Built-ins keep their bare name ('goal'/'union'); a JSON
+    head-set becomes ``<label>_<n>`` (label = filename stem before '__'), e.g. ``goal_250``."""
+    if spec in ("goal", "union"):
+        return spec
+    return f"{Path(spec).stem.split('__')[0] or 'heads'}_{n}"
+
+
 def _inst_key(inst) -> str:
     if isinstance(inst, D.KVTransferInstance):
         return f"kv|{inst.meta['cluster']}|src={inst.src_task}|dst={inst.dst_task}"
@@ -399,7 +417,7 @@ def run_config(
         presentation=presentation,
         src_lang=sl,
         dst_lang=dl,
-        patch_heads=args.patch_heads,
+        patch_heads=_patch_heads_tag(args.patch_heads, len(patch_heads)),
         readout_heads="goal",
         align=args.align,
         ablate_layer_range=abl_tag,
@@ -464,8 +482,9 @@ def parse_args():
     p.add_argument(
         "--patch-heads",
         default="goal",
-        choices=["goal", "union"],
-        help="heads whose k/v is transplanted (config axis). Readout is ALWAYS goal, regardless.",
+        help="heads whose k/v is transplanted: 'goal' | 'union' | a path to a JSON list of "
+        "[layer, head] pairs (e.g. head_sets/<model>/goal_topk/goal__lam20_top250.json). "
+        "A path is tagged 'ph-<label>_<n>' (e.g. ph-goal_250). Readout is ALWAYS the goal heads.",
     )
     p.add_argument(
         "--align",
@@ -540,7 +559,8 @@ def main():
 
     ctx = P.setup(args.model)  # loads model + head masks; binds module globals
     mt = ctx.mt
-    patch_heads = ctx.goal_heads if args.patch_heads == "goal" else ctx.union_heads
+    patch_heads = _resolve_patch_heads(ctx, args.patch_heads)
+    ph_tag = _patch_heads_tag(args.patch_heads, len(patch_heads))
     # READOUT_HEADS — always the goal heads, kept SEPARATE from the patched heads and NOT a config axis.
     readout_heads = ctx.goal_heads
 
@@ -554,16 +574,14 @@ def main():
     )
     ablate_heads = [h for h in ablate_all if h not in set(patch_heads)]
     logger.info(
-        f"patch_heads={args.patch_heads} (n={len(patch_heads)}) · readout_heads=goal "
+        f"patch_heads={args.patch_heads} -> tag '{ph_tag}' (n={len(patch_heads)}) · readout_heads=goal "
         f"(n={len(readout_heads)}) · ablate={abl_tag} (n={len(ablate_heads)}, strat={args.ablation_strat}) "
         f"· align={args.align} · alpha={args.alpha}"
     )
 
     model_short = args.model.split("/")[-1]
     # groups this run's outputs (ablation strat folded into the ablate segment when ablation is on)
-    run_tag = _run_tag(
-        args.patch_heads, abl_tag, args.ablation_strat, args.alpha, args.align
-    )
+    run_tag = _run_tag(ph_tag, abl_tag, args.ablation_strat, args.alpha, args.align)
     logger.info(f"run_tag={run_tag}")
 
     configs = []  # (setup, dt, variant, letter_stub, lt)
