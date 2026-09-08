@@ -131,7 +131,7 @@ SSH_OPTS = (
 )
 
 # Failure kinds the scheduler will auto-requeue (everything else is terminal).
-RETRYABLE_KINDS = {"oom", "killed"}
+RETRYABLE_KINDS = {"oom", "killed", "connection"}
 TERMINAL = {"done", "error", "killed", "cancelled"}
 
 
@@ -736,7 +736,7 @@ _STATE_ORDER = ["running", "waiting", "queued", "done", "error", "killed", "canc
 
 
 def _reason(kind: str | None) -> str:
-    return {"oom": "OOM", "killed": "killed"}.get(kind or "", kind or "err")
+    return {"oom": "OOM", "killed": "killed", "connection": "connection"}.get(kind or "", kind or "err")
 
 
 def _fmt_elapsed(sec: float) -> str:

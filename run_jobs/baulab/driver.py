@@ -162,12 +162,19 @@ def classify_error(tail: list[str], returncode: int) -> tuple[str, str]:
       * ``"oom"``    — CUDA out of memory (someone else's job likely crowded the card);
       * ``"killed"`` — the process was killed by a signal (oom-killer or a person reclaiming
                        the machine — exit 137/143, or a direct fatal signal);
+      * ``"connection"`` — a transient oracle/API connection failure (e.g. the Claude oracle
+                       ``ConnectionError`` after its own retries); retried like OOM;
       * ``"other"``  — a genuine failure in our code (not retried).
     """
     text = "\n".join(tail)
     low = text.lower()
     if "out of memory" in low or "cuda out of memory" in low or ("cublas" in low and "alloc" in low):
         return "oom", "CUDA OOM"
+    # Transient oracle/API connectivity (retryable). Match the oracle_llms signature and generic
+    # ConnectionError so a dropped Claude/API request re-queues instead of dying terminally.
+    if ("claude request failed" in low or "connectionerror" in low
+            or "connection error" in low or "connection reset" in low):
+        return "connection", "oracle/API connection error"
     if returncode == 137:
         return "killed", "killed (exit 137 — SIGKILL / oom-killer)"
     if returncode == 143:
