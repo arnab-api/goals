@@ -1,6 +1,6 @@
 # DIFF eval — setup & results reference (Qwen2.5-Coder-32B-Instruct)
 
-*Living reference for the DIFF-hypothesis evals. Last updated 2026-09-06. All rates recomputed from
+*Living reference for the DIFF-hypothesis evals. Last updated 2026-09-08. All rates recomputed from
 per-instance `results.json` (not `meta.json`), so in-progress runs are included. `n` = instances with
 an oracle verdict. HTML span boxes render best in the VS Code markdown preview.*
 
@@ -22,9 +22,10 @@ Each mechanism has **two data templates** (§2, §3).
 
 - **q-transfer (query⇒progress) is strong**: `multi_pred` ~0.94 causal / ~0.89 readout at α=2, with
   **gaze shift ≈1.00** vs a ~0.01 baseline. `filter` is weaker and α-critical.
-- **kv-transfer (k/v⇒goal) with the top-250 goal heads is near-perfect**: `multi_pred` var_eq hits
-  **causal ~0.99 / readout ~0.96 across all 4 datatypes × 4 language directions**, and **ablation is
-  unnecessary** (`off` ≈ `restrict`). 122→250 lifts causal 0.84→0.99, readout 0.51→0.96 (§3.2).
+- **kv-transfer (k/v⇒goal) with the top-250 goal heads is near-perfect — for BOTH templates**:
+  `multi_pred` var_eq **0.99 / 0.96** and `dual_comp` **0.97 / 0.94**, across all 4 datatypes × 4
+  language directions, and **ablation is unnecessary** (`off` ≈ `restrict` on both). 122→250 lifts
+  multi_pred causal 0.84→0.99 / readout 0.51→0.96 and dual_comp 0.75→0.97 / 0.55→0.94 (§3).
 - **Standard config going forward:** patch = readout = **top-250 goal heads**, `ablate=off`, α=2,
   var_eq (kv multi_pred), all 4 langs.
 
@@ -154,15 +155,16 @@ the query for the remaining sub-task.
 </td>
 </tr></table>
 
-**Results — best available (122 heads, α=2, `targeted` postfix; n≈128):** overall **causal 0.72**,
-pat=SRC 0.78, gaze_shift ~0.97.
+**Results — 250 heads, α=2, `targeted` postfix, all 4 langs (complete, n=32/config):** overall
+**causal 0.78**, pat=SRC 0.76. (122/α=2 baseline was causal 0.72.)
 
 ![axes](figures/axis_q_filter.png)
 
-**What helped / hurt:** α=2 is **essential** here — causal 0.41→0.72 vs α=1. Datatype dominates:
-`str`/`list[str]` reach 0.82–0.87, but **`list[int]` is the weak spot (0.48)**. The 250-head run
-(list[int] only, done) lifts `list[int]` py→py 0.50→0.78 but **py→cpp stays ~0.44** — cross-language
-into C++ is the lone soft spot for the composed filter. Only the `targeted` postfix has been run.
+**What helped / hurt:** α=2 is **essential** here — causal 0.41→0.72 vs α=1 (at 122). `str`/`list[str]`
+are strong (~0.8+), but **`list[int]` is the persistent weak spot, specifically cross-language into
+C++**: py→cpp **0.44**, cpp→py **0.59**, cpp→cpp **0.62** (same-language py→py is fine). 250 heads did
+**not** rescue the composed-filter `list[int]` cross-lang case — the lone soft spot in the whole study.
+Only the `targeted` postfix has been run.
 
 ---
 
@@ -205,14 +207,16 @@ Two distinct tasks that share a common prerequisite (both prefill the same "prog
 </tr></table>
 <span style="font-size:82%;color:#888">Orange = task-description span whose K,V are transplanted · salmon = pivot (<code>return</code>). Same prefilled progress on both sides.</span>
 
-**Results — best available (122 heads, restrict, α=2):** overall **causal 0.75**, pat=SRC 0.55.
+**Results — 250 heads (patch+readout), NO ablation, all 4 langs (complete, n=896):** overall
+**causal 0.97**, **pat=SRC 0.94**. *(At 122 heads/restrict it was only causal 0.75 / pat=SRC 0.55.)*
 
 ![axes](figures/axis_kv_dualcomp.png)
 
-**What helped / hurt:** `restrict` ≈ `zero` (0.75 vs 0.74) — ablation strategy is a wash. Datatype is
-the big axis: `str`/`list[str]` 0.84, but `int`/`list[int]` only 0.65–0.68. py→py (0.79) > py→cpp
-(0.71). **The causal≫readout gap is largest here** (causal 0.75 vs pat=SRC 0.55). *250-head + all-lang
-run is queued (`..._top250_remaining.json`) — expected to close the gap as it did for multi_pred.*
+**What helped:** the top-250 patch+readout set (as for multi_pred) — 122→250 lifts causal 0.75→0.97 and
+**closes the causal≫readout gap** (0.55→0.94). **Ablation is unnecessary here too**: this is the
+`abl-off` run and it matches the multi_pred no-abl≈restrict finding. Only remaining softness:
+`list[int]` (~0.92–0.94 causal). *(This is the confirmation of the dual_comp @250 ablation-necessity
+question — resolved: no ablation needed.)*
 
 ### 3.2 multi_pred — divergent frontier (`MultiPredicateInstance`)  ⭐
 
@@ -275,20 +279,23 @@ vs `restrict` = 0.99/0.96 (identical). See the cross-cutting figure below.
 Every result to date is one of py→py, py→cpp, cpp→py, cpp→cpp — but the **250-head** runs are the only
 ones with the two `cpp→*` directions (kv multi_pred has all four; 122-head runs are py→{py,cpp} only).
 
-| mechanism / template | best config on disk | langs | status |
-|---|---|---|---|
-| q / multi_pred | 122, α=2 | py→py, py→cpp | ✓ (250 pending) |
-| q / filter | 122, α=2, targeted | py→py, py→cpp | ~ (`list[int]`@250 done; str/list[str]@250 queued; `return` postfix ✗) |
-| kv / dual_comp | 122, restrict, α=2 | py→py, py→cpp | ~ (250 + cpp→* queued) |
-| kv / multi_pred | **250, var_eq, restrict/off** | **all 4** | ✓ complete, near-perfect |
+All 250-head runs cover **all four language directions** (py→py, py→cpp, cpp→py, cpp→cpp).
 
-**Queued** (`job_list/diff_eval/qwen32b_coder_diff_top250_remaining.json`, patch+readout=250, all 4
-langs, n=128): kv dual_comp (`abl-off`), q multi_pred, q filter (str, list[str]).
+| mechanism / template | best config (250, all 4 langs) | causal / pat=SRC | status |
+|---|---|---|---|
+| kv / multi_pred | var_eq, off ≈ restrict | **0.99 / 0.96** | ✓ complete (16 cfg) |
+| kv / dual_comp | no ablation | **0.97 / 0.94** | ✓ complete (16 cfg) |
+| q / multi_pred | α=2 | ~0.92 / 0.83 | ~ filling (≈9/16; oracle-interrupted, rerunning) |
+| q / filter | α=2, targeted | 0.78 / 0.76 | ✓ complete (12 cfg); `list[int]` cross-lang weak |
 
 **Next / open:**
-1. Land the queued 250 runs → confirm dual_comp closes the causal≫readout gap and off≈restrict there too.
-2. Does 250 rescue **q-filter `list[int]` py→cpp** (still ~0.44)?
+1. **Finish q multi_pred @250** (rerun in flight after the oracle drop) → then all four setups are complete at 250.
+2. **q-filter `list[int]` cross-language** (py→cpp 0.44, cpp→py 0.59, cpp→cpp 0.62) — the one persistent
+   weakness; 250 heads did not fix it. Decide whether to investigate or scope out.
 3. q-filter `return` postfix variant (only `targeted` exists).
 4. Retire the stale `kv_transfer/dual_comp/ph-goal__abl-35-50__a1__pad` (n=2 leftover).
 
-*Not needed:* ablation runs (off≈restrict at 250); α sweeps beyond α=2; more `zero`-ablation.
+**Resolved:** ablation is unnecessary at 250 for **both** kv setups (multi_pred: off≈restrict; dual_comp:
+`abl-off` = 0.97/0.94). The causal≫readout gap is closed at 250 everywhere except q-filter list[int]-cross-lang.
+
+*Not needed:* ablation runs; α sweeps beyond α=2; more `zero`-ablation.
