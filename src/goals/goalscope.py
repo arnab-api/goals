@@ -12,10 +12,11 @@ import keyword as _kw
 import warnings
 from typing import Callable, Literal, Optional, Union
 
+import baukit
 import torch
 from tqdm.auto import tqdm
 
-from src.functional import PatchSpec, generate_with_patch
+from src.functional import PatchSpec, generate_with_patch, get_hs
 from src.goals.head_loc_attn import (
     HeadMask,
     collect_head_steering_vecs,
@@ -712,6 +713,122 @@ def _build_goalscope_prompt(mt) -> str:
             continue_final_message=True,
             tokenize=False,
         )
+
+
+class OVReader:
+    """OV-write residual probe: is the goal already in the residual, in the goal heads' OV-write direction?
+
+    For a residual ``h`` (the stream after some layer ``L``, at a pivot token), a goal head ``(l, j)`` would
+    write ``W_O_j W_V_kv (g ⊙ h)`` into the residual if ``h`` were its value source — the full OV transform,
+    NOT a projection: the head reads its value on the RMSNorm'd residual (per-dim gain ``g`` folded; the
+    direction-preserving ``1/rms`` scalar is dropped), maps it through ``W_V`` (GQA kv-head ``kv = j // group``),
+    then writes it through ``W_O``. Aggregating the unit OV-writes over the readout heads gives a residual
+    DIRECTION ``h_ov``; steering the GoalScope probe with it (``head_additive_generate`` / ``additive_norm``)
+    verbalizes the goal iff ``h`` already carries it in that write direction.
+
+    The per-head factors ``(W_O_j, W_V_kv, g)`` are computed once in ``__init__`` and cached in ``readers``.
+    """
+
+    def __init__(self, mt, readout_heads: list[tuple[int, int]]):
+        self.mt = mt
+        self.readout_heads = list(readout_heads)
+        self.n_kv = mt.n_kv_heads
+        self.group = mt.n_heads // self.n_kv  # GQA group size
+        self.readers = self._build_readers()  # per-head (W_O_j, W_V_kv, g), CPU float32
+        self._probe_inputs = None  # lazily-built GoalScope probe inputs
+
+    def _proj_weight(self, layer: int, which: str) -> torch.Tensor:
+        name = self.mt.attn_module_name_format.format(layer) + f".{which}_proj"
+        return baukit.get_module(self.mt._model, name).weight
+
+    def _build_readers(self) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Per goal head ``(l, j)``: ``(W_O_j, W_V_kv, g)`` — small factors of the OV map
+        ``W_O_j W_V_kv diag(g)``, kept as CPU float32 and applied lazily in :meth:`resid_ov_vec`."""
+        hd = self.mt.head_dim
+        readers = []
+        for (layer, j) in tqdm(self.readout_heads, desc="Building OV readers"):
+            kv = j // self.group
+            Wo = self._proj_weight(layer, "o")[:, j * hd : (j + 1) * hd].detach().float().cpu()
+            Wv = self._proj_weight(layer, "v")[kv * hd : (kv + 1) * hd, :].detach().float().cpu()
+            g = (
+                baukit.get_module(
+                    self.mt._model, self.mt.layer_name_format.format(layer) + ".input_layernorm"
+                )
+                .weight.detach()
+                .float()
+                .cpu()
+            )
+            readers.append((Wo, Wv, g))
+        return readers
+
+    def resid_ov_vec(self, h: torch.Tensor) -> torch.Tensor:
+        """``h_ov = mean_j unit(W_O_j W_V_kv (g ⊙ h))`` — the aggregated OV-write direction for value ``h``.
+        ``h`` is any ``(n_embd,)`` residual (moved to CPU float32); returns ``(n_embd,)`` CPU float32."""
+        h = h.detach().float().cpu()
+        vecs = []
+        for Wo, Wv, g in self.readers:
+            h_ov = Wo @ (Wv @ (g * h))
+            vecs.append(h_ov / h_ov.norm().clamp_min(1e-8))
+        return torch.stack(vecs).mean(0)
+
+    @property
+    def probe_inputs(self):
+        if self._probe_inputs is None:
+            self._probe_inputs = prepare_input(
+                prompts=_build_goalscope_prompt(self.mt), tokenizer=self.mt
+            )
+        return self._probe_inputs
+
+    def apply_probe(
+        self,
+        prompt: str | TokenizerOutput,
+        pivot: int,
+        probe_layers: list[int],
+        *,
+        steer_layers: Optional[list[int]] = None,
+        max_new_tokens: int = 128,
+        strategy: Literal["additive", "additive_norm"] = "additive_norm",
+        alpha: float = 0.15,
+        n_steer_tokens: Optional[int] = None,
+        probe_inputs: Optional[dict] = None,
+    ) -> dict[int, str]:
+        """Probe every layer in ``probe_layers`` in one shot: residuals at all layers come from a SINGLE
+        forward (:func:`get_hs`), and all their OV-write steering vectors are batched into ONE
+        :func:`head_additive_generate` call.
+
+        Args:
+            prompt: source prompt (str or tokenized) to read the residual from.
+            pivot: token position of the residual to read.
+            probe_layers: decoder layers ``L`` whose post-layer residual is probed.
+            steer_layers: GoalScope steer band (default ``range(35, 46)``).
+            max_new_tokens, strategy, alpha, n_steer_tokens: forwarded to :func:`head_additive_generate`.
+            probe_inputs: pre-tokenized GoalScope probe (defaults to the cached :attr:`probe_inputs`).
+
+        Returns:
+            ``{L: readout}`` — the probe's verbalization for the residual after each layer ``L``.
+        """
+        steer_layers = list(range(35, 46)) if steer_layers is None else list(steer_layers)
+        probe_layers = list(probe_layers)
+        inp = (
+            prepare_input(prompts=prompt, tokenizer=self.mt) if isinstance(prompt, str) else prompt
+        )
+        # one forward: residual after each probe layer at the pivot
+        locations = [(self.mt.layer_name_format.format(L), pivot) for L in probe_layers]
+        hs = get_hs(self.mt, inp, locations=locations, return_dict=True)
+        steer = torch.stack(
+            [self.resid_ov_vec(hs[loc]) for loc in locations]
+        )  # (n_probe, n_embd) CPU f32
+        outs = head_additive_generate(
+            self.mt,
+            probe_inputs if probe_inputs is not None else self.probe_inputs,
+            steer,
+            layers=steer_layers,
+            max_new_tokens=max_new_tokens,
+            strategy=strategy,
+            alpha=alpha,
+            n_steer_tokens=n_steer_tokens,
+        )
+        return dict(zip(probe_layers, outs))
 
 
 def apply_goalscope(
