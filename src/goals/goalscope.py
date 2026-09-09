@@ -715,6 +715,34 @@ def _build_goalscope_prompt(mt) -> str:
         )
 
 
+# GoalScope destination prompt for the causality read-out: an information-less C++ function stub. The
+# goal encoding is steered in on top of it; the model then continues the C++ body cross-lingually.
+# Kept in sync with scripts/evaluation/eval_goalscope.py (CAUSAL_PREFIX / CAUSAL_INSTRUCTION).
+CAUSAL_PREFIX = "bool check(auto value){"
+CAUSAL_INSTRUCTION = (
+    "You are implementing a simple C++ function that checks for a condition. "
+    "Just write the function body, without any comments or explanations. Assume all the necessary "
+    "headers are already included."
+)
+
+
+def _build_causality_prompt(mt) -> str:
+    """Build the GoalScope *causality* destination prompt — an information-less C++ function stub
+    (assistant turn == ``CAUSAL_PREFIX``). Cross-language counterpart of :func:`_build_goalscope_prompt`."""
+    messages = [
+        {"role": "system", "content": GOALSCOPE_SYS},
+        {"role": "user", "content": CAUSAL_INSTRUCTION},
+        {"role": "assistant", "content": CAUSAL_PREFIX},
+    ]
+    kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
+    try:
+        return mt.tokenizer.apply_chat_template(
+            messages, chat_template_kwargs={"enable_thinking": False}, **kw
+        )
+    except TypeError:
+        return mt.tokenizer.apply_chat_template(messages, **kw)
+
+
 class OVReader:
     """OV-write residual probe: is the goal already in the residual, in the goal heads' OV-write direction?
 
@@ -735,7 +763,7 @@ class OVReader:
         self.n_kv = mt.n_kv_heads
         self.group = mt.n_heads // self.n_kv  # GQA group size
         self.readers = self._build_readers()  # per-head (W_O_j, W_V_kv, g), CPU float32
-        self._probe_inputs = None  # lazily-built GoalScope probe inputs
+        self._probe_inputs = {}  # {mode: tokenized GoalScope probe}, built lazily
 
     def _proj_weight(self, layer: int, which: str) -> torch.Tensor:
         name = self.mt.attn_module_name_format.format(layer) + f".{which}_proj"
@@ -771,13 +799,13 @@ class OVReader:
             vecs.append(h_ov / h_ov.norm().clamp_min(1e-8))
         return torch.stack(vecs).mean(0)
 
-    @property
-    def probe_inputs(self):
-        if self._probe_inputs is None:
-            self._probe_inputs = prepare_input(
-                prompts=_build_goalscope_prompt(self.mt), tokenizer=self.mt
-            )
-        return self._probe_inputs
+    def probe_inputs(self, mode: Literal["faithfulness", "causality"] = "faithfulness"):
+        """Tokenized GoalScope destination prompt for ``mode`` (cached per mode). ``"faithfulness"`` =
+        the NL "what are you doing at this line?" probe; ``"causality"`` = the C++ function stub."""
+        if mode not in self._probe_inputs:
+            builder = _build_goalscope_prompt if mode == "faithfulness" else _build_causality_prompt
+            self._probe_inputs[mode] = prepare_input(prompts=builder(self.mt), tokenizer=self.mt)
+        return self._probe_inputs[mode]
 
     def apply_probe(
         self,
@@ -785,6 +813,7 @@ class OVReader:
         pivot: int,
         probe_layers: list[int],
         *,
+        mode: Literal["faithfulness", "causality"] = "faithfulness",
         steer_layers: Optional[list[int]] = None,
         max_new_tokens: int = 128,
         strategy: Literal["additive", "additive_norm"] = "additive_norm",
@@ -800,9 +829,14 @@ class OVReader:
             prompt: source prompt (str or tokenized) to read the residual from.
             pivot: token position of the residual to read.
             probe_layers: decoder layers ``L`` whose post-layer residual is probed.
+            mode: which GoalScope destination prompt to steer into — ``"faithfulness"`` (default) reads
+                out into the NL "what are you doing at this line?" probe; ``"causality"`` steers into an
+                information-less C++ function stub and reads out the cross-language continuation. Differs
+                ONLY in the destination prompt (see :meth:`probe_inputs`). Ignored if ``probe_inputs`` is
+                given explicitly.
             steer_layers: GoalScope steer band (default ``range(35, 46)``).
             max_new_tokens, strategy, alpha, n_steer_tokens: forwarded to :func:`head_additive_generate`.
-            probe_inputs: pre-tokenized GoalScope probe (defaults to the cached :attr:`probe_inputs`).
+            probe_inputs: pre-tokenized GoalScope probe (defaults to the cached prompt for ``mode``).
 
         Returns:
             ``{L: readout}`` — the probe's verbalization for the residual after each layer ``L``.
@@ -820,7 +854,7 @@ class OVReader:
         )  # (n_probe, n_embd) CPU f32
         outs = head_additive_generate(
             self.mt,
-            probe_inputs if probe_inputs is not None else self.probe_inputs,
+            probe_inputs if probe_inputs is not None else self.probe_inputs(mode),
             steer,
             layers=steer_layers,
             max_new_tokens=max_new_tokens,
