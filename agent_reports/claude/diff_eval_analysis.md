@@ -1,6 +1,6 @@
 # DIFF eval — setup & results reference (Qwen2.5-Coder-32B-Instruct)
 
-*Living reference for the DIFF-hypothesis evals. Last updated 2026-09-08. All rates recomputed from
+*Living reference for the DIFF-hypothesis evals. Last updated 2026-09-09. All rates recomputed from
 per-instance `results.json` (not `meta.json`), so in-progress runs are included. `n` = instances with
 an oracle verdict. HTML span boxes render best in the VS Code markdown preview.*
 
@@ -18,10 +18,53 @@ Each mechanism has **two data templates** (§2, §3).
 
 ---
 
+## ★ Headline (2026-09-09) — the goal-head **query already carries the next goal**, not just progress
+
+The q-transfer `multi_pred` test in §2.1 cannot separate two readings of what the transplanted **pivot
+query** carries:
+
+- **(H-progress)** the query encodes *how far along* the model is (a decoding of the completed set
+  {T1,T2}); the actual next goal is then computed *downstream* by reading the task keys/values.
+- **(H-DIFF)** the query already encodes the **computed next goal itself** (the DIFF).
+
+In §2.1 the two coincide — SRC's progress-implied next *is* SRC's target — so "DST jumps to SRC's goal"
+is consistent with **both**, and the setup doesn't decide between them.
+
+**Sharper design** (`notebooks/diff/6_disent_from_attn_out.ipynb`, cell 8; `list[str]`, letters naming).
+Hold the **progress identical** on both sides and diverge only the **task-list order**, so the two
+hypotheses predict **different tokens**:
+
+| side | task list (order) | prefilled (progress) | native next |
+|---|---|---|---|
+| SRC | [T1, T2, **T3**, T4] | {T1, T2} | **T3** |
+| DST | [T1, T2, **T4**, T3] | {T1, T2} | **T4** |
+
+T1 = total #chars · T2 = total #uppercase · **T3 = whether any word is a palindrome** · **T4 = # words
+starting with a vowel**. Transplant **SRC's pivot query → DST** at the goal heads (query transplant only;
+keys/values untouched, so DST still *reads* its own task list).
+
+- **H-progress ⇒ T4**: the query only says "{T1,T2} done"; DST's own order puts **T4** next → unchanged.
+- **H-DIFF ⇒ T3**: the query already carries SRC's computed goal **T3**, dragging DST off its native T4.
+
+**Observed: T3.** The transplanted query overrides DST's native frontier and makes it write **T3** — so
+the goal-head **query already holds the precomputed next goal (the DIFF)**, not a mere progress code. The
+goal heads are **not where the DIFF is computed**; it is produced *upstream* and is already present in the
+query at the pivot. This matches the **OV-reader probe** — the goal is linearly readable from the
+residual's OV-write subspace from ~L40, *before* the goal-head layers concentrate
+(`scripts/evaluation/eval_ov_reader.py`, `notebooks/diff/7_ov_reader_eval_demo.ipynb`).
+
+*Status: qualitative single-instance result (nb6). To scale into a proper eval — the divergent-order
+query-transfer with the T4-vs-T3 contrast — as a follow-up to §2.1.*
+
+---
+
 ## 0. TL;DR
 
-- **q-transfer (query⇒progress) is strong**: `multi_pred` ~0.94 causal / ~0.89 readout at α=2, with
-  **gaze shift ≈1.00** vs a ~0.01 baseline. `filter` is weaker and α-critical.
+- **q-transfer (query⇒progress) is strong**: `multi_pred` @250, all 4 langs, is **causal 0.94 /
+  pat=SRC 0.85** at α=2 with **gaze shift 1.00** vs a 0.01 baseline (n=2048). `filter` is weaker and
+  α-critical.
+- **All four setups are now complete at top-250** across all 4 datatypes × 4 language directions
+  (q multi_pred was the last gap; finished 2026-09-08).
 - **kv-transfer (k/v⇒goal) with the top-250 goal heads is near-perfect — for BOTH templates**:
   `multi_pred` var_eq **0.99 / 0.96** and `dual_comp` **0.97 / 0.94**, across all 4 datatypes × 4
   language directions, and **ablation is unnecessary** (`off` ≈ `restrict` on both). 122→250 lifts
@@ -110,16 +153,22 @@ trailing-indent pivot. The pivot **query** is transplanted SRC→DST.
 Transplant the SRC pivot **query** → DST writes T3 (`has_duplicate`) instead of its own next goal T2
 (`count_even`). The SRC target *does* appear in the DST task list, so **gaze** is measurable here.
 
-**Results — best available (122 heads, α=2; n=128/config):** overall **causal 0.94**, readout
-**pat=SRC 0.89**, **gaze_shift ≈1.00** (baseline 0.01).
+> **Caveat — this design conflates two hypotheses.** SRC prefills *more* progress than DST, so SRC's
+> progress-implied next *is* SRC's target; "DST jumps to SRC's goal" is consistent with both *query =
+> progress* and *query = precomputed DIFF*. The divergent-task-order test in the **★ Headline** section
+> separates them and shows the query carries the **precomputed goal (DIFF)**.
+
+**Results — 250 heads (patch+readout), α=2, all 4 langs (complete, n=128/config, n=2048):** overall
+**causal 0.94**, **pat=SRC 0.85**, **gaze_shift 1.00** (clean baseline 0.01). Near lang-invariant
+(cpp→cpp 0.94, cpp→py 0.95, py→cpp 0.94, py→py 0.93) and flat across datatype (int 0.93, str 0.93,
+list[int] 0.96, list[str] 0.94). *(122-head, py-only was causal 0.94 / readout 0.89 — 250 adds the two
+cpp→* directions at the same strength; the small readout dip is the added cross-lang cells.)*
 
 ![axes](figures/axis_q_multipred.png)
 
-Near lang-invariant (py→py 0.95, py→cpp 0.92) and flat across datatype (0.92–0.95).
-
 **What helped:** α is a mild lever (causal 0.83→0.94 from α=1→2; readout already ~0.89 at both). The
-dominant evidence is the **gaze shift ≈1.00 against a ~0.01 clean baseline** — the model's attention
-re-points to the source sub-goal almost every time. *(250-head run pending; q-multi is already strong.)*
+dominant evidence is the **gaze shift 1.00 against a 0.01 clean baseline** — the model's attention
+re-points to the source sub-goal almost every time.
 
 ### 2.2 filter — composed single-line filter (`FilterTransferInstance`)
 
@@ -155,16 +204,18 @@ the query for the remaining sub-task.
 </td>
 </tr></table>
 
-**Results — 250 heads, α=2, `targeted` postfix, all 4 langs (complete, n=32/config):** overall
-**causal 0.78**, pat=SRC 0.76. (122/α=2 baseline was causal 0.72.)
+**Results — 250 heads, α=2, `targeted` postfix, all 4 langs (complete, n=32–116/config, n=1056):**
+overall **causal 0.83**, pat=SRC 0.87. (122/α=2 baseline was causal 0.72.)
 
 ![axes](figures/axis_q_filter.png)
 
 **What helped / hurt:** α=2 is **essential** here — causal 0.41→0.72 vs α=1 (at 122). `str`/`list[str]`
 are strong (~0.8+), but **`list[int]` is the persistent weak spot, specifically cross-language into
-C++**: py→cpp **0.44**, cpp→py **0.59**, cpp→cpp **0.62** (same-language py→py is fine). 250 heads did
+C++**: py→py 0.78, py→cpp **0.44**, cpp→py **0.59**, cpp→cpp **0.62**. 250 heads did
 **not** rescue the composed-filter `list[int]` cross-lang case — the lone soft spot in the whole study.
-Only the `targeted` postfix has been run.
+Note this is a *causal* (generation) failure only: the **readout still names SRC even here**
+(`list[int]` pat=SRC 0.88–0.97), so the goal is decodable at the pivot even when the continuation
+doesn't switch. Only the `targeted` postfix has been run.
 
 ---
 
@@ -285,17 +336,19 @@ All 250-head runs cover **all four language directions** (py→py, py→cpp, cpp
 |---|---|---|---|
 | kv / multi_pred | var_eq, off ≈ restrict | **0.99 / 0.96** | ✓ complete (16 cfg) |
 | kv / dual_comp | no ablation | **0.97 / 0.94** | ✓ complete (16 cfg) |
-| q / multi_pred | α=2 | ~0.92 / 0.83 | ~ filling (≈9/16; oracle-interrupted, rerunning) |
-| q / filter | α=2, targeted | 0.78 / 0.76 | ✓ complete (12 cfg); `list[int]` cross-lang weak |
+| q / multi_pred | α=2 | **0.94 / 0.85** (gaze 1.00) | ✓ complete (16 cfg) |
+| q / filter | α=2, targeted | 0.83 / 0.87 | ✓ complete (12 cfg); `list[int]` cross-lang weak |
 
 **Next / open:**
-1. **Finish q multi_pred @250** (rerun in flight after the oracle drop) → then all four setups are complete at 250.
-2. **q-filter `list[int]` cross-language** (py→cpp 0.44, cpp→py 0.59, cpp→cpp 0.62) — the one persistent
-   weakness; 250 heads did not fix it. Decide whether to investigate or scope out.
-3. q-filter `return` postfix variant (only `targeted` exists).
-4. Retire the stale `kv_transfer/dual_comp/ph-goal__abl-35-50__a1__pad` (n=2 leftover).
+1. **q-filter `list[int]` cross-language** (py→cpp 0.44, cpp→py 0.59, cpp→cpp 0.62) — the one persistent
+   weakness; 250 heads did not fix the *causal* switch (the readout still names SRC). Decide whether to
+   investigate or scope out.
+2. q-filter `return` postfix variant (only `targeted` exists).
+3. Retire the stale `kv_transfer/dual_comp/ph-goal__abl-35-50__a1__pad` (n=2 leftover).
 
-**Resolved:** ablation is unnecessary at 250 for **both** kv setups (multi_pred: off≈restrict; dual_comp:
-`abl-off` = 0.97/0.94). The causal≫readout gap is closed at 250 everywhere except q-filter list[int]-cross-lang.
+**Resolved:** all four setups are complete at top-250 (q multi_pred finished 2026-09-08: 0.94/0.85,
+gaze 1.00). Ablation is unnecessary at 250 for **both** kv setups (multi_pred: off≈restrict; dual_comp:
+`abl-off` = 0.97/0.94). The causal≫readout gap is closed at 250 everywhere except q-filter
+list[int]-cross-lang (and there the gap is inverted — readout succeeds, generation doesn't).
 
 *Not needed:* ablation runs; α sweeps beyond α=2; more `zero`-ablation.
