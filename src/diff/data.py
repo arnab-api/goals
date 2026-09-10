@@ -1097,6 +1097,35 @@ QTASKS: dict[str, QTransferTask] = {
 }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# trivial frontiers — target conditions the no-goal causality default already emits
+# ══════════════════════════════════════════════════════════════════════════════
+# The causality read-out steers an information-less C++ stub ``bool check(auto value){``. With NO
+# goal signal the model defaults to a scalar sign/zero comparison (``value > 0``, ``value == 0``,
+# ``value < 0``, or a boolean combination of these). Any frontier whose gold predicate IS such a
+# comparison is therefore matched by that default output *regardless of transfer*, inflating both
+# causality and faithfulness with false positives. Exclude these from frontier / target selection
+# (they may still appear as prefilled CONTEXT — only the measured frontier must be non-trivial).
+# Keyed per datatype; extend freely. Mirrors the ``is_trivial_causal_readout`` sanitizer in
+# ``scripts/evaluation/eval_goalscope.py`` (target-side vs read-out-side of the same idea).
+TRIVIAL_FRONTIERS: dict[str, frozenset[str]] = {
+    "int": frozenset({"is_positive", "is_negative", "sign"}),
+    "list[int]": frozenset(
+        {"all_positive", "count_positive", "count_negative", "contains_zero"}
+    ),
+    "list[str]": frozenset(),
+    "str": frozenset(),
+}
+
+
+def nontrivial_frontiers(datatype: str) -> list[Predicate]:
+    """The QTASKS predicates for ``datatype`` eligible to be a *measured* frontier / target
+    condition — i.e. the bank minus :data:`TRIVIAL_FRONTIERS` (the sign/zero comparisons the
+    no-goal causality default trivially matches)."""
+    trivial = TRIVIAL_FRONTIERS.get(datatype, frozenset())
+    return [p for p in QTASKS[datatype].predicates if p.id not in trivial]
+
+
 def _build_incompatible(
     implies: list[tuple[str, str]],
     mutex_groups: list[tuple[str, ...]],

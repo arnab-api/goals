@@ -54,7 +54,7 @@ from scripts.evaluation import faithfulness_io as fio
 
 # Every stage except the injection is shared with the head-set eval, so the two runs differ only
 # in the thing under test.
-from scripts.evaluation.eval_goalscope import (
+from scripts.evaluation.eval_goalscope_old_cond_data import (
     ANCHOR_ORDER,
     CAUSAL_PREFIX,
     ORACLE_MODEL,

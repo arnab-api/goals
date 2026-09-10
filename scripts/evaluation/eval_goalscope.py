@@ -1,55 +1,49 @@
 #!/usr/bin/env python
-"""GoalScope goal-head eval on the multi-predicate ``check_conditions`` setup — two ``--mode``s:
+"""GoalScope goal-head eval on the LOCKED prefill-to-frontier dataset (QTASKS bank) — two ``--mode``s:
 
-  faithfulness  — read out an NL description at each anchor ("what are you doing at this line?")
-                  and grade whether it faithfully describes the implementation span.
+  faithfulness  — read out an NL description at each pivot ("what are you doing at this line?")
+                  and grade whether it faithfully describes the frontier implementation span.
   causality     — steer the goal encoding into an information-less C++ stub
                   (``bool check(auto value){``) and grade whether the C++ continuation implements
-                  the same *idea* as the Python implementation span (cross-language transfer).
+                  the same *idea* as the Python frontier span (cross-language transfer).
 
-Both share the whole pipeline; they differ only in the GoalScope destination prompt, the read-out
-post-processing (causality prepends the C++ prefix), and the oracle rubric/prompt. Results save to
-``<results>/evaluation/goalscope/<mode>/<strategy>/<alpha>/<leaf>/``.
+This is the QTASKS successor to ``eval_goalscope_old_cond_data.py`` (the ``check_conditions`` /
+``condition_data`` version). It reuses that file's head-loading, oracle rubrics, ``hard_eval``
+(incl. the trivial sign/zero read-out sanitizer), ``compute_summary`` and storage verbatim; the ONLY
+difference is the corpus: instead of random ``sample_specs`` on ``condition_data`` predicates, it loads
+ONE frozen dataset (``data/goalscope_eval.json`` — QTASKS bank, prefill-to-frontier, ``var_eq`` stub,
+letters naming, trivial frontiers excluded, balanced frontier coverage). No per-run random sampling.
 
-Pipeline (consolidated from ``notebooks/clock/12_goal_eval_scaleup.ipynb`` (faithfulness) and
-``12.1_goal_eval_causality.ipynb`` (causality)):
+Pipeline (mirrors the OVReader skyline in ``scripts/evaluation/eval_ov_reader.py``):
 
-  1. Corpus — sample single-line INT predicates into ``check_conditions(n: int)`` tasks
-     (letters naming ``a/b/c``); greedy-decode the body.
-  2. Oracle spans — ``label_generation`` segments the body into per-condition spans (impl_span)
-     + condition descriptions (the ground truth: *what* each line implements).
-  3. Anchors — per assignment line, locate the token positions {prev_end, indent, var, eq,
-     first_impl} in the GoalScope tokenization.
-  4. Read-outs — ``apply_goalscope`` restricted to just those anchor positions (fast).
-  5. Scoring — hard eval (oracle: is the read-out a faithful description of the impl_span?) and
-     k-way (oracle: which of the sample's K conditions does the read-out name?). Soft eval is
-     intentionally dropped (didn't discriminate).
+  1. Corpus — load the datatype's recipes from the locked JSON; rebuild each ``QTransferInstance``
+     from ``src.diff.data.QTASKS`` by predicate id.
+  2. Prompt — prefilled source prompt ending at the frontier's ``{var} =`` (var_eq stub); greedy-decode.
+  3. impl_span — the frontier's ``{var} =`` line + the first generated line (single-line predicate,
+     so exact — no oracle span-labelling).
+  4. Pivots — locate {prev_end, indent, var, eq, first_impl} in the GoalScope tokenization.
+  5. Read-outs — ``apply_goalscope`` restricted to just those pivot positions (the skyline read-out).
+  6. Scoring — ``hard_eval`` (oracle YES/NO; causality is sanitized for trivial read-outs).
 
-Everything is saved under
-``<results>/evaluation/goalscope/faithfulness/<strategy>/<alpha>/<leaf>/`` — config (incl. the
-selected heads), the full per-anchor records with the raw oracle prompts + responses, a per-anchor
-summary, and per-sample generations + labels. Parse with ``scripts.evaluation.faithfulness_io``.
+Saved under ``<results>/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/`` (same scheme
+as the old script; the leaf differs by ``span=frontier`` + the dataset's dtype/nspec/nc, so the two
+never collide). Parse with ``scripts.evaluation.faithfulness_io``.
 
 All ``ask_claude`` calls use ``use_cache=True``.
 
 Usage:
     conda run -n goals python scripts/evaluation/eval_goalscope.py \
-        --mode faithfulness --heads goal --strategy additive --alpha 0.2 \
-        --steer_layer_range 35 46 --n_steer_tokens all --max_new_tokens 64
+        --mode faithfulness --datatype int --heads goal --strategy additive --alpha 0.2
 
     conda run -n goals python scripts/evaluation/eval_goalscope.py \
-        --mode causality --heads goal --strategy additive --alpha 0.2   # C++ transfer
+        --mode causality --datatype "list[int]" --heads goal --strategy additive --alpha 0.2
 
-    # a custom head set — the way to eval any filtered/ranked selection (fv, concept, top-k, ...):
-    ... --heads /path/to/heads.json          # json array of [layer_idx, head_idx] pairs
-    # It supersedes every head-selection flag: combining it with --goal_threshold/--goal_band is an
-    # error, not a silent no-op. The run dir is keyed on the file's STEM, so give distinct files
-    # distinct basenames — two `heads.json` in different dirs would otherwise resume each other.
-    # optional k-way oracle (faithfulness only for now):
-    ... --eval-k-way
+    # custom head set (supersedes every head-selection flag):  --heads /path/to/heads.json
+    # custom dataset:  --dataset data/goalscope_eval.json
 """
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import logging
@@ -64,18 +58,17 @@ sys.path.append(".")
 import numpy as np
 import torch
 
+import src.diff.data as D
 from scripts.clock.score_condition_heads import load_head_scores
 from scripts.evaluation import faithfulness_io as fio
-from src.goals.condition_data import (INT_PREDICATES, materialize, predicates_for,
-                                      sample_specs)
-from src.goals.functional import apply_chat_template, supports_chat_template
 from src.goals.goalscope import GOALSCOPE_SYS, apply_goalscope, greedy_continue
-from src.goals.multistep_label import label_generation
 from src.goals.oid_gaze import cache_root
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
 from src.utils.oracle_llms import ask_claude
+
+DEFAULT_DATASET = "data/goalscope_eval.json"
 
 logger = logging.getLogger(__name__)  # configured in main() via logging_utils
 
@@ -238,31 +231,69 @@ def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Corpus + generation
+# Corpus — LOCKED prefill-to-frontier dataset (QTASKS), replacing the old random sampling.
+# Mirrors scripts/evaluation/eval_ov_reader.py's corpus/prompt/pivot helpers (duplicated here to
+# avoid a circular import — eval_ov_reader imports grading utils from this module).
 # ══════════════════════════════════════════════════════════════════════════════
-def build_corpus(n_specs, num_conditions, seed, datatype="int"):
-    # `predicates_for`, not INT_PREDICATES: the pool must follow `datatype`, otherwise a
-    # --datatype=str run silently gets int predicates written against the wrong argument name
-    # and only the spec_id reflects the request.
-    preds = [p for p in predicates_for(datatype) if p.has_singleline_for("python")]
-    specs = sample_specs(
-        n_specs, num_conditions, seed=seed, predicates=preds, allow_repeats=False
-    )
-    for j, sp in enumerate(specs):
-        sp.spec_id = f"eval_{datatype}_{j:02d}"
-    return materialize(specs, langs=["python"], modularities=["monolithic"])
-
-
-def build_prompt(mt, sample):
-    instr = sample.render_instruction(
-        name_rule="letters", multistep=False
-    )  # mandates a/b/c
-    stub = sample.render_code_stub()  # def check_conditions(n: int):\n
-    if supports_chat_template(mt):
-        return apply_chat_template(
-            mt=mt, user_query=instr.strip(), incomplete_code=stub
+def load_locked_datapoints(dataset_path, datatype):
+    """Rebuild the datatype's ``QTransferInstance``s from the frozen JSON recipes (QTASKS by id).
+    Returns list[(spec_id, instance)] in file order. No RNG — the dataset IS the corpus."""
+    data = json.loads(Path(dataset_path).read_text())
+    recs = data["datapoints"].get(datatype)
+    if not recs:
+        raise SystemExit(
+            f"dataset {dataset_path!r} has no datapoints for datatype {datatype!r} "
+            f"(have {sorted(data['datapoints'])})"
         )
-    return instr + "\nAnswer:\n" + stub
+    out = []
+    for r in recs:
+        bank = D.QTASKS[r["datatype"]]
+        by_id = {p.id: p for p in bank.predicates}
+        subset = tuple(by_id[pid] for pid in r["predicate_ids"])
+        task = dataclasses.replace(bank, id=f"{bank.id}_T{r['T']}", predicates=subset)
+        inst = D.QTransferInstance(
+            task=task, var_name=bank.var_names[0], presentation=r["presentation"],
+            src_lang=r["lang"], dst_lang=r["lang"],
+            src_progress=list(r["progress_ids"]), dst_progress=list(r["progress_ids"]),
+            expected_next=r["frontier_id"], naming=r["naming"],
+            meta={"datatype": r["datatype"], "T": r["T"], "j": r["j"]},
+        )
+        out.append((r["spec_id"], inst))
+    return out, data.get("meta", {})
+
+
+def _chat_prompt(mt, question, prefill):
+    """Replicate src.diff.functional.get_prompt without depending on its module globals."""
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant proficient in programming. "
+         "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain."},
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": prefill},
+    ]
+    try:
+        return mt.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=False, continue_final_message=True,
+            tokenize=False, chat_template_kwargs={"enable_thinking": False},
+        )
+    except TypeError:
+        return mt.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=False, continue_final_message=True, tokenize=False,
+        )
+
+
+def build_prompt(mt, inst, lang):
+    """Prefilled source prompt ending at the frontier's ``{var} =`` (var_eq stub, letters)."""
+    q, pf = inst.src_parts()
+    q = q.replace("computes:", "computes in sequential order:")  # nudge the model to follow the listing
+    var = inst.var_of(inst.expected_next)
+    body = pf.rstrip("\n ")  # drop the trailing indent line
+    if lang == "cpp":
+        for pid in inst.src_progress:
+            body = D._cpp_autoify(body, inst.var_of(pid))
+        pf2 = body + f"\n    auto {var} ="
+    else:
+        pf2 = body + f"\n    {var} ="
+    return _chat_prompt(mt, q, D._finalize_prefill(pf2)), var
 
 
 def generate_completion(mt, prompt, max_new_tokens):
@@ -270,92 +301,27 @@ def generate_completion(mt, prompt, max_new_tokens):
     return greedy_continue(mt, **inp, max_new_tokens=max_new_tokens)
 
 
-def rule_based_spans(full_text, gen_char_start, n_conditions):
-    """Per-condition impl_span for naming="letters", purely rule-based (no oracle).
-    span[k] = code between `<letter_k> =` and the next present `<letter> =` line; for the last
-    present letter, up to the terminal print/return. Returns list[str|None] (None if not found)."""
-    gen = full_text[gen_char_start:]
-    starts = []
-    for k in range(n_conditions):
-        letter = chr(97 + k)
-        m = re.search(
-            rf"(?m)^[ \t]*{re.escape(letter)}\s*=(?!=)", gen
-        )  # assignment, not `==`
-        starts.append(m.start() if m else None)
-    present = [s for s in starts if s is not None]
-    if not present:
-        return [None] * n_conditions
-    last_start = max(present)
-    mterm = re.search(
-        r"(?m)^[ \t]*(?:print|return)\b", gen[last_start:]
-    )  # terminal statement
-    term = last_start + mterm.start() if mterm else len(gen)
-    spans = []
-    for k in range(n_conditions):
-        s = starts[k]
-        if s is None:
-            spans.append(None)
-            continue
-        later = [t for t in starts[k + 1 :] if t is not None and t > s]
-        e = min(later) if later else term
-        spans.append(gen[s:e].strip())
-    return spans
+def frontier_impl_span(prompt, completion, var):
+    """The frontier condition's code = its ``{var} =`` line + the first generated line (single-line
+    predicate, so this is exact — no oracle span-labelling needed)."""
+    last_prompt_line = prompt.rsplit("\n", 1)[-1]  # "    c =" | "    auto c ="
+    return (last_prompt_line + completion.split("\n", 1)[0]).strip()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Anchors
+# Pivots (== the old "anchors", same five names)
 # ══════════════════════════════════════════════════════════════════════════════
-def _tok_at_char(offsets, cpos):
-    for ti, (a, b) in enumerate(offsets):
-        if a <= cpos < b:
-            return ti
-    return None
-
-
-def line_anchors(full_text, offsets, var, gen_char_start):
-    """Token positions of {var, eq, first_impl, indent, prev_end} for `    {var} = ...`."""
-    m = re.search(rf"(?m)^([ \t]*){re.escape(var)}\s*=", full_text[gen_char_start:])
-    if not m:
-        return {}
-    base = gen_char_start + m.start()
-    indent_c = base
-    var_c = base + len(m.group(1))
-    eq_c = gen_char_start + m.start() + m.group(0).rfind("=")
-    prev_nl = full_text.rfind("\n", 0, base)
-    out = {}
-    out["var"] = _tok_at_char(offsets, var_c)
-    out["eq"] = _tok_at_char(offsets, eq_c)
-    out["first_impl"] = (
-        out["eq"] + 1
-        if out["eq"] is not None and out["eq"] + 1 < len(offsets)
-        else None
-    )
-    out["indent"] = (
-        _tok_at_char(offsets, indent_c) if full_text[indent_c] in " \t" else out["var"]
-    )
-    out["prev_end"] = _tok_at_char(offsets, prev_nl) if prev_nl != -1 else None
-    return {k: v for k, v in out.items() if v is not None}
-
-
-def anchors_for_sample(mt, full_text, prompt, conditions, impl_spans):
-    """Per-condition rows {cond, var, condition, impl_span, anchors}. `conditions` and `impl_spans`
-    are aligned by index (letter k -> chr(97+k)); source-agnostic (rule- or oracle-derived)."""
-    enc = prepare_input(prompts=full_text, tokenizer=mt, return_offsets_mapping=True)
-    offsets = [tuple(p) for p in enc.pop("offset_mapping")[0].tolist()]
-    gen_char_start = len(prompt)
-    rows = []
-    for k, (cond_text, impl) in enumerate(zip(conditions, impl_spans)):
-        var = chr(97 + k)
-        rows.append(
-            dict(
-                cond=k,
-                var=var,
-                condition=cond_text,
-                impl_span=(impl or "").strip(),
-                anchors=line_anchors(full_text, offsets, var, gen_char_start),
-            )
-        )
-    return rows
+def pivot_positions(mt, prompt, full_text, pivots):
+    """{pivot: absolute token pos}. prev_end/indent/var/eq = the last four tokens of the prompt;
+    first_impl = the first generated token. Positions index the tokenization of ``full_text``."""
+    prompt_ids = prepare_input(prompts=prompt, tokenizer=mt)["input_ids"][0].tolist()
+    full = prepare_input(prompts=full_text, tokenizer=mt)["input_ids"][0].tolist()
+    P = len(prompt_ids)
+    if full[:P] != prompt_ids:  # boundary token merged on re-tokenisation — fall back to common prefix
+        P = next((i for i in range(min(len(full), len(prompt_ids)))
+                  if full[i] != prompt_ids[i]), min(len(full), len(prompt_ids)))
+    idx = {"prev_end": P - 4, "indent": P - 3, "var": P - 2, "eq": P - 1, "first_impl": P}
+    return {p: idx[p] for p in pivots if 0 <= idx[p] < len(full)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -443,12 +409,47 @@ def _parse_verdict(resp: str) -> str:
     return hits[-1] if hits else "UNPARSED"
 
 
+# Scaffolding tokens of the causal C++ stub + boolean/return keywords. Stripping these, then the
+# comparison/logic/ternary operators, then the ONLY literal the no-goal default compares against
+# (``0``), leaves NOTHING iff the read-out is a bare sign/zero comparison (``value > 0``,
+# ``value == 0``, ``value < 0``, ``value < 0 ? value : 0``, ``if(value>0) return true; else …``).
+# It must NOT flag genuine predicates: a non-zero literal (``value >= 10`` — is_two_digit) or a real
+# arithmetic/bitwise op (``value & (value - 1)`` — is_power_of_two, ``value % 2`` — is_even) survives
+# and keeps the read-out non-trivial. Hence: only ``&&``/``||`` (logical) are removed — a lone ``&``
+# or ``|`` (bitwise), ``%``, ``+``, ``-``, ``*``, ``~``, ``^``, ``.`` or any non-zero digit remains.
+_TRIVIAL_READOUT_TOKENS = ("bool", "check", "auto", "value", "val", "return",
+                           "if", "else", "true", "false", "nullptr")
+
+
+def is_trivial_causal_readout(readout: str) -> bool:
+    """True iff a causality C++ read-out compares ``value`` to ZERO and does nothing else — the
+    sign/zero test the no-goal default emits (see :data:`src.diff.data.TRIVIAL_FRONTIERS`). A
+    non-zero constant or any real arithmetic/bitwise op (``%``, ``&``, ``-``, ``.size()``,
+    ``max_element``, ``abs`` …) keeps it non-trivial."""
+    if not readout or not readout.strip():
+        return False
+    t = readout
+    for tok in _TRIVIAL_READOUT_TOKENS:
+        t = re.sub(rf"\b{tok}\b", "", t)
+    t = t.replace("&&", "").replace("||", "")            # logical connectives (not bitwise &/|)
+    for op in ("==", "!=", ">=", "<=", ">", "<"):        # comparison operators
+        t = t.replace(op, "")
+    t = re.sub(r"(?<![0-9])0(?![0-9])", "", t)           # the standalone literal 0 (NOT 10, 99, …)
+    t = re.sub(r"[?:;(){}\s!]", "", t)                   # ternary / scaffolding punctuation
+    return t == ""
+
+
 def hard_eval(readout, impl_span, mode):
     """dict(verdict, prompt, system, response). verdict in {YES, NO, NO_INFO, MALFORMED, UNPARSED}.
     faithfulness: grade NL read-out vs impl; causality: grade C++ read-out vs the Python impl."""
     hard_sys = CAUSAL_HARD_SYS if mode == "causality" else FAITH_HARD_SYS
     if not readout or not readout.strip():
         return dict(verdict="MALFORMED", prompt=None, system=hard_sys, response=None)
+    # Sanitize: a trivial sign/zero read-out is what the model emits with NO goal signal, so it
+    # can never count as a causal transfer, no matter what the LLM oracle says. Short-circuit NO.
+    if mode == "causality" and is_trivial_causal_readout(readout):
+        return dict(verdict="NO", prompt=None, system=hard_sys,
+                    response="[sanitizer: trivial sign/zero read-out]")
     if mode == "causality":
         prompt = (
             f"Python (gold): {impl_span}\nC++ (read-out): {readout.strip()}\nAnswer:"
@@ -565,13 +566,6 @@ def parse_args():
         choices=["faithfulness", "causality"],
         help="faithfulness: NL read-out vs impl | causality: C++ transfer of the idea",
     )
-    ap.add_argument(
-        "--eval-k-way",
-        dest="eval_k_way",
-        action="store_true",
-        help="also run the k-way oracle (which condition does the read-out name?). "
-        "Default off. Not implemented for --mode causality yet.",
-    )
     # ── GOALSCOPE_CONFIG ──
     ap.add_argument(
         "--heads", default="goal", help="goal | gaze | decision | <path>.json"
@@ -614,18 +608,16 @@ def parse_args():
     )
     # ── corpus / model ──
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument("--datatype", default="int")
-    ap.add_argument("--n_specs", type=int, default=256)
-    ap.add_argument("--num_conditions", type=int, nargs="+", default=[3, 4, 5])
-    ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument("--datatype", default="int",
+                    help="which datatype's datapoints to run from the locked dataset "
+                         "(int | list[int] | str | list[str])")
+    ap.add_argument("--dataset", default=DEFAULT_DATASET,
+                    help="locked prefill-to-frontier dataset json (QTASKS recipes)")
+    ap.add_argument("--seed", type=int, default=123,
+                    help="torch/global seed for generation determinism (the corpus is fixed by the "
+                         "dataset, not this seed)")
     ap.add_argument(
-        "--gen_max_new_tokens", type=int, default=256, help="body generation budget"
-    )
-    ap.add_argument(
-        "--span_source",
-        default="rule",
-        choices=["rule", "oracle"],
-        help="impl-span labelling: 'rule' (letters-based, no oracle) | 'oracle' (label_generation)",
+        "--gen_max_new_tokens", type=int, default=64, help="frontier-body greedy budget (>=1)"
     )
     ap.add_argument(
         "--overwrite",
@@ -672,15 +664,16 @@ def main():
         "all" if str(args.n_steer_tokens).lower() == "all" else int(args.n_steer_tokens)
     )
     heads_name = resolve_heads_name(args.heads)
-
-    if args.mode == "causality" and args.eval_k_way:
-        raise SystemExit("--eval-k-way is not implemented for --mode causality yet")
     hard_sys = CAUSAL_HARD_SYS if args.mode == "causality" else FAITH_HARD_SYS
+
+    # ── LOCKED corpus: load up front (no model needed) so the run dir + skip check resolve first ──
+    datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatype)
+    num_conditions = ds_meta.get("n_conditions", [2, 3, 4])
+    ds_seed = ds_meta.get("seed", args.seed)
 
     # config (sans selected_heads) — enough to resolve the run dir + skip check before loading the model
     config = dict(
         mode=args.mode,
-        eval_k_way=args.eval_k_way,
         heads_spec=args.heads,
         heads_name=heads_name,
         goal_threshold=args.goal_threshold,
@@ -694,11 +687,13 @@ def main():
         max_new_tokens=args.max_new_tokens,
         model=args.model,
         datatype=args.datatype,
-        n_specs=args.n_specs,
-        num_conditions=list(args.num_conditions),
-        seed=args.seed,
+        n_specs=len(datapoints),
+        num_conditions=list(num_conditions),
+        seed=ds_seed,
         gen_max_new_tokens=args.gen_max_new_tokens,
-        span_source=args.span_source,
+        span_source="frontier",            # prefill-to-frontier: distinguishes leaf from the old 'rule'
+        dataset=str(args.dataset),
+        bank="QTASKS",
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
         readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
@@ -725,17 +720,15 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"run dir -> {run_dir}")
 
-    # corpus is deterministic from (n_specs, num_conditions, seed, datatype) and needs no model,
-    # so we can compute the full sample set up front and figure out what's already done.
-    samples = build_corpus(args.n_specs, args.num_conditions, args.seed, args.datatype)
-    completed = fio.read_completed_spec_ids(run_dir)
+    # corpus is the LOCKED dataset (no RNG) — already loaded; figure out what's done.
+    completed = set(fio.read_completed_spec_ids(run_dir))
     kept = fio.prune_orphan_records(
         run_dir, completed
     )  # drop rows from a half-finished sample
-    remaining = [s for s in samples if s.spec.spec_id not in set(completed)]
+    remaining = [(sid, inst) for sid, inst in datapoints if sid not in completed]
     logger.info(
-        f"corpus: {len(samples)} samples | already done: {len(completed)} "
-        f"({kept} records kept) | remaining: {len(remaining)}"
+        f"corpus: {len(datapoints)} datapoints (locked {args.dataset}, dtype={args.datatype}) | "
+        f"already done: {len(completed)} ({kept} records kept) | remaining: {len(remaining)}"
     )
 
     if not remaining:
@@ -812,43 +805,22 @@ def main():
     rec_fh = open(fio.records_path(run_dir), "a")
     samp_fh = open(fio.samples_path(run_dir), "a")
     n_done = len(completed)
-    for si, sample in enumerate(remaining):
+    n_total = len(datapoints)
+    for si, (sid, inst) in enumerate(remaining):
         sample_records = []
-        prompt = build_prompt(mt, sample)
+        prompt, var = build_prompt(mt, inst, inst.src_lang)
         completion = generate_completion(mt, prompt, args.gen_max_new_tokens)
         full_text = prompt + completion
 
-        # impl-span + condition text, either rule-based (letters, no oracle) or oracle-labelled
-        if args.span_source == "rule":
-            conditions = list(sample.spec.spec_texts)  # ground-truth descriptions
-            impl_spans = rule_based_spans(
-                full_text, len(prompt), len(sample.spec.predicate_ids)
-            )
-            labels_meta = [
-                dict(step_text=c, gen_code=(s or ""), gen_token_range=None)
-                for c, s in zip(conditions, impl_spans)
-            ]
-        else:  # oracle
-            labeled = label_generation(mt, sample, prompt, completion, use_cache=True)
-            conditions = [sl.step_text for sl in labeled.labels]
-            impl_spans = [sl.gen_code.strip() for sl in labeled.labels]
-            labels_meta = [
-                dict(
-                    step_text=sl.step_text,
-                    gen_code=sl.gen_code,
-                    gen_token_range=list(sl.gen_token_range)
-                    if sl.gen_token_range
-                    else None,
-                )
-                for sl in labeled.labels
-            ]
+        # frontier impl_span is exact (single-line predicate) — no oracle span-labelling
+        impl_span = frontier_impl_span(prompt, completion, var)
+        frontier_desc = inst.expected_next_desc
 
-        rows = anchors_for_sample(mt, full_text, prompt, conditions, impl_spans)
-        conds = [r["condition"] for r in rows]
-        apos = sorted({p for r in rows for p in r["anchors"].values()})
-        if not apos:
-            logger.warning(f"[{sample.spec.spec_id}] no anchors found — skipping")
+        pivs = pivot_positions(mt, prompt, full_text, ANCHOR_ORDER)
+        if not pivs:
+            logger.warning(f"[{sid}] no valid pivots — skipping")
             continue
+        apos = sorted(set(pivs.values()))
         res = apply_goalscope(
             full_text,
             mt=mt,
@@ -859,64 +831,39 @@ def main():
         )
         readouts = {r["pos"]: r for r in res}
 
-        for row in rows:
-            true_id = sample.spec.predicate_ids[row["cond"]]
-            for aname, pos in row["anchors"].items():
-                # causality prepends the C++ stub so the oracle sees a complete-ish snippet
-                ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
-                hv = hard_eval(ro, row["impl_span"], args.mode)
-                logger.debug(
-                    "[%s c%d %s] impl=%r cond=%r",
-                    sample.spec.spec_id,
-                    row["cond"],
-                    aname,
-                    row["impl_span"],
-                    row["condition"],
-                )
-                logger.debug("    read-out : %r", ro)
-                logger.debug(
-                    "    HARD  verdict=%s  oracle_response=%r",
-                    hv["verdict"],
-                    hv["response"],
-                )
-                rec = dict(
-                    spec=sample.spec.spec_id,
-                    cond=row["cond"],
-                    var=row["var"],
-                    anchor=aname,
-                    pos=pos,
-                    readout=ro,
-                    impl_span=row["impl_span"],
-                    condition=row["condition"],
-                    true_pred_id=true_id,
-                    hard=hv["verdict"],
-                    hard_prompt=hv["prompt"],
-                    hard_response=hv["response"],
-                )
-                if args.eval_k_way:
-                    kv = kway_assign(ro, conds)
-                    logger.debug(
-                        "    KWAY  pred=%s (true %d)  oracle_response=%r",
-                        kv["pred"],
-                        row["cond"],
-                        kv["response"],
-                    )
-                    rec.update(
-                        kway_pred=kv["pred"],
-                        kway_true=row["cond"],
-                        kway_prompt=kv["prompt"],
-                        kway_response=kv["response"],
-                    )
-                sample_records.append(rec)
+        for aname, pos in pivs.items():
+            # causality prepends the C++ stub so the oracle sees a complete-ish snippet
+            ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
+            hv = hard_eval(ro, impl_span, args.mode)
+            logger.debug("[%s %s] impl=%r frontier=%r", sid, aname, impl_span, frontier_desc)
+            logger.debug("    read-out : %r", ro)
+            logger.debug("    HARD  verdict=%s  oracle_response=%r", hv["verdict"], hv["response"])
+            sample_records.append(dict(
+                spec=sid,
+                anchor=aname,
+                pos=pos,
+                readout=ro,
+                impl_span=impl_span,
+                frontier_id=inst.expected_next,
+                condition=frontier_desc,
+                hard=hv["verdict"],
+                hard_prompt=hv["prompt"],
+                hard_response=hv["response"],
+            ))
         sample_meta = dict(
-            spec_id=sample.spec.spec_id,
-            predicate_ids=list(sample.spec.predicate_ids),
+            spec_id=sid,
+            datatype=inst.meta["datatype"],
+            lang=inst.src_lang,
+            T=inst.meta["T"],
+            j=inst.meta["j"],
+            predicate_ids=[p.id for p in inst.task.predicates],
+            progress_ids=list(inst.src_progress),
+            frontier_id=inst.expected_next,
+            var=var,
             prompt=prompt,
             completion=completion,
-            labels=labels_meta,
-            anchors=[
-                dict(cond=r["cond"], var=r["var"], anchors=r["anchors"]) for r in rows
-            ],
+            impl_span=impl_span,
+            pivots=pivs,
         )
         # write this sample's records FIRST, then its meta line: a sample counts as "done"
         # only once its meta line lands, so a crash mid-sample leaves recoverable orphan
@@ -926,8 +873,7 @@ def main():
         fio.append_jsonl(samp_fh, sample_meta)
         n_done += 1
         logger.info(
-            f"[{n_done}/{len(samples)}] {sample.spec.spec_id}: "
-            f"{sum(len(r['anchors']) for r in rows)} anchor read-outs scored"
+            f"[{n_done}/{n_total}] {sid}: {len(pivs)} pivot read-outs scored"
         )
 
     rec_fh.close()

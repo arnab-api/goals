@@ -91,7 +91,7 @@ sys.path.append(".")
 import torch
 
 from scripts.evaluation import faithfulness_io as fio
-from scripts.evaluation.eval_goalscope import (
+from scripts.evaluation.eval_goalscope_old_cond_data import (
     ANCHOR_ORDER,
     CAUSAL_HARD_SYS,
     CAUSAL_INSTRUCTION,

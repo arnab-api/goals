@@ -58,7 +58,7 @@ sys.path.append(".")
 from tqdm.auto import tqdm
 
 from scripts.evaluation import faithfulness_io as fio
-from scripts.evaluation.eval_goalscope import (ANCHOR_ORDER, CAUSAL_HARD_SYS,
+from scripts.evaluation.eval_goalscope_old_cond_data import (ANCHOR_ORDER, CAUSAL_HARD_SYS,
                                                FAITH_HARD_SYS, compute_summary,
                                                hard_eval)
 from src.utils import env_utils

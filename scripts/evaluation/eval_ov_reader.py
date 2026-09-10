@@ -72,6 +72,10 @@ def sample_datapoints(datatype, n_conditions, n_samples, lang, seed):
     in ``seed`` -> resume-stable. Deduped by (frontier id, prefilled ids)."""
     bank = D.QTASKS[datatype]
     preds = list(bank.predicates)
+    # The frontier (measured target) must NOT be a trivial sign/zero comparison — the no-goal
+    # causality default emits exactly those, so a trivial frontier scores as a false positive
+    # (see D.TRIVIAL_FRONTIERS). Trivial predicates may still appear as prefilled context.
+    trivial = D.TRIVIAL_FRONTIERS.get(datatype, frozenset())
     ks = [k for k in n_conditions if 2 <= k <= len(preds)]
     if not ks:
         raise SystemExit(
@@ -84,7 +88,11 @@ def sample_datapoints(datatype, n_conditions, n_samples, lang, seed):
             break
         T = rng.choice(ks)
         subset = rng.sample(preds, T)
-        j = rng.randint(1, T - 1)
+        # frontier sits at index j (1..T-1, so >=1 prefilled); constrain j so it is non-trivial
+        elig_j = [jj for jj in range(1, T) if subset[jj].id not in trivial]
+        if not elig_j:
+            continue
+        j = rng.choice(elig_j)
         ids = [p.id for p in subset]
         key = (ids[j], tuple(ids[:j]))
         if key in seen:
@@ -177,7 +185,7 @@ def parse_args():
     ap.add_argument("--lang", nargs="+", default=["python"], choices=["python", "cpp"],
                     help="source-prompt language(s); each is an independent shard")
     ap.add_argument("--layers", type=int, nargs="+", default=None,
-                    help="probe layers (default: 0..36 step6, 38..54 step2, 56..n_layer step4)")
+                    help="probe layers (default: 0..36 step6, 38..54 step2, 56..n_layer step4, + last layer)")
     ap.add_argument("--heads", default=None,
                     help="json head set (default: the model's 122-head goal__lam20_thr0.9_band25-56.json)")
     ap.add_argument("--n_conditions", type=int, nargs="+", default=[2, 3, 4],
@@ -333,8 +341,10 @@ def main():
     n_heads = mt.model.config.num_attention_heads
     heads = load_json_heads(heads_path, mt.n_layer, n_heads)
     heads_name = os.path.splitext(os.path.basename(heads_path))[0]
-    layers = args.layers or (list(range(0, 37, 6)) + list(range(38, 56, 2))
-                             + list(range(56, mt.n_layer, 4)))
+    layers = args.layers or sorted(set(
+        list(range(0, 37, 6)) + list(range(38, 56, 2))
+        + list(range(56, mt.n_layer, 4)) + [mt.n_layer - 1]  # always include the last layer
+    ))
     logger.info(f"heads[{heads_name}] = {len(heads)} | probe layers = {layers}")
 
     ov = OVReader(mt, heads)  # readers cached once, reused across every shard/pivot/datapoint
