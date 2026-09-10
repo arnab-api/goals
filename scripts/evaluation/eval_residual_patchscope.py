@@ -30,6 +30,9 @@ Results land in the same tree as the GoalScope runs, so ``faithfulness_io`` pars
 with ``heads=resid:L<lo>-<hi>:<agg>`` as the leaf's head-set component, so a residual run can never
 collide with a head-set run.
 
+Corpus is the same locked prefill-to-frontier dataset as ``eval_goalscope.py`` (QTASKS,
+``data/goalscope_eval.json``), with ``--datatypes`` aggregating all four into one 253-sample run.
+
 Usage:
     conda run -n goals python scripts/evaluation/eval_residual_patchscope.py \
         --mode faithfulness --alpha 0.1 --steer_layer_range 35 46
@@ -52,27 +55,27 @@ from tqdm.auto import tqdm
 
 from scripts.evaluation import faithfulness_io as fio
 
-# Every stage except the injection is shared with the head-set eval, so the two runs differ only
-# in the thing under test.
-from scripts.evaluation.eval_goalscope_old_cond_data import (
+# Every stage except the residual injection is shared with the head-set eval (the QTASKS
+# locked-dataset version), so the two runs differ only in the thing under test.
+from scripts.evaluation.eval_goalscope import (
+    ALL_DATATYPES,
     ANCHOR_ORDER,
     CAUSAL_PREFIX,
+    DEFAULT_DATASET,
     ORACLE_MODEL,
-    anchors_for_sample,
     build_causality_prompt,
-    build_corpus,
     build_prompt,
     compute_summary,
     default_goal_band,
+    frontier_impl_span,
     generate_completion,
     hard_eval,
-    kway_assign,
+    load_locked_datapoints,
     log_summary,
-    rule_based_spans,
+    pivot_positions,
 )
 from src.functional import PatchSpec, generate_with_patch
 from src.goals.goalscope import _build_goalscope_prompt
-from src.goals.multistep_label import label_generation
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
@@ -219,12 +222,6 @@ def parse_args():
         "--mode", default="faithfulness", choices=["faithfulness", "causality"]
     )
     ap.add_argument(
-        "--eval-k-way",
-        action="store_true",
-        dest="eval_k_way",
-        help="also run the k-way oracle (faithfulness only)",
-    )
-    ap.add_argument(
         "--source-layers",
         type=int,
         nargs=2,
@@ -256,12 +253,16 @@ def parse_args():
     ap.add_argument("--n_steer_tokens", default="all", help="'all' | int")
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument("--datatype", default="int")
-    ap.add_argument("--n_specs", type=int, default=512)
-    ap.add_argument("--num_conditions", type=int, nargs="+", default=[3, 4, 5])
-    ap.add_argument("--seed", type=int, default=123)
-    ap.add_argument("--gen_max_new_tokens", type=int, default=256)
-    ap.add_argument("--span_source", default="rule", choices=["rule", "oracle"])
+    ap.add_argument("--datatypes", nargs="+", default=ALL_DATATYPES,
+                    help="datatypes AGGREGATED into ONE run (default: all four -> 253-sample corpus)")
+    ap.add_argument("--dataset", default=DEFAULT_DATASET,
+                    help="locked prefill-to-frontier dataset json (QTASKS recipes)")
+    ap.add_argument("--seed", type=int, default=123,
+                    help="generation-determinism seed (corpus is fixed by the dataset)")
+    ap.add_argument("--gen_max_new_tokens", type=int, default=64,
+                    help="frontier-body greedy budget (>=1)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="SMOKE ONLY: cap the corpus to N datapoints (round-robin across datatypes)")
     ap.add_argument("--batch_size", type=int, default=16)
     ap.add_argument(
         "--overwrite",
@@ -279,9 +280,6 @@ def main():
     torch.set_grad_enabled(False)
     results_dir = env_utils.DEFAULT_RESULTS_DIR
 
-    if args.mode == "causality" and args.eval_k_way:
-        raise SystemExit("--eval-k-way is not implemented for --mode causality yet")
-
     n_steer = (
         "all" if str(args.n_steer_tokens).lower() == "all" else int(args.n_steer_tokens)
     )
@@ -289,12 +287,30 @@ def main():
     # explicit case is known now and is what the run dir keys on.
     src_band = tuple(args.source_layers) if args.source_layers else None
 
+    # ── LOCKED corpus (aggregated over datatypes), loaded up front — no model needed ──
+    datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatypes)
+    if args.limit:  # SMOKE: round-robin across datatypes so a small N hits every prompt builder
+        groups = {}
+        for sid, inst in datapoints:
+            groups.setdefault(inst.meta["datatype"], []).append((sid, inst))
+        picked, i = [], 0
+        while len(picked) < args.limit and any(i < len(v) for v in groups.values()):
+            for v in groups.values():
+                if i < len(v) and len(picked) < args.limit:
+                    picked.append(v[i])
+            i += 1
+        datapoints = picked
+        logger.warning(f"--limit {args.limit}: SMOKE run on {len(datapoints)} datapoints")
+    num_conditions = ds_meta.get("n_conditions", [2, 3, 4])
+    ds_seed = ds_meta.get("seed", args.seed)
+    dt_tag = ("all" if set(args.datatypes) == set(ALL_DATATYPES)
+              else "+".join(d.replace("[", "").replace("]", "") for d in args.datatypes))
+
     def leaf_heads_name(band):
         return f"resid:L{band[0]}-{band[1]}:{args.source_agg}"
 
     config = dict(
         mode=args.mode,
-        eval_k_way=args.eval_k_way,
         # `strategy` is a path component, so residual runs never land in a head-set run's dir
         strategy="resid_norm",
         alpha=args.alpha,
@@ -306,18 +322,18 @@ def main():
         n_steer_tokens=n_steer,
         max_new_tokens=args.max_new_tokens,
         model=args.model,
-        datatype=args.datatype,
-        n_specs=args.n_specs,
-        num_conditions=list(args.num_conditions),
-        seed=args.seed,
+        datatype=dt_tag,
+        datatypes=list(args.datatypes),
+        n_specs=len(datapoints),
+        num_conditions=list(num_conditions),
+        seed=ds_seed,
         gen_max_new_tokens=args.gen_max_new_tokens,
-        span_source=args.span_source,
+        span_source="frontier",       # prefill-to-frontier: distinguishes leaf from the old 'rule'
+        dataset=str(args.dataset),
+        bank="QTASKS",
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
         readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
-        dtype=torch.bfloat16,
-        device_map="auto",
-        attn_implementation="eager",
     )
 
     # The run dir needs heads_name, which needs the resolved band. Resolve it without the model
@@ -360,13 +376,12 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"run dir -> {run_dir}")
 
-    samples = build_corpus(args.n_specs, args.num_conditions, args.seed, args.datatype)
-    completed = fio.read_completed_spec_ids(run_dir)
+    completed = set(fio.read_completed_spec_ids(run_dir))
     kept = fio.prune_orphan_records(run_dir, completed)
-    remaining = [s for s in samples if s.spec.spec_id not in set(completed)]
+    remaining = [(sid, inst) for sid, inst in datapoints if sid not in completed]
     logger.info(
-        f"corpus: {len(samples)} samples | already done: {len(completed)} "
-        f"({kept} records kept) | remaining: {len(remaining)}"
+        f"corpus: {len(datapoints)} datapoints (locked {args.dataset}, dtypes={dt_tag}) | "
+        f"already done: {len(completed)} ({kept} records kept) | remaining: {len(remaining)}"
     )
 
     if not remaining:
@@ -407,42 +422,22 @@ def main():
     rec_fh = open(fio.records_path(run_dir), "a")
     samp_fh = open(fio.samples_path(run_dir), "a")
     n_done = len(completed)
-    for sample in remaining:
+    n_total = len(datapoints)
+    for sid, inst in remaining:
         sample_records = []
-        prompt = build_prompt(mt, sample)
+        prompt, var = build_prompt(mt, inst, inst.src_lang)
         completion = generate_completion(mt, prompt, args.gen_max_new_tokens)
         full_text = prompt + completion
 
-        if args.span_source == "rule":
-            conditions = list(sample.spec.spec_texts)
-            impl_spans = rule_based_spans(
-                full_text, len(prompt), len(sample.spec.predicate_ids)
-            )
-            labels_meta = [
-                dict(step_text=c, gen_code=(s or ""), gen_token_range=None)
-                for c, s in zip(conditions, impl_spans)
-            ]
-        else:
-            labeled = label_generation(mt, sample, prompt, completion, use_cache=True)
-            conditions = [sl.step_text for sl in labeled.labels]
-            impl_spans = [sl.gen_code.strip() for sl in labeled.labels]
-            labels_meta = [
-                dict(
-                    step_text=sl.step_text,
-                    gen_code=sl.gen_code,
-                    gen_token_range=list(sl.gen_token_range)
-                    if sl.gen_token_range
-                    else None,
-                )
-                for sl in labeled.labels
-            ]
+        # frontier impl_span is exact (single-line predicate) — no oracle span-labelling
+        impl_span = frontier_impl_span(prompt, completion, var)
+        frontier_desc = inst.expected_next_desc
 
-        rows = anchors_for_sample(mt, full_text, prompt, conditions, impl_spans)
-        conds = [r["condition"] for r in rows]
-        apos = sorted({p for r in rows for p in r["anchors"].values()})
-        if not apos:
-            logger.warning(f"[{sample.spec.spec_id}] no anchors found — skipping")
+        pivs = pivot_positions(mt, prompt, full_text, ANCHOR_ORDER)
+        if not pivs:
+            logger.warning(f"[{sid}] no valid pivots — skipping")
             continue
+        apos = sorted(set(pivs.values()))
 
         res = residual_patchscope(
             mt,
@@ -459,52 +454,38 @@ def main():
         )
         readouts = {r["pos"]: r for r in res}
 
-        for row in rows:
-            true_id = sample.spec.predicate_ids[row["cond"]]
-            for aname, pos in row["anchors"].items():
-                ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
-                hv = hard_eval(ro, row["impl_span"], args.mode)
-                logger.debug(
-                    "[%s c%d %s] read-out: %r -> %s",
-                    sample.spec.spec_id,
-                    row["cond"],
-                    aname,
-                    ro,
-                    hv["verdict"],
-                )
-                rec = dict(
-                    spec=sample.spec.spec_id,
-                    cond=row["cond"],
-                    var=row["var"],
-                    anchor=aname,
-                    pos=pos,
-                    readout=ro,
-                    impl_span=row["impl_span"],
-                    condition=row["condition"],
-                    true_pred_id=true_id,
-                    hard=hv["verdict"],
-                    hard_prompt=hv["prompt"],
-                    hard_response=hv["response"],
-                )
-                if args.eval_k_way:
-                    kv = kway_assign(ro, conds)
-                    rec.update(
-                        kway_pred=kv["pred"],
-                        kway_true=row["cond"],
-                        kway_prompt=kv["prompt"],
-                        kway_response=kv["response"],
-                    )
-                sample_records.append(rec)
+        for aname, pos in pivs.items():
+            ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
+            hv = hard_eval(ro, impl_span, args.mode)
+            logger.debug("[%s %s] read-out: %r -> %s", sid, aname, ro, hv["verdict"])
+            sample_records.append(dict(
+                spec=sid,
+                datatype=inst.meta["datatype"],   # per-record tag -> per-datatype breakdown
+                anchor=aname,
+                pos=pos,
+                readout=ro,
+                impl_span=impl_span,
+                frontier_id=inst.expected_next,
+                condition=frontier_desc,
+                hard=hv["verdict"],
+                hard_prompt=hv["prompt"],
+                hard_response=hv["response"],
+            ))
 
         sample_meta = dict(
-            spec_id=sample.spec.spec_id,
-            predicate_ids=list(sample.spec.predicate_ids),
+            spec_id=sid,
+            datatype=inst.meta["datatype"],
+            lang=inst.src_lang,
+            T=inst.meta["T"],
+            j=inst.meta["j"],
+            predicate_ids=[p.id for p in inst.task.predicates],
+            progress_ids=list(inst.src_progress),
+            frontier_id=inst.expected_next,
+            var=var,
             prompt=prompt,
             completion=completion,
-            labels=labels_meta,
-            anchors=[
-                dict(cond=r["cond"], var=r["var"], anchors=r["anchors"]) for r in rows
-            ],
+            impl_span=impl_span,
+            pivots=pivs,
         )
         # records first, then the meta line — a crash mid-sample leaves prunable orphans rather
         # than a phantom-complete sample (same contract as eval_goalscope)
@@ -512,10 +493,7 @@ def main():
             fio.append_jsonl(rec_fh, r)
         fio.append_jsonl(samp_fh, sample_meta)
         n_done += 1
-        logger.info(
-            f"[{n_done}/{len(samples)}] {sample.spec.spec_id}: "
-            f"{sum(len(r['anchors']) for r in rows)} anchor read-outs scored"
-        )
+        logger.info(f"[{n_done}/{n_total}] {sid}: {len(pivs)} pivot read-outs scored")
 
     rec_fh.close()
     samp_fh.close()
