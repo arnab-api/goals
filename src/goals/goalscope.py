@@ -818,29 +818,36 @@ class OVReader:
         alpha: float = 0.15,
         n_steer_tokens: Optional[int] = None,
         probe_inputs: Optional[dict] = None,
+        batch_size: int = 16,
     ):
-        """Probe already-extracted residual latents — all in ONE batched ``head_additive_generate``.
+        """Probe already-extracted residual latents, in chunks of ``batch_size``.
 
         ``latents`` is either a ``{key: (n_embd,) residual}`` dict (returns ``{key: readout}``) or a
         list/sequence of residual vectors (returns ``list[str]``). Each residual is turned into its
         OV-write steering vector (:meth:`resid_ov_vec`) and steered into the GoalScope probe for ``mode``.
-        Batches every latent into a single generation, so N latents cost ONE generate call.
+        No matter how many latents are passed, they are processed ``batch_size`` at a time (one
+        ``head_additive_generate`` call per chunk), so memory stays bounded. ``batch_size<=0`` puts
+        them all in a single batch.
         """
         steer_layers = list(range(35, 46)) if steer_layers is None else list(steer_layers)
         is_dict = isinstance(latents, dict)
         keys = list(latents) if is_dict else None
         vecs = [latents[k] for k in keys] if is_dict else list(latents)
-        steer = torch.stack([self.resid_ov_vec(h) for h in vecs])          # (n, n_embd) CPU f32
-        outs = head_additive_generate(
-            self.mt,
-            probe_inputs if probe_inputs is not None else self.probe_inputs(mode),
-            steer,
-            layers=steer_layers,
-            max_new_tokens=max_new_tokens,
-            strategy=strategy,
-            alpha=alpha,
-            n_steer_tokens=n_steer_tokens,
-        )
+        pin = probe_inputs if probe_inputs is not None else self.probe_inputs(mode)
+        bs = batch_size if batch_size and batch_size > 0 else len(vecs)
+        outs: list[str] = []
+        for s in range(0, len(vecs), max(bs, 1)):
+            steer = torch.stack([self.resid_ov_vec(h) for h in vecs[s : s + bs]])  # (b, n_embd) CPU f32
+            outs.extend(head_additive_generate(
+                self.mt,
+                pin,
+                steer,
+                layers=steer_layers,
+                max_new_tokens=max_new_tokens,
+                strategy=strategy,
+                alpha=alpha,
+                n_steer_tokens=n_steer_tokens,
+            ))
         return dict(zip(keys, outs)) if is_dict else outs
 
     def apply_probe_on_prompt(
@@ -852,7 +859,8 @@ class OVReader:
     ) -> dict[int, str]:
         """Extract the residual after each ``probe_layer`` at ``pivot`` in ONE :func:`get_hs` forward,
         then :meth:`apply_probe` on those latents. Returns ``{L: readout}``. ``kwargs`` (mode, steer_layers,
-        max_new_tokens, strategy, alpha, n_steer_tokens, probe_inputs) are forwarded to :meth:`apply_probe`."""
+        max_new_tokens, strategy, alpha, n_steer_tokens, probe_inputs, batch_size) are forwarded to
+        :meth:`apply_probe`."""
         inp = prepare_input(prompts=prompt, tokenizer=self.mt) if isinstance(prompt, str) else prompt
         probe_layers = list(probe_layers)
         locations = [(self.mt.layer_name_format.format(L), pivot) for L in probe_layers]

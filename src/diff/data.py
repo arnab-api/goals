@@ -2068,6 +2068,130 @@ FILTER_TASKS: dict[str, FilterTask] = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# diff-vs-progress q-transfer ("evidence against DIFF": is next(DIFF) pre-decided, or progress?)
+# ══════════════════════════════════════════════════════════════════════════════
+@dataclass
+class DiffVsProgInstance:
+    """Q-transfer setup that separates "next(DIFF) is already decided" from "next = progress-position".
+
+    Both sides list the SAME four predicates but in DIFFERENT order, with ASYMMETRIC prefill::
+
+        SRC.task = [T1, T2, T3, T4],  SRC.prefill = {T1, T2},  SRC.target  = T3   (transplant source)
+        DST.task = [T1, T2, T4, T3],  DST.prefill = {T1},      DST.native  = T2
+
+    Transplant SRC's pivot goal-head query into DST and ask what DST writes:
+      • T3  -> the next sub-goal is carried PRE-DECIDED in the query (independent of DST's own progress)
+      • T4  -> the query encodes PROGRESS ("done {T1,T2}"), and DST's slot after {T1,T2} is T4
+    The DST reordering (T4 before T3) is what makes these two predictions differ — without it, both
+    would land on T3. Binary scoring (``expected_next = T3``) therefore reads T3 = pre-decided-DIFF.
+
+    Same prompt shape / interface as :class:`MultiPredicateInstance` (independent assignment lines,
+    trailing-indent or ``var_eq`` pivot), but with per-side ORDER and per-side PREFILL. No SRC-target
+    span alignment is needed (single-position query transplant), and gaze is N/A (no ``.task``)."""
+
+    datatype: str
+    src_order: tuple[Predicate, ...]     # SRC's listed predicates, in order
+    dst_order: tuple[Predicate, ...]     # DST's listed predicates (T3/T4 swapped vs SRC)
+    src_progress: list[str]              # predicate ids prefilled in SRC (e.g. [T1, T2])
+    dst_progress: list[str]              # predicate ids prefilled in DST (e.g. [T1])
+    expected_next: str                   # SRC target = transplant target (T3)
+    var_name: str
+    presentation: Presentation
+    src_lang: Lang
+    dst_lang: Lang
+    naming: Literal["natural", "letters"] = "natural"
+    letter_stub: Literal["indent", "var_eq"] = "indent"
+    meta: dict = field(default_factory=dict)   # carries dst_next (T2) + datatype
+
+    def _var_of(self, order, pred_id):
+        if self.naming == "letters":
+            return chr(ord("a") + [p.id for p in order].index(pred_id))
+        return {p.id: p for p in order}[pred_id].result_name
+
+    def _parts(self, lang, order, progress):
+        q = _question([p.description for p in order], self.datatype, self.var_name, lang, self.presentation)
+        prog = [p for p in order if p.id in set(progress)]          # prefilled lines, in list order
+        var_eq = self.letter_stub == "var_eq"
+        lines = []
+        for p in prog:
+            rn = self._var_of(order, p.id)
+            ln = _assign_line(p, self.var_name, lang, res_name=rn)
+            if var_eq and lang == "cpp":
+                ln = _cpp_autoify(ln, rn)
+            lines.append(ln)
+        base = ("<code>\n" + _signature(self.datatype, self.var_name, lang)
+                + ("\n" + "\n".join(lines) if lines else ""))
+        return q, base + "\n    "                                   # trailing indent = pivot
+
+    def src_parts(self):
+        return self._parts(self.src_lang, self.src_order, self.src_progress)
+
+    def dst_parts(self):
+        return self._parts(self.dst_lang, self.dst_order, self.dst_progress)
+
+    def _desc(self, pred_id):
+        return next(p.description for p in self.src_order if p.id == pred_id)
+
+    @property
+    def expected_next_desc(self) -> str:
+        return self._desc(self.expected_next)
+
+    @property
+    def dst_next_desc(self) -> str:
+        return self._desc(self.meta["dst_next"])
+
+    @property
+    def task_desc(self) -> str:
+        return "; ".join(p.description for p in self.dst_order)
+
+
+def diff_vs_prog_setups(
+    datatype: str,
+    n_samples: int = 8,
+    seed: int = 0,
+    presentation: Presentation = "listed",
+    naming: Literal["natural", "letters"] = "natural",
+    letter_stub: Literal["indent", "var_eq"] = "indent",
+    src_lang: Lang = "python",
+    dst_lang: Lang = "python",
+) -> list[DiffVsProgInstance]:
+    """Sample ``n_samples`` diff-vs-progress instances (:class:`DiffVsProgInstance`). Each draws 4
+    pairwise-COMPATIBLE predicates T1..T4 from the datatype's :data:`QTASKS` bank and builds the fixed
+    contrast: SRC lists [T1,T2,T3,T4] prefilling {T1,T2} (target T3); DST lists [T1,T2,T4,T3]
+    prefilling {T1} (native next T2). Deduped by the ordered 4-tuple; reproducible via ``seed``."""
+    bank = QTASKS[datatype]
+    preds = list(bank.predicates)
+    assert len(preds) >= 4, f"need >=4 predicates in the {datatype!r} bank, have {len(preds)}"
+    rng = random.Random(seed)
+    out, seen = [], set()
+    for _ in range(n_samples * 400):
+        if len(out) >= n_samples:
+            break
+        t1, t2, t3, t4 = rng.sample(preds, 4)
+        quad = (t1.id, t2.id, t3.id, t4.id)
+        if quad in seen:
+            continue
+        if not all(qpred_compatible(datatype, a.id, b.id)
+                   for i, a in enumerate((t1, t2, t3, t4))
+                   for b in (t1, t2, t3, t4)[i + 1:]):
+            continue
+        seen.add(quad)
+        out.append(DiffVsProgInstance(
+            datatype=datatype,
+            src_order=(t1, t2, t3, t4),
+            dst_order=(t1, t2, t4, t3),          # swap T3/T4 so progress-position != pre-decided
+            src_progress=[t1.id, t2.id],
+            dst_progress=[t1.id],
+            expected_next=t3.id,                 # SRC target = transplant target
+            var_name=bank.var_names[0],
+            presentation=presentation, src_lang=src_lang, dst_lang=dst_lang,
+            naming=naming, letter_stub=letter_stub,
+            meta={"datatype": datatype, "dst_next": t2.id},
+        ))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # setup generators — a few contrastive instances per (datatype, presentation, language)
 # ══════════════════════════════════════════════════════════════════════════════
 def q_transfer_setups(
