@@ -284,7 +284,7 @@ def run_shard(mt, ov, heads, datatype, lang, args, layers, results_dir, base_con
             for L in layers:
                 recs[L] = []
             for pivot, pos in pivs.items():
-                by_layer = ov.apply_probe(
+                by_layer = ov.apply_probe_on_prompt(
                     full_text, pos, layers, mode=args.mode, steer_layers=list(range(*STEER_LAYER_RANGE)),
                     max_new_tokens=args.max_new_tokens, alpha=args.alpha,
                 )

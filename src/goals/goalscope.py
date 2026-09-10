@@ -809,9 +809,7 @@ class OVReader:
 
     def apply_probe(
         self,
-        prompt: str | TokenizerOutput,
-        pivot: int,
-        probe_layers: list[int],
+        latents,
         *,
         mode: Literal["faithfulness", "causality"] = "faithfulness",
         steer_layers: Optional[list[int]] = None,
@@ -820,38 +818,19 @@ class OVReader:
         alpha: float = 0.15,
         n_steer_tokens: Optional[int] = None,
         probe_inputs: Optional[dict] = None,
-    ) -> dict[int, str]:
-        """Probe every layer in ``probe_layers`` in one shot: residuals at all layers come from a SINGLE
-        forward (:func:`get_hs`), and all their OV-write steering vectors are batched into ONE
-        :func:`head_additive_generate` call.
+    ):
+        """Probe already-extracted residual latents — all in ONE batched ``head_additive_generate``.
 
-        Args:
-            prompt: source prompt (str or tokenized) to read the residual from.
-            pivot: token position of the residual to read.
-            probe_layers: decoder layers ``L`` whose post-layer residual is probed.
-            mode: which GoalScope destination prompt to steer into — ``"faithfulness"`` (default) reads
-                out into the NL "what are you doing at this line?" probe; ``"causality"`` steers into an
-                information-less C++ function stub and reads out the cross-language continuation. Differs
-                ONLY in the destination prompt (see :meth:`probe_inputs`). Ignored if ``probe_inputs`` is
-                given explicitly.
-            steer_layers: GoalScope steer band (default ``range(35, 46)``).
-            max_new_tokens, strategy, alpha, n_steer_tokens: forwarded to :func:`head_additive_generate`.
-            probe_inputs: pre-tokenized GoalScope probe (defaults to the cached prompt for ``mode``).
-
-        Returns:
-            ``{L: readout}`` — the probe's verbalization for the residual after each layer ``L``.
+        ``latents`` is either a ``{key: (n_embd,) residual}`` dict (returns ``{key: readout}``) or a
+        list/sequence of residual vectors (returns ``list[str]``). Each residual is turned into its
+        OV-write steering vector (:meth:`resid_ov_vec`) and steered into the GoalScope probe for ``mode``.
+        Batches every latent into a single generation, so N latents cost ONE generate call.
         """
         steer_layers = list(range(35, 46)) if steer_layers is None else list(steer_layers)
-        probe_layers = list(probe_layers)
-        inp = (
-            prepare_input(prompts=prompt, tokenizer=self.mt) if isinstance(prompt, str) else prompt
-        )
-        # one forward: residual after each probe layer at the pivot
-        locations = [(self.mt.layer_name_format.format(L), pivot) for L in probe_layers]
-        hs = get_hs(self.mt, inp, locations=locations, return_dict=True)
-        steer = torch.stack(
-            [self.resid_ov_vec(hs[loc]) for loc in locations]
-        )  # (n_probe, n_embd) CPU f32
+        is_dict = isinstance(latents, dict)
+        keys = list(latents) if is_dict else None
+        vecs = [latents[k] for k in keys] if is_dict else list(latents)
+        steer = torch.stack([self.resid_ov_vec(h) for h in vecs])          # (n, n_embd) CPU f32
         outs = head_additive_generate(
             self.mt,
             probe_inputs if probe_inputs is not None else self.probe_inputs(mode),
@@ -862,7 +841,24 @@ class OVReader:
             alpha=alpha,
             n_steer_tokens=n_steer_tokens,
         )
-        return dict(zip(probe_layers, outs))
+        return dict(zip(keys, outs)) if is_dict else outs
+
+    def apply_probe_on_prompt(
+        self,
+        prompt: str | TokenizerOutput,
+        pivot: int,
+        probe_layers: list[int],
+        **kwargs,
+    ) -> dict[int, str]:
+        """Extract the residual after each ``probe_layer`` at ``pivot`` in ONE :func:`get_hs` forward,
+        then :meth:`apply_probe` on those latents. Returns ``{L: readout}``. ``kwargs`` (mode, steer_layers,
+        max_new_tokens, strategy, alpha, n_steer_tokens, probe_inputs) are forwarded to :meth:`apply_probe`."""
+        inp = prepare_input(prompts=prompt, tokenizer=self.mt) if isinstance(prompt, str) else prompt
+        probe_layers = list(probe_layers)
+        locations = [(self.mt.layer_name_format.format(L), pivot) for L in probe_layers]
+        hs = get_hs(self.mt, inp, locations=locations, return_dict=True)
+        latents = {L: hs[(self.mt.layer_name_format.format(L), pivot)] for L in probe_layers}
+        return self.apply_probe(latents, **kwargs)
 
 
 def apply_goalscope(
