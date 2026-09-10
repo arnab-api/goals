@@ -32,11 +32,13 @@ never collide). Parse with ``scripts.evaluation.faithfulness_io``.
 All ``ask_claude`` calls use ``use_cache=True``.
 
 Usage:
+    # default aggregates all 4 datatypes into ONE run over the full 253-sample locked corpus:
     conda run -n goals python scripts/evaluation/eval_goalscope.py \
-        --mode faithfulness --datatype int --heads goal --strategy additive --alpha 0.2
+        --mode faithfulness --heads goal --strategy replace --alpha 1.0
 
     conda run -n goals python scripts/evaluation/eval_goalscope.py \
-        --mode causality --datatype "list[int]" --heads goal --strategy additive --alpha 0.2
+        --mode causality --heads goal --strategy replace --alpha 1.0
+    # subset instead:  --datatypes int "list[int]"
 
     # custom head set (supersedes every head-selection flag):  --heads /path/to/heads.json
     # custom dataset:  --dataset data/goalscope_eval.json
@@ -235,30 +237,38 @@ def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
 # Mirrors scripts/evaluation/eval_ov_reader.py's corpus/prompt/pivot helpers (duplicated here to
 # avoid a circular import — eval_ov_reader imports grading utils from this module).
 # ══════════════════════════════════════════════════════════════════════════════
-def load_locked_datapoints(dataset_path, datatype):
-    """Rebuild the datatype's ``QTransferInstance``s from the frozen JSON recipes (QTASKS by id).
-    Returns list[(spec_id, instance)] in file order. No RNG — the dataset IS the corpus."""
+ALL_DATATYPES = ["int", "list[int]", "str", "list[str]"]
+
+
+def load_locked_datapoints(dataset_path, datatypes):
+    """Rebuild ``QTransferInstance``s from the frozen JSON recipes (QTASKS by id), for one or more
+    datatypes AGGREGATED into a single corpus. ``datatypes`` may be a str or a list. Returns
+    list[(spec_id, instance)] in dataset order (spec_ids are datatype-prefixed, so unique across
+    datatypes). No RNG — the dataset IS the corpus."""
+    if isinstance(datatypes, str):
+        datatypes = [datatypes]
     data = json.loads(Path(dataset_path).read_text())
-    recs = data["datapoints"].get(datatype)
-    if not recs:
-        raise SystemExit(
-            f"dataset {dataset_path!r} has no datapoints for datatype {datatype!r} "
-            f"(have {sorted(data['datapoints'])})"
-        )
     out = []
-    for r in recs:
-        bank = D.QTASKS[r["datatype"]]
-        by_id = {p.id: p for p in bank.predicates}
-        subset = tuple(by_id[pid] for pid in r["predicate_ids"])
-        task = dataclasses.replace(bank, id=f"{bank.id}_T{r['T']}", predicates=subset)
-        inst = D.QTransferInstance(
-            task=task, var_name=bank.var_names[0], presentation=r["presentation"],
-            src_lang=r["lang"], dst_lang=r["lang"],
-            src_progress=list(r["progress_ids"]), dst_progress=list(r["progress_ids"]),
-            expected_next=r["frontier_id"], naming=r["naming"],
-            meta={"datatype": r["datatype"], "T": r["T"], "j": r["j"]},
-        )
-        out.append((r["spec_id"], inst))
+    for dt in datatypes:
+        recs = data["datapoints"].get(dt)
+        if not recs:
+            raise SystemExit(
+                f"dataset {dataset_path!r} has no datapoints for datatype {dt!r} "
+                f"(have {sorted(data['datapoints'])})"
+            )
+        for r in recs:
+            bank = D.QTASKS[r["datatype"]]
+            by_id = {p.id: p for p in bank.predicates}
+            subset = tuple(by_id[pid] for pid in r["predicate_ids"])
+            task = dataclasses.replace(bank, id=f"{bank.id}_T{r['T']}", predicates=subset)
+            inst = D.QTransferInstance(
+                task=task, var_name=bank.var_names[0], presentation=r["presentation"],
+                src_lang=r["lang"], dst_lang=r["lang"],
+                src_progress=list(r["progress_ids"]), dst_progress=list(r["progress_ids"]),
+                expected_next=r["frontier_id"], naming=r["naming"],
+                meta={"datatype": r["datatype"], "T": r["T"], "j": r["j"]},
+            )
+            out.append((r["spec_id"], inst))
     return out, data.get("meta", {})
 
 
@@ -608,9 +618,9 @@ def parse_args():
     )
     # ── corpus / model ──
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument("--datatype", default="int",
-                    help="which datatype's datapoints to run from the locked dataset "
-                         "(int | list[int] | str | list[str])")
+    ap.add_argument("--datatypes", nargs="+", default=ALL_DATATYPES,
+                    help="datatypes AGGREGATED into ONE run (default: all four -> full 253-sample "
+                         "corpus). Records keep their per-datatype tag for later breakdown.")
     ap.add_argument("--dataset", default=DEFAULT_DATASET,
                     help="locked prefill-to-frontier dataset json (QTASKS recipes)")
     ap.add_argument("--seed", type=int, default=123,
@@ -618,6 +628,11 @@ def parse_args():
                          "dataset, not this seed)")
     ap.add_argument(
         "--gen_max_new_tokens", type=int, default=64, help="frontier-body greedy budget (>=1)"
+    )
+    ap.add_argument(
+        "--limit", type=int, default=None,
+        help="SMOKE ONLY: cap the corpus to N datapoints (round-robin across datatypes so all "
+             "prompt builders are hit). Changes n_specs -> a separate run dir; not for real runs.",
     )
     ap.add_argument(
         "--overwrite",
@@ -667,9 +682,25 @@ def main():
     hard_sys = CAUSAL_HARD_SYS if args.mode == "causality" else FAITH_HARD_SYS
 
     # ── LOCKED corpus: load up front (no model needed) so the run dir + skip check resolve first ──
-    datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatype)
+    datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatypes)
+    if args.limit:  # SMOKE: round-robin across datatypes so a small N hits every prompt builder
+        groups = {}
+        for sid, inst in datapoints:
+            groups.setdefault(inst.meta["datatype"], []).append((sid, inst))
+        picked, i = [], 0
+        while len(picked) < args.limit and any(i < len(v) for v in groups.values()):
+            for v in groups.values():
+                if i < len(v) and len(picked) < args.limit:
+                    picked.append(v[i])
+            i += 1
+        datapoints = picked
+        logger.warning(f"--limit {args.limit}: SMOKE run on {len(datapoints)} datapoints "
+                       f"({sorted({inst.meta['datatype'] for _, inst in datapoints})})")
     num_conditions = ds_meta.get("n_conditions", [2, 3, 4])
     ds_seed = ds_meta.get("seed", args.seed)
+    # datatype path tag: "all" when the full set is aggregated, else a filesystem-safe join
+    dt_tag = ("all" if set(args.datatypes) == set(ALL_DATATYPES)
+              else "+".join(d.replace("[", "").replace("]", "") for d in args.datatypes))
 
     # config (sans selected_heads) — enough to resolve the run dir + skip check before loading the model
     config = dict(
@@ -686,7 +717,8 @@ def main():
         n_steer_tokens=n_steer,
         max_new_tokens=args.max_new_tokens,
         model=args.model,
-        datatype=args.datatype,
+        datatype=dt_tag,                    # "all" -> one run over the full aggregated corpus
+        datatypes=list(args.datatypes),     # provenance: exact datatypes aggregated
         n_specs=len(datapoints),
         num_conditions=list(num_conditions),
         seed=ds_seed,
@@ -727,7 +759,7 @@ def main():
     )  # drop rows from a half-finished sample
     remaining = [(sid, inst) for sid, inst in datapoints if sid not in completed]
     logger.info(
-        f"corpus: {len(datapoints)} datapoints (locked {args.dataset}, dtype={args.datatype}) | "
+        f"corpus: {len(datapoints)} datapoints (locked {args.dataset}, dtypes={dt_tag}) | "
         f"already done: {len(completed)} ({kept} records kept) | remaining: {len(remaining)}"
     )
 
@@ -840,6 +872,7 @@ def main():
             logger.debug("    HARD  verdict=%s  oracle_response=%r", hv["verdict"], hv["response"])
             sample_records.append(dict(
                 spec=sid,
+                datatype=inst.meta["datatype"],   # per-record tag -> per-datatype breakdown of an aggregated run
                 anchor=aname,
                 pos=pos,
                 readout=ro,
