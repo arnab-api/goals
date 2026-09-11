@@ -95,13 +95,93 @@ def random_heads_like(ablated, from_layer, n_layer, n_heads, exclude, rng):
     return rng.sample(pool, k)
 
 
-# ── attention-sink ablated generation (KV-cached; adapted from 13_middle cell 9) ──
+# ── blind-from-span helpers (13_middle §5 / 07.2 isolation): heads RUN but can't see the goal span ──
+def frontier_block_positions(mt, prompt, frontier_desc):
+    """Absolute key positions to BLIND: from a token before the frontier's description span through
+    the end of the prompt (the goal spec + the trailing pivot region), mirroring 13_middle §5's
+    ``range(span_start-1, len(prompt_ids))``. Returns None if the description isn't located."""
+    cpos = prompt.find(frontier_desc)
+    if cpos < 0:
+        return None
+    enc = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
+    offsets = [tuple(x) for x in enc["offset_mapping"][0].tolist()]
+    P = len(offsets)
+    end = cpos + len(frontier_desc)
+    toks = [ti for ti, (a, b) in enumerate(offsets) if b > a and a < end and b > cpos]
+    if not toks:
+        return None
+    return list(range(max(min(toks) - 1, 0), P))
+
+
+@torch.no_grad()
+def generate_blocking_span_cached(mt, prompt_ids, block_heads, block_positions, q_start,
+                                  max_new=64, stop_suffix=None):
+    """Greedy decode while every head in ``block_heads`` is BLIND to ``block_positions`` (adds -inf
+    there; it attends normally to every OTHER key) for query rows whose absolute position >= q_start.
+    Non-goal heads keep running — they just can't read the goal span. KV-cache aware, O(seq)/step.
+    ``block_heads=[]`` -> clean baseline. Deterministic (argmax)."""
+    if stop_suffix is None:
+        stop_suffix = [mt.tokenizer.eos_token, "\n", "\n\n"]
+    stop_suffix = [s for s in stop_suffix if s]
+    device = next(mt._model.parameters()).device
+    n_heads = mt.n_heads
+    l2h = defaultdict(list)
+    for l, h in sorted(block_heads):
+        l2h[l].append(h)
+    block = sorted(set(int(p) for p in block_positions))
+
+    ids_full = torch.tensor([list(prompt_ids)], device=device)
+    attn = torch.ones_like(ids_full)
+    past = None
+    gen = []
+
+    def _kvec(kv_len):
+        v = torch.zeros(kv_len, device=device)
+        bp = [p for p in block if p < kv_len]
+        if bp:
+            v[torch.tensor(bp, device=device)] = float("-inf")   # -inf ONLY on the blinded span
+        return v
+
+    for step in range(max_new):
+        kv_len = ids_full.shape[1]
+        if step == 0:
+            cur_ids, q_len, q_offset = ids_full, kv_len, 0        # prefill: q rows are absolute 0..P-1
+        else:
+            cur_ids, q_len, q_offset = ids_full[:, -1:], 1, kv_len - 1  # decode: single new query
+        inp = {"input_ids": cur_ids, "attention_mask": attn,
+               "past_key_values": past, "use_cache": True}
+        kvec = _kvec(kv_len) if block_heads else None
+        with mt.trace(inp, scan=False, validate=False):
+            if block_heads:
+                for L in sorted(l2h):
+                    sm = get_module_nnsight(mt, mt.attn_module_name_format.format(L)) \
+                            .source.attention_interface_0.source.nn_functional_softmax_0
+                    km = torch.zeros(1, n_heads, q_len, kv_len, device=device)
+                    for qi in range(q_len):
+                        if q_offset + qi >= q_start:
+                            for h in l2h[L]:
+                                km[0, h, qi, :] += kvec
+                    sm.input = sm.input + km.to(sm.input.device, sm.input.dtype)
+            logits = mt.output.logits[:, -1, :].save()
+            past = mt.output.past_key_values.save()
+        nxt = int(logits[0].argmax(-1))
+        if nxt == mt.tokenizer.eos_token_id:
+            break
+        tok_str = mt.tokenizer.decode([nxt])
+        gen.append(nxt)
+        if any(tok_str.endswith(s) for s in stop_suffix):
+            break
+        ids_full = torch.cat([ids_full, torch.tensor([[nxt]], device=device)], dim=1)
+        attn = torch.ones_like(ids_full)
+    return mt.tokenizer.decode(gen, skip_special_tokens=True)
+
+
 @torch.no_grad()
 def sink_generate_cached(mt, prompt_ids, ablated_heads, q_start, sink_pos=0,
                          max_new=64, stop_suffix=None):
     """Greedy decode while every head in ``ablated_heads`` may attend ONLY to ``sink_pos`` for query
-    rows whose ABSOLUTE position >= ``q_start`` (the pivot, then each decoded token). KV-cache aware,
-    so O(seq) per step. ``ablated_heads=[]`` -> clean baseline. Deterministic (argmax)."""
+    rows whose absolute position >= q_start (13_middle §4/§7 sink-ablation = restrict-to-sink; ≈ zero
+    the head's useful attention output). KV-cache aware. ``ablated_heads=[]`` -> clean baseline."""
     if stop_suffix is None:
         stop_suffix = [mt.tokenizer.eos_token, "\n", "\n\n"]
     stop_suffix = [s for s in stop_suffix if s]
@@ -117,17 +197,16 @@ def sink_generate_cached(mt, prompt_ids, ablated_heads, q_start, sink_pos=0,
     gen = []
 
     def _kvec(kv_len):
-        # -inf on every key except the sink position -> the head can attend ONLY to sink_pos
-        v = torch.full((kv_len,), float("-inf"), device=device)
+        v = torch.full((kv_len,), float("-inf"), device=device)   # -inf everywhere except the sink
         v[sink_pos] = 0.0
         return v
 
     for step in range(max_new):
         kv_len = ids_full.shape[1]
         if step == 0:
-            cur_ids, q_len, q_offset = ids_full, kv_len, 0        # prefill: q rows are absolute 0..P-1
+            cur_ids, q_len, q_offset = ids_full, kv_len, 0
         else:
-            cur_ids, q_len, q_offset = ids_full[:, -1:], 1, kv_len - 1  # decode: single new query
+            cur_ids, q_len, q_offset = ids_full[:, -1:], 1, kv_len - 1
         inp = {"input_ids": cur_ids, "attention_mask": attn,
                "past_key_values": past, "use_cache": True}
         kvec = _kvec(kv_len) if ablated_heads else None
@@ -164,7 +243,7 @@ def _dt_tag(datatypes):
 
 def run_dir_for(results_dir, model, axis, config):
     slug = model.split("/")[-1]
-    leaf = (f"heads={config['ablated_name']}__fromL={config['from_layer']}__sink={config['sink_pos']}"
+    leaf = (f"heads={config['ablated_name']}__fromL={config['from_layer']}__strat={config['strategy']}"
             f"__dtype={config['datatype']}__nspec={config['n_specs']}__seed={config['seed']}")
     return Path(results_dir) / "evaluation" / "ablation" / slug / axis / leaf
 
@@ -179,9 +258,10 @@ def common_argparser(description):
     ap.add_argument("--heads", default=None,
                     help="goal head-set json (default: the model's 122-head goal set)")
     ap.add_argument("--from_layer", type=int, default=20,
-                    help="sufficiency: ablate non-goal heads in layers >= this (layers < it kept). "
+                    help="sufficiency: blind non-goal heads in layers >= this (layers < it untouched). "
                          "necessity: lower bound of the matched random-control pool.")
-    ap.add_argument("--sink_pos", type=int, default=0, help="the only key an ablated head may attend to")
+    ap.add_argument("--sink_pos", type=int, default=0,
+                    help="sink strategy only: the single key an ablated head may attend to (default 0)")
     ap.add_argument("--gen_max_new_tokens", type=int, default=64, help="frontier-body greedy budget")
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--limit", type=int, default=None,
@@ -224,13 +304,20 @@ def load_setup(args):
     return mt, goal_heads, datapoints, config, results_dir
 
 
-def run_ablation_eval(mt, datapoints, ablated_heads, goal_heads, *, axis, ablated_name, config,
-                      results_dir, from_layer, sink_pos, gen_max_new_tokens, seed,
+def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, *, axis, ablated_name,
+                      strategy, config, results_dir, from_layer, sink_pos, gen_max_new_tokens, seed,
                       overwrite=False):
-    """Run the three conditions (baseline / ablated / random control) over ``datapoints`` and score
-    each generation with the oracle judge. ``ablated_heads`` is the axis-specific silenced set."""
-    config = dict(config, ablated_name=ablated_name, from_layer=from_layer, sink_pos=sink_pos,
-                  n_specs=len(datapoints))
+    """Run three conditions (baseline / ablated / control) over ``datapoints`` and score each
+    generation with the oracle judge. ``strategy`` picks the intervention on the condition's head set:
+
+      "sink"       — restrict those heads to attend ONLY to ``sink_pos`` (13_middle §4/§7; necessity).
+      "blind_span" — blind those heads from the frontier spec span (13_middle §5 / 07.2; sufficiency).
+
+    ``ablated_heads`` = the axis set; ``control_heads`` = the matched contrast — both get the SAME
+    intervention, differing only in WHICH heads it hits."""
+    assert strategy in ("sink", "blind_span"), strategy
+    config = dict(config, ablated_name=ablated_name, from_layer=from_layer, strategy=strategy,
+                  sink_pos=sink_pos, n_specs=len(datapoints))
     run_dir = run_dir_for(results_dir, config["model"], axis, config)
     run_dir.mkdir(parents=True, exist_ok=True)
     rec_path = run_dir / "records.jsonl"
@@ -240,16 +327,13 @@ def run_ablation_eval(mt, datapoints, ablated_heads, goal_heads, *, axis, ablate
     if rec_path.exists():
         done = {json.loads(l)["spec"] for l in rec_path.read_text().splitlines() if l.strip()}
     (run_dir / "config.json").write_text(json.dumps(
-        dict(config, axis=axis, from_layer=from_layer, sink_pos=sink_pos,
-             n_ablated=len(ablated_heads), n_goal=len(goal_heads),
+        dict(config, axis=axis, from_layer=from_layer, strategy=strategy, sink_pos=sink_pos,
+             n_ablated=len(ablated_heads), n_control=len(control_heads), n_goal=len(goal_heads),
              gen_max_new_tokens=gen_max_new_tokens, timestamp=time.strftime("%Y-%m-%d %H:%M:%S")), indent=2))
-    logger.info(f"run dir -> {run_dir} | ablating {len(ablated_heads)} heads | "
-                f"{len(datapoints)} datapoints ({len(done)} done)")
+    logger.info(f"run dir -> {run_dir} | {strategy} on {len(ablated_heads)} (ablated) / "
+                f"{len(control_heads)} (control) heads | {len(datapoints)} datapoints ({len(done)} done)")
 
-    rng = random.Random(seed)
-    rand_heads = random_heads_like(ablated_heads, from_layer, mt.n_layer, mt.n_heads, goal_heads, rng)
-    conditions = {"baseline": [], "ablated": ablated_heads, "random": rand_heads}
-
+    conditions = {"baseline": [], "ablated": ablated_heads, "control": control_heads}
     n_done = len(done)
     with open(rec_path, "a") as fh:
         for sid, inst in datapoints:
@@ -257,13 +341,23 @@ def run_ablation_eval(mt, datapoints, ablated_heads, goal_heads, *, axis, ablate
                 continue
             prompt, var = build_prompt(mt, inst, inst.src_lang)
             prompt_ids = prepare_input(prompts=prompt, tokenizer=mt)["input_ids"][0].tolist()
-            q_start = len(prompt_ids) - 1                       # ablate from the frontier pivot on
+            q_start = len(prompt_ids) - 1                       # intervene from the frontier pivot on
             cond_desc = inst.expected_next_desc
+            block_pos = None
+            if strategy == "blind_span":
+                block_pos = frontier_block_positions(mt, prompt, cond_desc)
+                if not block_pos:
+                    logger.warning(f"[{sid}] frontier span not located — skipping")
+                    continue
             row = dict(spec=sid, datatype=inst.meta["datatype"], frontier_id=inst.expected_next,
-                       condition=cond_desc, var=var)
+                       condition=cond_desc, var=var, n_blocked=(len(block_pos) if block_pos else 0))
             for cname, heads in conditions.items():
-                gen = sink_generate_cached(mt, prompt_ids, heads, q_start=q_start,
-                                           sink_pos=sink_pos, max_new=gen_max_new_tokens)
+                if strategy == "sink":
+                    gen = sink_generate_cached(mt, prompt_ids, heads, q_start, sink_pos=sink_pos,
+                                               max_new=gen_max_new_tokens)
+                else:
+                    gen = generate_blocking_span_cached(mt, prompt_ids, heads, block_pos, q_start,
+                                                        max_new=gen_max_new_tokens)
                 code = gen.split("\n", 1)[0].strip()
                 jv = judge_implements(code, cond_desc)
                 row[cname] = dict(gen=code, verdict=jv["verdict"])
@@ -272,7 +366,7 @@ def run_ablation_eval(mt, datapoints, ablated_heads, goal_heads, *, axis, ablate
             n_done += 1
             logger.info(f"[{n_done}/{len(datapoints)}] {sid}: "
                         f"base={row['baseline']['verdict']} ablated={row['ablated']['verdict']} "
-                        f"random={row['random']['verdict']}")
+                        f"control={row['control']['verdict']}")
 
     _summarize(run_dir, conditions)
     return run_dir
