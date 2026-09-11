@@ -243,8 +243,9 @@ def _dt_tag(datatypes):
 
 def run_dir_for(results_dir, model, axis, config):
     slug = model.split("/")[-1]
-    leaf = (f"heads={config['ablated_name']}__fromL={config['from_layer']}__strat={config['strategy']}"
-            f"__dtype={config['datatype']}__nspec={config['n_specs']}__seed={config['seed']}")
+    leaf = (f"heads={config['ablated_name']}__goal{config['n_goal']}__fromL={config['from_layer']}"
+            f"__strat={config['strategy']}__dtype={config['datatype']}__nspec={config['n_specs']}"
+            f"__seed={config['seed']}")
     return Path(results_dir) / "evaluation" / "ablation" / slug / axis / leaf
 
 
@@ -300,7 +301,7 @@ def load_setup(args):
     goal_heads = load_json_heads(heads_path, mt.n_layer, mt.n_heads)
     config = dict(model=args.model, dataset=str(args.dataset), datatype=_dt_tag(args.datatypes),
                   datatypes=list(args.datatypes), n_specs=len(datapoints), seed=args.seed,
-                  sink_pos=args.sink_pos, heads_spec=heads_path)
+                  sink_pos=args.sink_pos, heads_spec=heads_path, n_goal=len(goal_heads))
     return mt, goal_heads, datapoints, config, results_dir
 
 
