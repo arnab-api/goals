@@ -50,8 +50,13 @@ remote box; §2 of the notebook + this section populate once they land.
 | **Qwen2.5-Coder-32B** (122) | 0.823 | 0.783 |
 | **Qwen2.5-Coder-14B** (88) | 0.598 | 0.401 |
 | Qwen2.5-32B-Instruct (108) | 0.308 | 0.540 |
-| Olmo-3.1-32B-Instruct **+RL** (130) | 0.523 | 0.749 |
-| Olmo-3.1-32B-Instruct **SFT** (79) | 0.603 | 0.430 |
+| Olmo-3.1-32B-Instruct **+RL** (93, mask==1.0) | 0.495 | 0.689 |
+| Olmo-3.1-32B-Instruct **SFT** (91, mask>0.6) | 0.595 | 0.533 |
+
+> Olmo head budgets **rematched** (2026-09-11): the default `thr>0.9` selection gave a lopsided 130 (+RL)
+> vs 79 (SFT), and the SFT mask is too sparse to reach 130 by lowering the bar (caps ~97). Frozen
+> depth-matched sets — +RL `mask==1.0` → 93, SFT `mask>0.6` → 91 — make the contrast a fair one. Old
+> lopsided numbers for reference: +RL (130) 0.523 / 0.749, SFT (79) 0.603 / 0.430.
 
 | ![scale](figures/goalscope_axis_c_scale.png) |
 |---|
@@ -60,7 +65,7 @@ remote box; §2 of the notebook + this section populate once they land.
 
 - **Scale** (Coder 32B vs 14B): the encoding is markedly cleaner at 32B — faith 0.82 vs 0.60, caus 0.78 vs 0.40.
 - **Code fine-tuning** (Coder-32B vs Qwen-32B-Instruct): the biggest gap — faith 0.82 vs 0.31, caus 0.78 vs 0.54.
-- **RL fine-tuning** (Olmo +RL vs SFT): causality **up** (0.75 vs 0.43) but faithfulness **down** (0.52 vs 0.60).
+- **RL fine-tuning** (Olmo +RL vs SFT, head budgets rematched to 93 vs 91): causality **higher for +RL** (0.69 vs 0.53) but faithfulness **higher for SFT** (0.60 vs 0.50). Rematching from 130/79 roughly halved the causality gap (was 0.32; now 0.16), so about half of it was a head-count artifact — but a real ~0.16 causal-encoding advantage for the RL model survives. Per-pivot, +RL leads on the goal-carrying pivots (`indent` .88 vs .63, `var` .53 vs .32) while SFT's edge is `first_impl` faithfulness.
 
 > Caveat (c): the steer band is fixed at (35, 46) for every model — the *Qwen-32B* band. For Olmo (goal
 > band (10, 36)) it sits outside the goal region, so the Olmo numbers confound "where the goal heads live"
