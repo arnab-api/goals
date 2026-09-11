@@ -88,15 +88,17 @@ logger = logging.getLogger(__name__)
 # Residual extraction + injection
 # ══════════════════════════════════════════════════════════════════════════════
 @torch.no_grad()
-def extract_residual_latents(mt, prompt, positions, layers):
-    """``(n_layers, n_pos, n_embd)`` residual-stream latents, one forward pass.
+def extract_residual_latents(mt, prompt, positions, layers, source="resid"):
+    """``(n_layers, n_pos, n_embd)`` source latents, one forward pass.
 
-    Reads the *output* of each decoder layer (the residual stream after that block), which is the
-    same tensor ``apply_goalscope`` injects into — so source and destination live in the same
-    space, as the PatchScope construction requires.
+    ``source="resid"`` reads the *output* of each decoder layer (the residual stream after that
+    block); ``source="attn"`` reads the *output* of each layer's self-attention module (the whole
+    attention block's contribution — o_proj output, the summed head writes). Both live in the
+    residual (n_embd) space ``apply_goalscope`` injects into, as the PatchScope construction requires.
     """
     inp = prepare_input(prompts=prompt, tokenizer=mt)
-    names = [mt.layer_name_format.format(l) for l in layers]
+    fmt = mt.attn_module_name_format if source == "attn" else mt.layer_name_format
+    names = [fmt.format(l) for l in layers]
     idx = torch.tensor(list(positions))
     cache: dict[str, torch.Tensor] = {}
 
@@ -139,21 +141,23 @@ def residual_patchscope(
     steer_layer_range,
     alpha=0.1,
     source_agg="mean",
+    source="resid",
     max_new_tokens=64,
     batch_size=16,
     n_steer_tokens="all",
     probe_prompt=None,
 ):
-    """Verbalize each source position by injecting its residual latent into the read-out probe.
+    """Verbalize each source position by injecting its source latent into the read-out probe.
 
     Mirrors ``apply_goalscope``'s additive path — same probe, same greedy decode, same
-    ``n_steer_tokens`` semantics — with the residual latent in place of the head aggregate.
+    ``n_steer_tokens`` semantics — with the ``source`` latent (resid stream | attn-module output) in
+    place of the head aggregate.
 
     Returns ``[{"pos", "token", "patched_gen", "scoped"}]``, the shape ``faithfulness_io`` and
     ``render_patchscope_html`` both expect.
     """
     positions = list(token_positions)
-    stack = extract_residual_latents(mt, prompt, positions, source_layers)
+    stack = extract_residual_latents(mt, prompt, positions, source_layers, source=source)
     vecs = aggregate_latents(stack, source_agg)  # (n_pos, n_embd)
     # Unit direction: `add_norm` supplies the magnitude from ||h_dest|| at each patch site.
     vecs = vecs / vecs.norm(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -238,6 +242,14 @@ def parse_args():
         help="how to collapse the source-layer axis (default mean)",
     )
     ap.add_argument(
+        "--source",
+        default="resid",
+        choices=["resid", "attn"],
+        help="what latent to read at --source-layers: 'resid' (decoder-layer residual stream, "
+        "default) | 'attn' (self-attention module output — the whole attention block's contribution). "
+        "Baked into the run-dir leaf (resid:.. vs attn:..) so the two never collide.",
+    )
+    ap.add_argument(
         "--steer_layer_range",
         type=int,
         nargs=2,
@@ -307,7 +319,7 @@ def main():
               else "+".join(d.replace("[", "").replace("]", "") for d in args.datatypes))
 
     def leaf_heads_name(band):
-        return f"resid:L{band[0]}-{band[1]}:{args.source_agg}"
+        return f"{args.source}:L{band[0]}-{band[1]}:{args.source_agg}"
 
     config = dict(
         mode=args.mode,
@@ -317,6 +329,7 @@ def main():
         source_layers=list(src_band) if src_band else None,
         source_layers_explicit=args.source_layers is not None,
         source_agg=args.source_agg,
+        source=args.source,
         heads_name=leaf_heads_name(src_band) if src_band else None,
         steer_layer_range=list(args.steer_layer_range),
         n_steer_tokens=n_steer,
@@ -367,7 +380,7 @@ def main():
     # Same guard as the head-set eval: the leaf encodes the source band and aggregation, but not
     # every knob, so refuse to resume a run whose source differs from this invocation's.
     if prev is not None:
-        for k in ("source_layers", "source_agg", "strategy"):
+        for k in ("source_layers", "source_agg", "strategy", "source"):
             if prev.get(k) is not None and prev.get(k) != config[k]:
                 raise SystemExit(
                     f"run dir {run_dir} holds a run with {k}={prev[k]!r}, but this invocation "
@@ -447,6 +460,7 @@ def main():
             steer_layer_range=tuple(args.steer_layer_range),
             alpha=args.alpha,
             source_agg=args.source_agg,
+            source=args.source,
             max_new_tokens=args.max_new_tokens,
             batch_size=args.batch_size,
             n_steer_tokens=args.n_steer_tokens,
