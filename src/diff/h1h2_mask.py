@@ -506,16 +506,18 @@ def train_query_mask(mt, caches, l_read, hypothesis, intervention,
             loss.backward()
             opt.step()
             mask.clamp_()
-            ep_loss += float(loss) * len(batch)
-            ep_task += float(task) * len(batch)
+            b_task, b_sparse, b_loss = float(task.detach()), float(sparse.detach()), float(loss.detach())
+            logger.debug(f"[{hypothesis}/{intervention}] ep {ep:3d} batch {s // batch_size:3d} "
+                         f"target={b_task:.4f} sparse={b_sparse:.4f} total={b_loss:.4f}")
+            ep_loss += b_loss * len(batch)
+            ep_task += b_task * len(batch)
         n = len(caches)
         hist["loss"].append(ep_loss / n); hist["task"].append(ep_task / n)
-        hist["sparse"].append(float(sparse)); hist["mass"].append(ep_mass / n)
+        hist["sparse"].append(float(sparse.detach())); hist["mass"].append(ep_mass / n)
         hist["n_active"].append(int((mask.values > 0.5).sum()))
-        if ep % 10 == 0 or ep == n_epochs - 1:
-            logger.info(f"[{hypothesis}/{intervention}] ep {ep:3d} loss={hist['loss'][-1]:.4f} "
-                        f"task={hist['task'][-1]:.4f} mass={hist['mass'][-1]:.3f} "
-                        f"active={hist['n_active'][-1]}")
+        logger.info(f"[{hypothesis}/{intervention}] ep {ep:3d} loss={hist['loss'][-1]:.4f} "
+                    f"task={hist['task'][-1]:.4f} sparse={hist['sparse'][-1]:.4f} "
+                    f"mass={hist['mass'][-1]:.3f} active={hist['n_active'][-1]}")
         if checkpoint_dir and checkpoint_every and (ep % checkpoint_every == 0 or ep == n_epochs - 1):
             _save_ckpt(ep)
     return mask, hist
