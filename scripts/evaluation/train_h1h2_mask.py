@@ -87,11 +87,15 @@ def main():
     # free_form / mlps_frozen do a grad-enabled TRUNCATED forward; under device_map="auto" the whole
     # backward graph piles on GPU0 (it holds layers 0..~N/2, all computed) and OOMs while GPU1 idles.
     # A balanced map splits the computed layers 0..l_read-1 evenly across GPUs. #3 does no grad forward.
-    n_gpu = torch.cuda.device_count()
+    # NB: count GPUs from CUDA_VISIBLE_DEVICES, not torch.cuda.device_count() — under the dispatch
+    # launch (screen + conda activate) device_count() came back <2 and silently skipped the balance.
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    n_gpu = len([x for x in cvd.split(",") if x.strip()]) if cvd else torch.cuda.device_count()
     dmap = "auto"
     if args.intervention in ("free_form", "mlps_frozen") and n_gpu >= 2:
         dmap = M.build_balanced_device_map(args.model, args.l_read, n_gpu=n_gpu)
-        logger.info(f"balanced device_map over {n_gpu} GPUs (computed layers 0-{args.l_read-1} split evenly)")
+        print(f"[device_map] balanced over {n_gpu} GPUs (computed layers 0-{args.l_read-1} split evenly)",
+              flush=True)
     FUNC.setup(args.model, device_map=dmap)      # loads model + goal-head mask; binds FUNC globals
     mt = FUNC.mt
     slug = args.model.split("/")[-1]
