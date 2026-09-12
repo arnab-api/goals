@@ -518,8 +518,10 @@ def _probe_placed(jobs: list[dict], user: str | None, pw: str | None) -> dict[st
     return result
 
 
-def summarize_runs(probe: bool = False, user: str | None = None, pw: str | None = None) -> list[dict]:
-    """Newest-first summary of every batch with a manifest (for `--list` / kill.py).
+def summarize_runs(probe: bool = False, user: str | None = None, pw: str | None = None,
+                   limit: int = 10) -> list[dict]:
+    """Newest-first summary of the ``limit`` most recent batches with a manifest (for `--list` /
+    kill.py). ``limit=None`` (or <=0) returns every batch.
 
     probe=True: for jobs the manifest still shows non-terminal, read the authoritative per-run
     status.json (correcting a manifest that lagged behind an error/done) and, if that too is still
@@ -540,6 +542,8 @@ def summarize_runs(probe: bool = False, user: str | None = None, pw: str | None 
     # newest first by run_id (== submission timestamp YYYYMMDD_HHMMSS, lexicographically sortable) —
     # NOT file mtime, which any manifest rewrite (a state update / manual reconcile) would disturb.
     manifests.sort(key=lambda m: m["run_id"], reverse=True)
+    if limit and limit > 0:
+        manifests = manifests[:limit]                 # newest `limit` only — keeps --list short + probe cheap
 
     probed: dict[str, tuple[str | None, bool | None]] = {}
     if probe:
@@ -1042,7 +1046,7 @@ def print_runs(console: Console, probe: bool = False,
     if not runs:
         console.print("[dim]no batches found.[/]")
         return
-    table = Table(box=SIMPLE_HEAVY, title="batch history (newest first)")
+    table = Table(box=SIMPLE_HEAVY, title=f"batch history (newest {len(runs)})")
     table.add_column("run id", style="bold")
     table.add_column("submitted")
     table.add_column("jobs", justify="right")
