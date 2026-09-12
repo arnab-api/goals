@@ -284,21 +284,23 @@ _DISK_CACHED = ("block_head_communication",)
 
 def load_or_build_caches(mt, specs, l_read, intervention, build_prompts_fn, cache_dir,
                          datatype, lang, seed, stub="var_eq", src_targ_in_dst=True, overwrite=False):
-    """Per-pair caches for one intervention. ``block_head_communication`` (#3) is disk-persisted and
-    returned on the model device (its per-pair OV deltas are read every step). ``free_form`` /
-    ``mlps_frozen`` (#1/#2) are rebuilt in memory and kept on **CPU** — their grad forward moves inputs
-    to the device and the q-blend / MLP-freeze hooks move their own slices per-use, so the (large, for
-    #2) clean-MLP caches never sit on the GPU. Disk cache keyed by the full config (reused on match)."""
-    dev = next(mt._model.parameters()).device
+    """Per-pair caches for one intervention, all kept on **CPU** (never accumulated on the GPU). Each
+    cache is built then immediately moved to CPU, so the build phase never piles N caches on one shard
+    (the #3 512-pair delta build otherwise OOMs `cuda:0` at ~20GB on top of the weights). During
+    training every h_read path moves what it needs to the device per-pair: #1/#2 move inputs + hook
+    slices, #3 moves the per-pair OV deltas (``deltas.to(mask.device)``) — all small, all per-use.
+    ``block_head_communication`` (#3) is additionally disk-persisted, keyed by the full config."""
 
-    def _build():
-        return [build_pair_cache(mt, s, l_read, intervention, build_prompts_fn, stub, src_targ_in_dst)
-                for s in specs]
+    def _build_cpu():                                          # build + move each cache to CPU at once
+        out = []
+        for s in specs:
+            c = build_pair_cache(mt, s, l_read, intervention, build_prompts_fn, stub, src_targ_in_dst)
+            c.cpu_()
+            out.append(c)
+        return out
 
     if intervention not in _DISK_CACHED:
-        caches = _build()
-        for c in caches:                                      # keep #1/#2 caches on CPU (memory-safe)
-            c.cpu_()
+        caches = _build_cpu()
         logger.info(f"built {len(caches)} caches on CPU (no disk cache for {intervention})")
         return caches
 
@@ -307,20 +309,14 @@ def load_or_build_caches(mt, specs, l_read, intervention, build_prompts_fn, cach
     path = os.path.join(cache_dir, f"h1h2_caches_{key}.pt")
     if os.path.exists(path) and not overwrite:
         blob = torch.load(path, map_location="cpu", weights_only=False)
-        caches = blob["caches"]
-        for c in caches:
-            c.to(dev)
+        caches = blob["caches"]                                # already CPU (map_location); keep on CPU
         logger.info(f"loaded {len(caches)} caches <- {path}")
         return caches
-    caches = _build()
+    caches = _build_cpu()
     os.makedirs(cache_dir, exist_ok=True)
-    for c in caches:
-        c.cpu_()
     torch.save({"desc": desc, "caches": caches}, path)
     logger.info(f"built + saved {len(caches)} caches -> {path} "
                 f"({os.path.getsize(path) / 1e9:.2f} GB)")
-    for c in caches:
-        c.to(dev)
     return caches
 
 
