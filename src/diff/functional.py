@@ -149,8 +149,12 @@ def setup(
     goal_threshold=0.9,
     boundary_cos_thr=0.7,
     boundary_sel_thr=0.8,
+    device_map="auto",
 ):
-    """Load the model + trained head masks once; bind module globals. Returns a namespace."""
+    """Load the model + trained head masks once; bind module globals. Returns a namespace.
+
+    ``device_map`` is forwarded to ``ModelandTokenizer`` — pass a custom dict (e.g. the balanced map
+    from ``h1h2_mask.build_balanced_device_map``) to rebalance layers across GPUs; default ``"auto"``."""
     global mt, MODEL_NAME, GROUP, N_KV, N_LAYER, N_HEADS
     global \
         GOAL_HEADS, \
@@ -167,7 +171,7 @@ def setup(
     mt = ModelandTokenizer(
         model_key=model_name,
         dtype=torch.bfloat16,
-        device_map="auto",
+        device_map=device_map,
         attn_implementation="eager",
     )
     N_KV = mt.model.config.num_key_value_heads

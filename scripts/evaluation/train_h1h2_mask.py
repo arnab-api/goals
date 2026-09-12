@@ -34,6 +34,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # NB: CUDA_VISIBLE_DEVICES is set above BEFORE any torch import; the transitive torch import inside
 # ``src.diff.functional`` below is the first, so the device pin holds.
+import torch  # noqa: E402
 import src.diff.data as DATA  # noqa: E402
 import src.diff.functional as FUNC  # noqa: E402
 import src.diff.h1h2 as H  # noqa: E402
@@ -83,7 +84,15 @@ def parse_args():
 def main():
     args = parse_args()
     logging_utils.configure(args)
-    FUNC.setup(args.model)                       # loads model + goal-head mask; binds FUNC globals
+    # free_form / mlps_frozen do a grad-enabled TRUNCATED forward; under device_map="auto" the whole
+    # backward graph piles on GPU0 (it holds layers 0..~N/2, all computed) and OOMs while GPU1 idles.
+    # A balanced map splits the computed layers 0..l_read-1 evenly across GPUs. #3 does no grad forward.
+    n_gpu = torch.cuda.device_count()
+    dmap = "auto"
+    if args.intervention in ("free_form", "mlps_frozen") and n_gpu >= 2:
+        dmap = M.build_balanced_device_map(args.model, args.l_read, n_gpu=n_gpu)
+        logger.info(f"balanced device_map over {n_gpu} GPUs (computed layers 0-{args.l_read-1} split evenly)")
+    FUNC.setup(args.model, device_map=dmap)      # loads model + goal-head mask; binds FUNC globals
     mt = FUNC.mt
     slug = args.model.split("/")[-1]
     out_root = args.out or os.path.join(env_utils.DEFAULT_RESULTS_DIR, "evaluation", "h1h2_mask",

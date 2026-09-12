@@ -39,6 +39,45 @@ logger = logging.getLogger(__name__)
 INTERVENTIONS = ("free_form", "mlps_frozen", "block_head_communication")
 
 
+def build_balanced_device_map(model_name, l_read, n_gpu=2, max_gpu="79GiB"):
+    """Device map that splits the GRAD-COMPUTED layers (``0..l_read-1``) EVENLY across ``n_gpu`` GPUs.
+
+    ``device_map="auto"`` fills sequentially (layers 0..~N/2 on GPU0, rest on GPU1). With the forward
+    truncated at ``l_read`` (see ``h_read_forward``), only layers ``0..l_read-1`` compute, so under the
+    auto map GPU0 carries almost the whole backward graph (e.g. 33 of 40 grad-layers for l_read=40 on a
+    64-layer model) and OOMs while GPU1 sits idle holding the never-run layers ``l_read..``. Splitting
+    the computed layers evenly balances the graph; the weight-only layers ``l_read..`` are then packed
+    to equalise total layers per GPU. Non-layer modules keep accelerate's inferred placement."""
+    import torch as _torch
+    from accelerate import init_empty_weights
+    from transformers import AutoConfig, AutoModelForCausalLM
+    cfg = AutoConfig.from_pretrained(model_name)
+    n_layer = cfg.num_hidden_layers
+    with init_empty_weights():
+        m = AutoModelForCausalLM.from_config(cfg, dtype=_torch.bfloat16)
+    # non-layer modules, explicit (never rely on a '' catch-all): embed + rotary feed the first block
+    # (GPU0); norm + lm_head are post-all-layers and never run under truncation, so pack them on the
+    # last GPU. Only the ones this arch actually has are emitted.
+    named = dict(m.named_modules())
+    dm = {}
+    for name, gpu in [("model.embed_tokens", 0), ("model.rotary_emb", 0),
+                      ("model.norm", n_gpu - 1), ("lm_head", n_gpu - 1)]:
+        if name in named:
+            dm[name] = gpu
+    comp = list(range(l_read))                                    # grad-computed layers -> split EVENLY
+    assign, per = {}, len(comp) // n_gpu
+    for i in range(n_gpu):
+        for l in comp[i * per: (i + 1) * per if i < n_gpu - 1 else len(comp)]:
+            assign[l] = i
+    counts = [sum(1 for v in assign.values() if v == i) for i in range(n_gpu)]
+    for l in range(l_read, n_layer):                              # weight-only layers -> equalise totals
+        i = min(range(n_gpu), key=lambda g: counts[g])
+        assign[l] = i; counts[i] += 1
+    for l, i in assign.items():
+        dm[f"model.layers.{l}"] = i
+    return dm
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # module-name helpers + RoPE
 # ══════════════════════════════════════════════════════════════════════════════
