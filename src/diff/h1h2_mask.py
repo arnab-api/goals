@@ -208,15 +208,20 @@ class PairCache:
 
 
 @torch.no_grad()
-def _forward_capture(mt, ids, attn, layers_resid, layers_qkv=None, layers_mlp=None):
+def _forward_capture(mt, ids, attn, layers_resid, layers_qkv=None, layers_mlp=None, stop_after=None):
     """One forward capturing: residual-after-block for ``layers_resid`` (layer_name_format output),
-    q/k/v proj outputs for ``layers_qkv``, mlp outputs for ``layers_mlp``. Returns dicts."""
+    q/k/v proj outputs for ``layers_qkv``, mlp outputs for ``layers_mlp``. Returns dicts.
+
+    ``stop_after`` (a layer index): truncate the forward right after that decoder block's output, so
+    layers above it are never computed (baukit ``stop=True`` on the last-registered name). All captured
+    modules must live at layers <= ``stop_after`` for their outputs to be populated before the halt."""
     unt = lambda x: x[0] if isinstance(x, tuple) else x
-    names = [mt.layer_name_format.format(l) for l in layers_resid]
-    for l in (layers_qkv or []):
-        names += [_proj(mt, l, w) for w in ("q", "k", "v")]
+    names = [_proj(mt, l, w) for l in (layers_qkv or []) for w in ("q", "k", "v")]
     names += [_mlp_name(mt, l) for l in (layers_mlp or [])]
-    with baukit.TraceDict(mt._model, names, retain_output=True) as tr:
+    names += [mt.layer_name_format.format(l) for l in layers_resid]   # block outputs LAST (deepest fires last)
+    if stop_after is not None:
+        names.append(mt.layer_name_format.format(stop_after))         # ensure the stop target is the last name
+    with baukit.TraceDict(mt._model, names, retain_output=True, stop=stop_after is not None) as tr:
         mt._model(input_ids=ids, attention_mask=attn)
     resid = {l: unt(tr[mt.layer_name_format.format(l)].output)[0].float() for l in layers_resid}
     qkv = {l: {w: unt(tr[_proj(mt, l, w)].output)[0].float() for w in ("q", "k", "v")}
@@ -239,16 +244,16 @@ def build_pair_cache(mt, spec, l_read, intervention, build_prompts_fn, stub="var
     spans = [find_token_range(P["dst_prompt"], pr.description, mt.tokenizer)
              for pr in P["dst_inst"].task.predicates]
 
-    # SRC forward: pivot q_proj outputs (pre-RoPE) for candidate layers
+    # SRC forward: pivot q_proj outputs (pre-RoPE) for candidate layers — truncate past l_read
     _, src_qkv, _ = _forward_capture(mt, src_tok["input_ids"], src_tok["attention_mask"],
-                                     layers_resid=[], layers_qkv=cand_layers)
+                                     layers_resid=[], layers_qkv=cand_layers, stop_after=l_read - 1)
     q_src_pivot = {l: src_qkv[l]["q"][src_piv] for l in cand_layers}
 
-    # clean DST forward: residual@l_read, candidate q/k/v, MLPs (for #2)
+    # clean DST forward: residual@l_read, candidate q/k/v, MLPs (for #2) — truncate past l_read
     need_mlp = cand_layers if intervention == "mlps_frozen" else []
     resid, dst_qkv, mlp = _forward_capture(
         mt, dst_tok["input_ids"], dst_tok["attention_mask"],
-        layers_resid=[l_read - 1], layers_qkv=cand_layers, layers_mlp=need_mlp)
+        layers_resid=[l_read - 1], layers_qkv=cand_layers, layers_mlp=need_mlp, stop_after=l_read - 1)
     clean_h_read = resid[l_read - 1]                              # (seq, n_embd)
     q_dst_pivot = {l: dst_qkv[l]["q"][dst_piv] for l in cand_layers}
 
@@ -279,9 +284,11 @@ _DISK_CACHED = ("block_head_communication",)
 
 def load_or_build_caches(mt, specs, l_read, intervention, build_prompts_fn, cache_dir,
                          datatype, lang, seed, stub="var_eq", src_targ_in_dst=True, overwrite=False):
-    """Per-pair caches for one intervention, on the model device. Only ``block_head_communication`` is
-    persisted to ``cache_dir`` (keyed by the full config, so a matching prior run is reused); the other
-    interventions are always rebuilt in memory (see ``_DISK_CACHED``)."""
+    """Per-pair caches for one intervention. ``block_head_communication`` (#3) is disk-persisted and
+    returned on the model device (its per-pair OV deltas are read every step). ``free_form`` /
+    ``mlps_frozen`` (#1/#2) are rebuilt in memory and kept on **CPU** — their grad forward moves inputs
+    to the device and the q-blend / MLP-freeze hooks move their own slices per-use, so the (large, for
+    #2) clean-MLP caches never sit on the GPU. Disk cache keyed by the full config (reused on match)."""
     dev = next(mt._model.parameters()).device
 
     def _build():
@@ -290,7 +297,9 @@ def load_or_build_caches(mt, specs, l_read, intervention, build_prompts_fn, cach
 
     if intervention not in _DISK_CACHED:
         caches = _build()
-        logger.info(f"built {len(caches)} caches in memory (no disk cache for {intervention})")
+        for c in caches:                                      # keep #1/#2 caches on CPU (memory-safe)
+            c.cpu_()
+        logger.info(f"built {len(caches)} caches on CPU (no disk cache for {intervention})")
         return caches
 
     slug = mt.name.split("/")[-1]
@@ -417,15 +426,21 @@ def _mlp_freeze_hooks(mt, cache: PairCache):
 
 def h_read_forward(mt, mask: HeadMask, cache: PairCache, freeze_mlp: bool):
     """#1 / #2: grad-enabled DST forward with the q-blend hooks (+ MLP freeze for #2), returning the
-    residual after block l_read-1 at every position. Differentiable in the mask."""
+    residual after block l_read-1 at every position. Differentiable in the mask.
+
+    Truncated: ``stop=True`` halts the forward right after block l_read-1, so layers >= l_read are never
+    computed (no activations retained for them). Inputs are moved to the model device here, so the pair
+    caches can live on CPU (the q-blend / MLP-freeze hooks move their own slices per-use)."""
     unt = lambda x: x[0] if isinstance(x, tuple) else x
     name = mt.layer_name_format.format(cache.l_read - 1)
+    dev = next(mt._model.parameters()).device
+    ids, attn = cache.dst_ids.to(dev), cache.dst_attn.to(dev)
     handles = _q_blend_hooks(mt, mask, cache)
     if freeze_mlp:
         handles += _mlp_freeze_hooks(mt, cache)
     try:
-        with baukit.TraceDict(mt._model, [name], retain_output=True) as tr:
-            mt._model(input_ids=cache.dst_ids, attention_mask=cache.dst_attn)
+        with baukit.TraceDict(mt._model, [name], retain_output=True, stop=True) as tr:
+            mt._model(input_ids=ids, attention_mask=attn)
         return unt(tr[name].output)[0].float()
     finally:
         for h in handles:

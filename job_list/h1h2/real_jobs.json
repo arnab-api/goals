@@ -1,0 +1,32 @@
+[
+    {
+        "name": "h1h2_bhc_cache_warmup_512",
+        "command": "mkdir -p logs/h1h2 && python -m scripts.evaluation.train_h1h2_mask --model=Qwen/Qwen2.5-Coder-32B-Instruct --datatype list[str] --n_pairs 512 --l_read 40 --lambda_sparse 5 --n_epochs 32 --seed 123 --intervention block_head_communication --hypotheses h2 --n_epochs 1 --overwrite_cache |& tee logs/h1h2/real_bhc_warmup512.log"
+    },
+    {
+        "name": "h1h2_real_bhc_h1",
+        "command": "mkdir -p logs/h1h2 && python -m scripts.evaluation.train_h1h2_mask --model=Qwen/Qwen2.5-Coder-32B-Instruct --datatype list[str] --n_pairs 512 --l_read 40 --lambda_sparse 5 --n_epochs 32 --seed 123 --intervention block_head_communication --hypotheses h1 |& tee logs/h1h2/real_bhc_h1.log",
+        "dependencies": ["h1h2_bhc_cache_warmup_512"]
+    },
+    {
+        "name": "h1h2_real_bhc_h2",
+        "command": "mkdir -p logs/h1h2 && python -m scripts.evaluation.train_h1h2_mask --model=Qwen/Qwen2.5-Coder-32B-Instruct --datatype list[str] --n_pairs 512 --l_read 40 --lambda_sparse 5 --n_epochs 32 --seed 123 --intervention block_head_communication --hypotheses h2 |& tee logs/h1h2/real_bhc_h2.log",
+        "dependencies": ["h1h2_bhc_cache_warmup_512"]
+    },
+    {
+        "name": "h1h2_real_freeform_h1",
+        "command": "mkdir -p logs/h1h2 && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.train_h1h2_mask --model=Qwen/Qwen2.5-Coder-32B-Instruct --datatype list[str] --n_pairs 512 --l_read 40 --lambda_sparse 5 --n_epochs 32 --seed 123 --intervention free_form --hypotheses h1 --batch_size 8 |& tee logs/h1h2/real_freeform_h1.log"
+    },
+    {
+        "name": "h1h2_real_freeform_h2",
+        "command": "mkdir -p logs/h1h2 && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.train_h1h2_mask --model=Qwen/Qwen2.5-Coder-32B-Instruct --datatype list[str] --n_pairs 512 --l_read 40 --lambda_sparse 5 --n_epochs 32 --seed 123 --intervention free_form --hypotheses h2 --batch_size 8 |& tee logs/h1h2/real_freeform_h2.log"
+    },
+    {
+        "name": "h1h2_real_mlpsfrozen_h1",
+        "command": "mkdir -p logs/h1h2 && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.train_h1h2_mask --model=Qwen/Qwen2.5-Coder-32B-Instruct --datatype list[str] --n_pairs 512 --l_read 40 --lambda_sparse 5 --n_epochs 32 --seed 123 --intervention mlps_frozen --hypotheses h1 --batch_size 8 |& tee logs/h1h2/real_mlpsfrozen_h1.log"
+    },
+    {
+        "name": "h1h2_real_mlpsfrozen_h2",
+        "command": "mkdir -p logs/h1h2 && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.train_h1h2_mask --model=Qwen/Qwen2.5-Coder-32B-Instruct --datatype list[str] --n_pairs 512 --l_read 40 --lambda_sparse 5 --n_epochs 32 --seed 123 --intervention mlps_frozen --hypotheses h2 --batch_size 8 |& tee logs/h1h2/real_mlpsfrozen_h2.log"
+    }
+]
