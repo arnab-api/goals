@@ -37,11 +37,38 @@ only partially from the *full* attention output at the concentration band (0.34,
 and essentially **not** from the raw residual stream (~0.01–0.03) — whose norm is dominated by non-goal
 content, so norm-relative injection of it carries almost no goal signal.
 
-### (b) sparsity — how many heads? *(running; results pending)*
+### (b) sparsity — how many heads? *(complete, 2026-09-11)*
 
 Qwen2.5-Coder-32B, `additive_norm α=0.1`, head-set sizes **5, 10, 25, 50, 100, 150, 200, 250, 300** +
-the 122 anchor (`job_list/goalscope_eval/goalscope_eval_b_sparsity.json`). Jobs still running on the
-remote box; §2 of the notebook + this section populate once they land.
+the **122** anchor (`job_list/goalscope_eval/goalscope_eval_b_sparsity.json`). `hard_yes` pooled over
+the 5 pivots (`overall.hard_yes`, n=1265 records / 253 specs each). Pulled from
+`umibozu:/share/NFS/.../goalscope/Qwen2.5-Coder-32B-Instruct/{faithfulness,causality}/additive_norm/0.1/`.
+
+| # heads | faithfulness | causality |
+|---:|---|---|
+| 5   | 0.446 | 0.425 |
+| 10  | 0.715 | 0.625 |
+| 25  | 0.791 | 0.779 |
+| 50  | 0.817 | 0.839 |
+| 100 | 0.867 | 0.813 |
+| **122** (anchor) | **0.879** | **0.792** |
+| 150 | 0.859 | 0.816 |
+| 200 | 0.880 | 0.794 |
+| 250 | 0.852 | 0.750 |
+| 300 | 0.874 | 0.779 |
+
+![axis b sparsity](figures/goalscope_axis_b_sparsity.png)
+
+**The encoding is sparse and saturates early.** Read-out climbs steeply from 5→25 heads
+(faithfulness 0.45→0.79; causality 0.43→0.78) — **25 heads (~0.6% of 4160) already recover ~90% of the
+full-set faithfulness** — then plateaus: ~50–100 heads essentially match the 122 anchor, and adding
+heads beyond ~100 gives no faithfulness gain and a mild *causality* decline (0.84 @50 → 0.75 @250),
+consistent with larger sets pulling in less-selective heads that dilute the steered direction. Head
+budget, not raw count, is what matters; the 122 anchor sits on the plateau, not at a peak.
+
+The head-set naming reflects how each size was cut (`snap_top{5,10,25}` from the training-snapshot
+count; `lam*_top{50,…,300}` from mask sweeps at various λ), so the sweep is not a single clean
+threshold sweep — sizes are comparable, the exact head membership per size is not strictly nested.
 
 ### (c) generalization across models — `replace α=1.0`, goal heads
 
@@ -132,22 +159,20 @@ In `job_list/goalscope_norm_vs_residual.json` (currently pinned at α=0.1; updat
 Optional, only if the literal paper replication is wanted: `--source-agg last`, and a plain-additive
 residual arm.
 
-### b. Head sparsity
+### b. Head sparsity — **DONE** (results in §(b) above)
 
-Top-k by mask value: **25, 50, 100, 150, 200, 300**. Export each with
-`notebooks/clock/__head_inspection.ipynb` (`CFG["goal"]["topk"]`, writes
-`head_sets/<model>/goal__lam20_top<k>.json`), then point `--heads` at the path.
+Nine sizes run (**5, 10, 25, 50, 100, 150, 200, 250, 300**) + the 122 anchor, both modes,
+`additive_norm α=0.1`. Numbers pulled from umibozu 2026-09-11 → see the results table in
+[§(b) sparsity](#b-sparsity--how-many-heads-complete-2026-09-11). Headline: read-out saturates by
+~50–100 heads; 25 heads already recover ~90% of full faithfulness.
 
-- [ ] export the six json head sets
-- [ ] 6 × faithfulness, `additive_norm`, α=TBD
-- [ ] 6 × causality, `additive_norm`, α=TBD
-
-Two things to watch:
-* **must be `additive_norm`** — under `additive` this sweep measures ‖g_enc‖ growth (above);
-* the goal mask **saturates**: 117 of Qwen-Coder-32B's heads sit at exactly 1.0, so k ≤ 117 cuts
-  through a tie block and the selection is index order, not importance. `n_tied@K` in
-  `__head_inspection` flags it. k = 25 / 50 / 100 are all inside that block — report them as
-  "an arbitrary 25 of the 117 maximal heads", not "the top 25".
+Two things watched (still relevant when interpreting the curve):
+* **must be `additive_norm`** — under `additive` this sweep would measure ‖g_enc‖ growth (above); it is;
+* the goal mask **saturates**: 117 of Qwen-Coder-32B's heads sit at exactly 1.0, so a pure top-k-by-mask
+  cut with k ≤ 117 slices a tie block (index order, not importance). The small sets here dodge this by
+  cutting on the **training-snapshot count** instead (`snap_top{5,10,25}`); the `lam*_top{50..300}` sets
+  come from mask sweeps at various λ. So sizes are comparable but membership is not strictly nested —
+  the curve shows the effect of head *budget*, and should not be read as a clean nested top-k ordering.
 
 ### c. Model axes
 

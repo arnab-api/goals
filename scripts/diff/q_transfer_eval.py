@@ -62,9 +62,9 @@ if _cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-import src.diff.data as D  # noqa: E402
+import src.diff.data as DATA  # noqa: E402
 import src.diff.eval as E  # noqa: E402
-import src.diff.functional as P  # noqa: E402
+import src.diff.functional as FUNC  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
@@ -220,7 +220,7 @@ def _progress_of(inst) -> tuple[list, list]:
 
 
 def _resolve_datatypes(setup: str, requested) -> list[str]:
-    avail = list(D.QTASKS) if setup == "multi_pred" else list(D.FILTER_TASKS)
+    avail = list(DATA.QTASKS) if setup == "multi_pred" else list(DATA.FILTER_TASKS)
     if not requested:
         return avail
     keep = [d for d in requested if d in avail]
@@ -316,7 +316,7 @@ def run_config(
     set_seed(cfg_seed)
     if setup == "multi_pred":
         # each instance = a random n_conditions-predicate task + a fixed contrastive split
-        setups = D.q_transfer_setups(
+        setups = DATA.q_transfer_setups(
             dt,
             n_conditions=args.n_conditions,
             n_samples=args.n_samples,
@@ -334,7 +334,7 @@ def run_config(
                 inst.naming = _pick_naming(tag, _inst_key(inst))
         size_note = f"k={args.n_conditions}"
     else:  # filter — 2 commutative sub-tasks, SRC/DST prefill different single sub-tasks
-        setups = D.filter_transfer_setups(
+        setups = DATA.filter_transfer_setups(
             dt,
             n_samples=args.n_samples,
             seed=cfg_seed,
@@ -363,7 +363,7 @@ def run_config(
             f"SRC {inst.expected_next!r} -> DST {inst.meta['dst_next']!r}"
             f"  |  {inst.expected_next_desc!r}  vs  {inst.dst_next_desc!r}"
         )
-        raw = P.run_q_transfer_intervention(
+        raw = FUNC.run_q_transfer_intervention(
             mt,
             inst,
             patch_heads,
@@ -482,7 +482,7 @@ def parse_args():
         "--datatypes",
         nargs="+",
         default=None,
-        choices=sorted(set(D.QTASKS) | set(D.FILTER_TASKS)),
+        choices=sorted(set(DATA.QTASKS) | set(DATA.FILTER_TASKS)),
         help="which datatype tasks to run. Default: all datatypes available for each setup "
         "(q has 4, filter has 3). Requested datatypes not available for a setup are skipped.",
     )
@@ -598,7 +598,7 @@ def main():
             f"(requested {args.cuda})"
         )
 
-    ctx = P.setup(args.model)  # loads model + head masks; binds module globals
+    ctx = FUNC.setup(args.model)  # loads model + head masks; binds module globals
     mt = ctx.mt
     patch_heads = _resolve_patch_heads(ctx, args.patch_heads)
     ph_tag = _patch_heads_tag(args.patch_heads, len(patch_heads))
@@ -612,7 +612,9 @@ def main():
     )
 
     model_short = args.model.split("/")[-1]
-    run_tag = _run_tag(ph_tag, ro_tag, args.alpha, args.n_pivot)  # groups this run's outputs
+    run_tag = _run_tag(
+        ph_tag, ro_tag, args.alpha, args.n_pivot
+    )  # groups this run's outputs
     logger.info(f"run_tag={run_tag}")
 
     # enumerate configs per setup (each setup owns its axes + results subdir)

@@ -66,9 +66,9 @@ if _cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-import src.diff.data as D  # noqa: E402
+import src.diff.data as DATA  # noqa: E402
 import src.diff.eval as E  # noqa: E402
-import src.diff.functional as P  # noqa: E402
+import src.diff.functional as FUNC  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
@@ -186,7 +186,7 @@ def _patch_heads_tag(spec, n) -> str:
 
 
 def _inst_key(inst) -> str:
-    if isinstance(inst, D.KVTransferInstance):
+    if isinstance(inst, DATA.KVTransferInstance):
         return f"kv|{inst.meta['cluster']}|src={inst.src_task}|dst={inst.dst_task}"
     # multi-predicate: identity = shared prefix + the two frontiers
     return (
@@ -196,7 +196,7 @@ def _inst_key(inst) -> str:
 
 
 def _group_of(inst) -> str:
-    if isinstance(inst, D.KVTransferInstance):
+    if isinstance(inst, DATA.KVTransferInstance):
         return inst.meta["cluster"]
     return "shared:" + "-".join(p.id for p in inst.shared)
 
@@ -206,7 +206,7 @@ def _naming_of(inst) -> str:
 
 
 def _resolve_datatypes(setup: str, requested) -> list[str]:
-    avail = list(D.KVCLUSTERS) if setup == "dual_comp" else list(D.QTASKS)
+    avail = list(DATA.KVCLUSTERS) if setup == "dual_comp" else list(DATA.QTASKS)
     if not requested:
         return avail
     keep = [d for d in requested if d in avail]
@@ -309,7 +309,7 @@ def run_config(
     set_seed(cfg_seed)
     presentation = "description" if setup == "dual_comp" else "listed"
     if setup == "dual_comp":
-        setups = D.kv_transfer_setups(
+        setups = DATA.kv_transfer_setups(
             dt,
             presentation=presentation,
             src_lang=sl,
@@ -319,7 +319,7 @@ def run_config(
         )
         size_note = "kv-cluster"
     else:  # multi-predicate
-        setups = D.multi_predicate_setups(
+        setups = DATA.multi_predicate_setups(
             dt,
             n_conditions=args.n_conditions,
             n_samples=args.n_samples,
@@ -353,7 +353,7 @@ def run_config(
             f"SRC {inst.expected_next!r} -> DST {inst.dst_next!r}"
             f"  |  {inst.expected_next_desc!r}  vs  {inst.dst_next_desc!r}"
         )
-        raw = P.run_kv_transfer_intervention(
+        raw = FUNC.run_kv_transfer_intervention(
             mt,
             inst,
             patch_heads,
@@ -456,7 +456,7 @@ def parse_args():
         "--datatypes",
         nargs="+",
         default=None,
-        choices=sorted(set(D.KVCLUSTERS) | set(D.QTASKS)),
+        choices=sorted(set(DATA.KVCLUSTERS) | set(DATA.QTASKS)),
         help="which datatypes to run (default: all available for each setup).",
     )
     p.add_argument(
@@ -568,7 +568,7 @@ def main():
             f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} (requested {args.cuda})"
         )
 
-    ctx = P.setup(args.model)  # loads model + head masks; binds module globals
+    ctx = FUNC.setup(args.model)  # loads model + head masks; binds module globals
     mt = ctx.mt
     patch_heads = _resolve_patch_heads(ctx, args.patch_heads)
     ph_tag = _patch_heads_tag(args.patch_heads, len(patch_heads))
@@ -595,7 +595,9 @@ def main():
 
     model_short = args.model.split("/")[-1]
     # groups this run's outputs (ablation strat folded into the ablate segment when ablation is on)
-    run_tag = _run_tag(ph_tag, ro_tag, abl_tag, args.ablation_strat, args.alpha, args.align)
+    run_tag = _run_tag(
+        ph_tag, ro_tag, abl_tag, args.ablation_strat, args.alpha, args.align
+    )
     logger.info(f"run_tag={run_tag}")
 
     configs = []  # (setup, dt, variant, letter_stub, lt)

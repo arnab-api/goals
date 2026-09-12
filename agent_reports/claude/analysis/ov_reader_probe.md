@@ -2,7 +2,8 @@
 
 *Companion to `src/goals/goalscope.py` (`OVReader`), `scripts/evaluation/eval_ov_reader.py`,
 `scripts/evaluation/ov_reader_io.py`, and `notebooks/diff/7_ov_reader_eval_demo.ipynb`.
-Last updated 2026-09-10. All 8 jobs complete ({faithfulness, causality} × 4 datatypes, python, **n=64**).*
+Last updated 2026-09-11. All 8 jobs complete ({faithfulness, causality} × 4 datatypes, python, **n=64**),
+now including the **last layer (L63)** — the probe layer list always appends `n_layer-1`.*
 
 > **Causality is now sanitized** (see §5.0). Trivial sign/zero frontiers are excluded from target
 > selection and trivial read-outs (`value > 0` / `== 0` / `< 0`) are forced to NO, so the no-goal
@@ -140,7 +141,8 @@ span-labelling needed. Then greedy-decode 64 tokens.
 **Per datapoint, at each pivot:**
 - **Skyline** — `apply_goalscope(strategy="additive_norm", alpha=0.1)` = the goal heads' actual **output**
   read-out (the upper reference OVReader is compared against).
-- **OVReader** — `apply_probe` across `--layers` (default 18: `0..36:6, 38..54:2, 56..:4`).
+- **OVReader** — `apply_probe` across `--layers` (default `0..36:6, 38..54:2, 56..n_layer:4` **+ the last
+  layer `n_layer-1`=63** — 19 layers for Coder-32B).
 
 **Grading** — `eval_goalscope.hard_eval` (oracle `claude-sonnet-4.6`), the same rubric/verdict parser as the
 GoalScope evals; `hard_yes` = fraction graded YES. `mode ∈ {faithfulness, causality}`.
@@ -183,20 +185,24 @@ additionally remove the false-positive *targets* — expected to move numbers li
 
 ### 5.1 hard_yes across layers
 
-| job | skyline | L0 | L36 | L40 | L46 | L50 | L54 | L60 | OV peak |
-|---|---|---|---|---|---|---|---|---|---|
-| faithfulness int | 0.86 | 0.01 | 0.26 | 0.47 | 0.80 | 0.87 | 0.84 | 0.72 | **0.87 @ L50–52** |
-| faithfulness str | 0.93 | 0.00 | 0.30 | 0.47 | 0.64 | 0.81 | 0.79 | 0.76 | **0.81 @ L50** |
-| faithfulness list[int] | 0.88 | 0.02 | 0.34 | 0.55 | 0.78 | 0.85 | 0.80 | 0.70 | **0.85 @ L50** |
-| faithfulness list[str] | 0.86 | 0.01 | 0.34 | 0.53 | 0.62 | 0.70 | 0.63 | 0.58 | **0.71 @ L48** |
-| causality int *(sanitized)* | 0.76 | 0.00 | 0.33 | 0.42 | 0.72 | 0.80 | 0.79 | 0.68 | **0.80 @ L50** |
-| causality str *(sanitized)* | 0.82 | 0.01 | 0.35 | 0.45 | 0.60 | 0.76 | 0.69 | 0.64 | **0.76 @ L50** |
-| causality list[int] *(sanitized)* | 0.71 | 0.03 | 0.31 | 0.44 | 0.64 | 0.68 | 0.63 | 0.48 | **0.68 @ L50** |
-| causality list[str] *(sanitized)* | 0.71 | 0.02 | 0.25 | 0.36 | 0.43 | 0.62 | 0.56 | 0.49 | **0.62 @ L50** |
+| job | skyline | L0 | L36 | L40 | L46 | L50 | L54 | L60 | L63 | OV peak |
+|---|---|---|---|---|---|---|---|---|---|---|
+| faithfulness int | 0.86 | 0.01 | 0.26 | 0.47 | 0.80 | 0.87 | 0.84 | 0.72 | 0.57 | **0.87 @ L50–52** |
+| faithfulness str | 0.93 | 0.00 | 0.30 | 0.47 | 0.64 | 0.81 | 0.79 | 0.76 | 0.63 | **0.81 @ L50** |
+| faithfulness list[int] | 0.88 | 0.02 | 0.34 | 0.55 | 0.78 | 0.85 | 0.80 | 0.70 | 0.51 | **0.85 @ L50** |
+| faithfulness list[str] | 0.86 | 0.01 | 0.34 | 0.53 | 0.62 | 0.70 | 0.63 | 0.58 | 0.40 | **0.71 @ L48** |
+| causality int *(sanitized)* | 0.76 | 0.00 | 0.33 | 0.42 | 0.72 | 0.80 | 0.79 | 0.68 | 0.61 | **0.80 @ L50** |
+| causality str *(sanitized)* | 0.82 | 0.01 | 0.35 | 0.45 | 0.60 | 0.76 | 0.69 | 0.64 | 0.63 | **0.76 @ L50** |
+| causality list[int] *(sanitized)* | 0.71 | 0.03 | 0.31 | 0.44 | 0.64 | 0.68 | 0.63 | 0.48 | 0.44 | **0.68 @ L50** |
+| causality list[str] *(sanitized)* | 0.71 | 0.02 | 0.25 | 0.36 | 0.43 | 0.62 | 0.56 | 0.49 | 0.40 | **0.62 @ L50** |
 
 **Read:** faithfulness starts near-zero; sanitized causality now also starts at **~0 at L0** (the old L0
 floor of 0.22/0.31 for `int`/`list[int]` was entirely the trivial C++-stub default — see §5.0). Both climb
-from ~L36–40 and **saturate ~L48–54 near the goal-head OUTPUT skyline**, then taper by L56–60. **Datatype
+from ~L36–40 and **saturate ~L48–54 near the goal-head OUTPUT skyline**, then taper by L56–60 and **fall
+further at the last layer L63** (mean over datatypes: faith **0.53**, caus **0.52** — well below the mid-50s
+peak; `list[str]` drops most, to 0.40). By the final layer the residual has largely been re-shaped for
+next-token prediction, so the abstract goal is no longer as linearly present in the OV-write direction.
+**Datatype
 gradient** (both modes): `int`/`str` strongest, `list[int]` a bit below, `list[str]` weakest. **Sanitizer
 effect** is concentrated on `int`/`list[int]` (skyline 0.90→0.76, 0.83→0.71; peak 0.91→0.80, 0.79→0.68);
 `str`/`list[str]` are essentially unchanged (no sign/zero predicates to exploit). After sanitization the OV
@@ -250,13 +256,18 @@ use the §5.0 sanitizer, so L0 sits at ~0.
 The curves make the emergence explicit: `eq`/`first_impl` are flat-low through L≤30 then rise steeply to
 the skyline by ~L40–48; `indent`/`var` lag; `prev_end` never reaches its (already low) skyline. Faithfulness
 and sanitized causality trace the same shape, causality a few points lower and now correctly pinned to ~0 at
-L0. *(Superseded: the earlier faithfulness-only `ov_reader_agg_*` / `ov_reader_*` figures predate the
+L0. The x-axis now extends to **L63**: every pivot shows a **drop at the last layer** off the mid-50s
+plateau (steepest for `list[str]`), consistent with the residual turning over to next-token prediction.
+*(Superseded: the earlier faithfulness-only `ov_reader_agg_*` / `ov_reader_*` figures predate the
 sanitizer.)*
 
 ### 5.5 Interpretation
 
 The goal (DIFF) is **linearly present in the residual's OV-write subspace from ~L40, before the goal-head
-layers concentrate**, and by mid-50s it is as readable as the goal heads' own output. It is **pivot-gated**:
+layers concentrate**, peaks in the **mid-50s** where it is as readable as the goal heads' own output, and
+then **decays through L60 to the last layer L63** (mean ≈0.52–0.53, down from the ~0.8 peak) — the goal is a
+mid/upper-stack phenomenon, gone from the OV-write direction once the final layer commits to the next token.
+It is **pivot-gated**:
 strong at/after the `=` (goal committed), absent before the line begins (`prev_end`, where the goal heads
 themselves are also weak). Together with the ★ Headline result (the goal-head *query* already carries the
 computed next goal), this supports: **the DIFF is computed upstream of the goal heads and is already in the
@@ -274,7 +285,8 @@ artifact), leaving the emergence-from-~L40, saturate-near-skyline story intact.
 
 ## 6. Status / next
 
-- **Complete** (2026-09-10): all 8 jobs, n=64; §5 tables + §5.3–5.4 figures reflect the final data,
+- **Complete** (2026-09-11): all 8 jobs, n=64, **last layer L63 included**; §5.1 table has an L63 column and
+  §5.4 curves extend to L63. §5 tables + §5.3–5.4 figures reflect the final data,
   **causality sanitized** (§5.0). Sanitizer lives in code: `src.diff.data.TRIVIAL_FRONTIERS` /
   `nontrivial_frontiers` (target side, consumed by `eval_ov_reader.sample_datapoints`) and
   `eval_goalscope.is_trivial_causal_readout` (read-out side, in `hard_eval`). Coverage: `test/test_causal_sanitizer.py`.

@@ -60,7 +60,7 @@ sys.path.append(".")
 import numpy as np
 import torch
 
-import src.diff.data as D
+import src.diff.data as DATA
 from scripts.clock.score_condition_heads import load_head_scores
 from scripts.evaluation import faithfulness_io as fio
 from src.goals.goalscope import GOALSCOPE_SYS, apply_goalscope, greedy_continue
@@ -104,12 +104,15 @@ def default_goal_band(model_name, n_layer=None):
             f"no GOAL_BANDS entry for {slug!r} — pass --goal_band explicitly (or add it to "
             f"GOAL_BANDS). Falling back to another model's band would select the wrong heads."
         )
-    logger.warning(f"no GOAL_BANDS entry for {slug!r} — using the full depth (0, {n_layer})")
+    logger.warning(
+        f"no GOAL_BANDS entry for {slug!r} — using the full depth (0, {n_layer})"
+    )
     return (0, n_layer)
 
 
-def load_goal_heads(model_name, results_dir, threshold=0.9, band=None, tag="lam20",
-                    n_layer=None):
+def load_goal_heads(
+    model_name, results_dir, threshold=0.9, band=None, tag="lam20", n_layer=None
+):
     ck = torch.load(
         os.path.join(
             results_dir, f"localization/{model_name.split('/')[-1]}/{tag}/head_mask.pt"
@@ -178,11 +181,15 @@ def load_json_heads(spec, n_layer, n_heads):
     heads = []
     for i, item in enumerate(arr):
         if not (isinstance(item, (list, tuple)) and len(item) == 2):
-            raise SystemExit(f"--heads {spec!r}: entry {i} is {item!r}, want a [layer, head] pair")
+            raise SystemExit(
+                f"--heads {spec!r}: entry {i} is {item!r}, want a [layer, head] pair"
+            )
         try:
             l, h = int(item[0]), int(item[1])
         except (TypeError, ValueError):
-            raise SystemExit(f"--heads {spec!r}: entry {i} = {item!r} is not a pair of ints") from None
+            raise SystemExit(
+                f"--heads {spec!r}: entry {i} = {item!r} is not a pair of ints"
+            ) from None
         if not (0 <= l < n_layer):
             raise SystemExit(
                 f"--heads {spec!r}: entry {i} has layer {l}, outside [0, {n_layer}) for this model"
@@ -201,8 +208,15 @@ def load_json_heads(spec, n_layer, n_heads):
     return heads
 
 
-def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
-                  goal_band=None, n_layer=None):
+def load_head_set(
+    spec,
+    model_name,
+    results_dir,
+    n_heads,
+    goal_threshold=0.9,
+    goal_band=None,
+    n_layer=None,
+):
     """Return list[(layer, head)] for spec in {'goal','gaze','decision', <path>.json}."""
     goal_kw = dict(threshold=goal_threshold, band=goal_band, n_layer=n_layer)
     if spec.endswith(".json"):
@@ -213,7 +227,8 @@ def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
         heads = load_decision_heads(model_name)
     elif spec == "gaze":  # equal-N to goal (matches 09.1)
         heads = load_gaze_heads(
-            model_name, n_heads,
+            model_name,
+            n_heads,
             topk=len(load_goal_heads(model_name, results_dir, **goal_kw)),
         )
     else:
@@ -226,8 +241,11 @@ def load_head_set(spec, model_name, results_dir, n_heads, goal_threshold=0.9,
     if not heads:
         raise SystemExit(
             f"--heads {spec!r} selected 0 heads"
-            + (f" (threshold {goal_threshold} too high for this mask?)"
-               if spec in ("goal", "gaze") else "")
+            + (
+                f" (threshold {goal_threshold} too high for this mask?)"
+                if spec in ("goal", "gaze")
+                else ""
+            )
         )
     return heads
 
@@ -257,15 +275,22 @@ def load_locked_datapoints(dataset_path, datatypes):
                 f"(have {sorted(data['datapoints'])})"
             )
         for r in recs:
-            bank = D.QTASKS[r["datatype"]]
+            bank = DATA.QTASKS[r["datatype"]]
             by_id = {p.id: p for p in bank.predicates}
             subset = tuple(by_id[pid] for pid in r["predicate_ids"])
-            task = dataclasses.replace(bank, id=f"{bank.id}_T{r['T']}", predicates=subset)
-            inst = D.QTransferInstance(
-                task=task, var_name=bank.var_names[0], presentation=r["presentation"],
-                src_lang=r["lang"], dst_lang=r["lang"],
-                src_progress=list(r["progress_ids"]), dst_progress=list(r["progress_ids"]),
-                expected_next=r["frontier_id"], naming=r["naming"],
+            task = dataclasses.replace(
+                bank, id=f"{bank.id}_T{r['T']}", predicates=subset
+            )
+            inst = DATA.QTransferInstance(
+                task=task,
+                var_name=bank.var_names[0],
+                presentation=r["presentation"],
+                src_lang=r["lang"],
+                dst_lang=r["lang"],
+                src_progress=list(r["progress_ids"]),
+                dst_progress=list(r["progress_ids"]),
+                expected_next=r["frontier_id"],
+                naming=r["naming"],
                 meta={"datatype": r["datatype"], "T": r["T"], "j": r["j"]},
             )
             out.append((r["spec_id"], inst))
@@ -275,35 +300,46 @@ def load_locked_datapoints(dataset_path, datatypes):
 def _chat_prompt(mt, question, prefill):
     """Replicate src.diff.functional.get_prompt without depending on its module globals."""
     messages = [
-        {"role": "system", "content": "You are a helpful assistant proficient in programming. "
-         "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain."},
+        {
+            "role": "system",
+            "content": "You are a helpful assistant proficient in programming. "
+            "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.",
+        },
         {"role": "user", "content": question},
         {"role": "assistant", "content": prefill},
     ]
     try:
         return mt.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=False, continue_final_message=True,
-            tokenize=False, chat_template_kwargs={"enable_thinking": False},
+            messages,
+            add_generation_prompt=False,
+            continue_final_message=True,
+            tokenize=False,
+            chat_template_kwargs={"enable_thinking": False},
         )
     except TypeError:
         return mt.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=False, continue_final_message=True, tokenize=False,
+            messages,
+            add_generation_prompt=False,
+            continue_final_message=True,
+            tokenize=False,
         )
 
 
 def build_prompt(mt, inst, lang):
     """Prefilled source prompt ending at the frontier's ``{var} =`` (var_eq stub, letters)."""
     q, pf = inst.src_parts()
-    q = q.replace("computes:", "computes in sequential order:")  # nudge the model to follow the listing
+    q = q.replace(
+        "computes:", "computes in sequential order:"
+    )  # nudge the model to follow the listing
     var = inst.var_of(inst.expected_next)
     body = pf.rstrip("\n ")  # drop the trailing indent line
     if lang == "cpp":
         for pid in inst.src_progress:
-            body = D._cpp_autoify(body, inst.var_of(pid))
+            body = DATA._cpp_autoify(body, inst.var_of(pid))
         pf2 = body + f"\n    auto {var} ="
     else:
         pf2 = body + f"\n    {var} ="
-    return _chat_prompt(mt, q, D._finalize_prefill(pf2)), var
+    return _chat_prompt(mt, q, DATA._finalize_prefill(pf2)), var
 
 
 def generate_completion(mt, prompt, max_new_tokens):
@@ -327,10 +363,24 @@ def pivot_positions(mt, prompt, full_text, pivots):
     prompt_ids = prepare_input(prompts=prompt, tokenizer=mt)["input_ids"][0].tolist()
     full = prepare_input(prompts=full_text, tokenizer=mt)["input_ids"][0].tolist()
     P = len(prompt_ids)
-    if full[:P] != prompt_ids:  # boundary token merged on re-tokenisation — fall back to common prefix
-        P = next((i for i in range(min(len(full), len(prompt_ids)))
-                  if full[i] != prompt_ids[i]), min(len(full), len(prompt_ids)))
-    idx = {"prev_end": P - 4, "indent": P - 3, "var": P - 2, "eq": P - 1, "first_impl": P}
+    if (
+        full[:P] != prompt_ids
+    ):  # boundary token merged on re-tokenisation — fall back to common prefix
+        P = next(
+            (
+                i
+                for i in range(min(len(full), len(prompt_ids)))
+                if full[i] != prompt_ids[i]
+            ),
+            min(len(full), len(prompt_ids)),
+        )
+    idx = {
+        "prev_end": P - 4,
+        "indent": P - 3,
+        "var": P - 2,
+        "eq": P - 1,
+        "first_impl": P,
+    }
     return {p: idx[p] for p in pivots if 0 <= idx[p] < len(full)}
 
 
@@ -411,7 +461,9 @@ def build_causality_prompt(mt) -> str:
 def _parse_verdict(resp: str) -> str:
     """Prefer the <verdict>TOKEN</verdict> tag; fall back to the last bare verdict token."""
     m = re.search(
-        r"<verdict>\s*(HEAVY_LOOP|MALFORMED|NO_INFO|YES|NO)\s*</verdict>", resp, re.IGNORECASE
+        r"<verdict>\s*(HEAVY_LOOP|MALFORMED|NO_INFO|YES|NO)\s*</verdict>",
+        resp,
+        re.IGNORECASE,
     )
     if m:
         return m.group(1).upper()
@@ -427,8 +479,19 @@ def _parse_verdict(resp: str) -> str:
 # arithmetic/bitwise op (``value & (value - 1)`` — is_power_of_two, ``value % 2`` — is_even) survives
 # and keeps the read-out non-trivial. Hence: only ``&&``/``||`` (logical) are removed — a lone ``&``
 # or ``|`` (bitwise), ``%``, ``+``, ``-``, ``*``, ``~``, ``^``, ``.`` or any non-zero digit remains.
-_TRIVIAL_READOUT_TOKENS = ("bool", "check", "auto", "value", "val", "return",
-                           "if", "else", "true", "false", "nullptr")
+_TRIVIAL_READOUT_TOKENS = (
+    "bool",
+    "check",
+    "auto",
+    "value",
+    "val",
+    "return",
+    "if",
+    "else",
+    "true",
+    "false",
+    "nullptr",
+)
 
 
 def is_trivial_causal_readout(readout: str) -> bool:
@@ -441,11 +504,13 @@ def is_trivial_causal_readout(readout: str) -> bool:
     t = readout
     for tok in _TRIVIAL_READOUT_TOKENS:
         t = re.sub(rf"\b{tok}\b", "", t)
-    t = t.replace("&&", "").replace("||", "")            # logical connectives (not bitwise &/|)
-    for op in ("==", "!=", ">=", "<=", ">", "<"):        # comparison operators
+    t = t.replace("&&", "").replace("||", "")  # logical connectives (not bitwise &/|)
+    for op in ("==", "!=", ">=", "<=", ">", "<"):  # comparison operators
         t = t.replace(op, "")
-    t = re.sub(r"(?<![0-9])0(?![0-9])", "", t)           # the standalone literal 0 (NOT 10, 99, …)
-    t = re.sub(r"[?:;(){}\s!]", "", t)                   # ternary / scaffolding punctuation
+    t = re.sub(
+        r"(?<![0-9])0(?![0-9])", "", t
+    )  # the standalone literal 0 (NOT 10, 99, …)
+    t = re.sub(r"[?:;(){}\s!]", "", t)  # ternary / scaffolding punctuation
     return t == ""
 
 
@@ -458,8 +523,12 @@ def hard_eval(readout, impl_span, mode):
     # Sanitize: a trivial sign/zero read-out is what the model emits with NO goal signal, so it
     # can never count as a causal transfer, no matter what the LLM oracle says. Short-circuit NO.
     if mode == "causality" and is_trivial_causal_readout(readout):
-        return dict(verdict="NO", prompt=None, system=hard_sys,
-                    response="[sanitizer: trivial sign/zero read-out]")
+        return dict(
+            verdict="NO",
+            prompt=None,
+            system=hard_sys,
+            response="[sanitizer: trivial sign/zero read-out]",
+        )
     if mode == "causality":
         prompt = (
             f"Python (gold): {impl_span}\nC++ (read-out): {readout.strip()}\nAnswer:"
@@ -513,8 +582,11 @@ def compute_summary(records: list[dict], n_samples: int) -> dict:
     has_kway = bool(records) and all("kway_pred" in r for r in records)
 
     def _stats(grp):
-        d = dict(n=len(grp), hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])),
-                 heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in grp])))
+        d = dict(
+            n=len(grp),
+            hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])),
+            heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in grp])),
+        )
         if has_kway:
             d["kway_ok"] = float(
                 np.mean([r["kway_pred"] == r["kway_true"] for r in grp])
@@ -527,8 +599,10 @@ def compute_summary(records: list[dict], n_samples: int) -> dict:
         if (grp := [r for r in records if r["anchor"] == a])
     }
     if records:
-        overall = dict(hard_yes=float(np.mean([r["hard"] == "YES" for r in records])),
-                       heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in records])))
+        overall = dict(
+            hard_yes=float(np.mean([r["hard"] == "YES" for r in records])),
+            heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in records])),
+        )
         if has_kway:
             overall["kway_ok"] = float(
                 np.mean([r["kway_pred"] == r["kway_true"] for r in records])
@@ -554,7 +628,9 @@ def log_summary(summary: dict, mode: str = "faithfulness"):
             m = summary["by_anchor"][aname]
             k = f"  kway_ok={m['kway_ok']:.3f}" if "kway_ok" in m else ""
             hl = f"  hvy_loop={m['heavy_loop']:.3f}" if "heavy_loop" in m else ""
-            logger.info(f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}{hl}{k}")
+            logger.info(
+                f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}{hl}{k}"
+            )
     o = summary["overall"]
     k = f"  kway_ok={o['kway_ok']:.3f}" if "kway_ok" in o else ""
     hl = f"  hvy_loop={o['heavy_loop']:.3f}" if "heavy_loop" in o else ""
@@ -581,19 +657,26 @@ def parse_args():
         "--heads", default="goal", help="goal | gaze | decision | <path>.json"
     )
     ap.add_argument(
-        "--goal_threshold", type=float, default=None,
+        "--goal_threshold",
+        type=float,
+        default=None,
         help="mask-value cutoff for --heads goal (default 0.9). Default is None rather than 0.9 so "
         "that passing it explicitly is detectable: it is meaningless for a .json head set and "
         "combining the two is rejected rather than silently ignored.",
     )
     ap.add_argument(
-        "--goal_band", type=int, nargs=2, default=None, metavar=("START", "END"),
+        "--goal_band",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("START", "END"),
         help="layer band the goal heads are read from; default is per-model (GOAL_BANDS). "
         "Passing this explicitly also adds band=START-END to the run dir, so band sweeps "
         "do not overwrite each other.",
     )
     ap.add_argument(
-        "--strategy", default="additive",
+        "--strategy",
+        default="additive",
         choices=["additive", "additive_norm", "replace"],
         help="additive_norm makes the injection norm-relative "
         "(h + alpha*||h||*g/||g||) so alpha does not carry over from additive; "
@@ -618,21 +701,37 @@ def parse_args():
     )
     # ── corpus / model ──
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument("--datatypes", nargs="+", default=ALL_DATATYPES,
-                    help="datatypes AGGREGATED into ONE run (default: all four -> full 253-sample "
-                         "corpus). Records keep their per-datatype tag for later breakdown.")
-    ap.add_argument("--dataset", default=DEFAULT_DATASET,
-                    help="locked prefill-to-frontier dataset json (QTASKS recipes)")
-    ap.add_argument("--seed", type=int, default=123,
-                    help="torch/global seed for generation determinism (the corpus is fixed by the "
-                         "dataset, not this seed)")
     ap.add_argument(
-        "--gen_max_new_tokens", type=int, default=64, help="frontier-body greedy budget (>=1)"
+        "--datatypes",
+        nargs="+",
+        default=ALL_DATATYPES,
+        help="datatypes AGGREGATED into ONE run (default: all four -> full 253-sample "
+        "corpus). Records keep their per-datatype tag for later breakdown.",
     )
     ap.add_argument(
-        "--limit", type=int, default=None,
+        "--dataset",
+        default=DEFAULT_DATASET,
+        help="locked prefill-to-frontier dataset json (QTASKS recipes)",
+    )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=123,
+        help="torch/global seed for generation determinism (the corpus is fixed by the "
+        "dataset, not this seed)",
+    )
+    ap.add_argument(
+        "--gen_max_new_tokens",
+        type=int,
+        default=64,
+        help="frontier-body greedy budget (>=1)",
+    )
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=None,
         help="SMOKE ONLY: cap the corpus to N datapoints (round-robin across datatypes so all "
-             "prompt builders are hit). Changes n_specs -> a separate run dir; not for real runs.",
+        "prompt builders are hit). Changes n_specs -> a separate run dir; not for real runs.",
     )
     ap.add_argument(
         "--overwrite",
@@ -648,8 +747,12 @@ def parse_args():
     # never claim a selection knob that had no effect on the heads actually used.
     if args.heads.endswith(".json"):
         conflicting = [
-            name for name, val in (("--goal_threshold", args.goal_threshold),
-                                   ("--goal_band", args.goal_band)) if val is not None
+            name
+            for name, val in (
+                ("--goal_threshold", args.goal_threshold),
+                ("--goal_band", args.goal_band),
+            )
+            if val is not None
         ]
         if conflicting:
             ap.error(
@@ -658,7 +761,9 @@ def parse_args():
                 f"into the json."
             )
     if args.goal_threshold is None:
-        args.goal_threshold = 0.9  # materialise the documented default for the mask-based specs
+        args.goal_threshold = (
+            0.9  # materialise the documented default for the mask-based specs
+        )
     return args
 
 
@@ -683,7 +788,9 @@ def main():
 
     # ── LOCKED corpus: load up front (no model needed) so the run dir + skip check resolve first ──
     datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatypes)
-    if args.limit:  # SMOKE: round-robin across datatypes so a small N hits every prompt builder
+    if (
+        args.limit
+    ):  # SMOKE: round-robin across datatypes so a small N hits every prompt builder
         groups = {}
         for sid, inst in datapoints:
             groups.setdefault(inst.meta["datatype"], []).append((sid, inst))
@@ -694,13 +801,18 @@ def main():
                     picked.append(v[i])
             i += 1
         datapoints = picked
-        logger.warning(f"--limit {args.limit}: SMOKE run on {len(datapoints)} datapoints "
-                       f"({sorted({inst.meta['datatype'] for _, inst in datapoints})})")
+        logger.warning(
+            f"--limit {args.limit}: SMOKE run on {len(datapoints)} datapoints "
+            f"({sorted({inst.meta['datatype'] for _, inst in datapoints})})"
+        )
     num_conditions = ds_meta.get("n_conditions", [2, 3, 4])
     ds_seed = ds_meta.get("seed", args.seed)
     # datatype path tag: "all" when the full set is aggregated, else a filesystem-safe join
-    dt_tag = ("all" if set(args.datatypes) == set(ALL_DATATYPES)
-              else "+".join(d.replace("[", "").replace("]", "") for d in args.datatypes))
+    dt_tag = (
+        "all"
+        if set(args.datatypes) == set(ALL_DATATYPES)
+        else "+".join(d.replace("[", "").replace("]", "") for d in args.datatypes)
+    )
 
     # config (sans selected_heads) — enough to resolve the run dir + skip check before loading the model
     config = dict(
@@ -717,13 +829,13 @@ def main():
         n_steer_tokens=n_steer,
         max_new_tokens=args.max_new_tokens,
         model=args.model,
-        datatype=dt_tag,                    # "all" -> one run over the full aggregated corpus
-        datatypes=list(args.datatypes),     # provenance: exact datatypes aggregated
+        datatype=dt_tag,  # "all" -> one run over the full aggregated corpus
+        datatypes=list(args.datatypes),  # provenance: exact datatypes aggregated
         n_specs=len(datapoints),
         num_conditions=list(num_conditions),
         seed=ds_seed,
         gen_max_new_tokens=args.gen_max_new_tokens,
-        span_source="frontier",            # prefill-to-frontier: distinguishes leaf from the old 'rule'
+        span_source="frontier",  # prefill-to-frontier: distinguishes leaf from the old 'rule'
         dataset=str(args.dataset),
         bank="QTASKS",
         anchors=ANCHOR_ORDER,
@@ -789,12 +901,19 @@ def main():
     n_heads = mt.model.config.num_attention_heads
 
     heads = load_head_set(
-        args.heads, args.model, results_dir, n_heads,
-        goal_threshold=args.goal_threshold, goal_band=args.goal_band, n_layer=mt.n_layer,
+        args.heads,
+        args.model,
+        results_dir,
+        n_heads,
+        goal_threshold=args.goal_threshold,
+        goal_band=args.goal_band,
+        n_layer=mt.n_layer,
     )
     if args.heads == "goal":  # record the band actually used, resolved or not
-        band = tuple(args.goal_band) if args.goal_band else default_goal_band(
-            args.model, n_layer=mt.n_layer
+        band = (
+            tuple(args.goal_band)
+            if args.goal_band
+            else default_goal_band(args.model, n_layer=mt.n_layer)
         )
         config["goal_band"] = list(band)
         logger.info(
@@ -867,22 +986,32 @@ def main():
             # causality prepends the C++ stub so the oracle sees a complete-ish snippet
             ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
             hv = hard_eval(ro, impl_span, args.mode)
-            logger.debug("[%s %s] impl=%r frontier=%r", sid, aname, impl_span, frontier_desc)
+            logger.debug(
+                "[%s %s] impl=%r frontier=%r", sid, aname, impl_span, frontier_desc
+            )
             logger.debug("    read-out : %r", ro)
-            logger.debug("    HARD  verdict=%s  oracle_response=%r", hv["verdict"], hv["response"])
-            sample_records.append(dict(
-                spec=sid,
-                datatype=inst.meta["datatype"],   # per-record tag -> per-datatype breakdown of an aggregated run
-                anchor=aname,
-                pos=pos,
-                readout=ro,
-                impl_span=impl_span,
-                frontier_id=inst.expected_next,
-                condition=frontier_desc,
-                hard=hv["verdict"],
-                hard_prompt=hv["prompt"],
-                hard_response=hv["response"],
-            ))
+            logger.debug(
+                "    HARD  verdict=%s  oracle_response=%r",
+                hv["verdict"],
+                hv["response"],
+            )
+            sample_records.append(
+                dict(
+                    spec=sid,
+                    datatype=inst.meta[
+                        "datatype"
+                    ],  # per-record tag -> per-datatype breakdown of an aggregated run
+                    anchor=aname,
+                    pos=pos,
+                    readout=ro,
+                    impl_span=impl_span,
+                    frontier_id=inst.expected_next,
+                    condition=frontier_desc,
+                    hard=hv["verdict"],
+                    hard_prompt=hv["prompt"],
+                    hard_response=hv["response"],
+                )
+            )
         sample_meta = dict(
             spec_id=sid,
             datatype=inst.meta["datatype"],
@@ -905,9 +1034,7 @@ def main():
             fio.append_jsonl(rec_fh, r)
         fio.append_jsonl(samp_fh, sample_meta)
         n_done += 1
-        logger.info(
-            f"[{n_done}/{n_total}] {sid}: {len(pivs)} pivot read-outs scored"
-        )
+        logger.info(f"[{n_done}/{n_total}] {sid}: {len(pivs)} pivot read-outs scored")
 
     rec_fh.close()
     samp_fh.close()

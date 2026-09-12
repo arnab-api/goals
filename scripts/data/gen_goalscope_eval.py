@@ -15,6 +15,7 @@ Usage:
     conda run -n goals python scripts/data/gen_goalscope_eval.py            # regenerate the default file
     conda run -n goals python scripts/data/gen_goalscope_eval.py --out data/goalscope_eval.json --target-n 64
 """
+
 import argparse
 import json
 import random
@@ -26,7 +27,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(REPO_ROOT))
 
-import src.diff.data as D  # noqa: E402
+import src.diff.data as DATA  # noqa: E402
 
 DATATYPES = ["int", "list[int]", "str", "list[str]"]
 N_CONDITIONS = [2, 3, 4]
@@ -34,9 +35,11 @@ DEFAULT_OUT = REPO_ROOT / "data" / "goalscope_eval.json"
 
 
 def gen_datatype(dt, rng, target_n):
-    bank = D.QTASKS[dt]
-    pool = [p.id for p in bank.predicates]                    # context pool (all predicates)
-    frontiers = [p.id for p in D.nontrivial_frontiers(dt)]     # eligible targets (non-trivial)
+    bank = DATA.QTASKS[dt]
+    pool = [p.id for p in bank.predicates]  # context pool (all predicates)
+    frontiers = [
+        p.id for p in DATA.nontrivial_frontiers(dt)
+    ]  # eligible targets (non-trivial)
     var_name = bank.var_names[0]
     reps = max(1, round(target_n / len(frontiers)))
     recs, seen = [], set()
@@ -46,19 +49,28 @@ def gen_datatype(dt, rng, target_n):
         while made < reps and attempts < 4000:
             attempts += 1
             T = rng.choice(N_CONDITIONS)
-            j = rng.randint(1, T - 1)                          # frontier index; progress = subset[:j]
-            others = rng.sample(others_all, T - 1)             # the other T-1 predicates
-            subset = others[:j] + [F] + others[j:]             # F sits at index j
+            j = rng.randint(1, T - 1)  # frontier index; progress = subset[:j]
+            others = rng.sample(others_all, T - 1)  # the other T-1 predicates
+            subset = others[:j] + [F] + others[j:]  # F sits at index j
             progress = subset[:j]
-            key = (F, tuple(progress))                         # dedup on (frontier, progress)
+            key = (F, tuple(progress))  # dedup on (frontier, progress)
             if key in seen:
                 continue
             seen.add(key)
-            recs.append(dict(
-                datatype=dt, lang="python", T=T, j=j,
-                predicate_ids=subset, progress_ids=progress, frontier_id=F,
-                var_name=var_name, presentation="listed", naming="letters",
-            ))
+            recs.append(
+                dict(
+                    datatype=dt,
+                    lang="python",
+                    T=T,
+                    j=j,
+                    predicate_ids=subset,
+                    progress_ids=progress,
+                    frontier_id=F,
+                    var_name=var_name,
+                    presentation="listed",
+                    naming="letters",
+                )
+            )
             made += 1
         if made < reps:
             print(f"  [warn] {dt}/{F}: only {made}/{reps} distinct contexts")
@@ -68,11 +80,17 @@ def gen_datatype(dt, rng, target_n):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="output json path")
     ap.add_argument("--seed", type=int, default=123)
-    ap.add_argument("--target-n", type=int, default=64,
-                    help="aim per datatype; actual = reps * n_frontiers (exact balance)")
+    ap.add_argument(
+        "--target-n",
+        type=int,
+        default=64,
+        help="aim per datatype; actual = reps * n_frontiers (exact balance)",
+    )
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -86,15 +104,22 @@ def main():
     out = dict(
         meta=dict(
             description="Locked OVReader-setup corpus (QTASKS bank, prefill-to-frontier, var_eq stub, "
-                        "letters naming) with BALANCED frontier coverage: each non-trivial frontier is the "
-                        "target `reps` times with distinct prefill contexts. Rebuild from QTASKS by id.",
+            "letters naming) with BALANCED frontier coverage: each non-trivial frontier is the "
+            "target `reps` times with distinct prefill contexts. Rebuild from QTASKS by id.",
             bank="src.diff.data.QTASKS",
             generator="scripts/data/gen_goalscope_eval.py",
-            balanced=True, reps_per_frontier=reps_by,
-            n_conditions=N_CONDITIONS, seed=args.seed, target_n=args.target_n,
-            lang="python", datatypes=DATATYPES,
-            trivial_frontiers_excluded={k: sorted(v) for k, v in D.TRIVIAL_FRONTIERS.items()},
-            counts=counts, generated=time.strftime("%Y-%m-%d %H:%M:%S"),
+            balanced=True,
+            reps_per_frontier=reps_by,
+            n_conditions=N_CONDITIONS,
+            seed=args.seed,
+            target_n=args.target_n,
+            lang="python",
+            datatypes=DATATYPES,
+            trivial_frontiers_excluded={
+                k: sorted(v) for k, v in DATA.TRIVIAL_FRONTIERS.items()
+            },
+            counts=counts,
+            generated=time.strftime("%Y-%m-%d %H:%M:%S"),
         ),
         datapoints=data,
     )
@@ -104,8 +129,10 @@ def main():
     print(f"wrote {out_path}")
     for dt in DATATYPES:
         fr = Counter(r["frontier_id"] for r in data[dt])
-        print(f"  {dt:9}: {counts[dt]} datapoints | {len(fr)} frontiers x {reps_by[dt]} reps "
-              f"| per-frontier counts: {sorted(set(fr.values()))}")
+        print(
+            f"  {dt:9}: {counts[dt]} datapoints | {len(fr)} frontiers x {reps_by[dt]} reps "
+            f"| per-frontier counts: {sorted(set(fr.values()))}"
+        )
 
 
 if __name__ == "__main__":
