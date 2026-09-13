@@ -215,12 +215,13 @@ class PairCache:
     l_read: int
     dst_ids: torch.Tensor           # (1, seq) DST prompt ids
     dst_attn: torch.Tensor
-    dst_pivot: int
+    dst_pivot: int                  # GAZE position — the last token (" ="); collapse gaze read here
     clean_h_read: torch.Tensor      # (seq, n_embd) residual AFTER block l_read-1, DST clean
     spans: list                     # DST predicate description spans [(lo,hi)]
-    q_src_pivot: dict               # {layer: (n_heads*hd,) SRC pivot q_proj output, pre-RoPE}, layers < l_read
-    q_dst_pivot: dict               # {layer: (n_heads*hd,)} clean DST pivot q_proj output, pre-RoPE
-    deltas: Optional[torch.Tensor] = None       # (l_read, n_heads, n_embd) per-head OV pivot deltas (#3)
+    patch_positions: list           # abs DST positions whose QUERY is patched (last K tokens); [dst_pivot] if K=1
+    q_src_pivot: dict               # {layer: (K, n_heads*hd) SRC q_proj outputs at patch_positions, pre-RoPE}
+    q_dst_pivot: dict               # {layer: (K, n_heads*hd)} clean DST q_proj outputs at patch_positions
+    deltas: Optional[torch.Tensor] = None       # (K, l_read, n_heads, n_embd) per-position per-head OV deltas (#3)
     clean_mlp: Optional[dict] = None            # {layer: (seq, n_embd)} clean DST MLP outputs (#2)
     P: Optional[dict] = None                    # build_prompts output (prompts, insts, outcomes)
 
@@ -271,22 +272,30 @@ def _forward_capture(mt, ids, attn, layers_resid, layers_qkv=None, layers_mlp=No
 
 @torch.no_grad()
 def build_pair_cache(mt, spec, l_read, intervention, build_prompts_fn, stub="var_eq",
-                     src_targ_in_dst=True):
-    """Cache SRC queries + clean-DST artifacts for one pair. ``build_prompts_fn`` = ``h1h2.build_prompts``."""
+                     src_targ_in_dst=True, patch_last_k=1):
+    """Cache SRC queries + clean-DST artifacts for one pair. ``build_prompts_fn`` = ``h1h2.build_prompts``.
+
+    ``patch_last_k``: how many trailing query positions to patch — 1 = only the pivot (" =");
+    3 = the ``[<indent>, <var>, " ="]`` tail. SRC and DST end with the same K tokens (both finish
+    ``\\n    {var} =``), so positions align by offset from the end. The GAZE is ALWAYS read at the last
+    token (``dst_pivot``); ``patch_positions`` only changes which queries we transplant/perturb."""
     from src.tokens import find_token_range
     P = build_prompts_fn(mt, spec, stub=stub, src_targ_in_dst=src_targ_in_dst)
     src_tok = prepare_input(prompts=P["src_prompt"], tokenizer=mt)
     dst_tok = prepare_input(prompts=P["dst_prompt"], tokenizer=mt)
     src_piv = src_tok["input_ids"].shape[1] - 1
     dst_piv = dst_tok["input_ids"].shape[1] - 1
+    K = max(1, int(patch_last_k))
+    src_positions = list(range(src_piv - K + 1, src_piv + 1))     # aligned by offset from the end
+    dst_positions = list(range(dst_piv - K + 1, dst_piv + 1))
     cand_layers = list(range(l_read))
     spans = [find_token_range(P["dst_prompt"], pr.description, mt.tokenizer)
              for pr in P["dst_inst"].task.predicates]
 
-    # SRC forward: pivot q_proj outputs (pre-RoPE) for candidate layers — truncate past l_read
+    # SRC forward: q_proj outputs (pre-RoPE) at the K patch positions, per candidate layer — truncate past l_read
     _, src_qkv, _ = _forward_capture(mt, src_tok["input_ids"], src_tok["attention_mask"],
                                      layers_resid=[], layers_qkv=cand_layers, stop_after=l_read - 1)
-    q_src_pivot = {l: src_qkv[l]["q"][src_piv] for l in cand_layers}
+    q_src_pivot = {l: src_qkv[l]["q"][src_positions] for l in cand_layers}   # (K, width)
 
     # clean DST forward: residual@l_read, candidate q/k/v, MLPs (for #2) — truncate past l_read
     need_mlp = cand_layers if intervention == "mlps_frozen" else []
@@ -294,23 +303,23 @@ def build_pair_cache(mt, spec, l_read, intervention, build_prompts_fn, stub="var
         mt, dst_tok["input_ids"], dst_tok["attention_mask"],
         layers_resid=[l_read - 1], layers_qkv=cand_layers, layers_mlp=need_mlp, stop_after=l_read - 1)
     clean_h_read = resid[l_read - 1]                              # (seq, n_embd)
-    q_dst_pivot = {l: dst_qkv[l]["q"][dst_piv] for l in cand_layers}
+    q_dst_pivot = {l: dst_qkv[l]["q"][dst_positions] for l in cand_layers}   # (K, width)
 
     cache = PairCache(
         spec=spec, l_read=l_read, dst_ids=dst_tok["input_ids"], dst_attn=dst_tok["attention_mask"],
-        dst_pivot=dst_piv, clean_h_read=clean_h_read, spans=spans,
+        dst_pivot=dst_piv, clean_h_read=clean_h_read, spans=spans, patch_positions=dst_positions,
         q_src_pivot=q_src_pivot, q_dst_pivot=q_dst_pivot,
         clean_mlp={l: mlp[l] for l in need_mlp} if need_mlp else None,
     )
     if intervention == "block_head_communication":
-        cache.deltas = _precompute_ov_deltas(mt, cache, dst_qkv, l_read, dst_piv)
+        cache.deltas = _precompute_ov_deltas(mt, cache, dst_qkv, l_read, dst_positions)
     cache.P = P
     return cache
 
 
-def _cache_key(slug, datatype, lang, n_pairs, l_read, stub, src_targ_in_dst, seed, intervention):
+def _cache_key(slug, datatype, lang, n_pairs, l_read, stub, src_targ_in_dst, seed, intervention, patch_last_k=1):
     desc = (f"{slug}|{datatype}|{lang}|n{n_pairs}|L{l_read}|{stub}"
-            f"|sd{int(src_targ_in_dst)}|seed{seed}|{intervention}")
+            f"|sd{int(src_targ_in_dst)}|seed{seed}|{intervention}|k{patch_last_k}")
     return hashlib.md5(desc.encode()).hexdigest()[:12], desc
 
 
@@ -322,7 +331,8 @@ _DISK_CACHED = ("block_head_communication",)
 
 
 def load_or_build_caches(mt, specs, l_read, intervention, build_prompts_fn, cache_dir,
-                         datatype, lang, seed, stub="var_eq", src_targ_in_dst=True, overwrite=False):
+                         datatype, lang, seed, stub="var_eq", src_targ_in_dst=True, overwrite=False,
+                         patch_last_k=1):
     """Per-pair caches for one intervention, all kept on **CPU** (never accumulated on the GPU). Each
     cache is built then immediately moved to CPU, so the build phase never piles N caches on one shard
     (the #3 512-pair delta build otherwise OOMs `cuda:0` at ~20GB on top of the weights). During
@@ -333,18 +343,20 @@ def load_or_build_caches(mt, specs, l_read, intervention, build_prompts_fn, cach
     def _build_cpu():                                          # build + move each cache to CPU at once
         out = []
         for s in specs:
-            c = build_pair_cache(mt, s, l_read, intervention, build_prompts_fn, stub, src_targ_in_dst)
+            c = build_pair_cache(mt, s, l_read, intervention, build_prompts_fn, stub, src_targ_in_dst,
+                                 patch_last_k=patch_last_k)
             c.cpu_()
             out.append(c)
         return out
 
     if intervention not in _DISK_CACHED:
         caches = _build_cpu()
-        logger.info(f"built {len(caches)} caches on CPU (no disk cache for {intervention})")
+        logger.info(f"built {len(caches)} caches on CPU (no disk cache for {intervention}, k={patch_last_k})")
         return caches
 
     slug = mt.name.split("/")[-1]
-    key, desc = _cache_key(slug, datatype, lang, len(specs), l_read, stub, src_targ_in_dst, seed, intervention)
+    key, desc = _cache_key(slug, datatype, lang, len(specs), l_read, stub, src_targ_in_dst, seed,
+                           intervention, patch_last_k)
     path = os.path.join(cache_dir, f"h1h2_caches_{key}.pt")
     if os.path.exists(path) and not overwrite:
         blob = torch.load(path, map_location="cpu", weights_only=False)
@@ -360,19 +372,20 @@ def load_or_build_caches(mt, specs, l_read, intervention, build_prompts_fn, cach
 
 
 @torch.no_grad()
-def _precompute_ov_deltas(mt, cache, dst_qkv, l_read, dst_piv):
-    """(#3) Per candidate head: delta_h = OV(q_src, k_dst, v_dst) - OV(q_dst, k_dst, v_dst) at the pivot.
-    Returns (l_read, n_heads, n_embd). Keys/values are CLEAN DST (no inter-head communication); only the
-    query is swapped -> the pure isolated query-transplant write of each head."""
+def _precompute_ov_deltas(mt, cache, dst_qkv, l_read, dst_positions):
+    """(#3) Per candidate head and per patched position p: delta = OV(q_src[p], k_dst, v_dst) -
+    OV(q_dst[p], k_dst, v_dst), with keys/values CLEAN DST (no inter-head communication) and causal up
+    to p. Returns (K, l_read, n_heads, n_embd) — the pure isolated query-transplant write of each head at
+    each patched position. ``cache.q_{src,dst}_pivot[L]`` are (K, width), row i <-> dst_positions[i]."""
     hd, group = mt.head_dim, mt.n_heads // mt.n_kv_heads
-    deltas = torch.zeros(l_read, mt.n_heads, mt._model.config.hidden_size, dtype=torch.float32)
+    K = len(dst_positions)
+    deltas = torch.zeros(K, l_read, mt.n_heads, mt._model.config.hidden_size, dtype=torch.float32)
     for L in range(l_read):
         Wo = baukit.get_module(mt._model, _proj(mt, L, "o")).weight.float()   # (n_embd, n_heads*hd)
         dev = Wo.device                                                       # this layer's shard
         apply_rope = _apply_rope(mt, L)
         S = cache.clean_h_read.shape[0]
         cos_all, sin_all = _rope_cos_sin(mt, range(S), device=dev)
-        cos_piv, sin_piv = cos_all[:, dst_piv:dst_piv + 1], sin_all[:, dst_piv:dst_piv + 1]
         k_all = dst_qkv[L]["k"].to(dev)   # (S, n_kv*hd) pre-RoPE
         v_all = dst_qkv[L]["v"].to(dev)
         for j in range(mt.n_heads):
@@ -381,20 +394,22 @@ def _precompute_ov_deltas(mt, cache, dst_qkv, l_read, dst_piv):
             v = v_all[:, kv * hd:(kv + 1) * hd]                               # (S,hd)
             _, k_r = apply_rope(torch.zeros_like(k), k, cos_all, sin_all)
             k_r = k_r[0, 0]                                                   # (S,hd) RoPE'd
-            for tag, qsrc in (("src", cache.q_src_pivot[L]), ("dst", cache.q_dst_pivot[L])):
-                q = qsrc[j * hd:(j + 1) * hd].to(dev).view(1, 1, 1, hd)
-                q_r, _ = apply_rope(q, torch.zeros_like(q), cos_piv, sin_piv)
-                qp = q_r[0, 0, 0]                                             # (hd,) RoPE'd @ pivot
-                sc = (k_r @ qp) / (hd ** 0.5)
-                sc[dst_piv + 1:] = float("-inf")
-                attn = torch.softmax(sc.float(), -1)
-                out = (attn @ v.float())                                      # (hd,)
-                ov = Wo[:, j * hd:(j + 1) * hd] @ out                         # (n_embd,)
-                if tag == "src":
-                    ov_src = ov
-                else:
-                    ov_dst = ov
-            deltas[L, j] = (ov_src - ov_dst).cpu()
+            for pi, p in enumerate(dst_positions):
+                cos_p, sin_p = cos_all[:, p:p + 1], sin_all[:, p:p + 1]
+                for tag, qbank in (("src", cache.q_src_pivot[L]), ("dst", cache.q_dst_pivot[L])):
+                    q = qbank[pi, j * hd:(j + 1) * hd].to(dev).view(1, 1, 1, hd)
+                    q_r, _ = apply_rope(q, torch.zeros_like(q), cos_p, sin_p)
+                    qp = q_r[0, 0, 0]                                         # (hd,) RoPE'd @ position p
+                    sc = (k_r @ qp) / (hd ** 0.5)
+                    sc[p + 1:] = float("-inf")                                # causal up to p
+                    attn = torch.softmax(sc.float(), -1)
+                    out = (attn @ v.float())                                  # (hd,)
+                    ov = Wo[:, j * hd:(j + 1) * hd] @ out                     # (n_embd,)
+                    if tag == "src":
+                        ov_src = ov
+                    else:
+                        ov_dst = ov
+                deltas[pi, L, j] = (ov_src - ov_dst).cpu()
     return deltas
 
 
@@ -402,38 +417,51 @@ def _precompute_ov_deltas(mt, cache, dst_qkv, l_read, dst_piv):
 # h_read(mask) for each intervention
 # ══════════════════════════════════════════════════════════════════════════════
 def h_read_block_comm(mask: HeadMask, cache: PairCache):
-    """#3: clean h_read with sum_h m_h * delta_h added at the pivot. Linear in the mask; no forward."""
+    """#3: clean h_read with sum_h m_h * delta_h[p] added at EACH patched position p. Linear in the mask;
+    no forward. deltas: (K, l_read, n_heads, n_embd); the gaze is still read at cache.dst_pivot."""
     dev = mask.values.device                                    # keep grad graph on the mask's device
-    d = cache.deltas.to(dev)                                     # (l_read, n_heads, n_embd)
-    agg = torch.einsum("lh,lhe->e", mask.values[:cache.l_read], d)   # (n_embd,), grad -> mask
+    d = cache.deltas.to(dev)                                     # (K, l_read, n_heads, n_embd)
+    agg = torch.einsum("lh,klhe->ke", mask.values[:cache.l_read], d)   # (K, n_embd), grad -> mask
     hdev = cache.clean_h_read.device
     agg = agg.to(hdev)
     S = cache.clean_h_read.shape[0]
-    onehot = torch.zeros(S, device=hdev, dtype=agg.dtype)
-    onehot[cache.dst_pivot] = 1.0                                # constant selector (no grad needed)
-    return cache.clean_h_read + torch.outer(onehot, agg)        # add agg at pivot row, no in-place
+    sel = torch.zeros(S, len(cache.patch_positions), device=hdev, dtype=agg.dtype)
+    for i, p in enumerate(cache.patch_positions):
+        sel[p, i] = 1.0                                          # constant selector (no grad needed)
+    return cache.clean_h_read + sel @ agg                       # add each pos's agg at its row, no in-place
 
 
 def _q_blend_hooks(mt, mask: HeadMask, cache: PairCache):
-    """forward-pre? no — a forward hook on each candidate q_proj that blends the pivot query slice:
-    q[pivot, h] <- m_{l,h} * q_src_{l,h} + (1 - m_{l,h}) * q[pivot, h]. Grad flows to the mask."""
+    """forward hook on each candidate q_proj that blends the query slice at EACH patched position p:
+    q[p, h] <- m_{l,h} * q_src_{l,h}[p] + (1 - m_{l,h}) * q[p, h]. Grad flows to the mask. The gaze is
+    still read at the last token; patching earlier positions (indent/var) changes the keys/values the
+    pivot goal-heads attend to. ``cache.q_src_pivot[L]`` is (K, width), row i <-> patch_positions[i]."""
     hd = mt.head_dim
-    handles, piv = [], cache.dst_pivot
+    handles, positions = [], cache.patch_positions
     for L in range(cache.l_read):
         mod = baukit.get_module(mt._model, _proj(mt, L, "q"))
-        qsrc = cache.q_src_pivot[L]
+        qsrc = cache.q_src_pivot[L]                                          # (K, width)
 
         def make(L, qsrc):
             def hook(module, inp, out):
                 o = out[0] if isinstance(out, tuple) else out
                 seq = o.shape[1]
-                if not (0 <= piv < seq):
+                pos = [p for p in positions if 0 <= p < seq]
+                if not pos:
                     return out
-                qs = qsrc.to(o.dtype).to(o.device)                       # (n_heads*hd,)
-                m_full = mask.values[L].repeat_interleave(hd).to(o.device).to(o.dtype)  # (n_heads*hd,)
-                new_piv = m_full * qs + (1 - m_full) * o[0, piv]         # (n_heads*hd,) blended pivot row
-                # rebuild the sequence out-of-place (no versioned in-place -> autograd-safe)
-                o_new = torch.cat([o[:, :piv], new_piv.view(1, 1, -1), o[:, piv + 1:]], dim=1)
+                qs = qsrc.to(o.dtype).to(o.device)                          # (K, width)
+                m_full = mask.values[L].repeat_interleave(hd).to(o.device).to(o.dtype)  # (width,)
+                rows = []
+                prev = 0
+                for i, p in enumerate(positions):
+                    if not (0 <= p < seq):
+                        continue
+                    rows.append(o[:, prev:p])                                # untouched span (bare view)
+                    blended = (m_full * qs[i] + (1 - m_full) * o[0, p]).view(1, 1, -1)
+                    rows.append(blended)
+                    prev = p + 1
+                rows.append(o[:, prev:])
+                o_new = torch.cat(rows, dim=1)                               # out-of-place -> autograd-safe
                 return (o_new,) + tuple(out[1:]) if isinstance(out, tuple) else o_new
             return hook
         handles.append(mod.register_forward_hook(make(L, qsrc)))

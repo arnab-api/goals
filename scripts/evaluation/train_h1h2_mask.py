@@ -54,6 +54,8 @@ def parse_args():
     ap.add_argument("--l_read", type=int, default=40,
                     help="single knob: maskable heads at layers <L_READ; collapse reads h^L_READ")
     ap.add_argument("--stub", default="var_eq", choices=["var_eq", "indent"])
+    ap.add_argument("--patch_last_k", type=int, default=1,
+                    help="how many trailing query positions to patch (1=pivot ' =' only; 3=[indent,var,' ='])")
     ap.add_argument("--src_targ_in_dst", action="store_true", default=True)
     ap.add_argument("--no_src_targ_in_dst", dest="src_targ_in_dst", action="store_false")
     ap.add_argument("--hypotheses", nargs="+", default=["h1", "h2", "copy"],
@@ -106,7 +108,7 @@ def main():
     cache_dir = args.cache_dir or os.path.join(env_utils.DEFAULT_RESULTS_DIR, "notebook_caches", "h1h2_mask")
     interv = args.intervention
     for k in ("model", "datatype", "lang", "n_pairs", "l_read", "intervention", "hypotheses",
-              "n_epochs", "lr", "lambda_sparse", "comp_weight", "checkpoint_every", "batch_size", "seed"):
+              "n_epochs", "lr", "lambda_sparse", "comp_weight", "checkpoint_every", "batch_size", "seed", "patch_last_k"):
         logger.info(f"{k:16s}: {getattr(args, k)}")
     logger.info(f"goal heads      : {len(FUNC.GOAL_HEADS)}")
 
@@ -115,7 +117,8 @@ def main():
     caches = M.load_or_build_caches(
         mt, specs, args.l_read, interv, H.build_prompts, cache_dir,
         datatype=args.datatype, lang=args.lang, seed=args.seed,
-        stub=args.stub, src_targ_in_dst=args.src_targ_in_dst, overwrite=args.overwrite_cache)
+        stub=args.stub, src_targ_in_dst=args.src_targ_in_dst, overwrite=args.overwrite_cache,
+        patch_last_k=args.patch_last_k)
     logger.info(f"[{interv}] {len(caches)} caches ready in {time.time()-t0:.0f}s")
 
     lambdas = args.lambda_sweep or [args.lambda_sparse]
@@ -128,7 +131,7 @@ def main():
             config = {"model": slug, "datatype": args.datatype, "lang": args.lang, "l_read": args.l_read,
                       "intervention": interv, "hypothesis": hyp, "n_pairs": len(specs),
                       "n_epochs": args.n_epochs, "lr": args.lr, "lambda_sparse": lam,
-                      "comp_weight": args.comp_weight, "seed": args.seed}
+                      "comp_weight": args.comp_weight, "seed": args.seed, "patch_last_k": args.patch_last_k}
             # train_query_mask owns checkpointing: writes epochs/mask_epochNN.pt + mask.pt under out_dir
             mask, hist = M.train_query_mask(
                 mt, caches, args.l_read, hypothesis=hyp, intervention=interv,
