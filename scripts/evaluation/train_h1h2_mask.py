@@ -123,10 +123,11 @@ def main():
 
     lambdas = args.lambda_sweep or [args.lambda_sparse]
     sweeping = args.lambda_sweep is not None
+    kdir = f"k{args.patch_last_k}"                     # patched-position extent in the path (k1/k3 never collide)
     for lam in lambdas:
         for hyp in args.hypotheses:
-            out_dir = os.path.join(out_root, interv, f"lam{lam}", hyp) if sweeping \
-                else os.path.join(out_root, interv, hyp)
+            out_dir = os.path.join(out_root, interv, kdir, f"lam{lam}", hyp) if sweeping \
+                else os.path.join(out_root, interv, kdir, hyp)
             os.makedirs(out_dir, exist_ok=True)
             config = {"model": slug, "datatype": args.datatype, "lang": args.lang, "l_read": args.l_read,
                       "intervention": interv, "hypothesis": hyp, "n_pairs": len(specs),
