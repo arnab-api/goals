@@ -29,18 +29,17 @@ The figure prints a real prompt (spec `int_python_003`, frontier `is_even` = var
 
 Concretely on this prompt: with only the goal heads able to see the shaded span the model still writes `c = (n % 2 == 0)` (✓); hand the same privilege to a random equal-size set and it wanders off — e.g. `c = (n * (n + 1)) // 2` (✗). Across n=253 the goal-spared run stays near baseline while the random-spared control collapses to ~0.09.
 
-### Necessity — sink-ablation (13_middle §4/§7)
+### Necessity — three ablation strengths on the goal heads (`--sink_strat`, 13_middle §4/§7)
 
-The target heads are restricted to attend **only to the sink position** (`sink_pos = 0`): for query rows ≥ the pivot, their softmax input gets `-inf` at every key except position 0 (which stays 0), ≈ zeroing the head's useful attention output. Every other head runs normally. `from_layer` here is just the lower bound of the matched-control pool (`goal_from`), not a blinding boundary.
+`eval_ablation_necessity.py --sink_strat {bos, blind_task, blind_task_and_progress}` applies one of three interventions to the target heads, engaging only for query rows ≥ the pivot (the `=` token); every other head runs normally. `from_layer` here is just the lower bound of the matched-control pool (`goal_from`), not a blinding boundary.
 
-- **`ablated`** = sink the **goal** heads themselves.
-- **`control`** = sink a **random** equal-size set from the goal band (`range(goal_from, 64)`, disjoint from the goal heads).
+- **`bos`** (sink; the original) — the heads may attend **only to position 0** (`<|im_start|>`): `-inf` at every other key, ≈ zeroing the head's useful output. Nothing in the *prompt* is blinded; the query rows from the pivot on are the thing restricted.
+- **`blind_task`** — the heads are blinded from **only the current task's description span** (`frontier_desc_positions`); they attend everywhere else.
+- **`blind_task_and_progress`** — the heads are blinded from the task description **through the pivot** (`frontier_block_positions` = spec text + the progress code up to the current-progress token; the same span sufficiency's `blind_span` uses), attending everywhere before it.
 
-The figure prints the same prompt; here nothing in the *prompt* is blinded. Instead the intervention marks the **query rows from the `c =` pivot onward** (shaded): at those rows the goal heads' softmax scores become `-inf` everywhere except key position 0 (the sink token `<|im_start|>`), so their attention output ≈ 0 while every other head runs normally.
+In all three, **`ablated`** = the **goal** heads and **`control`** = a **random** equal-size set from the goal band (`range(goal_from, 64)`, disjoint from the goal heads). If ablating the goal heads hurts no more than the random set, they are **not** necessary (the computation reroutes).
 
-![necessity setup](figures/ablation_necessity_setup.png)
-
-If sinking the goal heads hurts no more than sinking a random equal-size set, the goal heads are **not** necessary (the computation reroutes).
+![necessity setup — bos/sink (query rows from the `=` pivot restricted to the pos-0 sink)](figures/ablation_necessity_setup.png)
 
 The control in both tests is depth-matched — the random set is drawn from `range(goal_from, 64)`, so a result cannot be an artifact of a shallower/deeper pool than the goal set. (This fixed an earlier sufficiency control that sampled from a fixed `from_layer=20` pool.)
 
@@ -60,29 +59,36 @@ Sparing the goal heads keeps generation near baseline; sparing a depth-matched r
 
 Per-datatype, the 122-head residual gap is concentrated in `list[str]` (1.00→0.70) and `str` (0.92→0.86); `int` stays strong (1.00→0.91). The 250-head set is at/near baseline across all four types.
 
-### Necessity — no *small* subset is necessary, but the full set is
+### Necessity — depends heavily on WHICH input you deny the goal heads
 
-| condition | 122 overall | 250 overall |
-|-----------|:-----------:|:-----------:|
-| baseline | 0.925 | 0.925 |
-| **sink GOAL heads** | **0.854** | **0.158** |
-| sink RANDOM equal set | 0.925 | 0.921 |
+All n=253, baseline = 0.925 for both budgets. `ablated` = the goal heads under the named strategy; `control` = the same intervention on a matched random set.
 
-This is the more interesting half:
+| strategy (goal heads) | blinded span | 122 ablated | 250 ablated | control (122 / 250) |
+|-----------------------|--------------|:-----------:|:-----------:|:-------------------:|
+| `blind_task` | current task description only | 0.881 | 0.806 | 0.925 / 0.925 |
+| `bos` (sink) | attend only to pos 0 (≈ zeroed) | 0.854 | **0.158** | 0.925 / 0.921 |
+| `blind_task_and_progress` | task desc → pivot (spec + progress) | **0.372** | **0.249** | 0.925 / 0.925 |
 
-- **The core 122 heads are *not* necessary.** Sinking them drops overall only 0.925→0.854 — well above collapse — while the random control is untouched (0.925). The goal computation **reroutes**: knocking out the 122 heads that most confidently encode the goal barely hurts, because the signal is redundantly available elsewhere.
-- **The 250-head set *is* necessary.** Sinking the full set collapses to **0.158**, while sinking 250 *random* heads (also from layer 0) leaves generation intact (0.921). So the collapse is specific to the goal heads, not a generic "ablate 250 heads and it breaks" effect.
+Reading across the three strengths:
 
-The redundancy therefore lives *within* the ~128 heads beyond the core 122: any small confident subset can be spared (rerouted around), but the union of the goal-writing heads is both **necessary and sufficient**.
+- **Reading the task description at the pivot is *not* what the goal heads need.** `blind_task` — denying them exactly the current task's spec text — barely moves either budget (122: 0.881, 250: 0.806). The goal has already been folded into the residual upstream; the heads don't re-read the spec at the pivot.
+- **Their necessary input is the progress/code region up to the pivot.** `blind_task_and_progress` — the same as `blind_task` but extended through the progress code to the pivot — collapses both budgets (122: 0.372, 250: 0.249).
+- **`blind_task_and_progress` *redirects* the goal heads to the previous task — it doesn't merely break them.** With the frontier's spec + progress hidden, the latest task the goal heads can still read is the **previous predicate**, and the model coherently implements *that* at the frontier slot (e.g. frontier "even" → ablated writes `n < 0` = the previous "negative" task; frontier "even" → `n == int(str(n)[::-1])` = the previous "palindrome" task). Oracle re-judging the ablated outputs against the *previous visible task* confirms it: **83.1%** of the 130 goal122 regressions (108/130) and **74.2%** of the 155 goal250 regressions (115/155) implement the previous task. So the low frontier-rate (0.372 / 0.249) is task **misselection**, not model breakage — which is also why it can look "harsher" than the `bos` sink: the sink zeros the heads and the network reroutes back to the frontier (122: 0.854), whereas here the heads stay live and causally select the latest task they can see. This is a *stronger* causal result — the goal heads decide **which** task is implemented from the most recent task description they can read.
+- **The 250 set is broadly necessary.** Under the two harsh interventions it collapses (sink 0.158, blind_task_and_progress 0.249); only `blind_task` (spec-only) leaves it near baseline (0.806).
+- **All effects are goal-specific**: the matched random control stays ~0.92 across every strategy and budget.
+
+So the earlier "the core 122 are not necessary" holds *only for the sink*: zeroing the 122 heads reroutes (0.854), but denying them the progress context while they stay active does break them (0.372). The redundancy that lets the sink reroute lives *within* the ~128 heads beyond the core 122; the union of the goal-writing heads is necessary under every harsh denial.
 
 ---
 
 ## Takeaway
 
 - **Sufficient (both budgets):** the goal heads alone, reading the spec span, reproduce baseline frontier implementation; a matched random set cannot (~0.09).
-- **Necessary (only at the full 250-head set):** the core 122 heads are individually redundant (sink → 0.85, reroutes), but the full goal-head set is necessary (sink → 0.16) and the effect is head-specific (random control → 0.92).
+- **Necessary — depends on what you deny.** The full 250-head set is necessary under the harsh interventions (sink → 0.16, blind_task_and_progress → 0.25); the core 122 reroutes under the sink (0.85) but still breaks when blinded from the progress context while staying active (blind_task_and_progress → 0.37). Denying only the task-description span barely hurts either budget (blind_task ≥ 0.81) — the goal heads' necessary input is the **progress/code up to the pivot**, not the spec text at the pivot. Every effect is head-specific (random control ~0.92).
 
-Net: the "intent to implement next(DIFF)" is carried by a **distributed, redundant set** of attention heads — sufficient in any reasonably-sized spared subset, necessary only in its union. This refines the earlier "sufficient but not necessary" framing: *not necessary* holds for the confident 122-head core, but *necessary* re-emerges once the redundant tail is included.
+Net: the "intent to implement next(DIFF)" is carried by a **distributed, redundant set** of attention heads — sufficient in any reasonably-sized spared subset, necessary in its union, and reliant on the progress/code context (not the re-read spec) at the pivot. This refines the earlier "sufficient but not necessary" framing: *not necessary* holds only for the confident 122-head core **under the sink**; *necessary* re-emerges once the redundant tail is included, or once the intervention denies the progress context rather than merely zeroing the heads.
+
+- **The goal heads causally select *which* task is implemented.** When blinded from the frontier's spec+progress (`blind_task_and_progress`) they don't produce garbage — they implement the **previous** task, the latest one they can still read (83.1% of goal122 / 74.2% of goal250 regressions). Task selection at the pivot is routed through the goal heads' view of the task list.
 
 ---
 
@@ -92,7 +98,11 @@ Net: the "intent to implement next(DIFF)" is carried by a **distributed, redunda
 |------|:------:|----------|
 | sufficiency | 122 | `sufficiency/heads=spare_goal__goal122__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123` |
 | sufficiency | 250 | `sufficiency/heads=spare_goal__goal250__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123` |
-| necessity | 122 | `necessity/heads=goal__goal122__fromL=28__strat=sink__dtype=all__nspec=253__seed=123` |
-| necessity | 250 | `necessity/heads=goal__goal250__fromL=0__strat=sink__dtype=all__nspec=253__seed=123` |
+| necessity (bos/sink) | 122 | `necessity/heads=goal__goal122__fromL=28__strat=sink__dtype=all__nspec=253__seed=123` |
+| necessity (bos/sink) | 250 | `necessity/heads=goal__goal250__fromL=0__strat=sink__dtype=all__nspec=253__seed=123` |
+| necessity (blind_task) | 122 | `necessity/heads=goal__goal122__fromL=28__strat=blind_task__dtype=all__nspec=253__seed=123` |
+| necessity (blind_task) | 250 | `necessity/heads=goal__goal250__fromL=0__strat=blind_task__dtype=all__nspec=253__seed=123` |
+| necessity (blind_task_and_progress) | 122 | `necessity/heads=goal__goal122__fromL=28__strat=blind_task_and_progress__dtype=all__nspec=253__seed=123` |
+| necessity (blind_task_and_progress) | 250 | `necessity/heads=goal__goal250__fromL=0__strat=blind_task_and_progress__dtype=all__nspec=253__seed=123` |
 
 All under `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/`. Figure regen: scratchpad `fig_ablation.py`.

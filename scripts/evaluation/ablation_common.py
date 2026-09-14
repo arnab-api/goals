@@ -113,6 +113,23 @@ def frontier_block_positions(mt, prompt, frontier_desc):
     return list(range(max(min(toks) - 1, 0), P))
 
 
+def frontier_desc_positions(mt, prompt, frontier_desc):
+    """Absolute key positions of ONLY the frontier's description span (the current task's spec text +
+    the one token before it) — NOT extended to the pivot. Used by the necessity ``blind_task``
+    strategy: the goal heads keep attending everywhere EXCEPT the current task's specification.
+    Returns None if the description isn't located."""
+    cpos = prompt.find(frontier_desc)
+    if cpos < 0:
+        return None
+    enc = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
+    offsets = [tuple(x) for x in enc["offset_mapping"][0].tolist()]
+    end = cpos + len(frontier_desc)
+    toks = [ti for ti, (a, b) in enumerate(offsets) if b > a and a < end and b > cpos]
+    if not toks:
+        return None
+    return list(range(max(min(toks) - 1, 0), max(toks) + 1))
+
+
 @torch.no_grad()
 def generate_blocking_span_cached(mt, prompt_ids, block_heads, block_positions, q_start,
                                   max_new=64, stop_suffix=None):
@@ -312,11 +329,17 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
     generation with the oracle judge. ``strategy`` picks the intervention on the condition's head set:
 
       "sink"       — restrict those heads to attend ONLY to ``sink_pos`` (13_middle §4/§7; necessity).
-      "blind_span" — blind those heads from the frontier spec span (13_middle §5 / 07.2; sufficiency).
+      "blind_span" — blind those heads from the frontier spec span through the pivot (13_middle §5 /
+                     07.2; sufficiency).
+      "blind_task" — blind those heads from ONLY the current task's description span, attending
+                     everywhere else (a gentler necessity than "sink").
+      "blind_task_and_progress" — blind those heads from the task description THROUGH the pivot (the
+                     current-progress token), i.e. the same span as "blind_span" but applied to the
+                     axis heads (a necessity variant).
 
     ``ablated_heads`` = the axis set; ``control_heads`` = the matched contrast — both get the SAME
     intervention, differing only in WHICH heads it hits."""
-    assert strategy in ("sink", "blind_span"), strategy
+    assert strategy in ("sink", "blind_span", "blind_task", "blind_task_and_progress"), strategy
     config = dict(config, ablated_name=ablated_name, from_layer=from_layer, strategy=strategy,
                   sink_pos=sink_pos, n_specs=len(datapoints))
     run_dir = run_dir_for(results_dir, config["model"], axis, config)
@@ -345,8 +368,9 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
             q_start = len(prompt_ids) - 1                       # intervene from the frontier pivot on
             cond_desc = inst.expected_next_desc
             block_pos = None
-            if strategy == "blind_span":
-                block_pos = frontier_block_positions(mt, prompt, cond_desc)
+            if strategy in ("blind_span", "blind_task", "blind_task_and_progress"):
+                block_pos = (frontier_desc_positions(mt, prompt, cond_desc) if strategy == "blind_task"
+                             else frontier_block_positions(mt, prompt, cond_desc))
                 if not block_pos:
                     logger.warning(f"[{sid}] frontier span not located — skipping")
                     continue
