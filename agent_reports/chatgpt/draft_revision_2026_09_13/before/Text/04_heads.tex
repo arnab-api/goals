@@ -1,0 +1,111 @@
+\section{A Sparse Set of \goalheads Carries the Goal}
+\label{sec:heads}
+
+\Cref{sec:what} read the goal out of a located set of attention heads. Here we say how those
+\goalheads are found, and show that the goal signal is a property of the \emph{head selection}---not of
+the residual stream at those positions, and not of a large fraction of the network.
+
+\subsection{Locating the \goalheads}
+\label{sec:heads:localize}
+
+We localize the \goalheads with activation patching (\Cref{sec:notations:interventions}) on a
+minimal-pair setup. A \emph{source} and a \emph{destination} prompt each ask the model to implement a
+single predicate ($\pred_\src \neq \pred_\dst$) on the same data type (\texttt{int} $\mid$ \texttt{str}
+$\mid \cdots$), each cut off so the next token is representative of the predicate being implemented. To
+guarantee the located latents carry the abstract predicate rather than shallow token information, source
+and destination use \emph{different programming languages}, so the source's target token is absent from
+the destination's language (a concrete example is in {\color{red}\Cref{fig:goal_head_loc}}).
+
+We cache what each head \emph{writes} to the residual stream (its OV contribution $a_t^{\ell j}$,
+Eq.~\ref{eq:head}) from the source run, and learn a sparse binary mask over all heads that, when their
+outputs are patched into the destination run, maximizes the logit of the source-predicate token
+$\mathrm{tok}_\mathrm{targ}$:
+\vspace{-1.0em}
+\begin{align}
+    \label{eqn:opt-int}
+    a^{\ell j}_{-1} & \leftarrow \mathrm{mask}^{\ell j}\, a^{\ell j}_{\src} + (1 - \mathrm{mask}^{\ell j})\, a^{\ell j}_{-1}.
+\end{align}
+\vspace{-1.5em}
+
+The learned mask selects a compact set of \goalheads concentrated in the model's middle-to-late layers
+(band $25$--$56$ for \texttt{Qwen2.5-Coder-32B}; $122$ heads at threshold $>0.9$). Full training details,
+layer/threshold sweeps, and per-model head sets are in \Cref{app:head_loc}.
+
+\subsection{The head \emph{selection}, not the location, carries the goal}
+\label{sec:heads:residual}
+
+Is the goal simply present in the residual stream at the pivot, or specifically in what the \goalheads
+write? We compare \goalscope's read-out quality when the injected vector is the \goalheads' aggregate
+output versus the raw residual stream (and the full attention-block output) at the same positions and
+depths, holding the injection mechanism fixed (norm-relative, so the comparison reads content, not
+magnitude; \Cref{app:goalscope}).
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{source injected into \goalscope} & \textbf{faithfulness} & \textbf{causality} \\
+\midrule
+\goalheads (122, output aggregate)            & \textbf{0.879} & \textbf{0.792} \\
+full attention-block output, L40--50          & 0.343 & 0.334 \\
+residual stream, L25--56                       & 0.031 & 0.020 \\
+residual stream, L40--50                       & 0.009 & 0.006 \\
+\bottomrule
+\end{tabular}
+\caption{The head selection does nearly all the work. \goalscope read-out on the locked
+prefill-to-frontier corpus (Qwen2.5-Coder-32B, $n{=}253$, $\alpha{=}0.1$), varying only the injected
+source. The goal is highly readable from the \goalheads' output, only partially from the full attention
+output, and essentially \emph{unreadable} from the raw residual stream, whose norm is dominated by
+non-goal content.}
+\label{tab:heads-vs-residual}
+\end{table}
+
+\Cref{tab:heads-vs-residual} (see also \Cref{fig:heads-vs-residual}) shows the goal is highly readable
+from the \goalheads (0.88 / 0.79) but essentially \emph{unreadable} from the raw residual at the same
+depths ($\sim$0.01--0.03). The head selection, not the location, is what exposes the goal.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\linewidth]{Figures/goalscope_axis_a_residual.png}
+\caption{\goalheads{} aggregate vs.\ raw residual / attention-block output as the \goalscope source
+(placeholder; regenerate at final quality).}
+\label{fig:heads-vs-residual}
+\end{figure}
+
+\subsection{How many heads? The encoding is sparse}
+\label{sec:heads:sparsity}
+
+The read-out saturates with only a small fraction of heads (\Cref{tab:sparsity},
+\Cref{fig:head-budget}). Faithfulness climbs steeply from $5$ to $25$ heads ($0.45 \to 0.79$) and then
+plateaus: $\sim$25 heads ($\approx$0.6\% of the model's $4160$ heads) already recover $\sim$90\% of the
+full-set read-out, and $50$--$100$ heads essentially match the $122$-head anchor. Adding heads beyond
+$\sim$100 yields no further faithfulness and a mild \emph{causality} decline, consistent with larger
+sets pulling in less-selective heads that dilute the steered direction. This sparsity is what makes
+\goalscope and the steering experiments of \Cref{sec:steer} a targeted intervention rather than a
+diffuse perturbation.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccccccccc}
+\toprule
+\# heads & 5 & 10 & 25 & 50 & 100 & \textbf{122} & 150 & 200 & 250 & 300 \\
+\midrule
+faithfulness & 0.446 & 0.715 & 0.791 & 0.817 & 0.867 & \textbf{0.879} & 0.859 & 0.880 & 0.852 & 0.874 \\
+causality    & 0.425 & 0.625 & 0.779 & 0.839 & 0.813 & \textbf{0.792} & 0.816 & 0.794 & 0.750 & 0.779 \\
+\bottomrule
+\end{tabular}
+\caption{\goalscope read-out vs.\ number of \goalheads (Qwen2.5-Coder-32B, \texttt{additive\_norm}
+$\alpha{=}0.1$, \texttt{hard\_yes} pooled over the 5 pivots, $n{=}1265$ records). The read-out saturates
+by $\sim$50--100 heads; the $122$-head set used elsewhere sits on the plateau.}
+\label{tab:sparsity}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\linewidth]{Figures/fig3_250_vs_122.png}
+\caption{Read-out quality vs.\ number of \goalheads (placeholder). A handful of heads recovers most of
+the signal.}
+\label{fig:head-budget}
+\end{figure}

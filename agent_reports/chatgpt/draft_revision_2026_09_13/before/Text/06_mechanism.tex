@@ -1,0 +1,126 @@
+\section{The Goal Is Committed Upstream, Not Diffed at the Pivot}
+\label{sec:mechanism}
+
+We have shown that a decodable, steerable goal encoding is present at the pivot. A natural mechanistic
+hypothesis---which we initially pursued---is that the model \emph{computes} this goal at the pivot as a
+running \emph{difference} between the task specification and its own progress (a ``\diffmodel'':
+$g_k \approx \goal - \progress$). This section shows that account is \textbf{not} what happens. Three
+results converge on a different picture: the next goal is \emph{pre-committed upstream} and merely
+\emph{read out and routed} by the \goalheads.
+
+\subsection{The goal heads are sufficient but not necessary}
+\label{sec:mechanism:ablation}
+
+We test the \goalheads' causal role with two matched ablations on the locked corpus ($n{=}253$; setup in
+\Cref{fig:sink-setup}, details in \Cref{app:goalscope}).
+
+\paragraph{Sufficiency (blind-from-span).} We blind \emph{every} upper-layer head from the specification
+span \emph{except} the \goalheads. With only the \goalheads able to read what the task asks for, the
+model still implements the correct frontier sub-task (near baseline), whereas sparing a random
+equal-size, depth-matched set collapses to $\sim$0.09. The \goalheads are \emph{sufficient} to carry the
+goal into the implementation.
+
+\paragraph{Necessity (sink-ablation).} We instead silence the \goalheads themselves (restricting them to
+attend only to the sink position from the pivot onward). This hurts \emph{no more than} silencing a
+random equal-size set: the computation reroutes. The \goalheads are \emph{not necessary}---the goal is
+stored redundantly and can be recovered without them.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.46\linewidth}
+\includegraphics[width=\linewidth]{Figures/ablation_sufficiency_setup.png}
+\caption{sink / blind-from-span setup}
+\end{subfigure}\hfill
+\begin{subfigure}{0.46\linewidth}
+\includegraphics[width=\linewidth]{Figures/ablation_sufficiency_necessity.png}
+\caption{sufficiency (spare goal heads) vs.\ necessity (silence goal heads)}
+\end{subfigure}
+\caption{The \goalheads are \emph{sufficient} (spare only them and the model still implements the
+sub-task) but \emph{not necessary} (silence them and it reroutes, no worse than random). Placeholders.}
+\label{fig:sink-setup}
+\end{figure}
+
+Sufficient-but-not-necessary means the \goalheads are best read as a \emph{read-out / routing channel}
+for a goal that is represented more diffusely, not as the unique site that \emph{computes} it.
+
+\subsection{The goal is linearly present upstream of the goal-head layers}
+\label{sec:mechanism:upstream}
+
+If the \goalheads only route the goal, where is it computed? We probe the residual stream directly with
+\textbf{OVReader}: for a residual state $h$ taken after layer $L$ at the pivot, OVReader applies the
+\goalheads' output--value (OV) circuit to $h$ and reads the result through \goalscope---asking whether
+the upcoming sub-goal is \emph{already present in the residual}, in the exact form a goal head would
+write it, from layer $L$ onward. The goal becomes linearly readable well \emph{before} the goal-head
+layers concentrate (from $\sim$L40; \Cref{fig:ovreader}). The \goalheads therefore inherit a goal that
+upstream computation has already made available, consistent with the necessity result.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.46\linewidth}
+\includegraphics[width=\linewidth]{Figures/ov_reader_skyline_first_impl.png}
+\caption{read-out quality vs.\ probe layer $L$}
+\end{subfigure}\hfill
+\begin{subfigure}{0.46\linewidth}
+\includegraphics[width=\linewidth]{Figures/ov_reader_goalscope_bars.png}
+\caption{OVReader vs.\ \goalscope}
+\end{subfigure}
+\caption{OVReader: the goal is linearly present in the residual from $\sim$L40, before the goal-head
+band---i.e.\ computed upstream and read out later (placeholders).}
+\label{fig:ovreader}
+\end{figure}
+
+\subsection{The pivot query already carries the pre-decided goal, not a difference}
+\label{sec:mechanism:precommit}
+
+The sharpest test of the \diffmodel account isolates \emph{what the pivot query carries}. We hold the
+model's \emph{progress identical} on both sides and diverge only the \emph{order} of the task list, so
+the two hypotheses predict different next tokens:
+
+\begin{center}\small
+\begin{tabular}{llll}
+\toprule
+side & task list (order) & prefilled (progress) & native next \\
+\midrule
+SRC & $[T_1, T_2, \mathbf{T_3}, T_4]$ & $\{T_1, T_2\}$ & $\mathbf{T_3}$ \\
+DST & $[T_1, T_2, \mathbf{T_4}, T_3]$ & $\{T_1, T_2\}$ & $\mathbf{T_4}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Under \textbf{(H-progress / \diffmodel)}, the query encodes only \emph{how far along} the model is
+($\{T_1,T_2\}$, identical on both sides), and the next goal would be computed downstream from the task
+keys/values---so transplanting SRC's query into DST should leave DST pursuing $T_4$. Under
+\textbf{(H-committed)}, the query already carries the \emph{computed next goal} itself, so the transplant
+should flip DST to $T_3$. We observe the latter: transplanting the pivot query flips DST toward $T_3$
+(\Cref{fig:precommit}). The next goal is \emph{already decided} by the pivot and carried in the query;
+it is not (re)derived at the pivot as a difference against progress.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{Figures/q-transfer-diff-vs-prog.png}
+\caption{Query transplant with progress held fixed and task order swapped: DST flips to the source's
+\emph{pre-decided} next goal $T_3$, not to the progress-implied $T_4$---evidence against a pivot-time
+diff (placeholder).}
+\label{fig:precommit}
+\end{figure}
+
+\subsection{Which goal, not whether it succeeds}
+\label{sec:mechanism:competence}
+
+A direction that predicts \emph{success} could merely track model competence rather than \emph{which}
+sub-goal is pursued. Our interventions control for this: the steering and transplant tests
+(\Cref{sec:steer,sec:mechanism:precommit}) are \emph{which-goal} contrasts among equally-valid orderings
+($T_3$ vs.\ $T_4$, $g_\src$ vs.\ $g_\dst$), where every option is correct, so a shift can only mean the
+representation encodes intent, not success. We report the failure modes---cases where the goal signal is
+weak or a transplant fails to trigger---in \Cref{app:dissociation}, and discuss them next.
+\arnab{fold in the kv-transfer failure taxonomy (naming/datatype; patched read-out reverting to
+dst/neither).}
+
+\subsection{Summary}
+\label{sec:mechanism:summary}
+
+The next instrumental goal is \emph{committed upstream} (linearly present in the residual by $\sim$L40),
+\emph{stored redundantly} (silencing the goal heads reroutes), \emph{carried pre-decided in the pivot
+query} (not diffed against progress), and \emph{read out and routed} by a sparse set of \goalheads that
+are sufficient but not necessary. This replaces the pivot-time \diffmodel picture with a
+commit-then-route account of goal pursuit.

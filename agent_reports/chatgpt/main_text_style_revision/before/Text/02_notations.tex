@@ -1,0 +1,26 @@
+\section{Task and Intervention Setup}
+\label{sec:notations}
+
+\subsection{Language models and head contributions}
+\label{sec:notations:lm}
+An autoregressive transformer $\M$ maps a token prefix $x=(x_1,\ldots,x_n)$ to a distribution over its next token. Write $h_t^\ell$ for the residual state at layer $\ell$ and position $t$. Suppressing normalization and positional encoding, a head's contribution to the residual stream is
+\begin{equation}
+a_t^{\ell j}=\left(\sum_{i\leq t}\mathrm{Attn}(q_t,K)_i v_i\right)W_O^{\ell j},
+\qquad \mathrm{Attn}(q_t,K)=\mathrm{softmax}\!\left(\frac{q_tK^\top}{\sqrt{d_{\mathrm{head}}}}\right).
+\label{eq:head}
+\end{equation}
+Here queries, keys, and values are learned projections of the normalized residual states; queries and keys additionally receive the model's positional transformation. In grouped-query attention, multiple query heads share a key/value head. The output projection maps each head's attention-weighted value into residual-stream coordinates. We write $[\ell,j]$ for a head and use \emph{head contribution} for this projected output, rather than for its attention weights or raw value states.
+
+\subsection{Sequential subgoal implementation}
+\label{sec:notations:task}
+A prompt specifies an ordered sequence $G=(g_1,\ldots,g_K)$ of independent predicates and asks the model to implement them sequentially. Predicates operate on integers, strings, lists of integers, or lists of strings. The main evaluation uses a locked corpus of 253 specifications. We prefill completed predicates and an assignment prefix for the next predicate, which defines the \emph{frontier} subgoal $g_k$. This controlled frontier supplies the target description for evaluation; it does not guarantee that every clean completion implements it correctly.
+
+We inspect five positions around the frontier: the end of the preceding line, indentation, the variable name, the assignment operator, and the first implementation token. We call a pre-implementation capture position a \pivot. The assignment operator is the principal pivot in the ablation experiments. The first implementation token is a comparison position and is not evidence of encoding before implementation. Thus the corpus provides 253 specifications and up to 1,265 position-level records; the five positions are repeated measurements of each specification. Exact tokenization is described in \Cref{app:pivots}.
+
+Progress denotes the completed subgoals. It is equivalent to an index in $G$ only under execution in the specified order without skipping. We use this distinction when changing task order or the prefilled work. Our object of study is information about the next subgoal, not a presumed representation of a complete execution plan.
+
+\subsection{Interventions and generation}
+\label{sec:notations:interventions}
+Activation patching replaces selected activations in a destination run with activations cached from a source run \citep{vig-etal-2020,mueller2026quest}. We write $\M(p)[a_t^{\ell j}\leftarrow a_{\mathrm{src}}^{\ell j}]$ for an intervened forward pass. For multi-token generation, the intervention additionally has a schedule specifying its prefill positions and subsequent decoding passes. A fresh patch applied at every decoding step differs from a single prefill patch whose effects persist through the cache.
+
+We distinguish three interventions. \emph{Head-output replacement} substitutes individual head outputs and is used for localization and replacement readout. \emph{Aggregate injection} sums selected projected contributions and adds the resulting vector to residual states in a separate probe; this is the main \goalscope readout. \emph{Query or key/value transfer} changes, respectively, the query states or task-span keys and values accessed through selected heads. These latter interventions probe sensitivity to goal selection and task information (\Cref{sec:mechanism}). A resulting output change establishes an effect of the intervention; its interpretation depends on the source/destination contrast and the sites and duration patched.

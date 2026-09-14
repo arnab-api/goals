@@ -1,0 +1,33 @@
+\section{Discussion}
+\label{sec:conclusion}
+
+We gave evidence that code LLMs hold an explicit representation of their next instrumental sub-goal
+\emph{before} they execute it, and that this representation is decodable (\goalscope verbalizes it in
+natural language, \Cref{sec:what}), localized to a sparse set of \goalheads (\Cref{sec:heads}),
+steerable and portable across languages, model families, and domains (\Cref{sec:steer}), and
+\emph{committed upstream} rather than computed at the pivot (\Cref{sec:mechanism}). Intent precedes
+action, and it does so as a concrete, manipulable object.
+
+\paragraph{Commit-then-route, not diff-at-the-pivot.} We initially modeled next-step selection as a
+running \emph{diff} of the specification against progress. The evidence does not support that: the goal
+is linearly present in the residual before the goal-head layers concentrate, silencing the goal heads
+reroutes rather than removes it, and the pivot query already carries the \emph{pre-decided} goal rather
+than a difference against progress. The \goalheads are best understood as a sufficient-but-not-necessary
+\emph{read-out and routing} channel for a goal that is decided upstream and stored redundantly. Where
+exactly the goal is first \emph{computed} (and how the ordered task list is turned into a committed next
+step) is the natural next question.
+
+\paragraph{Intent vs.\ competence.} A representation that predicts success could merely track competence.
+Our which-goal contrasts among equally-valid orderings (\Cref{sec:mechanism:competence}) isolate
+\emph{which} sub-goal is pursued from \emph{whether} it will be executed correctly, but a fuller
+characterization of the failure modes---when the goal signal is weak, or a transplant fails to
+trigger---is important for trusting the account.
+
+\paragraph{Limitations and outlook.} Our task decompositions are specified in the prompt; whether the
+same representation governs \emph{proactive} (unspecified) decomposition is only tested qualitatively
+(\Cref{app:unspecified}). We also deliberately leave the low-level goal-to-syntax mapping unexamined,
+focusing on the abstract goal encoding. Extending the account to free-form code and to non-code
+sequential tasks (\Cref{sec:steer:noncode}) is natural future work, as is locating the upstream
+computation that commits the goal.
+\claude{Merge with \texttt{Text/100\_limitations.tex} if a separate Limitations section is desired for
+the venue.}

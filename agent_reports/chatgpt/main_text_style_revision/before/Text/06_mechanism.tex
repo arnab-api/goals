@@ -1,0 +1,38 @@
+\section{Goal Information in Context and Model Depth}
+\label{sec:mechanism}
+\label{sec:steer}
+We next examine the information accessed through goal-head attention and its availability in intermediate residual states. These experiments characterize sensitivity to context and goal selection without presupposing a progress-subtraction algorithm.
+
+\subsection{Attention to relevant task descriptions}
+\label{sec:mechanism:gaze}
+At a frontier position, the selected heads' value-weighted attention often concentrates on the task tokens describing the upcoming predicate. This resembles gaze behavior observed in other generation settings \citep{gandikota2026gaze}. We use this alignment as a diagnostic of which instruction information the heads access (\Cref{app:gaze}). Attention alignment alone does not show that the model will implement the attended goal, or where that goal was selected.
+
+\subsection{Changing task information redirects implementation}
+\label{sec:steer:transplant}
+\label{sec:steer:crosslang}
+Consider a source with tasks $(A,B,C)$ and a destination with tasks $(A,B,D)$, both prefilling $A$ and $B$. We transplant keys and values for the source task span into the destination attention computation for the selected heads. The destination still receives its original text prefix, but the intervention supplies source task information through those heads. A continuation implementing $C$ rather than $D$ demonstrates behavioral transfer of that information.
+
+In the multi-predicate assignment-pivot setup, the 250-head intervention achieves approximately 99\% source-directed continuation and 96\% exclusive source-goal readout over four datatypes and four language directions. Source-directed continuation includes the oracle's source-or-both labels; it is not a claim of perfect exclusive replacement or executable code in every case. The cross-language conditions show that this transfer can produce a destination-language realization of source task information. Detailed configurations and failure modes are in \Cref{app:task_transfer}.
+
+The implementation routes patched attention outputs to the selected query heads, accounting for shared KV heads. It applies across prefill query positions and subsequent decoding. Consequently, earlier patched outputs can alter later destination states and queries. Frozen source keys and values do not imply a fixed destination query throughout the network. Success shows adaptation to changed task information, but does not by itself locate progress information in the query.
+
+\subsection{Queries can favor a particular source subgoal}
+\label{sec:mechanism:precommit}
+Query transfer provides a complementary intervention. In the multi-predicate setup, transferring source queries at selected heads produces approximately 94\% source-directed continuation across the four language directions. This result establishes that the query states can influence which subgoal is pursued, but source progress and source target coincide in the basic setup.
+
+A qualitative task-order contrast makes their predictions diverge. The source orders tasks $(A,B,C,D)$ and has completed $(A,B)$, so its next task is $C$. The destination orders $(A,B,D,C)$ and has completed only $A$. Transferring a source state that solely specifies the completed prefix $(A,B)$ would favor $D$ under the destination order, while a state favoring the source target would favor $C$. The observed transfer favors $C$. This example supports goal-specific information in the query; a systematic crossed evaluation is needed to distinguish it from other context-dependent selectors. It does not show that progress information is absent from the query or establish how the next goal is computed.
+
+\subsection{Reading intermediate residual states with OVReader}
+\label{sec:mechanism:upstream}
+The preceding experiments manipulate attention states. We also ask at which layers the residual state at a capture position supports a subgoal readout. \textbf{OVReader} applies the selected heads' value and output maps to that residual, normalizes each head's transformed vector, aggregates the results, and uses the resulting direction in the \goalscope probe (\Cref{app:ovreader}). It uses model weights rather than a newly trained semantic decoder. Because normalization and probe generation are part of the procedure, we describe it as an OV-based readout, not a linear probe.
+
+At the assignment operator, readout can already be strong around layer 40. Across the five capture positions, performance generally peaks around layers 48--52 and declines toward the final layer. Positions before the assignment show different emergence profiles. Layer 40 is within the selected-head layer range, so these curves do not establish that goal computation precedes all goal-head activity. They show where the representation is accessible through this readout, not its unique origin or an irreversible commitment to a goal.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.82\linewidth]{Figures/ov_reader_skyline_eq.png}
+\caption{OVReader at the assignment pivot: readout quality across source layers, compared with the selected heads' actual output readout. The evaluation uses 64 examples per datatype. The plotted ``causality'' metric is implementation transfer with trivial-readout sanitization. This pre-implementation position is separated from the first implementation token; other positions appear in \Cref{app:ovreader}.}
+\label{fig:ovreader}
+\end{figure}
+
+Together, task-span transfer, query transfer, and OVReader show that subgoal information is available in multiple interacting components and remains sensitive to context. They leave open whether progress and target identity are separately represented, how they are combined, and which computations initially select the subgoal.

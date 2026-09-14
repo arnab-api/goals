@@ -1,0 +1,33 @@
+\section{Related Works}
+\label{sec:related}
+
+\paragraph{Planning and look-ahead in LMs.} A growing body of work shows that autoregressive LMs
+encode information about tokens they have not yet emitted and act toward future constraints
+\citep{pal2023futurelens, lindsey2025biology}. We examine
+an explicit, decodable representation of the \emph{next instrumental sub-goal}, present before
+execution, and evaluate both its verbalization and its use in steering code generation.
+\claude{Add citations: future-lens / prompt-injection look-ahead, poetry-planning (Anthropic biology),
+chess/maze planning, emergent world models.}
+
+\paragraph{Portable task representations and function abstractions.} Compact, transplantable
+representations of a task have been found in attention-head outputs (function vectors,
+\citealp{todd2024function}), in concept-induction heads that carry language-independent word
+meanings \citep{feucht2025dual}, and in \emph{filter heads} that encode a filtering predicate in
+their \emph{query} states and reapply it across formats, languages, and tasks
+\citep{sensharma2025filterheads}. Our \goalheads extend this line to \emph{intent}: a compact,
+transplantable, cross-language encoding of the next instrumental sub-goal, read out and routed by a
+sparse head set. The filter-heads finding that models sometimes \emph{eagerly evaluate} rather than
+carry a portable predicate connects to our failure-mode analysis (\Cref{sec:mechanism:competence}).
+
+\paragraph{Verbalizing latents.} \goalscope builds on Patchscope \citep{ghandeharioun2024patchscope}
+and related self-interpretation / lens methods, adapting them to read attention-head outputs at a
+single position over multi-token rollouts.
+\claude{Add: logit lens, tuned lens, SelfIE, function-vector readouts; contrast what \goalscope reads
+(head-output, multi-token) vs.\ residual-stream single-token lenses.}
+
+\paragraph{High-level interpretability of goal-directed behavior.} Our work is an instance of the
+high-level, mechanism-agnostic interpretability agenda \citep{greenblatt2024highlevel}: we build a
+theory of goal representation at an abstraction above the token-to-syntax mapping and validate it with
+intervention experiments across programming languages and replications within multiple models.
+\claude{Cite causal abstraction / DAS (Geiger et al.), high-level causal mediation; position our
+cross-language transfer as the abstraction test.}

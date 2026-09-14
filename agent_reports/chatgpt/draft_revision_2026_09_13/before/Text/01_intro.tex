@@ -1,0 +1,22 @@
+\section{Introduction}
+\label{sec:intro}
+\arnab{I am using terms like ``sub-goal'', ``intention", ... interchangeably on the intro. we need to come to a concensus what term to use.}
+
+% NOTE: \citep{} keys below are placeholders (render as [?]) until references.bib is populated.
+% \arnab{...}/\claude{...} margin notes flag claims that still need an experiment or citation.
+
+Consider a programmer asked to write a routine that \emph{retrieves a record from a database}, a task that decomposes into several sub-tasks: \emph{check that the query is valid}, \emph{check that the user has permission}, \emph{perform the retrieval}, and so on \arnab{find a better example}. The programmer does not decide what to type one keystroke at a time. At each point they hold a coherent \emph{goal} for the current sub-task (\textit{``check that the query is valid''}) before writing any of it. We ask whether large language models (LLMs) write code the same way: when an LLM emits a long span of tokens to satisfy a multi-step specification, does it hold an explicit representation of the \emph{next} instrumental sub-goal before it begins it's implementation?
+
+Although LLMs are trained to predict one token at a time, a growing body of work shows that they \emph{look ahead}: they encode information about tokens they have not yet emitted \citep{pal2023futurelens} and plan toward constraints several tokens in the future \citep{lindsey2025biology}. Most of this work treats \emph{``the plan''} as a single, static object. We take a more mechanistic view and ask what the plan for the \emph{next step} looks like as a concrete internal object---and, crucially, whether that object is one we can read and move between contexts. \arnab{maybe related works is a better place for this. move if the intro gets too long.}
+
+We study the \emph{instrumental} level of the following hierarchy: the \emph{broader} goal (\emph{implement merge sort}) decomposes into \emph{instrumental sub-goals} (\textit{merge the two sub-arrays}), each of which admits many \emph{implementations} (such as using \emph{for} loop or \emph{while} loop). Our claim concerns a representation of \emph{which instrumental sub-goal the model is about to pursue}, invariant and separable from how it will be realized in code.
+
+We give evidence, on \texttt{Qwen2.5-Coder-32B-Instruct} and replicated across model families, that the next instrumental sub-goal is an explicit, decodable, and steerable internal object, present before execution. Our findings are organized as follows.
+
+\textbf{The next sub-goal is pre-committed before execution, and is verbalizable (\Cref{sec:what}).} We can localize the encoding of the LM's intention to perform the next-step to a sparse set of attention heads, which dub as \goalheads. We introduce a tool \goalscope, a lightweight probe built on the \goalheads, that can verbalizes the next sub-goal directly from the LM internals well before implementation for it begins.
+
+\textbf{The encoding is abstract and portable (\Cref{sec:steer}).} Transplanting the encoding causally steers a fresh context to pursue the intended sub-goal. This works \emph{across programming languages} (a goal cached from Python triggers the same sub-goal injected into C++, and vice versa), \emph{across model families and training regimes} (scale, code-tuning, RL), and \emph{beyond code}, in few-shot and non-code sequential-planning settings. This is evidence that the encoding is a genuinely abstract representation of intent, decoupled from the surface next token distributions.
+
+\textbf{A bottleneck in LM's execution of the sub-task (\Cref{sec:mechanism}).} Using the \goalheads's OV-projection we find that the encoding of the next sub-goal is already pre-decided \emph{before} the layers where the goal heads concentrate. But we find that the goal heads create a bottleneck in the LM's execution of the goal. The LM can still perform the next sub-goal if we only preserve the \goalheads and knock all the attention heads in later layers, starting from well before the goal-head layers. However, if we knock-out enough \goalheads, the LM can't execute the next goal anymore. So, these heads are both sufficient and necessary for mediating the LM's pre-decided intention. 
+
+Together, our results give a concrete, testable evidence that code-LLMs represent and pursue intermediate goals: an explicit, portable, causally manipulable encoding of \emph{intent} that precedes action.  \arnab{Teaser figure: the read-out + one steering example, framed as ``intent before action''.}

@@ -1,0 +1,36 @@
+\section{Reading Subgoals Before Implementation}
+\label{sec:what}
+We first ask whether selected activations contain information that can describe and guide the upcoming operation before its implementation appears. We identify heads using a simple transfer task and then evaluate their readouts on sequential subgoal implementation.
+
+\subsection{Localizing goal heads}
+\label{sec:what:approach}
+\label{sec:heads:localize}
+A source and a destination prompt request different predicates on the same datatype in different programming languages. Both end where the next token distinguishes their respective implementations. We cache source head outputs and learn a sparse mask that promotes a target token associated with implementing the \emph{source predicate in the destination language}:
+\begin{equation}
+a_{-1}^{\ell j}\leftarrow m^{\ell j}a_{\mathrm{src}}^{\ell j}+(1-m^{\ell j})a_{-1}^{\ell j}.
+\label{eqn:opt-int}
+\end{equation}
+The localization contrast uses a target token different from the source's next token, reducing the possibility of selecting heads solely for copying that token. This is a localization objective, not itself a guarantee of full semantic transfer. We call the selected set $H$ the \goalheads. The main readout uses 122 heads concentrated in layers 28--55 of the 64-layer model. Mask learning and head-set construction are detailed in \Cref{app:head_loc}; subsequent multi-token evaluation tests what their outputs carry beyond the localization token.
+
+\subsection{GoalScope and implementation transfer}
+\label{sec:what:readout}
+\goalscope builds on activation-based verbalization \citep{ghandeharioun2024patchscope}. At a chosen source token, we cache the selected heads' projected contributions and sum them into one vector. A separate run of the same model receives a fixed prompt asking what operation it is performing. We inject the aggregate into this probe's residual stream and greedily decode a natural-language readout. The probe receives neither the source instructions nor the source code as text.
+
+Our main configuration uses norm-relative additive injection: at layers 35--45, the added vector has magnitude $0.1$ times the local residual norm and points along the selected-head aggregate. The same source vector is applied at the probe's last prompt position and each subsequent decoding step. \Cref{app:goalscope} gives the formula, prompt, and replacement variant. The source vector remains fixed during each readout; the probe's output is a multi-token generation.
+
+We evaluate two complementary capabilities. \textbf{Readout faithfulness} asks whether the verbalization describes a nontrivial part of the frontier subgoal. \textbf{Implementation transfer} uses a code stub in another programming language as the probe context and asks whether its continuation implements a nontrivial part of that subgoal. Both employ interventions, but they test different outcomes: eliciting a description versus eliciting code. Native causal involvement is tested separately in \Cref{sec:heads}.
+
+An oracle judges readouts against the extracted code for the generated frontier assignment (exact prompts in \Cref{app:oracle_prompts}). Implementation-transfer scoring rejects trivial sign/zero continuations that can arise as defaults of the probe stub. A positive score denotes nontrivial agreement, not necessarily a complete or executable implementation. We retain clean generation as a separate reference rather than treating the intended frontier as proof of what the model actually computed.
+
+\subsection{Readout across capture positions}
+\label{sec:what:results}
+Across the locked corpus and all five positions, the 122-head readout achieves 87.9\% faithfulness and 79.2\% implementation transfer. These pooled rates include the first implementation token; evidence for \emph{before implementation} comes from the position-wise results. Readouts are strongest near the assignment operator and first implementation token and weaker at the end of the previous line. The positional variation places the claim near the start of the subgoal rather than implying that the entire future program is represented from the outset.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.68\linewidth]{Figures/ov_reader_goalscope_bars.png}
+\caption{Selected-head readouts across capture positions on the OVReader evaluation corpus (64 examples per datatype). The first implementation token is shown as a comparison, separately from pre-implementation positions. The plotted ``causality'' metric is implementation transfer with trivial-readout sanitization. This corpus is distinct from the locked 253-specification corpus used for the pooled rates in the text.}
+\label{fig:goal-eval}
+\end{figure}
+
+Cross-language implementation transfer supports an operation-level interpretation: the same extracted contributions can guide different surface realizations. It does not establish invariance to every implementation choice. Similarly, a natural-language readout establishes that the signal can be verbalized, not that its native format is language. We next distinguish effective readout from the heads' causal role in ordinary code generation.

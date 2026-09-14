@@ -1,0 +1,22 @@
+\section{Beyond Explicitly Specified Code Tasks}
+\label{sec:generalization}
+\label{sec:steer:noncode}
+Our controlled corpus specifies the component predicates in the prompt. To explore whether the code-localized head set reads information beyond these explicit specifications, we examine free-form code and a few-shot relation setting. These extensions are qualitative and are kept separate from the controlled-corpus rates.
+
+\paragraph{Free-form code.}
+When a programming request does not enumerate its component steps, \goalscope can be applied to positions within the generated solution. Here the model's own continuation, rather than a preassigned predicate list, is the relevant comparison. The granularity of a subgoal can be ambiguous: a readout may describe a local operation or a larger enclosing computation. We therefore treat these examples as exploratory and defer the examples and annotation choices to \Cref{app:unspecified}.
+
+\paragraph{Few-shot relation tasks.}
+Following the function-vector setting \citep{todd2024function}, a prompt supplies input--output demonstrations and ends at the answer prefix for a new input. The relation need not be named in the prompt. We retain the code-localized heads and ask whether their contributions expose the operation inferred from the demonstrations. Unlike sequential code, this setup tests an inferred task mapping rather than selection among explicitly listed subgoals.
+
+\begin{quote}\small\ttfamily
+Q: enter\quad A: exit\\
+Q: feasible\quad A: infeasible\\
+\ldots\\
+Q: mercy\quad A:
+\end{quote}
+This abbreviated prompt is drawn from the exploratory antonym run, whose clean continuation begins ``cruelty'' and then continues producing question--answer pairs. At the newline following ``cruelty'' (saved token position 57), the readout is ``Identifying antonyms.'' At the answer-prefix token \texttt{A} before the later answer ``slow'' (position 70), it is again ``Identifying antonyms.'' These are captured during the continuing sequence, not before the first answer. Nearby positions also produce vague or incorrect descriptions, so the example establishes qualitative accessibility rather than a reliability estimate.
+
+The probe asks for the hidden rule in a short phrase; it does not name antonymy or receive the demonstrations as text. The head set remains code-localized, but the verbalization prompt is adapted to this domain. Exact prompt wording and contrasting readouts appear in \Cref{app:non-code}. A quantitative evaluation should use held-out examples and a relation-description rubric, reporting clean task accuracy and unsteered probe outputs separately. We leave that evaluation pending rather than claiming quantified non-code transfer.
+
+Additional recipe, travel, and narrative settings are reserved for \Cref{app:non-code}. Replications within other models, including code-trained and instruction-trained variants, are reported separately in \Cref{app:model_comparison}; no cross-model activation transfer is assumed.

@@ -1,0 +1,19 @@
+\section{Introduction}
+\label{sec:intro}
+
+A request to process a list of strings can involve several operations: remove invalid entries, retain palindromes, and count the remaining items. Before writing the code for one of these operations, does a language model already represent which operation it is about to implement? We study this question at the level of a \emph{subgoal}: a meaningful intermediate operation that can admit multiple implementations. Our use of \emph{intent} refers to the identity of this upcoming operation, rather than to a subjective state or a complete plan for the program.
+
+Autoregressive prediction is compatible with representations of future computation. Prior work finds information about future tokens and constraints in model activations \citep{pal2023futurelens,lindsey2025biology}. Here we ask whether an upcoming subgoal is accessible as a semantic representation before its implementation appears, and whether transferring that representation can guide computation in a new context. Code provides a controlled setting in which the intended operation can be specified independently of its syntax and evaluated across programming languages.
+
+Our main experiments use \texttt{Qwen2.5-Coder-32B-Instruct} on sequential predicate-implementation tasks. We identify attention heads whose output contributions transfer a predicate between contexts with different programming languages. We then evaluate these heads on multi-step prompts at positions around the beginning of the next implementation. The paper develops three findings.
+
+\paragraph{Upcoming subgoals are readable and transferable.}
+\goalscope extracts selected-head contributions at a source position and injects their aggregate into a separate model run with a fixed verbalization prompt (\Cref{sec:what}). Its continuation describes the upcoming operation. Injecting the signal into a code stub instead tests whether it can induce implementation in another programming language. These complementary readouts test semantic accessibility and behavioral transfer; neither requires the source code to be supplied as text to the probe.
+
+\paragraph{Sparse readout and native causal involvement differ.}
+A small head set recovers much of the readout performance of the full selection, but a broader intervention is needed to strongly disrupt native implementation (\Cref{sec:heads}). We distinguish these findings with controlled span-restriction and sink-attention experiments. The results identify a causally important route for task information without claiming that the selected heads alone constitute the entire subgoal computation.
+
+\paragraph{Subgoal information is available in both attention and the residual stream.}
+The heads attend to relevant task descriptions, and changing their task-span keys and values can redirect implementation. Query transfer can also favor a particular source subgoal (\Cref{sec:mechanism}). An OV-based transformation makes subgoal information readable from intermediate residual states. Together, these results constrain how the representation interacts with context while leaving its precise computation open.
+
+We also examine few-shot relation tasks and free-form code to explore the reach of the code-localized readout (\Cref{sec:generalization}). Replications within other model families and training regimes are reported in \Cref{app:model_comparison}. These are replications of the phenomenon within each model, rather than transfers of activations between models. Our central claim is that an upcoming subgoal has a readable and manipulable representation before its implementation, not that the model forms its entire plan in advance or represents that plan in natural language.

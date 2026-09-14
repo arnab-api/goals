@@ -1,0 +1,32 @@
+\section{Task, Background, and Notations}
+\label{sec:notations}
+
+\subsection{Language Models}
+\label{sec:notations:lm}
+
+An autoregressive transformer language model $\M : \mathcal{X} \to \mathcal{Y}$ over a vocabulary $\mathcal{V}$ maps a sequence of tokens $x = (x_1, x_2, \dots, x_n)$, $x_i \in \mathcal{V}$, to $y \in \mathbb{R}^{|\mathcal{V}|}$, a probability distribution over the next-token continuation of $x$. Internally, $\M$ has $L$ layers; the residual stream at layer $\ell$ and position $t$ is
+    $h_t^{\ell} = h_t^{\ell-1} + m_t^{\ell} + \sum_{j} a_t^{\ell j}$,
+where $m_t^{\ell}$ is the output of the MLP and $a_t^{\ell j}$ is the contribution of the $j$-th attention head. Following \citet{elhage2021mathematical}, the contribution of a single head to $h_t^{\ell}$ is
+\begin{equation}
+    a_t^{\ell j} = \left( \sum_{i \le t} \mathrm{Attn}(q_t, K)_i \; v_i \right) W_{O}^{\ell j},
+    \qquad
+    \mathrm{Attn}(q_t, K) = \mathrm{softmax}\!\left(\frac{q_t K^\top}{\sqrt{d_{\text{head}}}}\right),
+    \label{eq:head}
+\end{equation}
+with query $q_t = h_t^{\ell-1} W_Q^{\ell j}$, keys $K = h_{\le t}^{\ell-1} W_K^{\ell j}$, affinity of query and key states determine the mixture over the value states $v_i = h_i^{\ell-1} W_V^{\ell j}$, which is then projected with the output projection $W_{O}^{\ell j}$ and added to the residual stream. We write $[\ell, j]$ for the $j$-th attention head at layer $\ell$, and $h_t^{\ell}(x)$ for the layer-$\ell$ residual stream at position $t$ when $\M$ is run on $x$.\footnote{Most modern LM families (e.g.\ OLMo, Qwen) apply RMSNorm to $h$ before Eq.~\ref{eq:head}; }
+
+\subsection{Task: Sequential Sub-Task Implementation}
+\label{sec:notations:task}
+
+We study a set of controlled settings in which the model must satisfy a \emph{broader goal} that decomposes into an ordered set of independent \emph{sub-tasks} $G = \{g_1, \dots, g_K\}$, each specified in natural language (for example, \textit{``check if there are any palindromes in a list of strings''}). A prompt $p$ presents the specification and asks the model to implement the sub-tasks in code, one after another. The model realizes each $g_k$ over a contiguous span of generated tokens. A concrete example of the task is shown on {\color{red} Figure~\ref{fig:teaser}}, with more details on Appendix \ref{app:task}.
+
+We use two terms throughout. The \pivot $\pi_k$ is the token position at which the model is about to begin sub-task $g_k$ but has emitted none of its implementation. This is the natural place to ask what it \emph{intends} to do next. The next instrumental goal at $\pi_k$ is the sub-task $g_k$ it is about to pursue; the model's \progress at $\pi_k$ is the set of sub-tasks it has already completed (equivalently, its place in the ordered list $G$). Our central object of study is the internal representation of the next instrumental goal $g_k$ present at $\pi_k$, \emph{before} $g_k$ is realized in code.
+
+
+\subsection{Intervention Primitives}
+\label{sec:notations:interventions}
+\paragraph{Activation patching} \citep{vig-etal-2020, mueller2026quest}. We run $\M$ on a prompt $p$ but overwrite a chosen set of internal activations with latents cached from a different run, and read out the effect on the output distribution. We write $\M\left(p\right)\left[a_i^{\ell j} \leftarrow v\right]$ for the forward pass on $p$ in which the output of head $[\ell,j]$ at position $i$ is replaced by the vector $v$. When the replaced value is cached from a \emph{source} prompt $p_{\text{src}}$ and injected into a \emph{destination} prompt $p_{\text{dst}}$, a change in $\M\left(p\right)\left[v_\mathrm{orig} \leftarrow v_\mathrm{rep}\right]$ isolates the causal role of the patched component/encoding. \arnab{M(x) usually denotes a single forward pass. Our setup is multi-token generation. Ok?}
+
+\paragraph{Query, key/value, and output transplants.} The head decomposition in Eq.~\ref{eq:head} exposes three places a transplant can act, and we use all three. An \emph{output} (OV) transplant replaces a head's contribution $a_t^{\ell j}$ (what it \emph{writes} to the residual stream), and is the primitive behind \goalscope and our head localization (\Cref{sec:what,sec:heads}). A \emph{query} transplant replaces the query $q_t^{\ell j}$ that the destination uses at $\pi_k$ with the source's, changing what the read \emph{looks for}. A \emph{key/value} transplant replaces the keys and values $K^{\ell j}, V^{\ell j}$ at the specification tokens with the source's, changing what the read \emph{finds}. We use these transplants both to \emph{steer} a fresh context toward an intended sub-goal (\Cref{sec:steer}) and to probe \emph{where} the goal is computed (\Cref{sec:mechanism}).
+
+

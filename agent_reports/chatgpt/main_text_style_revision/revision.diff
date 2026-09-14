@@ -1,0 +1,292 @@
+--- before/Text/02_notations.tex
++++ Text/02_notations.tex
+@@ -9,18 +9,24 @@
+ \qquad \mathrm{Attn}(q_t,K)=\mathrm{softmax}\!\left(\frac{q_tK^\top}{\sqrt{d_{\mathrm{head}}}}\right).
+ \label{eq:head}
+ \end{equation}
+-Here queries, keys, and values are learned projections of the normalized residual states; queries and keys additionally receive the model's positional transformation. In grouped-query attention, multiple query heads share a key/value head. The output projection maps each head's attention-weighted value into residual-stream coordinates. We write $[\ell,j]$ for a head and use \emph{head contribution} for this projected output, rather than for its attention weights or raw value states.
++Here queries, keys, and values are learned projections of the normalized residual states; queries and keys additionally receive the model's positional transformation. In grouped-query attention, multiple query heads share a key/value head. We denote an individual head by $[\ell,j]$ and call $a_t^{\ell j}$ its \emph{head contribution}: what the head writes to the residual stream after the output projection.
+ 
+ \subsection{Sequential subgoal implementation}
+ \label{sec:notations:task}
+-A prompt specifies an ordered sequence $G=(g_1,\ldots,g_K)$ of independent predicates and asks the model to implement them sequentially. Predicates operate on integers, strings, lists of integers, or lists of strings. The main evaluation uses a locked corpus of 253 specifications. We prefill completed predicates and an assignment prefix for the next predicate, which defines the \emph{frontier} subgoal $g_k$. This controlled frontier supplies the target description for evaluation; it does not guarantee that every clean completion implements it correctly.
++A prompt specifies an ordered sequence $G=(g_1,\ldots,g_K)$ of operations on the same input and asks the model to implement them sequentially. For example, a program may be asked to compute the number of digits in an integer and then check whether it is even. We supply the implementation of the first operation and stop at the assignment prefix for the second:
++\begin{quote}\small\ttfamily
++def func(n: int):\\
++\hspace*{1em}a = len(str(abs(n)))\\
++\hspace*{1em}b =
++\end{quote}
++At the final \texttt{=}, the model has yet to write the evenness check. We call this next sub-goal $g_k$ the \emph{frontier}. This setup lets us identify the upcoming assignment and compare its implementation with a readout captured before it is written.
+ 
+-We inspect five positions around the frontier: the end of the preceding line, indentation, the variable name, the assignment operator, and the first implementation token. We call a pre-implementation capture position a \pivot. The assignment operator is the principal pivot in the ablation experiments. The first implementation token is a comparison position and is not evidence of encoding before implementation. Thus the corpus provides 253 specifications and up to 1,265 position-level records; the five positions are repeated measurements of each specification. Exact tokenization is described in \Cref{app:pivots}.
++Our main evaluation contains 253 specifications over integers, strings, lists of integers, and lists of strings. Each prompt lists two to four operations, which we refer to as predicates, including Boolean tests, counts, and other transformations. We inspect five positions around the frontier: the end of the preceding line, indentation, the variable name, the assignment operator, and the first implementation token. The first four are pre-implementation capture positions, which we call \emph{pivots}; the fifth provides a comparison after implementation has begun. We use the assignment operator as the principal pivot for the ablation experiments. The corpus supplies 1,265 observations per evaluation mode, with five repeated measurements per specification. The data distribution, complete example prompt, and tokenization are in \Cref{app:task,app:pivots}.
+ 
+-Progress denotes the completed subgoals. It is equivalent to an index in $G$ only under execution in the specified order without skipping. We use this distinction when changing task order or the prefilled work. Our object of study is information about the next subgoal, not a presumed representation of a complete execution plan.
++We use \emph{progress} to denote the completed sub-goals. Under execution in the specified order, these are the prefix $(g_1,\ldots,g_{k-1})$. Later experiments vary the task order and completed work to examine how they influence the next sub-goal.
+ 
+ \subsection{Interventions and generation}
+ \label{sec:notations:interventions}
+-Activation patching replaces selected activations in a destination run with activations cached from a source run \citep{vig-etal-2020,mueller2026quest}. We write $\M(p)[a_t^{\ell j}\leftarrow a_{\mathrm{src}}^{\ell j}]$ for an intervened forward pass. For multi-token generation, the intervention additionally has a schedule specifying its prefill positions and subsequent decoding passes. A fresh patch applied at every decoding step differs from a single prefill patch whose effects persist through the cache.
++Activation patching replaces selected activations in a destination run with activations cached from a source run \citep{vig-etal-2020,mueller2026quest}. We write $\M(p)[a_t^{\ell j}\leftarrow a_{\mathrm{src}}^{\ell j}]$ for a forward pass on prompt $p$ with a source head contribution substituted at position $t$.
+ 
+-We distinguish three interventions. \emph{Head-output replacement} substitutes individual head outputs and is used for localization and replacement readout. \emph{Aggregate injection} sums selected projected contributions and adds the resulting vector to residual states in a separate probe; this is the main \goalscope readout. \emph{Query or key/value transfer} changes, respectively, the query states or task-span keys and values accessed through selected heads. These latter interventions probe sensitivity to goal selection and task information (\Cref{sec:mechanism}). A resulting output change establishes an effect of the intervention; its interpretation depends on the source/destination contrast and the sites and duration patched.
++We use head-output replacement to localize the \goalheads. For the main \goalscope readout, we sum their source contributions into a single vector and add it to the residual stream of a separate probe run. We also transfer queries and task-span keys and values to examine how goal-head attention selects and accesses task information (\Cref{sec:mechanism}). For each intervention, we specify both the positions patched during prefill and whether the patch is repeated during subsequent decoding.
+--- before/Text/03_what.tex
++++ Text/03_what.tex
+@@ -1,30 +1,34 @@
+-\section{Reading Subgoals Before Implementation}
++\section{The Next Sub-Goal Is Encoded Before Implementation}
+ \label{sec:what}
+-We first ask whether selected activations contain information that can describe and guide the upcoming operation before its implementation appears. We identify heads using a simple transfer task and then evaluate their readouts on sequential subgoal implementation.
++Can we read what the model is about to do before it writes the implementation? We first locate attention heads that carry a portable representation of a code operation. We then use their contributions at the pivot to describe the upcoming sub-goal and to trigger its implementation in a new context.
+ 
+ \subsection{Localizing goal heads}
+ \label{sec:what:approach}
+ \label{sec:heads:localize}
+-A source and a destination prompt request different predicates on the same datatype in different programming languages. Both end where the next token distinguishes their respective implementations. We cache source head outputs and learn a sparse mask that promotes a target token associated with implementing the \emph{source predicate in the destination language}:
++We locate the \goalheads using activation patching on a simpler, single-predicate task. A source and a destination prompt request different predicates on the same datatype, written in different programming languages. Both prompts end where the next token distinguishes the requested implementations. We cache the source head contributions and learn a sparse mask $m^{\ell j}$ jointly over attention heads. In the destination run, the mask controls which contributions are replaced:
+ \begin{equation}
+ a_{-1}^{\ell j}\leftarrow m^{\ell j}a_{\mathrm{src}}^{\ell j}+(1-m^{\ell j})a_{-1}^{\ell j}.
+ \label{eqn:opt-int}
+ \end{equation}
+-The localization contrast uses a target token different from the source's next token, reducing the possibility of selecting heads solely for copying that token. This is a localization objective, not itself a guarantee of full semantic transfer. We call the selected set $H$ the \goalheads. The main readout uses 122 heads concentrated in layers 28--55 of the 64-layer model. Mask learning and head-set construction are detailed in \Cref{app:head_loc}; subsequent multi-token evaluation tests what their outputs carry beyond the localization token.
++The mask is optimized to promote a token that would begin implementing the \emph{source predicate in the destination language}. We choose this target to differ from the source's next token, so the localization objective rewards transfer across different token realizations. We call the selected set $H$ the \goalheads. Our main selection contains 122 heads in layers 28--55 of the 64-layer model. The mask-learning procedure and head-set construction are described in \Cref{app:head_loc}. We next test the selected heads on full readout continuations.
+ 
+ \subsection{GoalScope and implementation transfer}
+ \label{sec:what:readout}
+-\goalscope builds on activation-based verbalization \citep{ghandeharioun2024patchscope}. At a chosen source token, we cache the selected heads' projected contributions and sum them into one vector. A separate run of the same model receives a fixed prompt asking what operation it is performing. We inject the aggregate into this probe's residual stream and greedily decode a natural-language readout. The probe receives neither the source instructions nor the source code as text.
++\goalscope is a lightweight probe that verbalizes the sub-goal encoded at a single token position. Building on Patchscope \citep{ghandeharioun2024patchscope}, we cache what the selected heads write to the residual stream at the source pivot and sum these contributions into one vector. A separate run of the same model receives a fixed prompt asking what operation it is performing. We inject the cached vector into this probe's residual stream and generate a natural-language description. The source task reaches the probe through the injected activations; its instructions and code are not supplied as text.
+ 
+-Our main configuration uses norm-relative additive injection: at layers 35--45, the added vector has magnitude $0.1$ times the local residual norm and points along the selected-head aggregate. The same source vector is applied at the probe's last prompt position and each subsequent decoding step. \Cref{app:goalscope} gives the formula, prompt, and replacement variant. The source vector remains fixed during each readout; the probe's output is a multi-token generation.
++Our main configuration adds the vector at layers 35--45, scaled to $0.1$ times the local residual norm. We reuse the same source vector at the probe's last prompt position and every subsequent decoding step, generating the readout greedily. \Cref{app:goalscope} gives the exact prompt, normalization, and replacement variant.
+ 
+-We evaluate two complementary capabilities. \textbf{Readout faithfulness} asks whether the verbalization describes a nontrivial part of the frontier subgoal. \textbf{Implementation transfer} uses a code stub in another programming language as the probe context and asks whether its continuation implements a nontrivial part of that subgoal. Both employ interventions, but they test different outcomes: eliciting a description versus eliciting code. Native causal involvement is tested separately in \Cref{sec:heads}.
++\paragraph{Faithfulness.} We ask whether the verbalization faithfully describes a nontrivial part of what the model implements in its next assignment. The controlled frontier identifies this assignment, allowing us to compare the readout with the model's generated code.
+ 
+-An oracle judges readouts against the extracted code for the generated frontier assignment (exact prompts in \Cref{app:oracle_prompts}). Implementation-transfer scoring rejects trivial sign/zero continuations that can arise as defaults of the probe stub. A positive score denotes nontrivial agreement, not necessarily a complete or executable implementation. We retain clean generation as a separate reference rather than treating the intended frontier as proof of what the model actually computed.
++\paragraph{Implementation transfer.} We inject the same encoding into a code stub in another programming language and ask whether it triggers a nontrivial part of the source operation. For example, an encoding captured from Python is used to steer a C++ continuation. This tests whether the representation can guide a new implementation of the operation. We refer to this metric as \emph{implementation transfer}; saved evaluation plots label it ``causality.'' We test the heads' role in the model's original generation separately in \Cref{sec:heads}.
++
++For both measures, an oracle compares the readout with the extracted implementation of the source frontier assignment. A positive judgment credits nontrivial agreement, including partial implementations; it does not certify executable correctness. Transfer scoring also rejects trivial sign/zero continuations that can arise as defaults of the probe stub. Exact oracle prompts are in \Cref{app:oracle_prompts}.
+ 
+ \subsection{Readout across capture positions}
+ \label{sec:what:results}
+-Across the locked corpus and all five positions, the 122-head readout achieves 87.9\% faithfulness and 79.2\% implementation transfer. These pooled rates include the first implementation token; evidence for \emph{before implementation} comes from the position-wise results. Readouts are strongest near the assignment operator and first implementation token and weaker at the end of the previous line. The positional variation places the claim near the start of the subgoal rather than implying that the entire future program is represented from the outset.
++At the assignment operator, before the first implementation token, the 122-head readout achieves 97.2\% faithfulness and 95.7\% implementation transfer on the 253-specification corpus (\Cref{fig:sparsity}). The model thus carries a readable and portable representation of the upcoming operation at this pivot.
++
++Readout quality varies with the capture position. It is strongest near the assignment operator and first implementation token, and weaker at the end of the previous line. Pooled over all five positions, including the first implementation token, the scores are 87.9\% faithfulness and 79.2\% implementation transfer. \Cref{fig:goal-eval} shows the positional pattern on the separate OVReader evaluation corpus; \Cref{app:sparsity_pivots} reports the head-budget results at the remaining positions on the 253-specification corpus.
+ 
+ \begin{figure}[t]
+ \centering
+@@ -33,4 +37,4 @@
+ \label{fig:goal-eval}
+ \end{figure}
+ 
+-Cross-language implementation transfer supports an operation-level interpretation: the same extracted contributions can guide different surface realizations. It does not establish invariance to every implementation choice. Similarly, a natural-language readout establishes that the signal can be verbalized, not that its native format is language. We next distinguish effective readout from the heads' causal role in ordinary code generation.
++These two readouts expose complementary properties of the encoding: a natural-language description reveals its semantic content, while cross-language transfer shows that it can guide a different realization of the operation. We next examine how compactly the encoding can be read and how the heads contribute to the model's own implementation.
+--- before/Text/04_heads.tex
++++ Text/04_heads.tex
+@@ -1,6 +1,6 @@
+-\section{Sparse Readout and Causal Involvement of Goal Heads}
++\section{Goal Heads Carry and Mediate the Sub-Goal}
+ \label{sec:heads}
+-A compact set may suffice to expose subgoal information without containing every path used for native implementation. We therefore separate readout performance at different head budgets from interventions that restrict the model's access to task information.
++How many heads are needed to read the sub-goal, and how important are these heads for carrying it out? We study both questions: first by varying the number of heads used for readout, then by restricting their access to task information during the model's own code generation.
+ 
+ \subsection{Small head sets support effective readout}
+ \label{sec:heads:sparsity}
+@@ -10,17 +10,19 @@
+ \caption{Readout versus head budget at the assignment-operator pivot, before implementation (253 matched specifications; norm-relative additive injection, $\alpha=.1$). Lines show available head selections; stars mark the separately selected 122-head reference. Selections are not strictly nested, so connecting points guides comparison rather than isolating an effect of head count alone. Other capture positions appear in \Cref{app:sparsity_pivots}.}
+ \label{fig:sparsity}
+ \end{figure}
+-At the assignment pivot, twenty-five selected heads---approximately 0.98\% of the model's 2,560 query heads---achieve 93.7\% readout faithfulness and 90.5\% implementation transfer. The 122-head reference achieves 97.2\% and 95.7\%, respectively (\Cref{fig:sparsity}). Small selected sets thus recover much of the readout performance at this pre-implementation position. Larger sets do not yield a monotonic improvement. This does not identify a minimal circuit or imply that arbitrary sets of this size suffice. Results at the previous-line end, indentation, variable name, and first implementation token are in \Cref{app:sparsity_pivots}; comparisons with other injected sources appear in \Cref{app:readout_sources}.
++Twenty-five selected heads, approximately 0.98\% of the model's 2,560 query heads, achieve 93.7\% readout faithfulness and 90.5\% implementation transfer at the assignment pivot. The 122-head reference achieves 97.2\% and 95.7\%, respectively (\Cref{fig:sparsity}). Much of the sub-goal's semantic content can therefore be recovered from a small fraction of the attention heads.
+ 
+-\subsection{Preserving or restricting task access}
++Larger selections do not improve performance monotonically. The selections differ in membership and are not strictly nested, so the curves compare available head sets rather than isolate head count alone. Results at the other capture positions appear in \Cref{app:sparsity_pivots}. Comparisons with full-attention and residual-stream readouts are in \Cref{app:readout_sources}.
++
++\subsection{Goal heads mediate implementation}
+ \label{sec:mechanism:ablation}
+-We evaluate native frontier implementation on the same 253 specifications at the assignment pivot, with interventions continuing during decoding. Each example has a clean baseline, a goal-head condition, and a random-head control. We test the core 122 heads and a broader 250-head set.
++We next ask whether the model relies on the \goalheads to implement the next sub-goal. On the same 253 specifications, we intervene at the assignment pivot and continue the intervention during decoding. We compare the original generation with interventions on the 122-head core, a broader 250-head set, and random-head controls.
+ 
+-\paragraph{Conditional sufficiency: preserve selected access.}
+-For heads in layers 20 and above outside the spared set, we block attention to the span from just before the frontier description through the end of the prompt. Spared heads retain access. Other key positions remain available, layers below 20 are intact, and all MLP computation continues. Thus this intervention tests sufficiency of \emph{selected upper-layer access to the blocked span}, not sufficiency of these heads in isolation. Random controls spare a comparable number of heads from the specified depth pool; the pool and exact blocked span are detailed in \Cref{app:ablation}.
++\paragraph{Sufficiency of goal-head access.}
++We preserve the selected heads' access to the upcoming task and code span while blocking that access for other heads in layers 20 and above. The blocked span begins just before the frontier description and ends at the final prompt token. Lower layers, MLPs, and attention to positions outside this span continue to operate. This tests whether goal-head access can sustain implementation when other upper-layer heads lose access to the same information. The control preserves access for a comparable number of random heads; exact spans and sampling pools are in \Cref{app:ablation}.
+ 
+-\paragraph{Necessity test: restrict selected heads to the sink.}
+-From the pivot onward, we instead restrict the selected heads to attend only to position zero, while other heads operate normally. This removes their normal content-dependent attention but is not literal output zeroing. We compare with restricting an equal-size random set drawn from the depth pool and disjoint from the goal heads.
++\paragraph{Necessity of goal-head access.}
++In the complementary experiment, we restrict the selected heads to attend only to position zero, the attention sink, while other heads operate normally. The selected heads still contribute the sink value but lose access to the task and code tokens. We compare with applying the same restriction to an equal-size random set, drawn from the depth pool and disjoint from the goal heads.
+ 
+ \begin{table}[t]
+ \centering\small
+@@ -36,10 +38,10 @@
+ Restrict random heads to sink & .925 & .921\\
+ \bottomrule
+ \end{tabular}
+-\caption{Native frontier implementation under span restriction and sink-attention interventions ($n=253$). The two experiments manipulate different access patterns; ``spare'' does not remove the rest of the network.}
++\caption{Frontier implementation success under span restriction and sink-attention interventions ($n=253$). ``Spare'' preserves selected heads' access to the blocked task/code span in layers 20 and above. ``Restrict'' limits the selected heads to attention at position zero.}
+ \label{tab:goal-ablation}
+ \end{table}
+ 
+-Preserving goal-head access retains substantially more implementation performance than preserving random-head access (\Cref{tab:goal-ablation}). Conversely, sink-restricting 250 goal heads sharply reduces success, whereas the random control remains close to baseline. Restricting the 122-head core has a smaller but nonzero effect. These results establish causal involvement of the broader selection under the tested intervention. They do not prove a unique bottleneck, identify the computation that first selects the goal, or demonstrate active rerouting after ablation.
++Preserving access for the 250 goal heads retains 91.3\% implementation success, close to the 92.5\% clean baseline; preserving random-head access retains only 9.5\% (\Cref{tab:goal-ablation}). Conversely, restricting the 250 goal heads to the sink reduces success to 15.8\%, while the random control remains at 92.1\%. The broader goal-head set therefore plays a causal role in mediating the model's implementation of the sub-goal.
+ 
+-The combination is informative: a small set supports effective readout, while native implementation remains robust to restricting the core and is much more vulnerable to restricting the broader set. Readout sufficiency and the extent of native dependence are different properties of the representation.
++The 122-head core shows a smaller effect: restricting it leaves success at 85.4\%. Taken together with the readout curves, this reveals a distinction between the heads needed to expose the sub-goal and the broader set whose access is important for execution. These sufficiency and necessity tests concern access under the specified interventions; the heads operate within the rest of the network.
+--- before/Text/05_steerable.tex
++++ Text/05_steerable.tex
+@@ -1,13 +1,10 @@
+ \section{Beyond Explicitly Specified Code Tasks}
+ \label{sec:generalization}
+ \label{sec:steer:noncode}
+-Our controlled corpus specifies the component predicates in the prompt. To explore whether the code-localized head set reads information beyond these explicit specifications, we examine free-form code and a few-shot relation setting. These extensions are qualitative and are kept separate from the controlled-corpus rates.
+-
+-\paragraph{Free-form code.}
+-When a programming request does not enumerate its component steps, \goalscope can be applied to positions within the generated solution. Here the model's own continuation, rather than a preassigned predicate list, is the relevant comparison. The granularity of a subgoal can be ambiguous: a readout may describe a local operation or a larger enclosing computation. We therefore treat these examples as exploratory and defer the examples and annotation choices to \Cref{app:unspecified}.
++Do the heads localized on code also carry an operation that the model infers from examples? Our controlled code tasks name each sub-goal in the prompt. We now examine a few-shot setting where the intended relation is conveyed through demonstrations.
+ 
+ \paragraph{Few-shot relation tasks.}
+-Following the function-vector setting \citep{todd2024function}, a prompt supplies input--output demonstrations and ends at the answer prefix for a new input. The relation need not be named in the prompt. We retain the code-localized heads and ask whether their contributions expose the operation inferred from the demonstrations. Unlike sequential code, this setup tests an inferred task mapping rather than selection among explicitly listed subgoals.
++Following the function-vector setting \citep{todd2024function}, we provide input--output pairs demonstrating a relation, followed by a new input. We retain the 122 heads localized on code and adapt the probe question to ask for the hidden rule in a short phrase. For example, an antonym prompt contains the following pairs:
+ 
+ \begin{quote}\small\ttfamily
+ Q: enter\quad A: exit\\
+@@ -15,8 +12,12 @@
+ \ldots\\
+ Q: mercy\quad A:
+ \end{quote}
+-This abbreviated prompt is drawn from the exploratory antonym run, whose clean continuation begins ``cruelty'' and then continues producing question--answer pairs. At the newline following ``cruelty'' (saved token position 57), the readout is ``Identifying antonyms.'' At the answer-prefix token \texttt{A} before the later answer ``slow'' (position 70), it is again ``Identifying antonyms.'' These are captured during the continuing sequence, not before the first answer. Nearby positions also produce vague or incorrect descriptions, so the example establishes qualitative accessibility rather than a reliability estimate.
++The model answers ``cruelty'' and continues generating question--answer pairs. At the newline following ``cruelty,'' \goalscope reads \emph{``Identifying antonyms.''} At the answer-prefix token \texttt{A} before a later answer, ``slow,'' it again reads \emph{``Identifying antonyms.''} The probe is given neither the name of the relation nor the demonstrations as text. The code-localized head contributions carry enough information to describe the inferred operation.
+ 
+-The probe asks for the hidden rule in a short phrase; it does not name antonymy or receive the demonstrations as text. The head set remains code-localized, but the verbalization prompt is adapted to this domain. Exact prompt wording and contrasting readouts appear in \Cref{app:non-code}. A quantitative evaluation should use held-out examples and a relation-description rubric, reporting clean task accuracy and unsteered probe outputs separately. We leave that evaluation pending rather than claiming quantified non-code transfer.
++These are qualitative readouts during the continuing sequence, with the first captured after the initial answer and the second before a later answer. Nearby positions also produce vague or incorrect descriptions. \Cref{app:non-code} gives the full demonstration list, exact probe wording, token indices, and contrasting readouts. The example shows that the code-localized heads can expose an inferred non-code relation; a quantitative evaluation across relations and positions remains to be completed.
+ 
+-Additional recipe, travel, and narrative settings are reserved for \Cref{app:non-code}. Replications within other models, including code-trained and instruction-trained variants, are reported separately in \Cref{app:model_comparison}; no cross-model activation transfer is assumed.
++\paragraph{Code without enumerated sub-goals.}
++Free-form code poses a related question: can the readout describe a step that the model chooses while solving a broader programming request? Here, evaluation must identify a meaningful operation in the model's continuation, which may be a local statement or a larger enclosing computation. This extension requires qualitative examples and an explicit choice of sub-goal granularity.
++% TODO: Populate app:unspecified with source code, capture positions, and actual readouts before presenting a free-form result.
++
++We report replications within other model families and sizes in \Cref{app:model_comparison}. Further exploratory non-code settings are discussed in \Cref{app:non-code}.
+--- before/Text/06_mechanism.tex
++++ Text/06_mechanism.tex
+@@ -1,32 +1,35 @@
+-\section{Goal Information in Context and Model Depth}
++\section{How Goal Heads Access the Upcoming Sub-Goal}
+ \label{sec:mechanism}
+ \label{sec:steer}
+-We next examine the information accessed through goal-head attention and its availability in intermediate residual states. These experiments characterize sensitivity to context and goal selection without presupposing a progress-subtraction algorithm.
++What information do the \goalheads use to guide the next operation? We examine where the heads attend, how changing their queries or task-span keys and values affects the continuation, and where the sub-goal can be read from the residual stream.
+ 
+ \subsection{Attention to relevant task descriptions}
+ \label{sec:mechanism:gaze}
+-At a frontier position, the selected heads' value-weighted attention often concentrates on the task tokens describing the upcoming predicate. This resembles gaze behavior observed in other generation settings \citep{gandikota2026gaze}. We use this alignment as a diagnostic of which instruction information the heads access (\Cref{app:gaze}). Attention alignment alone does not show that the model will implement the attended goal, or where that goal was selected.
++The \goalheads often look back to the task they are about to implement. At a frontier position, their collective value-weighted attention concentrates on tokens in the prompt describing the upcoming predicate. This resembles the gaze behavior observed during generation in other settings \citep{gandikota2026gaze}. These qualitative attention patterns suggest a connection between the task descriptions and the goal encoding. We test that connection causally by changing the information available through the heads' keys and values.
++% TODO: Add representative gaze plots and complete the quantitative analysis in app:gaze.
+ 
+ \subsection{Changing task information redirects implementation}
+ \label{sec:steer:transplant}
+ \label{sec:steer:crosslang}
+-Consider a source with tasks $(A,B,C)$ and a destination with tasks $(A,B,D)$, both prefilling $A$ and $B$. We transplant keys and values for the source task span into the destination attention computation for the selected heads. The destination still receives its original text prefix, but the intervention supplies source task information through those heads. A continuation implementing $C$ rather than $D$ demonstrates behavioral transfer of that information.
++Consider a source prompt with tasks $(A,B,C)$ and a destination with tasks $(A,B,D)$, both with $A$ and $B$ already implemented. The next requested sub-goal is $C$ in the source and $D$ in the destination. We cache the keys and values of the source task tokens and transplant them into the destination's goal-head attention. The destination prompt still requests $D$; the patched heads now access the source task information. We ask whether this change makes the model implement $C$.
+ 
+-In the multi-predicate assignment-pivot setup, the 250-head intervention achieves approximately 99\% source-directed continuation and 96\% exclusive source-goal readout over four datatypes and four language directions. Source-directed continuation includes the oracle's source-or-both labels; it is not a claim of perfect exclusive replacement or executable code in every case. The cross-language conditions show that this transfer can produce a destination-language realization of source task information. Detailed configurations and failure modes are in \Cref{app:task_transfer}.
++At the assignment pivot, the 250-head intervention produces source-directed continuations in approximately 99\% of cases across four datatypes and four language directions. Here, \emph{source-directed} includes the oracle's labels for the source goal alone or both source and destination goals. A separate \goalscope readout identifies the source goal exclusively in approximately 96\% of cases. Transfer also works across programming languages, producing a destination-language realization of the source operation. These results show that the task information accessed through goal-head keys and values can redirect the model's next sub-goal. Configurations and scoring details are in \Cref{app:task_transfer}.
+ 
+-The implementation routes patched attention outputs to the selected query heads, accounting for shared KV heads. It applies across prefill query positions and subsequent decoding. Consequently, earlier patched outputs can alter later destination states and queries. Frozen source keys and values do not imply a fixed destination query throughout the network. Success shows adaptation to changed task information, but does not by itself locate progress information in the query.
++The patch is routed to the selected query heads, accounting for shared KV heads, and remains active across prefill and decoding. Earlier patched outputs can therefore influence later destination states and queries. The result establishes adaptation to changed task information; locating the progress representation requires additional controls over these interactions.
+ 
+-\subsection{Queries can favor a particular source subgoal}
++\subsection{Queries carry information about the next sub-goal}
+ \label{sec:mechanism:precommit}
+-Query transfer provides a complementary intervention. In the multi-predicate setup, transferring source queries at selected heads produces approximately 94\% source-directed continuation across the four language directions. This result establishes that the query states can influence which subgoal is pursued, but source progress and source target coincide in the basic setup.
++We next cache the source queries at the pivot and transplant them into the destination's goal heads. In the multi-predicate setup, this produces approximately 94\% source-directed continuations across the four language directions (\Cref{app:task_transfer}). Query states thus carry information that can steer the choice of sub-goal. To examine whether this information concerns completed work or the upcoming operation, we use a task-order contrast in which the two predict different continuations.
+ 
+-A qualitative task-order contrast makes their predictions diverge. The source orders tasks $(A,B,C,D)$ and has completed $(A,B)$, so its next task is $C$. The destination orders $(A,B,D,C)$ and has completed only $A$. Transferring a source state that solely specifies the completed prefix $(A,B)$ would favor $D$ under the destination order, while a state favoring the source target would favor $C$. The observed transfer favors $C$. This example supports goal-specific information in the query; a systematic crossed evaluation is needed to distinguish it from other context-dependent selectors. It does not show that progress information is absent from the query or establish how the next goal is computed.
++The source orders tasks $(A,B,C,D)$ and has completed $(A,B)$, making $C$ its next task. The destination orders tasks $(A,B,D,C)$ and has completed only $A$. If the transferred state specifies only the completed prefix $(A,B)$, the destination order would make $D$ the next task. A state that carries the source's upcoming sub-goal would instead favor $C$. The observed query transfer favors $C$.
++
++This qualitative contrast supports the presence of goal-specific information in the query. A systematic evaluation that independently varies progress, task order, and target identity is needed to determine how broadly this interpretation holds and how progress information also contributes.
+ 
+ \subsection{Reading intermediate residual states with OVReader}
+ \label{sec:mechanism:upstream}
+-The preceding experiments manipulate attention states. We also ask at which layers the residual state at a capture position supports a subgoal readout. \textbf{OVReader} applies the selected heads' value and output maps to that residual, normalizes each head's transformed vector, aggregates the results, and uses the resulting direction in the \goalscope probe (\Cref{app:ovreader}). It uses model weights rather than a newly trained semantic decoder. Because normalization and probe generation are part of the procedure, we describe it as an OV-based readout, not a linear probe.
++At what depth does the upcoming sub-goal become readable? We introduce \textbf{OVReader}, which uses the goal heads' value and output projections to read intermediate residual states. For a residual state at the pivot, we apply each selected head's projections, normalize the transformed vectors, and aggregate them. The resulting direction steers the \goalscope probe. This gives us a readout built from the model's own weights, with no additional decoder training (\Cref{app:ovreader}).
+ 
+-At the assignment operator, readout can already be strong around layer 40. Across the five capture positions, performance generally peaks around layers 48--52 and declines toward the final layer. Positions before the assignment show different emergence profiles. Layer 40 is within the selected-head layer range, so these curves do not establish that goal computation precedes all goal-head activity. They show where the representation is accessible through this readout, not its unique origin or an irreversible commitment to a goal.
++At the assignment operator, OVReader can recover the sub-goal around layer 40, with readout quality approaching that of the selected heads' actual outputs (\Cref{fig:ovreader}). Across the five capture positions, performance generally peaks around layers 48--52 and declines toward the final layer; earlier token positions show different emergence profiles. The upcoming sub-goal is therefore accessible in intermediate residual states before implementation begins. These depths overlap the selected-head range of layers 28--55. The curves locate where the readout is effective; determining where the sub-goal is first selected requires further causal interventions.
+ 
+ \begin{figure}[t]
+ \centering
+@@ -35,4 +38,4 @@
+ \label{fig:ovreader}
+ \end{figure}
+ 
+-Together, task-span transfer, query transfer, and OVReader show that subgoal information is available in multiple interacting components and remains sensitive to context. They leave open whether progress and target identity are separately represented, how they are combined, and which computations initially select the subgoal.
++The experiments identify complementary parts of the mechanism: task-span keys and values provide information that can redirect the operation, queries can favor a particular sub-goal, and the goal heads' projections make that sub-goal readable from intermediate residual states. Understanding how these components combine completed work with the task specification remains an open question.
+--- before/Text/06_related_works.tex
++++ Text/06_related_works.tex
+@@ -1,33 +1,16 @@
+-\section{Related Works}
++\section{Related Work}
+ \label{sec:related}
+ 
+-\paragraph{Planning and look-ahead in LMs.} A growing body of work shows that autoregressive LMs
+-encode information about tokens they have not yet emitted and act toward future constraints
+-\citep{pal2023futurelens, lindsey2025biology}. We examine
+-an explicit, decodable representation of the \emph{next instrumental sub-goal}, present before
+-execution, and evaluate both its verbalization and its use in steering code generation.
++\paragraph{Planning and look-ahead in LMs.} Prior work shows that autoregressive LMs encode information about future tokens \citep{pal2023futurelens} and plan toward constraints in later output \citep{lindsey2025biology}. We study the upcoming computation at the level of an instrumental sub-goal. Our experiments ask whether its representation can be read before implementation and transferred to guide the same operation in a new context.
+ \claude{Add citations: future-lens / prompt-injection look-ahead, poetry-planning (Anthropic biology),
+ chess/maze planning, emergent world models.}
+ 
+-\paragraph{Portable task representations and function abstractions.} Compact, transplantable
+-representations of a task have been found in attention-head outputs (function vectors,
+-\citealp{todd2024function}), in concept-induction heads that carry language-independent word
+-meanings \citep{feucht2025dual}, and in \emph{filter heads} that encode a filtering predicate in
+-their \emph{query} states and reapply it across formats, languages, and tasks
+-\citep{sensharma2025filterheads}. Our \goalheads extend this line to \emph{intent}: a compact,
+-transplantable, cross-language encoding of the next instrumental sub-goal, read out and routed by a
+-sparse head set. The filter-heads finding that models sometimes \emph{eagerly evaluate} rather than
+-carry a portable predicate connects to our failure-mode analysis (\Cref{sec:mechanism:competence}).
++\paragraph{Portable task representations and function abstractions.} Function vectors are compact representations of demonstrated input--output tasks, carried by a small set of attention heads and transferable to new contexts \citep{todd2024function}. Concept-induction heads carry word representations that mediate translation across languages \citep{feucht2025dual}. Filter heads encode predicates in their query states and reapply them across collections, formats, languages, and tasks \citep{sensharma2025filterheads}. Our work examines a related abstraction during multi-step generation: the particular sub-goal the model is about to implement. We localize its encoding in head contributions, verbalize its content, and test its portability across programming languages.
+ 
+-\paragraph{Verbalizing latents.} \goalscope builds on Patchscope \citep{ghandeharioun2024patchscope}
+-and related self-interpretation / lens methods, adapting them to read attention-head outputs at a
+-single position over multi-token rollouts.
++\paragraph{Verbalizing internal representations.} Patchscope uses a language model to express information extracted from its hidden states \citep{ghandeharioun2024patchscope}. \goalscope applies this approach to the contributions of causally localized attention heads at a single source position. The cached signal is reused throughout probe generation to obtain a multi-token description or code implementation. OVReader extends this readout to intermediate residual states using the selected heads' value and output projections.
+ \claude{Add: logit lens, tuned lens, SelfIE, function-vector readouts; contrast what \goalscope reads
+ (head-output, multi-token) vs.\ residual-stream single-token lenses.}
+ 
+-\paragraph{High-level interpretability of goal-directed behavior.} Our work is an instance of the
+-high-level, mechanism-agnostic interpretability agenda \citep{greenblatt2024highlevel}: we build a
+-theory of goal representation at an abstraction above the token-to-syntax mapping and validate it with
+-intervention experiments across programming languages and replications within multiple models.
++\paragraph{High-level interpretability of goal-directed behavior.} The high-level interpretability agenda studies model behavior through abstractions that can be investigated without a complete account of every underlying computation \citep{greenblatt2024highlevel}. We use an instrumental sub-goal as such an abstraction. Cross-language transfer tests whether its encoding can guide different implementations, while restrictions on goal-head attention test its role in the model's own generation.
+ \claude{Cite causal abstraction / DAS (Geiger et al.), high-level causal mediation; position our
+ cross-language transfer as the abstraction test.}
+--- before/Text/07_discussion.tex
++++ Text/07_discussion.tex
+@@ -1,15 +1,15 @@
+ \section{Discussion}
+ \label{sec:conclusion}
+-The upcoming subgoal is accessible before its implementation through a readout of selected attention-head contributions. These contributions can also steer code in another language, and controlled restrictions establish causal involvement of a broader selected set in native implementation. Query and task-span interventions show that the representation interacts with context, while OVReader traces its accessibility through model depth.
++We find that code LLMs carry a compact representation of their upcoming sub-goal before writing its implementation. The representation can be extracted from attention-head contributions, verbalized in natural language, and transplanted to trigger the same operation in another programming language. The heads also mediate the model's own implementation: preserving their access to task information largely preserves performance, and restricting a broader set sharply reduces it. These findings connect an interpretable description of what the model is about to do with an internal representation that can influence its behavior.
+ 
+-\paragraph{Meaning and realization.}
+-Cross-language implementation transfer supports a representation that can guide more than one surface realization. Natural-language verbalization provides a complementary description of its content. Neither result establishes that the internal representation is itself natural language, or that every detail of the eventual implementation has been selected at the capture point. The position-wise evidence concerns an upcoming operation, not a complete long-horizon plan.
++\paragraph{An abstraction of the upcoming operation.}
++The portability of the encoding suggests a separation between the identity of a sub-goal and its realization in code. An operation extracted from Python can guide a C++ implementation, even though the two require different tokens. Natural-language verbalization provides a complementary way to inspect this semantic content. Our evidence concerns the upcoming operation near the start of its implementation; it leaves open how much of a longer plan is represented and how its details are chosen. Verbalizability also does not establish that the representation's native format is natural language.
+ 
+-\paragraph{Causal involvement and selection.}
++\paragraph{From goal representation to goal selection.}
+ \label{sec:mechanism:competence}
+-The ablations distinguish effective readout from native dependence on the selected heads. They do not establish a unique bottleneck or demonstrate adaptive rerouting. Similarly, a query that favors a source goal and a KV intervention that changes the executed goal do not identify a unique progress representation. Establishing the algorithm of subgoal selection requires contrasts that independently vary completed work, task order, and target identity while controlling intervention sites.
++The intervention results identify several parts of goal-directed computation. Queries carry information that can favor a particular sub-goal; task-span keys and values supply information to which the model can adapt; and the heads' projections expose the upcoming operation in intermediate residual states. The ablations further distinguish a small set sufficient for readout from a broader set important for implementation. These observations constrain the mechanism, while leaving open how the model combines completed work with the specification to select its next step. Independently varying progress, task order, and target identity offers a way to investigate that computation. The current interventions establish causal involvement under specific access restrictions, rather than a unique bottleneck or an isolated goal-selection circuit.
+ 
+ \paragraph{Scope and limitations.}
+-Our principal quantitative setting is controlled code generation with a known frontier. Oracle agreement can credit partial implementations and does not certify executable correctness. Readout, task execution, and successful transfer are therefore distinct outcomes. The five capture positions are repeated observations on each specification, and the head-budget selections are not strictly nested. Cross-model results replicate the procedure within each model; they do not show interchangeability of latent coordinates. Free-form code and non-code examples remain exploratory. Boundary-signal interventions are reported as a separate supporting direction in \Cref{app:boundary}.
++Our principal quantitative setting uses explicit task specifications and a known frontier. The oracle measures nontrivial semantic agreement and can credit partial implementations, so success rates should be interpreted separately from executable program correctness. Capture positions are repeated observations of the same specifications, and head-budget comparisons use selections that are not strictly nested. Replications use each model's own heads and activations; differences between models combine checkpoint, head-selection, and generation effects. The few-shot example is qualitative, and evaluating free-form code requires further examples and decisions about sub-goal granularity. These settings are promising tests of how far the code-localized representation generalizes.
+ 
+-The results provide a concrete way to examine the semantic operation a model is about to pursue. They motivate further work on when these readouts fail, how subgoals are selected without explicit decomposition, and how their representations change as computation proceeds.
++\goalscope provides a concrete tool for examining what a model is about to do as generation proceeds. Further work can use these readouts to study how sub-goals change, when an intended operation fails to be implemented, and how the model decides to move on to the next step. Our exploratory boundary-signal interventions (\Cref{app:boundary}) provide a complementary starting point for the last question.
