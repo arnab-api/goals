@@ -52,9 +52,11 @@ import src.diff.data as DATA  # noqa: E402
 from scripts.evaluation import ov_reader_io as ovio  # noqa: E402
 from scripts.evaluation.eval_goalscope import (  # noqa: E402
     CAUSAL_PREFIX,
+    DEFAULT_DATASET,
     ORACLE_MODEL,
     hard_eval,
     load_json_heads,
+    load_locked_datapoints,
 )
 from src.goals.goalscope import (  # noqa: E402
     OVReader,
@@ -274,7 +276,12 @@ def parse_args():
     ap.add_argument(
         "--skyline_alpha", type=float, default=0.1, help="GoalScope skyline alpha"
     )
-    ap.add_argument("--n_samples", type=int, default=64, help="datapoints per datatype")
+    ap.add_argument("--n_samples", type=int, default=64, help="datapoints per datatype (sampled mode only)")
+    ap.add_argument("--locked", action="store_true",
+                    help="use the LOCKED sanitized corpus (data/goalscope_eval.json, span=frontier) instead "
+                         "of freshly sampling — matches eval_goalscope exactly so the skyline == Axis(a)")
+    ap.add_argument("--dataset", default=DEFAULT_DATASET, help="locked-corpus json (with --locked)")
+    ap.add_argument("--limit", type=int, default=None, help="SMOKE: cap datapoints per shard")
     ap.add_argument(
         "--max_new_tokens", type=int, default=64, help="read-out length per pivot"
     )
@@ -327,10 +334,18 @@ def run_shard(mt, ov, heads, datatype, lang, args, layers, results_dir, base_con
         ovio.write_config(d, cfg)
         completed[idx] = done
 
-    datapoints = sample_datapoints(
-        datatype, args.n_conditions, args.n_samples, lang, args.seed
-    )
-    spec_ids = [f"{datatype}_{lang}_{i:03d}" for i in range(len(datapoints))]
+    if getattr(args, "locked", False):
+        # locked sanitized corpus (span=frontier), same datapoints/spec_ids as eval_goalscope
+        pairs, _ = load_locked_datapoints(args.dataset, [datatype])
+        spec_ids = [sid for sid, _ in pairs]
+        datapoints = [inst for _, inst in pairs]
+    else:
+        datapoints = sample_datapoints(
+            datatype, args.n_conditions, args.n_samples, lang, args.seed
+        )
+        spec_ids = [f"{datatype}_{lang}_{i:03d}" for i in range(len(datapoints))]
+    if getattr(args, "limit", None):
+        datapoints = datapoints[: args.limit]; spec_ids = spec_ids[: args.limit]
     remaining = [
         (sid, inst)
         for sid, inst in zip(spec_ids, datapoints)
@@ -491,6 +506,8 @@ def main():
     results_dir = env_utils.DEFAULT_RESULTS_DIR
     slug = args.model.split("/")[-1]
 
+    if args.locked:
+        args.span_source = "frontier"   # locked corpus -> tag leaves span=frontier (distinct from old span=rule)
     heads_path = args.heads or DEFAULT_HEADS_JSON.format(slug=slug)
 
     mt = ModelandTokenizer(
