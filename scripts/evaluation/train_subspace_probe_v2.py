@@ -36,10 +36,10 @@ from src.goals.subspace_probe import cache_source_residuals  # noqa: E402  (gene
 from src.goals.subspace_probe_v2 import (  # noqa: E402
     SubspaceProbeV2,
     SubspaceV2Config,
+    batched_steered_student_logits,
+    batched_teacher_logits,
     build_causal_chat,
     distill_kl,
-    steered_student_logits,
-    teacher_logits,
 )
 from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
@@ -68,6 +68,7 @@ def parse_args():
     ap.add_argument("--lambda_ortho", type=float, default=0.1)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--epochs", type=int, default=5)
+    ap.add_argument("--batch_size", type=int, default=8, help="rows (example × pivot) per optimizer step")
     ap.add_argument("--out", default=None)
     logging_utils.add_logging_args(ap)
     return ap.parse_args()
@@ -121,31 +122,39 @@ def main():
         / f"r{args.r}__L{read_layer}__a{args.alpha}" / "probe.pt")
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    # pre-tokenize the teacher/student prefixes once (they only depend on the row's stub + goal_desc)
+    for row in rows:
+        row["t_prefix"] = prepare_input(prompts=build_causal_chat(mt, row["stub"], goal_desc=row["goal_desc"]),
+                                        tokenizer=mt)["input_ids"][0].cpu()
+        row["s_prefix"] = prepare_input(prompts=build_causal_chat(mt, row["stub"], goal_desc=None),
+                                        tokenizer=mt)["input_ids"][0].cpu()
+
     import random as _rnd
     rng = _rnd.Random(0)
+    B = args.batch_size
     for epoch in range(args.epochs):
         rng.shuffle(rows)
         tot_kl = tot_ortho = 0.0
+        n_batches = 0
         t0 = time.time()
-        for i, row in enumerate(rows):
-            # teacher + student prefixes (share the SAME stub + y; teacher sees the goal, student doesn't)
-            t_prefix = prepare_input(prompts=build_causal_chat(mt, row["stub"], goal_desc=row["goal_desc"]),
-                                     tokenizer=mt)["input_ids"][0]
-            s_prefix = prepare_input(prompts=build_causal_chat(mt, row["stub"], goal_desc=None),
-                                     tokenizer=mt)["input_ids"][0]
-            y = row["y_ids"]
-            tl = teacher_logits(mt, t_prefix, y)                       # (T,V) no grad
-            sl = steered_student_logits(mt, probe, s_prefix, y, row["h"])  # (T,V) grad via W
-            kl = distill_kl(tl, sl)
+        for s in range(0, len(rows), B):
+            batch = rows[s:s + B]
+            t_prefix = [r["t_prefix"] for r in batch]
+            s_prefix = [r["s_prefix"] for r in batch]
+            y_list = [r["y_ids"] for r in batch]
+            h_list = [r["h"] for r in batch]
+            tl = batched_teacher_logits(mt, t_prefix, y_list)                       # (ΣT,V) no grad
+            sl = batched_steered_student_logits(mt, probe, s_prefix, y_list, h_list)  # (ΣT,V) grad via W
+            kl = distill_kl(tl, sl)  # mean per-token KL over the whole batch
             ortho = probe.orthogonality_loss()
             loss = kl.to(ortho.device) + cfg.lambda_ortho * ortho  # kl may be on a different GPU
             opt.zero_grad()
             loss.backward()
             opt.step()
             probe.reorthogonalize()
-            tot_kl += float(kl); tot_ortho += float(ortho)
-        logger.info(f"epoch {epoch}: KL={tot_kl/len(rows):.4f} ortho={tot_ortho/len(rows):.2e} "
-                    f"({time.time()-t0:.1f}s)")
+            tot_kl += float(kl); tot_ortho += float(ortho); n_batches += 1
+        logger.info(f"epoch {epoch}: KL={tot_kl/n_batches:.4f} ortho={tot_ortho/n_batches:.2e} "
+                    f"({n_batches} batches of ≤{B}, {time.time()-t0:.1f}s)")
         torch.save(dict(W=probe.W.detach().cpu(), config=cfg, epoch=epoch,
                         read_layer=read_layer, steer_layers=band, model=args.model), out)
     logger.info(f"saved -> {out}")

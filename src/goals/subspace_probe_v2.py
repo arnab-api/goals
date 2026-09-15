@@ -236,6 +236,92 @@ def steered_student_logits(
     return out.logits[0, P - 1 : P - 1 + T, :].float()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Batched forwards (train loop) — left-pad, corrected position ids, per-row steer mask
+# ═══════════════════════════════════════════════════════════════════════════════
+def _left_pad(mt: ModelandTokenizer, seqs: list[list[int]]):
+    """Left-pad token-id lists to a common length. Returns (input_ids, attention_mask, position_ids,
+    L) on the model device. position_ids are recomputed from the mask so RoPE ignores the pad."""
+    pad = mt.tokenizer.pad_token_id
+    if pad is None:
+        pad = mt.tokenizer.eos_token_id
+    B = len(seqs)
+    L = max(len(s) for s in seqs)
+    ids = torch.full((B, L), pad, dtype=torch.long)
+    mask = torch.zeros((B, L), dtype=torch.long)
+    for b, s in enumerate(seqs):
+        ids[b, L - len(s):] = torch.as_tensor(s, dtype=torch.long)
+        mask[b, L - len(s):] = 1
+    pos = (mask.cumsum(-1) - 1).clamp_min(0)
+    dev = mt.device
+    return ids.to(dev), mask.to(dev), pos.to(dev), L
+
+
+def _y_predict_slices(logits: torch.Tensor, starts: list[int], T_list: list[int]) -> torch.Tensor:
+    """Concatenate, over rows, the logits at the positions predicting ``y`` → (ΣT, V)."""
+    return torch.cat([logits[b, starts[b]:starts[b] + T_list[b], :] for b in range(len(starts))], dim=0)
+
+
+@torch.no_grad()
+def batched_teacher_logits(
+    mt: ModelandTokenizer, prefix_list: list[torch.Tensor], y_list: list[torch.Tensor]
+) -> torch.Tensor:
+    """Full-vocab teacher logits at the y-predicting positions for a batch of rows, concatenated to
+    (ΣT, V). No steering, no grad. Row order must match the student call for the KL to align."""
+    seqs = [list(p.tolist()) + list(y.tolist()) for p, y in zip(prefix_list, y_list)]
+    ids, mask, pos, L = _left_pad(mt, seqs)
+    out = mt._model(input_ids=ids, attention_mask=mask, position_ids=pos)
+    T_list = [int(y.shape[0]) for y in y_list]
+    starts = [L - T - 1 for T in T_list]  # left-padded: position predicting y_1
+    return _y_predict_slices(out.logits.float(), starts, T_list)
+
+
+def batched_steered_student_logits(
+    mt: ModelandTokenizer,
+    probe: SubspaceProbeV2,
+    prefix_list: list[torch.Tensor],
+    y_list: list[torch.Tensor],
+    h_list: list[torch.Tensor],
+) -> torch.Tensor:
+    """Full-vocab student logits at the y-predicting positions for a batch of rows, concatenated to
+    (ΣT, V). Each row is steered with its own ``o_b = Wᵀ W h_b`` (additive_norm over the steer band,
+    injected from the last prefix token onward). Differentiable in ``W``."""
+    cfg = probe.config
+    H = torch.stack([h.to(probe.W.device).float() for h in h_list])  # (B, d)
+    O = probe.readout_vec(H)  # (B, d), grad via W
+    unit_O = O / O.norm(dim=-1, keepdim=True).clamp_min(1e-6)  # (B, d)
+
+    seqs = [list(p.tolist()) + list(y.tolist()) for p, y in zip(prefix_list, y_list)]
+    ids, mask, pos, L = _left_pad(mt, seqs)
+    B = len(seqs)
+    T_list = [int(y.shape[0]) for y in y_list]
+    starts = [L - T - 1 for T in T_list]  # patch/inject start per row (last prefix token)
+    inj = torch.zeros((B, L), dtype=torch.bool)
+    for b in range(B):
+        inj[b, starts[b]:] = True  # inject at the last prefix token + every y position
+
+    handles = []
+    for l in cfg.steer_layers:
+        module = baukit.get_module(mt._model, mt.layer_name_format.format(l))
+
+        def hook(mod, inp, output):
+            hidden = output[0] if isinstance(output, tuple) else output
+            rest = output[1:] if isinstance(output, tuple) else ()
+            dev, dt = hidden.device, hidden.dtype
+            norms = hidden.norm(dim=-1, keepdim=True)  # (B, L, 1)
+            add = cfg.alpha * norms * unit_O.to(device=dev, dtype=dt)[:, None, :]  # (B, L, d)
+            m = inj.to(dev)[:, :, None]  # (B, L, 1)
+            return (hidden + m * add,) + rest if rest else hidden + m * add
+
+        handles.append(module.register_forward_hook(hook))
+    try:
+        out = mt._model(input_ids=ids, attention_mask=mask, position_ids=pos)
+    finally:
+        for h in handles:
+            h.remove()
+    return _y_predict_slices(out.logits.float(), starts, T_list)
+
+
 def distill_kl(teacher_logits_t: torch.Tensor, student_logits_t: torch.Tensor) -> torch.Tensor:
     """Forward KL( teacher ‖ student ) averaged over positions (T). Full vocab, T=1 (no softening)."""
     log_p = F.log_softmax(teacher_logits_t, dim=-1)  # teacher (target)
