@@ -1,0 +1,6 @@
+[
+    {
+        "name": "subspace_v2_32b_L46",
+        "command": "mkdir -p logs/subspace_v2 && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.gen_teacher_targets_v2 --model Qwen/Qwen2.5-Coder-32B-Instruct --split train |& tee logs/subspace_v2/gen_train_32b.log && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.train_subspace_probe_v2 --model Qwen/Qwen2.5-Coder-32B-Instruct --targets data/subspace_v2/teacher_targets/Qwen2.5-Coder-32B-Instruct/train.json --read_layer 46 |& tee logs/subspace_v2/train_32b.log && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.eval_subspace_probe_v2 --model Qwen/Qwen2.5-Coder-32B-Instruct --probe results/subspace_probe_v2/Qwen2.5-Coder-32B-Instruct/r256__L46__a0.1/probe.pt --split_file data/subspace_v2/teacher_targets/Qwen2.5-Coder-32B-Instruct/predicate_split__seed7__ho0.3.json |& tee logs/subspace_v2/eval_32b.log"
+    }
+]
