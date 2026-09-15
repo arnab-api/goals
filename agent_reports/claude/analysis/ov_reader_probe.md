@@ -2,8 +2,15 @@
 
 *Companion to `src/goals/goalscope.py` (`OVReader`), `scripts/evaluation/eval_ov_reader.py`,
 `scripts/evaluation/ov_reader_io.py`, and `notebooks/diff/7_ov_reader_eval_demo.ipynb`.
-Last updated 2026-09-11. All 8 jobs complete ({faithfulness, causality} × 4 datatypes, python, **n=64**),
-now including the **last layer (L63)** — the probe layer list always appends `n_layer-1`.*
+Last updated 2026-09-15. **Faithfulness has been re-run on the locked, sanitized 253-spec corpus**
+(`data/goalscope_eval.json`, `--locked`, `span=frontier`; int 65 / list[int] 60 / str 64 / list[str] 64 =
+**n=253**) so the OVReader skyline matches the goal-head GoalScope numbers exactly. **Causality re-run is
+still pending** — the causality rows/figures below remain the earlier **sampled n=64, `span=rule`** values
+and will be refreshed when the 4 causality shards finish. The probe layer list always appends the **last
+layer (L63)** (`n_layer-1`).*
+
+> ⚠️ **Mixed-corpus notice (2026-09-15):** faithfulness numbers = locked n=253; causality numbers = old
+> sampled n=64. Do not compare the two modes datapoint-for-datapoint until causality is re-run.
 
 > **Causality is now sanitized** (see §5.0). Trivial sign/zero frontiers are excluded from target
 > selection and trivial read-outs (`value > 0` / `== 0` / `< 0`) are forced to NO, so the no-goal
@@ -158,9 +165,11 @@ python; α=0.15, heads = 122 goal set).
 
 ---
 
-## 5. Results (complete — n=64, all 8 jobs)
+## 5. Results
 
 Qwen2.5-Coder-32B-Instruct, 122 goal heads, α=0.15, python source. `hard_yes` (pooled over the 5 pivots).
+**Faithfulness = locked corpus, n=253** (int 65 / list[int] 60 / str 64 / list[str] 64). **Causality =
+old sampled corpus, n=64, pending re-run** (see header notice).
 
 ### 5.0 Trivial-case sanitization (causality only)
 
@@ -185,16 +194,23 @@ additionally remove the false-positive *targets* — expected to move numbers li
 
 ### 5.1 hard_yes across layers
 
+Faithfulness rows are the **locked n=253** re-run; causality rows are the **old sampled n=64** values
+(pending re-run — see header notice).
+
 | job | skyline | L0 | L36 | L40 | L46 | L50 | L54 | L60 | L63 | OV peak |
 |---|---|---|---|---|---|---|---|---|---|---|
-| faithfulness int | 0.86 | 0.01 | 0.26 | 0.47 | 0.80 | 0.87 | 0.84 | 0.72 | 0.57 | **0.87 @ L50–52** |
-| faithfulness str | 0.93 | 0.00 | 0.30 | 0.47 | 0.64 | 0.81 | 0.79 | 0.76 | 0.63 | **0.81 @ L50** |
-| faithfulness list[int] | 0.88 | 0.02 | 0.34 | 0.55 | 0.78 | 0.85 | 0.80 | 0.70 | 0.51 | **0.85 @ L50** |
-| faithfulness list[str] | 0.86 | 0.01 | 0.34 | 0.53 | 0.62 | 0.70 | 0.63 | 0.58 | 0.40 | **0.71 @ L48** |
-| causality int *(sanitized)* | 0.76 | 0.00 | 0.33 | 0.42 | 0.72 | 0.80 | 0.79 | 0.68 | 0.61 | **0.80 @ L50** |
-| causality str *(sanitized)* | 0.82 | 0.01 | 0.35 | 0.45 | 0.60 | 0.76 | 0.69 | 0.64 | 0.63 | **0.76 @ L50** |
-| causality list[int] *(sanitized)* | 0.71 | 0.03 | 0.31 | 0.44 | 0.64 | 0.68 | 0.63 | 0.48 | 0.44 | **0.68 @ L50** |
-| causality list[str] *(sanitized)* | 0.71 | 0.02 | 0.25 | 0.36 | 0.43 | 0.62 | 0.56 | 0.49 | 0.40 | **0.62 @ L50** |
+| faithfulness int *(n=253)* | 0.88 | 0.01 | 0.27 | 0.45 | 0.76 | 0.82 | 0.81 | 0.70 | 0.55 | **0.82 @ L52** |
+| faithfulness str *(n=253)* | 0.93 | 0.00 | 0.28 | 0.44 | 0.67 | 0.85 | 0.79 | 0.77 | 0.68 | **0.85 @ L50** |
+| faithfulness list[int] *(n=253)* | 0.87 | 0.03 | 0.38 | 0.53 | 0.72 | 0.86 | 0.81 | 0.71 | 0.55 | **0.86 @ L50** |
+| faithfulness list[str] *(n=253)* | 0.84 | 0.02 | 0.34 | 0.49 | 0.63 | 0.68 | 0.66 | 0.63 | 0.43 | **0.69 @ L48** |
+| causality int *(sanitized, n=64, pending)* | 0.76 | 0.00 | 0.33 | 0.42 | 0.72 | 0.80 | 0.79 | 0.68 | 0.61 | **0.80 @ L50** |
+| causality str *(sanitized, n=64, pending)* | 0.82 | 0.01 | 0.35 | 0.45 | 0.60 | 0.76 | 0.69 | 0.64 | 0.63 | **0.76 @ L50** |
+| causality list[int] *(sanitized, n=64, pending)* | 0.71 | 0.03 | 0.31 | 0.44 | 0.64 | 0.68 | 0.63 | 0.48 | 0.44 | **0.68 @ L50** |
+| causality list[str] *(sanitized, n=64, pending)* | 0.71 | 0.02 | 0.25 | 0.36 | 0.43 | 0.62 | 0.56 | 0.49 | 0.40 | **0.62 @ L50** |
+
+The locked-corpus faithfulness skyline is **0.879 overall (weighted n=253)** — matching the goal-head
+GoalScope faithfulness (Axis (a) = 0.879) exactly, confirming the re-run reproduces the goalscope reference
+on the locked sanitized corpus. Per-datatype skylines: int 0.877, list[int] 0.870, str 0.928, list[str] 0.841.
 
 **Read:** faithfulness starts near-zero; sanitized causality now also starts at **~0 at L0** (the old L0
 floor of 0.22/0.31 for `int`/`list[int]` was entirely the trivial C++-stub default — see §5.0). Both climb
@@ -214,13 +230,13 @@ the trivial artifact.
 `hard_yes` per pivot (representative jobs; skyline vs selected OV layers):
 
 ```
-faithfulness · int                     causality · int (sanitized)
+faithfulness · int (locked, n=65)      causality · int (sanitized, n=64, pending)
 pivot        skyline  L40  L48  L52     skyline  L40  L48  L52
-prev_end        0.50  .09  .45  .55       0.55  .22  .36  .52
-indent          0.89  .27  .91  .94       0.75  .20  .80  .91
-var             0.92  .22  .81  .91       0.80  .16  .80  .83
-eq              1.00  .97 1.00  .98       0.89  .86  .89  .88
-first_impl      1.00  .80  .98  .97       0.83  .66  .84  .88
+prev_end        0.52  .05  .26  .34       0.55  .22  .36  .52
+indent          0.91  .26  .89  .89       0.75  .20  .80  .91
+var             0.95  .17  .88  .92       0.80  .16  .80  .83
+eq              1.00  .94 1.00 1.00       0.89  .86  .89  .88
+first_impl      1.00  .82  .91  .97       0.83  .66  .84  .88
 ```
 
 **Pivot ordering (consistent across datatypes & modes): `eq ≈ first_impl > indent ≈ var ≫ prev_end`.**
@@ -285,8 +301,14 @@ artifact), leaving the emergence-from-~L40, saturate-near-skyline story intact.
 
 ## 6. Status / next
 
-- **Complete** (2026-09-11): all 8 jobs, n=64, **last layer L63 included**; §5.1 table has an L63 column and
-  §5.4 curves extend to L63. §5 tables + §5.3–5.4 figures reflect the final data,
+- **Faithfulness re-run on locked corpus** (2026-09-15): all 4 faithfulness shards done on the locked,
+  sanitized 253-spec corpus (`--locked`, `span=frontier`, n=253); skyline reproduces goal-head GoalScope
+  (0.879, exact). §5.1 faithfulness rows + §5.2 faithfulness·int + §5.3–5.4 figures should be regenerated
+  from `results/evaluation/ov-reader/.../{layer}/faithfulness/*span=frontier*` (the old `span=rule` faith
+  dirs were deleted). **Causality re-run pending** — 4 causality shards running (int/list[int] in flight,
+  str/list[str] queued); §5.1/§5.2 causality rows and the causality figure panels are still the old sampled
+  n=64 `span=rule` values and must be refreshed when those finish.
+- Earlier (2026-09-11): all 8 jobs on the old sampled n=64 corpus, **last layer L63 included**;
   **causality sanitized** (§5.0). Sanitizer lives in code: `src.diff.data.TRIVIAL_FRONTIERS` /
   `nontrivial_frontiers` (target side, consumed by `eval_ov_reader.sample_datapoints`) and
   `eval_goalscope.is_trivial_causal_readout` (read-out side, in `hard_eval`). Coverage: `test/test_causal_sanitizer.py`.
