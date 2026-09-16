@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>stable_marriage</title><style>:root{
+  --bg:#ffffff; --code:#1f2328; --dim:#c4c8cf; --muted:#6b7280;
+  --kw:#a626a4; --cn:#0b76c4; --bi:#3aa39f; --num:#0b76c4; --fn:#6f42c1;
+  --anchor:#f2708a; --anchor-line:#9aa1ab; --box:#d0d5dd; --hi:#fff2b8; --pin:#f2708a;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--code);
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.gs-wrap{position:relative;display:flex;align-items:stretch;gap:0;padding:22px 26px 40px;--leftw:46%;}
+.gs-left{position:relative;flex:0 0 var(--leftw);min-height:100%;}
+.gs-divider{flex:0 0 14px;align-self:stretch;position:relative;cursor:col-resize;z-index:4;}
+.gs-divider::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:#e5e7eb;transform:translateX(-50%);transition:background .1s,width .1s;}
+.gs-divider:hover::before,.gs-divider.drag::before{background:#9aa1ab;width:2px;}
+.gs-right{flex:1 1 auto;padding-left:20px;min-width:0;}
+.gs-title{font-size:13px;color:var(--muted);letter-spacing:.02em;margin:0 0 10px;text-transform:uppercase;}
+pre.gs-code{margin:0;font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:15px;line-height:1.7;white-space:pre-wrap;word-break:break-word;}
+.gs-tok{border-radius:4px;padding:0 .5px;}
+.gs-tok.scoped{cursor:pointer;transition:background .12s;}
+.gs-tok.scoped:hover{background:var(--hi);}
+.gs-tok.pinned{background:#ffe08a;box-shadow:0 0 0 1.5px var(--pin);border-radius:4px;}
+.gs-tok.noncode{color:var(--dim);}
+.gs-tok.kw{color:var(--kw);font-weight:600}
+.gs-tok.cn{color:var(--cn);font-weight:600}
+.gs-tok.bi{color:var(--bi)}
+.gs-tok.num{color:var(--num)}
+svg.gs-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;overflow:visible;}
+.gs-callout{position:absolute;left:6px;max-width:calc(var(--leftw) - 34px);background:#fff;border:1px solid var(--box);
+  border-radius:12px;padding:11px 14px;box-shadow:0 1px 3px rgba(16,24,40,.07);z-index:3;
+  font-size:15px;line-height:1.45;font-style:italic;color:#111827;}
+.gs-callout .idx{position:absolute;left:-11px;top:-11px;width:22px;height:22px;border-radius:50%;
+  background:var(--pin);color:#fff;font-style:normal;font-weight:700;font-size:12px;
+  display:flex;align-items:center;justify-content:center;box-shadow:0 1px 2px rgba(0,0,0,.2);}
+.gs-hint{position:absolute;top:22px;right:26px;font-size:12px;color:var(--muted);font-style:italic;}
+.gs-tip{position:fixed;pointer-events:none;z-index:9;max-width:320px;background:#111827;color:#fff;
+  font-size:13px;line-height:1.4;font-style:italic;padding:8px 11px;border-radius:8px;opacity:0;
+  transition:opacity .1s;box-shadow:0 4px 14px rgba(0,0,0,.25);}
+.gs-empty{color:var(--muted);font-size:14px;font-style:italic;padding-top:6px;}</style></head>
+<body>
+<div class="gs-wrap" id="gs_9ef14ee3">
+  <div class="gs-left"></div>
+  <div class="gs-divider" title="drag to resize"></div>
+  <div class="gs-right">
+    <div class="gs-title">stable_marriage</div>
+    <pre class="gs-code"><span class="gs-tok noncode kw" data-pos="0">def</span><span class="gs-tok noncode" data-pos="1"> </span><span class="gs-tok noncode" data-pos="2">stable_marriage(men_pref,</span><span class="gs-tok noncode" data-pos="3"> </span><span class="gs-tok noncode" data-pos="4">women_pref):</span><span class="gs-tok noncode" data-pos="5">
+    </span><span class="gs-tok noncode" data-pos="6">...</span><span class="gs-tok noncode" data-pos="7">
+    </span><span class="gs-tok scoped kw" data-pos="8">while</span><span class="gs-tok noncode" data-pos="9"> </span><span class="gs-tok noncode" data-pos="10">True:</span><span class="gs-tok noncode" data-pos="11">
+        </span><span class="gs-tok noncode" data-pos="12">free_man</span><span class="gs-tok noncode" data-pos="13"> </span><span class="gs-tok noncode" data-pos="14">=</span><span class="gs-tok noncode" data-pos="15"> </span><span class="gs-tok noncode cn" data-pos="16">None</span><span class="gs-tok noncode" data-pos="17">
+        </span><span class="gs-tok scoped kw" data-pos="18">for</span><span class="gs-tok noncode" data-pos="19"> </span><span class="gs-tok noncode" data-pos="20">man</span><span class="gs-tok noncode" data-pos="21"> </span><span class="gs-tok noncode kw" data-pos="22">in</span><span class="gs-tok noncode" data-pos="23"> </span><span class="gs-tok noncode" data-pos="24">range(num_men):</span><span class="gs-tok noncode" data-pos="25">
+            </span><span class="gs-tok noncode kw" data-pos="26">if</span><span class="gs-tok noncode" data-pos="27"> </span><span class="gs-tok noncode kw" data-pos="28">not</span><span class="gs-tok noncode" data-pos="29"> </span><span class="gs-tok noncode" data-pos="30">engaged[man]:</span><span class="gs-tok noncode" data-pos="31">
+                </span><span class="gs-tok noncode" data-pos="32">free_man</span><span class="gs-tok noncode" data-pos="33"> </span><span class="gs-tok noncode" data-pos="34">=</span><span class="gs-tok noncode" data-pos="35"> </span><span class="gs-tok noncode" data-pos="36">man</span><span class="gs-tok noncode" data-pos="37">
+                </span><span class="gs-tok noncode kw" data-pos="38">break</span><span class="gs-tok noncode" data-pos="39">
+        </span><span class="gs-tok noncode kw" data-pos="40">if</span><span class="gs-tok noncode" data-pos="41"> </span><span class="gs-tok noncode kw" data-pos="42">not</span><span class="gs-tok noncode" data-pos="43"> </span><span class="gs-tok noncode" data-pos="44">free_man:</span><span class="gs-tok noncode" data-pos="45">
+            </span><span class="gs-tok noncode kw" data-pos="46">break</span><span class="gs-tok noncode" data-pos="47">
+        </span><span class="gs-tok noncode kw" data-pos="48">for</span><span class="gs-tok noncode" data-pos="49"> </span><span class="gs-tok scoped" data-pos="50">p_count</span><span class="gs-tok noncode" data-pos="51"> </span><span class="gs-tok noncode kw" data-pos="52">in</span><span class="gs-tok noncode" data-pos="53"> </span><span class="gs-tok noncode" data-pos="54">range(len(men_pref)):</span><span class="gs-tok noncode" data-pos="55">
+            </span><span class="gs-tok noncode" data-pos="56">...</span></pre>
+  </div>
+  <svg class="gs-links"></svg>
+  <div class="gs-tip"></div>
+</div>
+<script>(function(){
+  const CID = "gs_9ef14ee3";
+  const root = document.getElementById(CID);
+  if(!root) return;
+  const TOK = [{"pos": 0, "text": "def", "scoped": false, "readout": ""}, {"pos": 1, "text": " ", "scoped": false, "readout": ""}, {"pos": 2, "text": "stable_marriage(men_pref,", "scoped": false, "readout": ""}, {"pos": 3, "text": " ", "scoped": false, "readout": ""}, {"pos": 4, "text": "women_pref):", "scoped": false, "readout": ""}, {"pos": 5, "text": "\n    ", "scoped": false, "readout": ""}, {"pos": 6, "text": "...", "scoped": false, "readout": ""}, {"pos": 7, "text": "\n    ", "scoped": false, "readout": ""}, {"pos": 8, "text": "while", "scoped": true, "readout": "checking if there is an unmatched man and attempting to match him"}, {"pos": 9, "text": " ", "scoped": false, "readout": ""}, {"pos": 10, "text": "True:", "scoped": false, "readout": ""}, {"pos": 11, "text": "\n        ", "scoped": false, "readout": ""}, {"pos": 12, "text": "free_man", "scoped": false, "readout": ""}, {"pos": 13, "text": " ", "scoped": false, "readout": ""}, {"pos": 14, "text": "=", "scoped": false, "readout": ""}, {"pos": 15, "text": " ", "scoped": false, "readout": ""}, {"pos": 16, "text": "None", "scoped": false, "readout": ""}, {"pos": 17, "text": "\n        ", "scoped": false, "readout": ""}, {"pos": 18, "text": "for", "scoped": true, "readout": "finding the next free man"}, {"pos": 19, "text": " ", "scoped": false, "readout": ""}, {"pos": 20, "text": "man", "scoped": false, "readout": ""}, {"pos": 21, "text": " ", "scoped": false, "readout": ""}, {"pos": 22, "text": "in", "scoped": false, "readout": ""}, {"pos": 23, "text": " ", "scoped": false, "readout": ""}, {"pos": 24, "text": "range(num_men):", "scoped": false, "readout": ""}, {"pos": 25, "text": "\n            ", "scoped": false, "readout": ""}, {"pos": 26, "text": "if", "scoped": false, "readout": ""}, {"pos": 27, "text": " ", "scoped": false, "readout": ""}, {"pos": 28, "text": "not", "scoped": false, "readout": ""}, {"pos": 29, "text": " ", "scoped": false, "readout": ""}, {"pos": 30, "text": "engaged[man]:", "scoped": false, "readout": ""}, {"pos": 31, "text": "\n                ", "scoped": false, "readout": ""}, {"pos": 32, "text": "free_man", "scoped": false, "readout": ""}, {"pos": 33, "text": " ", "scoped": false, "readout": ""}, {"pos": 34, "text": "=", "scoped": false, "readout": ""}, {"pos": 35, "text": " ", "scoped": false, "readout": ""}, {"pos": 36, "text": "man", "scoped": false, "readout": ""}, {"pos": 37, "text": "\n                ", "scoped": false, "readout": ""}, {"pos": 38, "text": "break", "scoped": false, "readout": ""}, {"pos": 39, "text": "\n        ", "scoped": false, "readout": ""}, {"pos": 40, "text": "if", "scoped": false, "readout": ""}, {"pos": 41, "text": " ", "scoped": false, "readout": ""}, {"pos": 42, "text": "not", "scoped": false, "readout": ""}, {"pos": 43, "text": " ", "scoped": false, "readout": ""}, {"pos": 44, "text": "free_man:", "scoped": false, "readout": ""}, {"pos": 45, "text": "\n            ", "scoped": false, "readout": ""}, {"pos": 46, "text": "break", "scoped": false, "readout": ""}, {"pos": 47, "text": "\n        ", "scoped": false, "readout": ""}, {"pos": 48, "text": "for", "scoped": false, "readout": ""}, {"pos": 49, "text": " ", "scoped": false, "readout": ""}, {"pos": 50, "text": "p_count", "scoped": true, "readout": "propose to the next woman on his preference list and check if she accepts"}, {"pos": 51, "text": " ", "scoped": false, "readout": ""}, {"pos": 52, "text": "in", "scoped": false, "readout": ""}, {"pos": 53, "text": " ", "scoped": false, "readout": ""}, {"pos": 54, "text": "range(len(men_pref)):", "scoped": false, "readout": ""}, {"pos": 55, "text": "\n            ", "scoped": false, "readout": ""}, {"pos": 56, "text": "...", "scoped": false, "readout": ""}];                 // [{pos,text,readout,scoped}]
+  const readouts = {}; TOK.forEach(t=>{ if(t.scoped) readouts[t.pos]=t.readout; });
+  const left  = root.querySelector(".gs-left");
+  const right = root.querySelector(".gs-right");
+  const svg   = root.querySelector("svg.gs-links");
+  const tip   = root.querySelector(".gs-tip");
+  const pinned = [];                           // ordered list of pos (pin order)
+
+  function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+  // hover preview
+  root.querySelectorAll(".gs-tok.scoped").forEach(el=>{
+    el.addEventListener("mousemove", e=>{
+      const p = +el.dataset.pos;
+      tip.textContent = "“"+ (readouts[p]||"") +"”";
+      tip.style.opacity = .98;
+      tip.style.left = Math.min(e.clientX+14, window.innerWidth-336) + "px";
+      tip.style.top  = (e.clientY+16) + "px";
+    });
+    el.addEventListener("mouseleave", ()=>{ tip.style.opacity = 0; });
+    el.addEventListener("click", ()=>{
+      const p = +el.dataset.pos;
+      const i = pinned.indexOf(p);
+      if(i>=0){ pinned.splice(i,1); el.classList.remove("pinned"); }
+      else    { pinned.push(p);     el.classList.add("pinned"); }
+      render();
+    });
+  });
+
+  function render(){
+    // clear callouts + links
+    root.querySelectorAll(".gs-callout").forEach(n=>n.remove());
+    while(svg.firstChild) svg.removeChild(svg.firstChild);
+    const empty = left.querySelector(".gs-empty"); if(empty) empty.remove();
+    if(pinned.length===0){
+      const e=document.createElement("div"); e.className="gs-empty";
+      e.textContent="Click a highlighted token on the right to pin its read-out here.";
+      left.appendChild(e); return;
+    }
+    // Single origin for callouts (children of root, absolute) + svg user space + measurements:
+    // the svg is position:absolute inset:0, so its box IS root's padding box == the abs-positioning
+    // containing block. Measure everything relative to it.
+    const O = svg.getBoundingClientRect();
+    // sort pins by the token's vertical position so callouts read top-to-bottom
+    const order = pinned.map(p=>{
+      const t = right.querySelector('.gs-tok[data-pos="'+p+'"]');
+      const r = t.getBoundingClientRect();
+      return {p, t, ty:(r.top+r.bottom)/2 - O.top, tx:r.left - O.left};
+    }).sort((a,b)=>a.ty-b.ty);
+
+    // create callouts, then position with simple vertical de-collision
+    let lastBottom = 0;
+    order.forEach((o,k)=>{
+      const box=document.createElement("div"); box.className="gs-callout";
+      const n = pinned.indexOf(o.p)+1;                 // stable pin number
+      box.innerHTML='<span class="idx">'+n+'</span>'
+                    +'“'+esc(readouts[o.p])+'”';
+      root.appendChild(box);
+      const bh = box.offsetHeight;
+      let top = Math.max(o.ty - bh/2, lastBottom + 12);
+      box.style.top = top + "px";
+      lastBottom = top + bh;
+      o.box = box; o.n = n;
+    });
+    // draw leader lines + anchor dots (after layout is known)
+    order.forEach(o=>{
+      const br = o.box.getBoundingClientRect();
+      const x1 = br.right - O.left, y1 = br.top - O.top + o.box.offsetHeight/2;
+      const tr = o.t.getBoundingClientRect();
+      const x2 = tr.left - O.left - 2, y2 = (tr.top+tr.bottom)/2 - O.top;
+      const mx = (x1+x2)/2;
+      const path=document.createElementNS("http://www.w3.org/2000/svg","path");
+      path.setAttribute("d",`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+      path.setAttribute("fill","none"); path.setAttribute("stroke","#9aa1ab");  // var() not valid in SVG attrs
+      path.setAttribute("stroke-width","1.4");
+      svg.appendChild(path);
+      const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
+      c.setAttribute("cx",x2); c.setAttribute("cy",y2); c.setAttribute("r","4");
+      c.setAttribute("fill","#f2708a"); c.setAttribute("stroke","#fff"); c.setAttribute("stroke-width","1");
+      svg.appendChild(c);
+    });
+  }
+  window.addEventListener("resize", render);
+
+  // draggable splitter — resize the left/right panels; callouts + leader lines re-flow live.
+  const divider = root.querySelector(".gs-divider");
+  let dragging = false;
+  divider.addEventListener("mousedown", e=>{
+    dragging = true; divider.classList.add("drag");
+    document.body.style.userSelect = "none"; e.preventDefault();
+  });
+  document.addEventListener("mousemove", e=>{
+    if(!dragging) return;
+    const wr = root.getBoundingClientRect();
+    const cs = getComputedStyle(root);
+    const padL = parseFloat(cs.paddingLeft)||0, padR = parseFloat(cs.paddingRight)||0;
+    const content = wr.width - padL - padR;
+    const w = e.clientX - (wr.left + padL);
+    const frac = Math.min(0.80, Math.max(0.18, w/content));   // clamp 18%..80%
+    root.style.setProperty("--leftw", (frac*100).toFixed(2)+"%");
+    render();
+  });
+  document.addEventListener("mouseup", ()=>{
+    if(dragging){ dragging=false; divider.classList.remove("drag");
+      document.body.style.userSelect=""; render(); }
+  });
+
+  render();
+})();</script>
+</body></html>
