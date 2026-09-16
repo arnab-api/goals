@@ -254,8 +254,11 @@ def goalscope_qualitative_html(
             tc = _tok_class(text)
             if tc:
                 cls.append(tc)
+        # Newline tokens are invisible in <pre>; show a visible ↵ glyph before the real \n so the
+        # span is still hoverable/clickable (matches the original goalscope visualization).
+        tok_html = _html.escape(text).replace("\n", "↵\n")
         spans.append(
-            f'<span class="{" ".join(cls)}" data-pos="{pos}">{_html.escape(text)}</span>'
+            f'<span class="{" ".join(cls)}" data-pos="{pos}">{tok_html}</span>'
         )
         tokens_json.append(
             {"pos": pos, "text": text, "scoped": scoped,
