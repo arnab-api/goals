@@ -513,6 +513,21 @@ def _generate_baukit(
     sentinel_layer = sorted_layers[0]
     decode_step = [0]  # mutable so the closure can write to it
 
+    # Pre-place each patch on its target module's device/dtype ONCE, here, instead of letting
+    # `_apply_patch_to_state` do it on every decode step. With device_map="auto" the steered
+    # layers can straddle a GPU boundary, which made that in-hook `.to()` a cross-GPU P2P copy
+    # repeated (n_layers x n_steps) times per call. Keyed by id() so caller-owned PatchSpecs are
+    # left untouched.
+    prepped: dict[int, torch.Tensor] = {}
+    for _name, _plist in modules_to_patches.items():
+        _mod = baukit.get_module(mt._model, _name)
+        _param = next(_mod.parameters(), None)
+        for _p in _plist:
+            _t = _p.patch
+            if _param is not None:
+                _t = _t.to(device=_param.device, dtype=_param.dtype)
+            prepped[id(_p)] = _t
+
     def hook(output, layer):
         nonlocal decode_step
         is_tuple = isinstance(output, tuple)
@@ -540,7 +555,9 @@ def _generate_baukit(
                 should_apply = False
 
             if should_apply:
-                _apply_patch_to_state(actual, p.location[1], p.patch, p.strategy)
+                _apply_patch_to_state(
+                    actual, p.location[1], prepped[id(p)], p.strategy
+                )
 
         return (actual,) + output[1:] if is_tuple else actual
 

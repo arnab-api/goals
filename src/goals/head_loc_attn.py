@@ -371,6 +371,7 @@ def collect_head_steering_vecs(
     token_positions: list[int],
     return_individual_heads: bool = False,
     patch_interface: Optional[Callable] = None,
+    w_o_override: Optional[dict[int, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Compute the summed residual-stream contribution of selected heads at each token position.
 
@@ -387,6 +388,12 @@ def collect_head_steering_vecs(
         token_positions: Token positions to extract (absolute indices into src_tokenized).
         patch_interface: forwarded to :func:`get_o_proj_inputs_batch` — when given, the extraction
             forward runs under it, so the aggregated head write reflects the intervention.
+        w_o_override: ``{layer: W_o}`` replacing the ``o_proj.weight`` read for those layers.
+            ``W_o`` must be ``(n_embd, n_heads*head_dim)``; it is cast to float32/CPU here.
+            Needed when the weights *in* the module are not the weights whose head-write you
+            want — e.g. a LoRA adapter that targets ``o_proj`` and is active for the forward
+            pass but not folded into ``.weight``.  Layers absent from the dict fall back to
+            the module's own weight.  ``None`` (default) reads every layer from the module.
 
     Returns:
         Float32 CPU tensor of shape ``(batch_size, n_positions, n_embd)`` — one
@@ -425,8 +432,11 @@ def collect_head_steering_vecs(
 
     for layer, heads in heads_per_layer.items():
         attn_name = mt.attn_module_name_format.format(layer)
-        o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
-        W_o = o_proj.weight.detach().float().cpu()  # (n_embd, n_embd)
+        if w_o_override is not None and layer in w_o_override:
+            W_o = w_o_override[layer].detach().float().cpu()
+        else:
+            o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
+            W_o = o_proj.weight.detach().float().cpu()  # (n_embd, n_heads*head_dim)
 
         inp = o_proj_inputs[layer]  # (batch_size, n_positions, n_embd) float32 CPU
 

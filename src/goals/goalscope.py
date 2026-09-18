@@ -7,10 +7,11 @@ This module provides:
 
 from __future__ import annotations
 
+import contextlib
 import html as _html
 import keyword as _kw
 import warnings
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, ContextManager, Literal, Optional, Union
 
 import baukit
 import torch
@@ -887,6 +888,10 @@ def apply_goalscope(
     save_path: Optional[str] = None,
     token_positions: Optional[list[int]] = None,
     patch_interface: Optional[Callable] = None,
+    src_mt=None,
+    src_context: Optional[Callable[[], ContextManager]] = None,
+    dest_context: Optional[Callable[[], ContextManager]] = None,
+    src_w_o_override: Optional[dict[int, torch.Tensor]] = None,
 ) -> list[dict]:
     """Run GoalScope on a single prompt.
 
@@ -965,6 +970,20 @@ def apply_goalscope(
             of ``get_attention_matrices``.  ``None`` (default) → no intervention; source extraction
             is unchanged.  Note the intervention's own positions are absolute indices into
             ``prompt``'s tokenization, exactly like ``token_positions``.
+        src_mt: Model to read the goal signal FROM.  ``None`` (default) -> ``mt``, i.e. the
+            same model both extracts and verbalizes.  When given, ``src_mt`` supplies the
+            head activations / o_proj inputs while ``mt`` remains the *steered* verbalizer.
+            Both must share a tokenizer and layer/head geometry (source positions and
+            ``selected_heads`` are indices into a single tokenization).
+        src_context: Zero-arg callable returning a context manager entered around the
+            source-side extraction forward.  Use it when source and destination are two
+            weight states of ONE loaded model (e.g. a LoRA adapter merged in / out) and so
+            cannot be two separate ``mt`` objects.  ``None`` -> no-op.
+        dest_context: Same, around the verbalizer generation loop.  ``None`` -> no-op.
+        src_w_o_override: ``{layer: W_o}`` forwarded to
+            :func:`collect_head_steering_vecs` — the output matrix used to turn the source's
+            o_proj inputs into residual-stream writes, for layers where the module's own
+            ``.weight`` is not the right one.  **Additive strategies only.**
 
     Returns:
         List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` and
@@ -977,9 +996,21 @@ def apply_goalscope(
         raise ValueError(
             f"strategy must be 'additive', 'additive_norm' or 'replace', got {strategy!r}"
         )
+    if src_w_o_override is not None and strategy == "replace":
+        # "replace" transplants o_proj *inputs*; it never reads W_o, so an override here
+        # would be silently ignored.
+        raise ValueError("src_w_o_override is not applicable to strategy='replace'")
 
     # Translate n_steer_tokens="all" → None for the underlying APIs
     n_steer = None if n_steer_tokens == "all" else int(n_steer_tokens)
+
+    # Source model / weight-state resolution.  `src_mt` splits extraction from
+    # verbalization across two loaded models; `src_context` / `dest_context` do the same
+    # across two weight states of one model.
+    if src_mt is None:
+        src_mt = mt
+    _src_ctx = src_context or contextlib.nullcontext
+    _dest_ctx = dest_context or contextlib.nullcontext
 
     if goalscope_prompt is None:
         goalscope_prompt = _build_goalscope_prompt(mt)
@@ -1056,13 +1087,15 @@ def apply_goalscope(
         # Aggregate selected heads into one residual-stream vector per position.
         # collect_head_steering_vecs returns (batch_size, n_seg, n_embd);
         # src_tokenized here has batch_size=1, so squeeze the leading dim.
-        steering_vecs = collect_head_steering_vecs(
-            mt=mt,
-            src_tokenized=src_tokenized,
-            selected_heads=selected_heads,
-            token_positions=seg_positions,
-            patch_interface=patch_interface,
-        )[0]  # (n_seg, n_embd)
+        with _src_ctx():
+            steering_vecs = collect_head_steering_vecs(
+                mt=src_mt,
+                src_tokenized=src_tokenized,
+                selected_heads=selected_heads,
+                token_positions=seg_positions,
+                patch_interface=patch_interface,
+                w_o_override=src_w_o_override,
+            )[0]  # (n_seg, n_embd)
 
         # additive_norm's unit-direction normalisation happens inside
         # head_additive_generate, so `steering_vecs` stays raw here.
@@ -1085,13 +1118,14 @@ def apply_goalscope(
 
         # Extract per-layer o_proj inputs at every segment position.
         # Shape per layer: (1, n_seg, n_embd); stack → (n_seg, n_layers, n_embd).
-        src_o_inputs = get_o_proj_inputs_batch(
-            mt,
-            src_tokenized,
-            layers_replace,
-            token_positions=seg_positions,
-            patch_interface=patch_interface,
-        )
+        with _src_ctx():
+            src_o_inputs = get_o_proj_inputs_batch(
+                src_mt,
+                src_tokenized,
+                layers_replace,
+                token_positions=seg_positions,
+                patch_interface=patch_interface,
+            )
         src_head_vals_all = torch.stack(
             [src_o_inputs[layer][0] for layer in layers_replace], dim=1
         )  # (n_seg, n_layers, n_embd)
@@ -1099,52 +1133,55 @@ def apply_goalscope(
     # -----------------------------------------------------------------
     # Batched generation
     # -----------------------------------------------------------------
-    for chunk_start in tqdm(range(0, n_seg, batch_size), desc=f"GoalScope[{strategy}]"):
-        chunk_end = min(chunk_start + batch_size, n_seg)
-        B = chunk_end - chunk_start
+    with _dest_ctx():
+        for chunk_start in tqdm(
+            range(0, n_seg, batch_size), desc=f"GoalScope[{strategy}]"
+        ):
+            chunk_end = min(chunk_start + batch_size, n_seg)
+            B = chunk_end - chunk_start
 
-        tiled = TokenizerOutput(
-            data=dict(
-                input_ids=dest_ids.expand(B, -1).clone(),
-                attention_mask=dest_attn.expand(B, -1).clone(),
-            )
-        )
-
-        if strategy in ("additive", "additive_norm"):
-            gens = head_additive_generate(
-                mt=mt,
-                dest_inputs=tiled,
-                steering_vecs=steering_vecs[chunk_start:chunk_end],  # (B, n_embd), raw
-                layers=steer_layers,
-                max_new_tokens=max_new_tokens,
-                strategy=strategy,
-                n_steer_tokens=n_steer,
-                alpha=alpha,
-            )
-        else:  # replace
-            src_chunk = src_head_vals_all[
-                chunk_start:chunk_end
-            ]  # (B, n_layers, n_embd)
-            gens = headpatched_generate(
-                mt=mt,
-                dest_inputs=tiled,
-                src_o_proj_inps=src_chunk,
-                mask=mask_module,
-                layers=layers_replace,
-                max_new_tokens=max_new_tokens,
-                n_steer_tokens=n_steer,
-                alpha=alpha,
+            tiled = TokenizerOutput(
+                data=dict(
+                    input_ids=dest_ids.expand(B, -1).clone(),
+                    attention_mask=dest_attn.expand(B, -1).clone(),
+                )
             )
 
-        for i in range(B):
-            results.append(
-                {
-                    "pos": seg_positions[chunk_start + i],
-                    "token": text_tokens[seg_positions[chunk_start + i]],
-                    "patched_gen": gens[i],
-                    "scoped": True,
-                }
-            )
+            if strategy in ("additive", "additive_norm"):
+                gens = head_additive_generate(
+                    mt=mt,
+                    dest_inputs=tiled,
+                    steering_vecs=steering_vecs[chunk_start:chunk_end],  # (B, n_embd), raw
+                    layers=steer_layers,
+                    max_new_tokens=max_new_tokens,
+                    strategy=strategy,
+                    n_steer_tokens=n_steer,
+                    alpha=alpha,
+                )
+            else:  # replace
+                src_chunk = src_head_vals_all[
+                    chunk_start:chunk_end
+                ]  # (B, n_layers, n_embd)
+                gens = headpatched_generate(
+                    mt=mt,
+                    dest_inputs=tiled,
+                    src_o_proj_inps=src_chunk,
+                    mask=mask_module,
+                    layers=layers_replace,
+                    max_new_tokens=max_new_tokens,
+                    n_steer_tokens=n_steer,
+                    alpha=alpha,
+                )
+
+            for i in range(B):
+                results.append(
+                    {
+                        "pos": seg_positions[chunk_start + i],
+                        "token": text_tokens[seg_positions[chunk_start + i]],
+                        "patched_gen": gens[i],
+                        "scoped": True,
+                    }
+                )
 
     # Optionally fold in the non-code tokens (everything outside [code_start, code_end))
     # as display-only, non-scoped context — no source extraction / generation for them.
