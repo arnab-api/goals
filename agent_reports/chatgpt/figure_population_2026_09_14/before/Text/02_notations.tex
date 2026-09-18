@@ -1,0 +1,41 @@
+\section{Task and Intervention Setup}
+\label{sec:notations}
+
+\subsection{Language models and head contributions}
+\label{sec:notations:lm}
+An autoregressive transformer $\M: \mathcal{X} \rightarrow \mathcal{Y}$, over a vocabulary $\mathcal{V}$ maps a sequence of tokens $x=(x_1,\ldots,x_n)$, $x \in \mathcal{V}$, to $y \in \mathbb{R}^{|\mathcal{V}|}$, a probability distribution over its next token. Internally, $\M$ has $L$ layers; the residual stream at layer $\ell$ and position $t$ is
+    $h_t^{\ell} = h_t^{\ell-1} + m_t^{\ell} + \sum_{j} a_t^{\ell j}$,
+where $m_t^{\ell}$ is the output of the MLP and $a_t^{\ell j}$ is the contribution of the $j$-th attention head. Suppressing normalization and positional encoding, a head's contribution to the residual stream is
+\begin{equation}
+a_t^{\ell j}=\left(\sum_{i\leq t}\mathrm{Attn}(q_t,K)_i v_i\right)W_O^{\ell j},
+\qquad \mathrm{Attn}(q_t,K)=\mathrm{softmax}\!\left(\frac{q_tK^\top}{\sqrt{d_{\mathrm{head}}}}\right).
+\label{eq:head}
+\end{equation}
+with query $q_t = h_t^{\ell-1} W_Q^{\ell j}$, keys $K = h_{\le t}^{\ell-1} W_K^{\ell j}$, affinity of query and key states determine the mixture over the value states $v_i = h_i^{\ell-1} W_V^{\ell j}$, which is then projected with the output projection $W_{O}^{\ell j}$ and added to the residual stream. In grouped-query attention, multiple query heads read from the same key/value head.
+
+% Here queries, keys, and values are learned projections of the normalized residual states; queries and keys additionally receive the model's positional transformation. In grouped-query attention, multiple query heads share a key/value head. We denote an individual head by $[\ell,j]$ and call $a_t^{\ell j}$ its \emph{head contribution}: what the head writes to the residual stream after the output projection.
+
+\subsection{Sequential subgoal implementation}
+\label{sec:notations:task}
+
+We study a set of controlled settings in which the model must satisfy a \emph{broader goal} that decomposes into an ordered set of independent \emph{sub-tasks} $G = \{g_1, \dots, g_K\}$, each specified in natural language (for example, \textit{``check if there are any palindromes in a list of strings''}). A prompt $p$ presents the specification and asks the model to implement the sub-tasks in code, one after another. The model realizes each $g_k$ over a contiguous span of generated tokens. We use two terms throughout. The \pivot $\pi_k$ is the token position at which the model is about to begin sub-task $g_k$, which we dub as the \emph{frontier}. In our controlled setup, we prefill in the LM's progress until the \pivot $\pi_k$. This let's us ask if the upcoming assignment is already encoded in the \pivot $\pi_k$ and compare the readout with the LM's actual \emph{future} behavior.  A concrete example of the task is shown on {\color{red} Figure~\ref{fig:teaser}}, with more details on Appendix \ref{app:task}.
+
+% This is the natural place to ask what it \emph{intends} to do next. The next instrumental goal at $\pi_k$ is the sub-task $g_k$ it is about to pursue; the model's \progress at $\pi_k$ is the set of sub-tasks it has already completed (equivalently, its place in the ordered list $G$). Our central object of study is the internal representation of the next instrumental goal $g_k$ present at $\pi_k$, \emph{before} $g_k$ is realized in code.
+
+% A prompt specifies an ordered sequence $G=(g_1,\ldots,g_K)$ of operations on the same input and asks the model to implement them sequentially. For example, a program may be asked to compute the number of digits in an integer and then check whether it is even. We supply the implementation of the first operation and stop at the assignment prefix for the second:
+% \begin{quote}\small\ttfamily
+% def func(n: int):\\
+% \hspace*{1em}a = len(str(abs(n)))\\
+% \hspace*{1em}b =
+% \end{quote}
+% At the final \texttt{=}, the model has yet to write the evenness check. We call this next sub-goal $g_k$ the \emph{frontier}. This setup lets us identify the upcoming assignment and compare its implementation with a readout captured before it is written.
+
+Our main evaluation contains 253 specifications over integers, strings, lists of integers, and lists of strings. Each prompt lists two to four operations, which we refer to as predicates, including Boolean tests, counts, and other transformations. We inspect five positions around the frontier: the end of the preceding line, indentation, the variable name, the assignment operator, and the first implementation token. The first four are pre-implementation capture positions, which we call \emph{pivots}; the fifth provides a comparison after implementation has begun. We use the assignment operator as the principal pivot for the ablation experiments. The corpus supplies 1,265 observations per evaluation mode, with five repeated measurements per specification. The data distribution, complete example prompt, and tokenization are in \Cref{app:task,app:pivots}. \arnab{condense the different pivot explanation to figure. nothing in text. stash specifics in the appendix.}
+
+% We use \emph{progress} to denote the completed sub-goals. Under execution in the specified order, these are the prefix $(g_1,\ldots,g_{k-1})$. Later experiments vary the task order and completed work to examine how they influence the next sub-goal.
+
+\subsection{Intervention Primitives}
+\label{sec:notations:interventions}
+\paragraph{Activation patching} \citep{vig-etal-2020, mueller2026quest}. We run $\M$ on a prompt $p$ but overwrite a chosen set of internal activations with latents cached from a different run, and read out the effect on the output distribution. We write $\M\left(p\right)\left[a_i^{\ell j} \leftarrow v\right]$ for the forward pass on $p$ in which the output of head $[\ell,j]$ at position $i$ is replaced by the vector $v$. When the replaced value is cached from a \emph{source} prompt $p_{\text{src}}$ and injected into a \emph{destination} prompt $p_{\text{dst}}$, a change in $\M\left(p\right)\left[v_\mathrm{orig} \leftarrow v_\mathrm{rep}\right]$ isolates the causal role of the patched component/encoding. \arnab{M(x) usually denotes a single forward pass. Our setup is multi-token generation. Ok?}
+
+\paragraph{Query, key/value, and output transplants.} The head decomposition in Eq.~\ref{eq:head} exposes three places a transplant can act, and we use all three. An \emph{output} (OV) transplant replaces a head's contribution $a_t^{\ell j}$ (what it \emph{writes} to the residual stream), and is the primitive behind \goalscope and our head localization (\Cref{sec:what,sec:heads}). A \emph{query} transplant replaces the query $q_t^{\ell j}$ that the destination uses at $\pi_k$ with the source's, changing what the read \emph{looks for}. A \emph{key/value} transplant replaces the keys and values $K^{\ell j}, V^{\ell j}$ at the specification tokens with the source's, changing what the read \emph{finds}. We use these transplants both to \emph{steer} a fresh context toward an intended sub-goal and to probe \emph{where} the goal is computed (\Cref{sec:mechanism}).

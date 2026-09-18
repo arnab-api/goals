@@ -926,6 +926,7 @@ def run_q_transfer_intervention(
     alpha=1.0,
     n_pivot=1,
     compute_gaze=True,
+    restrict_to_task=False,
     ctx=None,
 ):
     """Run one q-transfer (or composed-filter) intervention and return all RAW artifacts as
@@ -960,7 +961,7 @@ def run_q_transfer_intervention(
 
     # TASK span (gaze only): composed phrase (filter) or the union over the numbered predicate list
     # (q). N/A when the instance has no in-prompt SRC-target span (multi-predicate) — skip gaze.
-    if compute_gaze and (("task_text" in m) or hasattr(inst, "task")):
+    if (compute_gaze or restrict_to_task) and (("task_text" in m) or hasattr(inst, "task")):
         if "task_text" in m:
             lo, hi = token_span(dst_prompt, m["task_text"], ctx=ctx)
         else:
@@ -1001,10 +1002,19 @@ def run_q_transfer_intervention(
 
         return _if
 
+    # optional: blind the patch (goal) heads to everything EXCEPT the task span, so the transplanted
+    # query can only read the task-description list (BOS/pos-0 kept as a sink to avoid all-masked rows).
+    def _restrict_ctx():
+        if not restrict_to_task or not task_positions:
+            return nullcontext()
+        keepset = set(task_positions)
+        blk = [p for p in range(piv_dst + 1) if p not in keepset and p != 0]
+        return restrict_head_attn(mt, patch_heads, blk, keep=[])
+
     # generations
     gen_src = greedy(src_tok, max_new=max_new, ctx=ctx)
     gen_dst = greedy(dst_tok, max_new=max_new, ctx=ctx)
-    with _boost_ctx():
+    with _boost_ctx(), _restrict_ctx():
         gen_patched = greedy(
             dst_tok, prefill_specs=pf, decode_specs=dc, n_steer=n_steer, max_new=max_new, ctx=ctx
         )
@@ -1019,11 +1029,21 @@ def run_q_transfer_intervention(
     ro_dst = _ro(dst_prompt, piv_dst)
     ro_patched = _ro(dst_prompt, piv_dst, iface=_patched_iface())
 
-    # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched (PLAIN patch).
-    # Skipped when there is no SRC-target span (multi-predicate) — gaze is N/A there.
+    # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched. Under
+    # restrict_to_task the patched attention is measured WITH the task-span restriction active, so the
+    # ATTN_VIS shows where the (transplanted-query) goal heads focus WITHIN the task list.
     if task_positions is not None:
+        if restrict_to_task:
+            keepset = set(task_positions)
+            _blk = [p for p in range(piv_dst + 1) if p not in keepset and p != 0]
+
+            def _attn_iface(mt, inputs, patches=None, model_kwargs=None):
+                with proj_patch_hooks(mt, pf), restrict_head_attn(mt, patch_heads, _blk, keep=[]):
+                    return mt._model(**dict(inputs), **dict(model_kwargs or {}))
+        else:
+            _attn_iface = iface
         clean_i = get_attention_matrices(dst_tok, mt, value_weighted=True)
-        patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=iface)
+        patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=_attn_iface)
         a_clean = pivot_attn(clean_i, list(readout_heads), task_positions, piv_dst)
         a_patched = pivot_attn(patched_i, list(readout_heads), task_positions, piv_dst)
         attn = dict(

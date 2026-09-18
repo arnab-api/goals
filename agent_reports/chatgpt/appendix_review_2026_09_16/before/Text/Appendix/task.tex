@@ -1,0 +1,76 @@
+\section{Corpus}
+\label{app:task}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=0.85\linewidth]{Figures/corpus/specified-task-example.png}
+\caption{Illustrative example of the prompt. N subgoals are specified in natural language. For a target {\color{blue}frontier} the LM's generated code are prefilled in up to a pivot point. On the same figure we identify the pivot points probed using goalscope in {\color{red} Sections ...} with background highlights (\colorbox{green!20}{\texttt{``eq''}}, \colorbox{yellow!30}{\texttt{``var''}}, \colorbox{violet!8}{\texttt{``indent''}}, \colorbox{red!15}{\texttt{``prev\_end''}}) 
+Generic \texttt{<system>}, \texttt{<user>}, and \texttt{<assistant>} tags are stand in for the LM tokenizer's reserved chat tokens.}
+\label{fig:task-prompt}
+\end{figure}
+We use a fixed corpus of 253 Python specifications to compare GoalScope readouts across head budgets and capture positions (\Cref{app:readout_sources}), native ablations (\Cref{app:ablation,app:necessity}), and model families (\Cref{app:model_comparison}). To generate the corpus, we sample $N\in\{2,3,4\}$ sub-tasks from one of four datatypes: \texttt{int}, \texttt{str}, \texttt{list[int]}, and \texttt{list[str]}. \Cref{tab:data-distribution} gives the datatype counts and examples of the full descriptions used in the prompts. Each specification prefills at least one completed sub-task before the frontier $g_k$, with fixed function and intermediate-variable naming conventions. \Cref{fig:task-prompt} shows a concrete example, with the four pre-implementation pivots highlighted where we probe for the frontiner $g_k$ is most of our evaluations. 
+
+% The corpus is stored in \texttt{data/goalscope\_eval.json}, generated with seed 123. Frontier identities are balanced within each datatype. There are 92 two-task, 82 three-task, and 79 four-task specifications. The complete archived OVReader sweep uses a separate 256-specification cohort (\Cref{app:ovreader}); query and KV transfer use source/destination pairs (\Cref{app:task_transfer}). These cohorts are reported separately.
+% The main GoalScope evaluation uses \texttt{data/goalscope\_eval.json}, generated with seed 123 from the QTASKS predicate bank. It contains 253 Python specifications. Each specifies two, three, or four predicates and prefills one or more completed predicates before the frontier assignment. The function and intermediate-variable naming conventions are fixed; the exact example below uses \texttt{func} and successive letter variables. Sampling balances the frontier predicate within each datatype, rather than making the four datatype counts identical. The number of completed predicates is between one and three and always less than the total number of predicates.
+
+\arnab{add example python code-stubs in \Cref{tab:data-distribution}}
+\begin{table}[ht]\centering\small
+\input{Text/Appendix/tables/corpus}
+\caption{The locked evaluation corpus and illustrative sub-task descriptions, copied verbatim from the task bank. Each specification contains two to four sub-tasks; the examples are individual sub-tasks, not complete specifications. We curate both python and C++ implementation stubs for each of the sub-tasks, which we use to prefill the code to the frontier, in the specified language in the prompt.}
+\label{tab:data-distribution}
+\end{table}
+
+% \begin{table}[ht]\centering\small
+% \begin{tabular}{lrrr}\toprule
+% Datatype & 1 completed & 2 completed & 3 completed\\\midrule
+% int & 38 & 18 & 9 \\
+% list[int] & 36 & 19 & 5 \\
+% str & 43 & 16 & 5 \\
+% list[str] & 34 & 20 & 10 \\
+% \midrule Total & 151 & 73 & 29\\\bottomrule\end{tabular}
+% \caption{Number of completed predicates in the prefilled context. These counts are specification-level, not token-position-level.}
+% \end{table}
+
+% The frontier bank excludes the integer predicates \texttt{is\_negative}, \texttt{is\_positive}, and \texttt{sign}, and the integer-list predicates \texttt{all\_positive}, \texttt{contains\_zero}, \texttt{count\_negative}, and \texttt{count\_positive}. This exclusion applies to measured frontier targets; it does not forbid such predicates in completed context. The following lists give every retained frontier ID; each occurs the number of times specified in \Cref{tab:data-distribution}.
+
+% \paragraph{int (5 contexts per frontier).}
+% \texttt{absolute\_value}, \texttt{count\_set\_bits}, \texttt{digit\_count}, \texttt{digit\_sum}, \texttt{is\_even}, \texttt{is\_multiple\_of\_3}, \texttt{is\_odd}, \texttt{is\_palindrome}, \texttt{is\_perfect\_square}, \texttt{is\_power\_of\_two}, \texttt{is\_prime}, \texttt{is\_two\_digit}, \texttt{last\_digit}.
+
+% \paragraph{list[int] (5 contexts per frontier).}
+% \texttt{count\_even}, \texttt{count\_odd}, \texttt{distinct\_count}, \texttt{has\_duplicate}, \texttt{has\_even}, \texttt{is\_sorted}, \texttt{max\_val}, \texttt{mean\_int}, \texttt{min\_val}, \texttt{product\_all}, \texttt{total\_sum}, \texttt{value\_range}.
+
+% \paragraph{str (4 contexts per frontier).}
+% \texttt{all\_lowercase}, \texttt{count\_digits}, \texttt{count\_letters}, \texttt{count\_lowercase}, \texttt{count\_spaces}, \texttt{count\_uppercase}, \texttt{first\_is\_letter}, \texttt{has\_digit}, \texttt{has\_space}, \texttt{is\_alnum}, \texttt{is\_palindrome}, \texttt{last\_char}, \texttt{length}, \texttt{starts\_upper}, \texttt{vowel\_count}, \texttt{word\_count}.
+
+% \paragraph{list[str] (4 contexts per frontier).}
+% \texttt{all\_unique\_lengths}, \texttt{any\_empty}, \texttt{count\_all\_lowercase}, \texttt{count\_capitalized}, \texttt{count\_ends\_consonant}, \texttt{count\_long}, \texttt{count\_short}, \texttt{count\_starts\_vowel}, \texttt{count\_with\_digit}, \texttt{distinct\_count}, \texttt{has\_palindrome}, \texttt{longest\_word\_length}, \texttt{shortest\_word\_length}, \texttt{total\_length}, \texttt{total\_uppercase\_letters}, \texttt{total\_vowels}.
+
+
+% \subsection{Exact source prompt and capture positions}
+% The following is the complete saved prompt for \texttt{int\_python\_000} in the Qwen2.5-Coder-32B evaluation, including chat delimiters and the assistant prefill. The input ends immediately after the final \texttt{=} without an added newline. In the prompt illustrations, \texttt{\textbackslash n} marks an actual newline; unmarked wrapping only fits the text to the box. The accompanying text files preserve the exact bytes.
+% \PromptInput{source_exact.txt}
+
+% The first predicate, digit count, is already implemented; the frontier is evenness. The saved capture indices are 102 (previous-line end), 103 (indentation), 104 (variable), 105 (assignment operator), and 106 (first implementation token). They are indices in this model's tokenization, not universal character offsets. The saved clean continuation is:
+% \PromptInput{source_completion.txt}
+
+% The gold implementation span used by the judge is \texttt{b = (n \% 2 == 0)}. More generally, the runner extracts the actual generated frontier assignment as \texttt{impl\_span}; it does not use the natural-language predicate description as the oracle's CODE field. This tests agreement with the generated operation and must be distinguished from clean correctness against the requested predicate. The controlled frontier identifies the assignment directly, without an oracle segmentation call.
+
+% Five capture positions yield 1,265 records per mode and model, with repeated observations of the same 253 specifications. Rates pool records unless a position or datatype is explicitly selected. This corpus is separate from the 64-per-datatype OVReader sampling and the source/destination-pair corpora used for Q/KV transfer; their counts should not be combined.
+
+% \subsection{Capture positions}
+% \label{app:pivots}
+% We cache the state at five positions around a prefilled frontier assignment: previous-line end, indentation, variable name, assignment operator, and first implementation token. Position names refer to tokenized boundaries, rather than whole lines. The first implementation token provides a comparison after implementation has begun. Each readout uses only the cached state at its selected position; subsequent tokens shown in an illustration are not available to that state.
+
+% \begin{figure}[ht]\centering
+% \includegraphics[width=.92\linewidth]{Figures/author/evaluation_setup.pdf}
+% \caption{\textbf{Capture positions and the two readouts.} Pink marks the previous-line end, purple indentation, yellow the variable, light green the assignment operator, and dark green the first implementation token. The arrows illustrate faithfulness and causality readouts at the variable and assignment positions. In the evaluation, both probes run separately at all five positions.}
+% \label{fig:pivot-probes-detail}
+% \end{figure}
+
+% For the evenness example \texttt{int\_python\_000}, the Qwen2.5-Coder-32B token indices are 102, 103, 104, 105, and 106, respectively. These indices depend on the model's tokenization. Five positions produce repeated measurements of the same specifications; rates pool positions only where explicitly stated.
+
+% \subsection{Scoring the readouts}
+% The runner extracts the generated frontier assignment as \texttt{impl\_span}. An oracle judges whether the probe's description (faithfulness) or C++ implementation (causality) captures a nontrivial part of that code. For \texttt{int\_python\_000}, the extracted assignment is \texttt{b = (n \% 2 == 0)}. The reference is the model's generated operation, not the natural-language task description. Agreement with that operation and correctness against the requested task are distinct measurements.
+
+% \Cref{app:oracle_prompts} provides the complete judging prompts, instantiated examples, and verdict rules. We count only \texttt{YES} verdicts as successes and retain all records in the denominator. Causality scores apply the deterministic trivial-readout sanitizer described there. The rubric allows partial agreement and does not certify execution correctness. Native ablations instead score the generated continuation against the requested frontier task.
+
+% In prompt illustrations, \texttt{\textbackslash n} marks an actual newline. Unmarked wrapping only fits the text to the box; the accompanying raw prompt files preserve the original newlines.

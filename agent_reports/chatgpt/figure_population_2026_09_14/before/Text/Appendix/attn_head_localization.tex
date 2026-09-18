@@ -1,0 +1,7 @@
+\section{Localizing Attention Heads}
+\label{app:head_loc}
+Localization uses contrastive single-predicate prompts and learns a mask jointly over attention heads. The target is a token appropriate for the source predicate in the destination language, chosen to differ from the source continuation token. Applying the learned mask selects head activations for replacement. Subsequent readout uses the selected heads' projected contributions; the localization next-token objective and the multi-token evaluation are distinct.
+
+The core Qwen2.5-Coder-32B selection has 122 heads in layers 28--55, from a thresholded mask within the candidate layer band. The broader set used in ablations contains 250 heads and includes earlier and later layers. The small-set readout sweep uses available selections from training snapshots and mask sweeps; these are not strictly nested prefixes of one ranking. Counts alone therefore do not determine head membership or the intervention's depth distribution.
+
+\textit{Draft completion item: consolidate localization training splits, mask optimization settings, selection-file hashes, and per-model selection provenance into a final configuration table.}

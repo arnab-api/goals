@@ -1,0 +1,23 @@
+\section{GoalScope}
+\label{app:goalscope}
+\subsection{Capture positions}
+\label{app:pivots}
+The evaluation indexes the final four prompt tokens around a prefilled frontier assignment and the first generated implementation token: previous-line end, indentation, variable, assignment operator, and first implementation. Position names refer to the actual tokenized boundary; they are not interchangeable with an entire source line. The first implementation token is not a pre-implementation pivot. A cached state at a given position has no causal access to subsequent tokens, even when those tokens are displayed for context.
+
+\subsection{Aggregation and probe generation}
+At source position $t$, the main readout aggregates projected head contributions $g_t=\sum_{(\ell,j)\in H}a_t^{\ell j}$. At probe layer $\ell$ and current position $s$, norm-relative additive injection uses
+\begin{equation}
+r_{\ell,s}\leftarrow r_{\ell,s}+\alpha\|r_{\ell,s}\|\frac{g_t}{\|g_t\|}.
+\end{equation}
+The main configuration uses $\alpha=.1$, layers 35--45 inclusive, and repeated injection during greedy probe generation. This coefficient is a fraction of the probe's local residual norm and is not interchangeable with an unnormalized additive coefficient. The source vector is fixed for the whole readout.
+
+The default verbalization prompt is:
+\begin{quote}\small
+System: You are a helpful assistant proficient in programming.\\
+User: What are you doing at this line of the code. Keep your answer as brief as possible.\\
+Assistant:
+\end{quote}
+The probe receives no source code as text. Implementation transfer uses a code-stub probe instead and measures nontrivial agreement with the source subgoal. A distinct replacement variant substitutes selected heads' pre-output-projection activations in their corresponding layers, rather than aggregating them into a single direction; this is the variant used in the cross-model table. Its layer sites come from the head set, not the additive injection band.
+
+\subsection{Evaluation}
+An oracle judges whether the generated description or implementation matches a nontrivial part of the extracted frontier code. The full system rubrics, user-message templates, and saved examples are in \Cref{app:oracle_prompts}. Reported implementation-transfer results apply trivial-readout sanitization to avoid crediting a probe's default sign/zero comparisons. These judgments do not certify execution correctness. Clean continuation agreement, probe readout agreement, and intervention-induced changes are separate measurements. Corpus size and capture-position pooling are stated with each result.

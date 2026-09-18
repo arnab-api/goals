@@ -1,0 +1,62 @@
+\clearpage
+\section{OVReader}
+\label{app:ovreader}
+\subsection{Constructing the readout direction}
+Let $h_{L,t}\in\mathbb{R}^{d}$ be the residual state after source layer $L$ at position $t$. For selected head $j$, let $O_j\in\mathbb{R}^{d\times d_h}$ be its block of the attention output projection, and let $V_j\in\mathbb{R}^{d_h\times d}$ be its value projection. Query heads that share a KV head use the corresponding shared value map. Incorporating the head's pre-attention RMSNorm gain $\gamma_j$, define
+\begin{equation}
+B_j=V_j\operatorname{diag}(\gamma_j),\qquad A_j=O_j B_j.
+\end{equation}
+The normalization's scalar denominator is immaterial after normalizing each transformed vector. OVReader applies these weight maps directly to the residual at the chosen source layer, without computing a new attention distribution:
+\begin{equation}
+u_j(h)=\frac{A_jh}{\max(\|A_jh\|_2,\epsilon)},\qquad
+g_{\mathrm{OV}}(h)=\frac{1}{|H|}\sum_{j\in H}u_j(h),\qquad \epsilon=10^{-8}.
+\end{equation}
+This is a weights-only readout, not the head's actual attention-weighted output. Per-head normalization also makes it different from a single linear map obtained by averaging the $A_j$. We inject $g_{\mathrm{OV}}$ with norm-relative coefficient $.15$ into probe layers 35--45 throughout decoding. The actual head-output reference uses $.1$.
+
+\subsection{Faithfulness and causality across layers}
+\Cref{fig:ov-faithfulness,fig:ov-causality} give separate sweeps for both modes at all five capture positions. Each faint curve corresponds to one datatype; the solid black curve averages the four datatype rates. The dashed reference uses actual goal-head outputs at the same pivot.
+
+These plots use the complete archived evaluation: 64 specifications per datatype, 19 source layers, and a head-output reference. The same 256 specifications occur at every layer and pivot in both modes. This is the cohort used in the main OVReader figure, with rule-based implementation spans. The newer locked-corpus rerun is incomplete for causality, so we do not mix its records into these comparisons. The faint curves show differences across datatypes, not uncertainty over independent runs. Causality records include trivial-output sanitization.
+
+\begin{figure}[p]\centering
+\includegraphics[width=\linewidth]{Figures/appendix/ov_faithfulness.pdf}
+\caption{\textbf{OVReader faithfulness at all five capture positions.} Each datatype contributes 64 specifications per point; the mean pools all 256. Source-layer indices are zero-based. The dashed line is mean faithfulness from the actual head contributions at the same position. The first implementation token is included as a comparison after implementation begins.}
+\label{fig:ov-faithfulness}
+\label{fig:ovreader-other-pivots}
+\end{figure}
+
+\begin{figure}[p]\centering
+\includegraphics[width=\linewidth]{Figures/appendix/ov_causality.pdf}
+\caption{\textbf{OVReader causality at all five capture positions.} The cohort, source layers, and aggregation match \Cref{fig:ov-faithfulness}. Scores measure oracle agreement of the C++ probe implementation with source code, rather than execution-based accuracy. The dashed line uses actual head contributions.}
+\label{fig:ov-causality}
+\end{figure}
+\clearpage
+
+\subsection{Alternative transformations of the residual}
+The exploratory notebook compares the OV map with projections onto read and write subspaces and an eigenvector-based projection. With ${}^+$ denoting the Moore--Penrose pseudoinverse, the per-head transformations are:
+\begin{table}[ht]\centering\small
+\begin{tabular}{llp{.43\linewidth}}\toprule
+Variant & Transformation of $h$ & Construction\\\midrule
+OV & $O_jB_jh$ & Apply the value and output maps.\\
+Write projection & $O_jO_j^+h$ & Project onto the output map's column space.\\
+Read projection & $B_j^+B_jh$ & Project onto the value map's row space.\\
+Eigen projection & $Q_jQ_j^\top h$ & Project onto an orthonormal basis built from leading eigenvectors.\\\bottomrule
+\end{tabular}
+\caption{Residual transformations compared in the saved exploratory example. Each variant normalizes per-head vectors and averages them before the same norm-relative injection.}
+\label{tab:ov-variants}
+\end{table}
+
+The write and read spaces equal the column and row spaces of $A_j$ when $B_j$ has full row rank and $O_j$ has full column rank, respectively. For the eigen variant, the notebook diagonalizes $B_jO_j$, selects 64 eigenvectors by eigenvalue magnitude, maps them into residual space using $O_j$, and constructs $Q_j$ by QR decomposition of their real and imaginary parts. This QR step is not rank-truncated: redundant or zero columns can introduce additional basis directions. Thus the saved exploratory variant need not be a projection strictly onto the leading eigenspace.
+
+\begin{center}\begin{minipage}{\linewidth}\centering
+\includegraphics[width=.47\linewidth]{Figures/appendix/ov_example_prompt.pdf}
+\captionof{figure}{\textbf{Source prompt for the transformation comparison.} The source has counted empty and long words; at the highlighted assignment it is about to count vowel-initial words. Only the prompt panel is reproduced here; the table below gives the full saved layer-40 readouts.}
+\label{fig:ovreader-example}
+\end{minipage}\end{center}
+
+\begin{center}\begin{minipage}{\linewidth}\centering\small
+\input{Text/Appendix/tables/ov_example}
+\captionof{table}{\textbf{One saved comparison at layer 40 and the assignment pivot.} Full readouts from \texttt{07.1\_ov\_probe\_comparison.ipynb}. Residual variants use $\alpha=.15$; the actual-head reference uses $.1$. Under the partial-content rubric, \texttt{YES} need not recover the counting operation. This example is not an aggregate comparison of the variants.}
+\label{tab:ov-example}
+\end{minipage}\end{center}
+\clearpage

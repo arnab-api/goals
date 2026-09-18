@@ -1,0 +1,67 @@
+\section{Generalization Across Model Families and Sizes}
+\label{app:olmo}
+\label{app:model_comparison}
+\label{sec:steer:crossmodel}
+We repeat localization and evaluation within five models: Qwen2.5-Coder at 14B and 32B parameters, Qwen2.5-32B-Instruct, and OLMo-3.1-32B instruction and SFT variants. Each model uses its own selected heads and its own probe generation. This tests replication of readable and transferable task information, not activation transplantation between models.
+
+\subsection{Matched evaluation and head selection}
+All ten runs use the same 253 specification identifiers and five capture positions, yielding 1,265 records per model and mode. Rates below are recomputed from saved records. The intervention is head replacement with source coefficient 1 and steering throughout decoding; the probe generation budget is 64 tokens. Replacement operates at the selected heads' own layers and ignores the additive steer-band setting. Thus the results are not directly interchangeable with the main norm-relative additive scores.
+
+\begin{table}[ht]\centering\small
+\begin{tabular}{lrrcc}\toprule
+Model & Heads & Selected layer range & Faithfulness & Transfer\\\midrule
+Qwen Coder 32B & 122 & 28--55 & 0.823 & 0.783 \\
+Qwen Coder 14B & 88 & 18--47 & 0.598 & 0.401 \\
+Qwen Instruct 32B & 108 & 29--55 & 0.308 & 0.540 \\
+OLMo Instruct 32B (+RL) & 93 & 11--35 & 0.495 & 0.689 \\
+OLMo Instruct 32B (SFT) & 91 & 11--34 & 0.595 & 0.533 \\
+\bottomrule\end{tabular}
+\caption{Within-model replication on the locked corpus, pooled over capture positions. Head sets are model-specific. A selected layer range gives its endpoints, not a claim that every layer is represented.}
+\label{tab:model-comparison}
+\end{table}
+
+The Qwen sets contain 122, 88, and 108 heads, respectively. The OLMo comparison uses 93 instruction-model heads and 91 SFT-model heads from the candidate band 10--36, using the exported threshold selections rather than the older 130/79-head pair. Their counts are approximately matched, not identical. Head membership and its layer distribution remain model-specific. Full model identifiers and selection names are listed below for reproducibility.
+
+\noindent\texttt{Qwen/Qwen2.5-Coder-32B-Instruct}\\
+Selection: \texttt{goal}.\par
+
+\noindent\texttt{Qwen/Qwen2.5-Coder-14B-Instruct}\\
+Selection: \texttt{goal}.\par
+
+\noindent\texttt{Qwen/Qwen2.5-32B-Instruct}\\
+Selection: \texttt{goal}.\par
+
+\noindent\texttt{allenai/Olmo-3.1-32B-Instruct}\\
+Selection: \texttt{json:goal\_\_lam20\_thr1.0\_band10-36}.\par
+
+\noindent\texttt{allenai/Olmo-3.1-32B-Instruct-SFT}\\
+Selection: \texttt{json:goal\_\_lam20\_thr0.6\_band10-36}.\par
+
+\subsection{Results by capture position}
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{Figures/model_generalization_pivots.pdf}
+\caption{Readout faithfulness and implementation transfer within each model across capture positions (253 records per point). The first implementation token is separated from the four earlier positions. The common scale exposes differences in timing and metric, which pooled rates can obscure.}
+\label{fig:cross-model}
+\end{figure}
+
+\begin{table}[ht]\centering\scriptsize
+\begin{tabular}{llrrrrr}\toprule
+Model & Metric & Prev. end & Indent & Variable & Assignment & First impl.\\\midrule
+Qwen Coder 32B & Faith. & 0.439 & 0.885 & 0.885 & 0.945 & 0.960 \\
+Qwen Coder 32B & Transfer & 0.300 & 0.858 & 0.838 & 0.945 & 0.972 \\
+Qwen Coder 14B & Faith. & 0.154 & 0.474 & 0.557 & 0.889 & 0.917 \\
+Qwen Coder 14B & Transfer & 0.028 & 0.198 & 0.206 & 0.791 & 0.783 \\
+Qwen Instruct 32B & Faith. & 0.000 & 0.245 & 0.071 & 0.636 & 0.589 \\
+Qwen Instruct 32B & Transfer & 0.040 & 0.601 & 0.217 & 0.905 & 0.937 \\
+OLMo Instruct 32B (+RL) & Faith. & 0.020 & 0.648 & 0.257 & 0.814 & 0.735 \\
+OLMo Instruct 32B (+RL) & Transfer & 0.158 & 0.881 & 0.526 & 0.921 & 0.957 \\
+OLMo Instruct 32B (SFT) & Faith. & 0.055 & 0.668 & 0.466 & 0.925 & 0.862 \\
+OLMo Instruct 32B (SFT) & Transfer & 0.036 & 0.628 & 0.324 & 0.818 & 0.858 \\
+\bottomrule\end{tabular}
+\caption{Exact per-position rates for the model comparison in \Cref{fig:cross-model}.}
+\end{table}
+
+\subsection{Interpretation}
+The Coder-32B configuration scores above Coder-14B on both pooled metrics; it also outperforms the generic Qwen-32B instruction configuration on these code tasks. For OLMo, the instruction model has higher implementation-transfer scores, while the SFT model has higher readout faithfulness. Replication therefore does not imply identical performance or a single ordering of models across metrics.
+
+These comparisons vary checkpoints, head sets, and potentially source-generation competence together. They support the presence of the phenomenon across families and sizes, but do not isolate causal effects of scale, code training, or RL. Capturing at equivalent named boundaries also need not mean identical tokenization across models. The approximate OLMo budget matching reduces one disparity without controlling every difference. All scores use the partial-content oracle rubric in \Cref{app:oracle_prompts}, rather than execution-based program correctness.

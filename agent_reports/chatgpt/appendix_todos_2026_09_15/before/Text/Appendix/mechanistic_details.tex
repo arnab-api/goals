@@ -1,0 +1,168 @@
+\section{Details of Causal and Context Interventions}
+\label{app:ablation}
+\arnab{necessity and sufficiency should have different sections. ablation strategies and corresponding results should be paired up together.}
+\arnab{the ablation demonstrations should be in their corresponding sections, paired up together with the results.}
+\arnab{{\color{red} TODO:} get qualitative examples of the ablation effect.}
+The native ablation evaluation uses 253 frontier assignments. Both intervention types begin at the final prompt token and continue at subsequent query positions during decoding; earlier query rows remain unmodified. For span restriction, the blocked key interval begins one token before the frontier description and extends through the prompt's final assignment token. Heads in layers 20--63 outside the spared set are blocked from that interval. For sink restriction, selected heads attend only to key position zero. The latter produces the sink value contribution and is not mathematically identical to zeroing a head.
+
+The 122-head core and 250-head set differ in both membership and depth coverage. Random controls sample from the corresponding depth pool, not a matched count at each individual layer. For a set containing heads below layer 20, those heads are outside the span-restriction band. Thus total selected count and number of spared heads inside that band must be distinguished. The experiments test these specified interventions, not arbitrary removal of the entire complement or isolation of the selected heads from the rest of the network.
+
+
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{lcc}
+\toprule
+Condition & 122 heads & 250 heads\\
+\midrule
+Clean baseline & .925 & .925\\
+Spare goal-head access & .806 & .913\\
+Spare random-head access & .091 & .095\\
+\midrule
+Restrict goal heads to sink & .854 & .158\\
+Restrict random heads to sink & .925 & .921\\
+\bottomrule
+\end{tabular}
+\caption{Frontier implementation success under span restriction and sink-attention interventions ($n=253$). ``Spare'' preserves selected heads' access to the blocked task/code span in layers 20 and above. ``Restrict'' limits the selected heads to attention at position zero.}
+\label{tab:goal-ablation-exact}
+\end{table}
+
+For the 122-head sufficiency run, both goal and random conditions block 1,638 heads in layers 20--63, leaving 122 with access in that band. For the broader run, the saved configurations block 1,524 heads in the goal condition and 1,590 in the random condition, leaving 236 and 170, respectively. Thus the broader sufficiency control does not exactly match the number of spared heads inside the intervention band. The sink comparisons use the stated selected-set sizes.
+
+\begin{table}[ht]\centering\small
+\begin{tabular}{lrrrr}\toprule
+ & \multicolumn{2}{c}{122 heads} & \multicolumn{2}{c}{250 heads}\\
+Blocked keys in selected heads & Goal & Random & Goal & Random\\\midrule
+Task descriptions & .881 & .925 & .806 & .925\\
+Task descriptions and progress & .372 & .925 & .249 & .925\\
+All except sink & .854 & .925 & .158 & .921\\\bottomrule
+\end{tabular}
+\caption{Additional necessity interventions from the saved 253-specification evaluation. The clean baseline is .925 throughout. Restricting task descriptions alone has a smaller effect than restricting task and progress tokens together. These are access interventions at the current and subsequent query positions.}
+\label{tab:ablation-spans}
+\end{table}
+
+
+
+\begin{figure}[p]
+\centering
+\textbf{(a) Sufficiency: spare goal-head access}\par\smallskip
+\includegraphics[width=.70\linewidth]{Figures/author/ablation_sufficiency.pdf}\par\medskip
+\textbf{(b) Necessity: restrict goal heads to position zero}\par\smallskip
+\includegraphics[width=.70\linewidth]{Figures/author/ablation_necessity.pdf}
+\caption{\textbf{Ablation setups.} (a) Only spared heads can attend to the green span; other heads in layers 20--63 are blocked from it. (b) Selected heads cannot attend to the orange span and instead attend to position zero, denoted by generic \texttt{<bos>} (\texttt{<|im\_start|>} in Qwen). Purple boxes mark the final \texttt{ =} query. The restriction continues at subsequent generation positions; earlier query rows are unchanged. Generic role tags stand in for model-specific delimiters.}
+\label{fig:ablation-setup}
+\par\medskip
+\begin{minipage}{\linewidth}\centering\small
+\begin{tabular}{lll}\toprule
+Condition & Continuation after \texttt{b =} & Oracle verdict\\\midrule
+Clean & \texttt{(n \% 2 == 0)} & YES\\
+Spare goal-head access & \texttt{(n \% 2 == 0)} & YES\\
+Spare random-head access & \texttt{(n * (n + 1)) // 2} & NO\\
+Restrict goal heads to sink & \texttt{nn\textasciigrave} & MALFORMED\\
+Restrict random heads to sink & \texttt{(n \% 2 == 0)} & YES\\\bottomrule
+\end{tabular}
+\captionof{table}{\textbf{An observed effect of ablation.} Exact saved continuations for \texttt{int\_python\_000}, whose prompt appears in \Cref{app:task}. The frontier is evenness after digit count. Intervention rows use the broader 250-head configuration. This selected example illustrates the aggregate results.}
+\label{tab:ablation-example}
+\end{minipage}
+\end{figure}
+\clearpage
+
+\section{Task and Query Transfer}
+\label{app:task_transfer}
+Task-span KV transfer uses per-query-head output routing to avoid transferring to every query head sharing a KV head. Task spans are padded to equal length and source keys are re-rotated to destination positions; equal lengths do not imply identical absolute starts. The KV patch is active across prefill positions and decoding. Query transfer patches the specified pivot tokens and reuses the source pivot query during the steering window (32 forward passes in the evaluation CLI, including prefill). The reported transfer configurations also amplify selected OV contributions with coefficient 2; this differs from the GoalScope probe's coefficient 0.1.
+
+The principal multi-predicate 250-head runs report approximately 94\% source-directed generation for query transfer ($n=2048$) and 99\% for KV transfer at the assignment pivot ($n=512$), spanning four datatypes and four language directions. The latter uses no non-goal-head ablation. These rates count source-or-both oracle labels and do not imply perfect program correctness. GoalScope's patched source readout is a separate outcome. Q-filter examples exhibit readout/behavior disagreement; aggregate readout success should not be treated as a substitute for implementation success.
+
+The qualitative task-order example in \Cref{fig:query-order} uses unequal source/destination progress. It should not be described as an identical-progress experiment. Broader conclusions about query content require a systematic crossed design. We make no claim that these interventions demonstrate a particular set-subtraction operation.
+
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{Figures/author/kv_freeform.pdf}
+\caption{\textbf{KV transfer after a shared initial sub-task.} The source and destination both sort the words by length (blue), then pursue different tasks: a vowel test on the shortest word versus a palindrome test on the longest word. Replacing the destination task-span keys and values available to the goal heads with those from the source changes the continuation to a vowel test on the shortest word. The readout shifts accordingly. Source, native destination, and patched continuations are red, green, and purple; yellow marks their pivots. This is an illustrative slide example, separate from the scored multi-predicate cohort. In the evaluated implementation, the fixed source span is routed to selected query heads at every forward pass; other heads retain destination KV access.}
+\label{fig:kv-freeform}
+\end{figure}
+
+\subsection{KV transfer by datatype}
+\arnab{aggregated results and then should be broken across the datatypes. not tables.}
+\begin{table}[ht]\centering\small
+
+\paragraph{int.}
+\begin{tabular}{lcc}\toprule
+Source $\backslash$ Destination & Python & C++\\\midrule
+Python & 100.0\,\{96.9\} & 93.8\,\{96.9\}\\
+C++ & 100.0\,\{100.0\} & 100.0\,\{96.9\}\\
+\bottomrule\end{tabular}
+
+
+\paragraph{list[int].}
+\begin{tabular}{lcc}\toprule
+Source $\backslash$ Destination & Python & C++\\\midrule
+Python & 96.9\,\{100.0\} & 100.0\,\{96.9\}\\
+C++ & 100.0\,\{100.0\} & 100.0\,\{100.0\}\\
+\bottomrule\end{tabular}
+
+
+\paragraph{str.}
+\begin{tabular}{lcc}\toprule
+Source $\backslash$ Destination & Python & C++\\\midrule
+Python & 100.0\,\{96.9\} & 100.0\,\{93.8\}\\
+C++ & 96.9\,\{90.6\} & 100.0\,\{90.6\}\\
+\bottomrule\end{tabular}
+
+
+\paragraph{list[str].}
+\begin{tabular}{lcc}\toprule
+Source $\backslash$ Destination & Python & C++\\\midrule
+Python & 100.0\,\{100.0\} & 100.0\,\{87.5\}\\
+C++ & 100.0\,\{93.8\} & 100.0\,\{96.9\}\\
+\bottomrule\end{tabular}
+\caption{Datatype breakdown of \Cref{tab:kv-transfer}: causal success \{source readout\}, in percent. Each cell has 32 examples, using 250 heads, assignment pivots, task-span padding, OV amplification 2, and no collateral ablation.}
+\label{tab:kv-datatypes}
+\end{table}
+The braced score counts patched descriptions judged exclusively source-directed, with all examples in the denominator. The stored \texttt{valid} flag asks whether the original source and destination readouts match their respective frontiers, allowing a both-goal verdict; its rates are 99.2\%, 96.9\%, 96.1\%, and 94.5\% for Python--Python, Python--C++, C++--Python, and C++--C++, respectively. The stored \texttt{shifted} flag counts patched source-only or both-goal readouts, without requiring either clean readout to be correct. Its unconditional rates happen to match the braced scores here because none of these patched readouts is labeled both. The evaluation script also reports shift conditional on \texttt{valid}; that denominator differs from the unconditional scores shown here.
+
+\subsection{Query transfer under a task-order contrast}
+Let $A$ count characters, $B$ count uppercase letters, $C$ test whether any word is a palindrome, and $D$ count vowel-initial words. The source orders $(A,B,C,D)$ and has completed $(A,B)$; the destination orders $(A,B,D,C)$ and has completed only $A$. Its native next task is therefore $B$. A transferred state encoding only completed tasks $(A,B)$ would make $D$ next under destination order, whereas the source's next goal is $C$. The slide example shows a query-patched continuation implementing $C$, accompanied by a palindrome readout. This is a qualitative contrast, not a factorial evaluation of progress and goal identity.
+
+\begin{figure}[ht]
+\centering
+\begin{minipage}[c]{.50\linewidth}
+\centering\includegraphics[width=\linewidth]{Figures/slides/query_source_destination.pdf}
+\end{minipage}\hfill
+\begin{minipage}[c]{.47\linewidth}
+\small\textbf{Source (upper prompt):} completed $A,B$; next $C$.\par\medskip
+\textbf{Destination (lower prompt):} completed $A$; native next $B$.\par\medskip
+\textbf{Query patch:} transfer the source pivot queries to destination goal heads.\par\medskip
+Completed-task prediction: $D$.\par
+Observed patched goal: $C$.
+\end{minipage}\par\smallskip
+\includegraphics[width=\linewidth]{Figures/slides/query_result.pdf}
+\caption{\textbf{A query-transfer contrast from the exploratory slides.} The source and destination contain the same four tasks in different orders and have unequal prefills. The patched destination computes whether any word is a palindrome, matching the source's upcoming goal. Ellipses in the prompt panels mark the capture/patch boundary; the saved readout identifies position 141. This example does not establish that query states contain only goal information.}
+\label{fig:query-order}
+\end{figure}
+
+\clearpage
+\section{OVReader}
+\label{app:ovreader}
+\arnab{rederive the math here. probably the math should only be here.}
+\arnab{design choices. $W_\mathrm{OV}(h)$ vs $h \perp \mathrm{row}(W_\mathrm{OV})$ vs $h \perp \mathrm{col}(W_\mathrm{OV})$, $\mathrm{top\_eigen}(W_\mathrm{OV})(h)$. Qualitative check on 1 example.}
+\arnab{more space in the appendix. faithfulness and causality should have their own figures. faded lines for each of the data types.}
+\arnab{more space here. faithfullness and causality should can have different set of figures. with faded lines per datatype.}
+For a residual state after source layer $L$, OVReader applies each selected head's value map and output map, including its pre-attention normalization gain. It unit-normalizes each transformed vector and averages them. This operator is based on model weights, but is not a single linear projection because of the per-head normalization. The aggregate steers a separate GoalScope probe with norm-relative coefficient .15; the selected-head-output comparison uses .1.
+
+The evaluation samples 64 examples per datatype, with five capture positions and layer sweeps through the final layer. At the assignment operator, readout can approach the head-output reference around L40; pooled curves generally peak near L48--52. A decline at the final layer indicates reduced accessibility through this particular transformation and probe, not absence of all subgoal information. Implementation-transfer scores were rejudged with a trivial-output sanitizer; existing records should not be described as a freshly resampled corpus excluding all trivial target predicates.
+
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{Figures/ov_reader_other_pivots.pdf}
+\caption{\textbf{OVReader at the remaining capture positions.} The cohort and aggregation match \Cref{fig:ovreader}: means and $\pm1$ sample standard deviation across four datatype rates, with 64 examples each. Dashed horizontal lines show the actual head-output reference for the same position. The first implementation token is included as a comparison after implementation begins.}
+\label{fig:ovreader-other-pivots}
+\end{figure}
+
+The plots use the complete archived evaluation with rule-based frontier spans, rather than the incomplete frontier-span rerun. They contain 19 source-layer settings and a head-output reference, with 64 examples per datatype at every position and in both evaluation modes. The datatype bands describe variation across four task families; they are not confidence intervals over independent runs.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{Figures/slides/ov_example.pdf}
+\caption{\textbf{Qualitative projection readouts from the exploratory slides.} The source has counted empty and long words; at the highlighted assignment it is about to count words beginning with a vowel. The slide compares an OV-transformed state with alternative write/read and eigenvector-based directions. These individual descriptions illustrate the experiment and are not additional aggregate evidence for the layer sweep.}
+\label{fig:ovreader-example}
+\end{figure}

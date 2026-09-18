@@ -2192,6 +2192,232 @@ def diff_vs_prog_setups(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# diff-trigger q-transfer — transplant an ABSTRACT "advance past completed sub-tasks" query
+# ══════════════════════════════════════════════════════════════════════════════
+@dataclass
+class DiffTriggerInstance:
+    """Q-transfer where SRC and DST share two sub-tasks {A, B} but each has a UNIQUE third one
+    (SRC has C, DST has D). Transplanting SRC's pivot goal-head query into DST tests whether the
+    query carries the DIFF *relative to progress* (abstract/relational) rather than the literal
+    next sub-task::
+
+        order-matched:  SRC.task = [A, B, C], prefill {A, B}  (SRC frontier = C)
+                        DST.task = [A, B, D], prefill {A}      (DST native  = B)
+        order-diff:     SRC.task = [A, C, B], prefill {A, B}  (SRC frontier = C, listed 2nd)
+                        DST.task = [A, B, D], prefill {A}      (DST native  = B; D listed 3rd)
+
+    Transplant SRC's pivot query into DST and read what DST writes:
+      • **D** -> the query carried an abstract ``{A,B} done, do the remaining`` DIFF, resolved
+        against DST's own list -> D (the DIFF hypothesis).
+      • **B** -> no transfer (DST keeps its native frontier).
+      • **C** -> literal content copy (SRC's target verbatim, though C is not in DST's spec).
+    ``order-matched`` confounds D with a positional "do the 3rd-listed" copy (C and D are both 3rd);
+    ``order-diff`` breaks that — C is 2nd in SRC, D is 3rd in DST, so a positional copy predicts B.
+
+    Scoring reuses :func:`src.diff.eval.eval_q_transfer` / :func:`judge_causal`: ``expected_next_desc``
+    = D (the DIFF-predicted DST target = "triggered"), ``dst_next_desc`` = B (native), ``task_desc`` =
+    the DST task; ``src_target_desc`` = C is exposed for a separate literal-copy check. Gaze uses the
+    DST task predicates via the ``task`` property. Same prompt shape as :class:`DiffVsProgInstance`
+    (independent assignment lines, trailing-indent or ``var_eq`` pivot; single-position q transplant)."""
+
+    datatype: str
+    src_order: tuple[Predicate, ...]   # SRC listed predicates (contains A, B, C)
+    dst_order: tuple[Predicate, ...]   # DST listed predicates (contains A, B, D)
+    src_progress: list[str]            # prefilled in SRC  ([A, B])
+    dst_progress: list[str]            # prefilled in DST  ([A])
+    diff_target: str                   # D id — DIFF-predicted DST outcome (scoring target)
+    dst_native: str                    # B id — DST's native next
+    src_target: str                    # C id — SRC transplant frontier / literal-copy reference
+    var_name: str
+    presentation: Presentation
+    src_lang: Lang
+    dst_lang: Lang
+    naming: Literal["natural", "letters"] = "natural"
+    letter_stub: Literal["indent", "var_eq"] = "indent"
+    meta: dict = field(default_factory=dict)
+
+    def _var_of(self, order, pred_id):
+        if self.naming == "letters":
+            return chr(ord("a") + [p.id for p in order].index(pred_id))
+        return {p.id: p for p in order}[pred_id].result_name
+
+    def _parts(self, lang, order, progress):
+        q = _question([p.description for p in order], self.datatype, self.var_name, lang, self.presentation)
+        prog = [p for p in order if p.id in set(progress)]          # prefilled lines, in list order
+        var_eq = self.letter_stub == "var_eq"
+        lines = []
+        for p in prog:
+            rn = self._var_of(order, p.id)
+            ln = _assign_line(p, self.var_name, lang, res_name=rn)
+            if var_eq and lang == "cpp":
+                ln = _cpp_autoify(ln, rn)
+            lines.append(ln)
+        base = ("<code>\n" + _signature(self.datatype, self.var_name, lang)
+                + ("\n" + "\n".join(lines) if lines else ""))
+        if var_eq:
+            # eq pivot: emit the frontier's ``{var} =`` stub so the query is read at the ``=`` token
+            # (the strong goal-head pivot). Frontier = the first un-prefilled predicate in list order.
+            frontier = next(p for p in order if p.id not in set(progress))
+            rn = self._var_of(order, frontier.id)
+            stub = f"auto {rn} =" if lang == "cpp" else f"{rn} ="
+            return q, base + f"\n    {stub}"
+        return q, base + "\n    "                                   # trailing indent = pivot
+
+    def src_parts(self):
+        return self._parts(self.src_lang, self.src_order, self.src_progress)
+
+    def dst_parts(self):
+        return self._parts(self.dst_lang, self.dst_order, self.dst_progress)
+
+    def _desc(self, pred_id):
+        for p in (*self.src_order, *self.dst_order):   # C only in src_order, D only in dst_order
+            if p.id == pred_id:
+                return p.description
+        raise KeyError(pred_id)
+
+    @property
+    def expected_next(self) -> str:      # DIFF-predicted DST target (transplant "success")
+        return self.diff_target
+
+    @property
+    def expected_next_desc(self) -> str:
+        return self._desc(self.diff_target)
+
+    @property
+    def dst_next_desc(self) -> str:
+        return self._desc(self.dst_native)
+
+    @property
+    def src_target_desc(self) -> str:    # SRC's literal transplant frontier (C) — literal-copy check
+        return self._desc(self.src_target)
+
+    @property
+    def task_desc(self) -> str:
+        return "; ".join(p.description for p in self.dst_order)
+
+    @property
+    def task(self):                      # gaze: DST task predicates -> their description spans in dst_prompt
+        from types import SimpleNamespace
+        return SimpleNamespace(predicates=self.dst_order)
+
+
+# Semantic predicate families — used ONLY by the diff-trigger q-transfer to avoid sampling A/B/C/D
+# sets with overlapping sub-tasks (e.g. two "length" ops, or even/odd complements), which confound the
+# "did DST switch to D vs stay on B" test. See agent_reports/claude/analysis/diff_trigger_predicate_families.md.
+# NOT used by the other setups (the overlap issue is minor there). Any predicate id not listed falls
+# back to a singleton family (its own id).
+DIFF_TRIGGER_FAMILIES: dict[str, dict[str, list[str]]] = {
+    "int": {
+        "decimal_digits": ["digit_count", "digit_sum", "last_digit", "is_palindrome", "is_two_digit"],
+        "parity": ["is_even", "is_odd"],
+        "divisibility": ["is_multiple_of_3"],
+        "sign_magnitude": ["is_positive", "is_negative", "sign", "absolute_value"],
+        "mult_structure": ["is_prime", "is_perfect_square", "is_power_of_two"],
+        "bits": ["count_set_bits"],
+    },
+    "str": {
+        "charclass_count": ["vowel_count", "count_letters", "count_digits", "count_spaces",
+                            "count_uppercase", "count_lowercase"],
+        "charclass_bool": ["has_digit", "has_space", "is_alnum", "all_lowercase", "starts_upper",
+                           "first_is_letter"],
+        "length_words": ["length", "word_count"],
+        "palindrome": ["is_palindrome"],
+        "last_char": ["last_char"],
+    },
+    "list[int]": {
+        "parity": ["has_even", "count_even", "count_odd"],
+        "sign": ["count_positive", "count_negative", "all_positive", "contains_zero"],
+        "extremes": ["max_val", "min_val", "value_range"],
+        "aggregate": ["total_sum", "product_all", "mean_int"],
+        "uniq_order": ["has_duplicate", "distinct_count", "is_sorted"],
+    },
+    "list[str]": {
+        "word_length": ["total_length", "count_long", "count_short", "longest_word_length",
+                        "shortest_word_length", "all_unique_lengths"],
+        "vowel_consonant": ["count_starts_vowel", "count_ends_consonant", "total_vowels"],
+        "case": ["count_capitalized", "count_all_lowercase", "total_uppercase_letters"],
+        "content": ["count_with_digit", "has_palindrome", "any_empty", "distinct_count"],
+    },
+}
+
+
+def _diff_family(datatype: str, pred_id: str) -> str:
+    """Family of a predicate for the diff-trigger constraint; unmapped ids -> their own id."""
+    for fam, members in DIFF_TRIGGER_FAMILIES.get(datatype, {}).items():
+        if pred_id in members:
+            return fam
+    return pred_id
+
+
+def diff_trigger_setups(
+    datatype: str,
+    variant: Literal["order_matched", "order_diff"] = "order_matched",
+    n_samples: int = 8,
+    seed: int = 0,
+    presentation: Presentation = "listed",
+    naming: Literal["natural", "letters"] = "letters",
+    letter_stub: Literal["indent", "var_eq"] = "indent",
+    src_lang: Lang = "python",
+    dst_lang: Lang = "python",
+    distinct_families: bool = True,
+    nontrivial_frontier: bool = True,
+) -> list[DiffTriggerInstance]:
+    """Sample ``n_samples`` diff-trigger instances (:class:`DiffTriggerInstance`). Each draws 4
+    pairwise-compatible predicates A, B, C, D from the datatype's :data:`QTASKS` bank and builds the
+    shared-{A,B} contrast. ``variant="order_matched"`` lists SRC as [A,B,C] (C in the 3rd slot, like
+    DST's D); ``variant="order_diff"`` lists SRC as [A,C,B] (C in the 2nd slot) to dissociate the DIFF
+    outcome (D) from a positional "copy the 3rd-listed" account. Deduped by the ordered 4-tuple;
+    reproducible via ``seed``."""
+    assert variant in ("order_matched", "order_diff")
+    bank = QTASKS[datatype]
+    preds = list(bank.predicates)
+    assert len(preds) >= 4, f"need >=4 predicates in the {datatype!r} bank, have {len(preds)}"
+    trivial = TRIVIAL_FRONTIERS.get(datatype, frozenset())
+    rng = random.Random(seed)
+    out, seen = [], set()
+    for _ in range(n_samples * 400):
+        if len(out) >= n_samples:
+            break
+        A, B, C, D = rng.sample(preds, 4)
+        quad = (A.id, B.id, C.id, D.id)
+        if quad in seen:
+            continue
+        # diff-trigger overlap controls (scoped to this experiment):
+        #  - C (SRC target) and D (DST remaining) must be non-trivial frontiers, and
+        #  - B (native), C, D must come from three DIFFERENT semantic families,
+        # so "did DST switch to D vs stay on B" is not confounded by look-alike sub-tasks.
+        if nontrivial_frontier and (C.id in trivial or D.id in trivial):
+            continue
+        if distinct_families and len({_diff_family(datatype, B.id),
+                                      _diff_family(datatype, C.id),
+                                      _diff_family(datatype, D.id)}) < 3:
+            continue
+        if not all(qpred_compatible(datatype, a.id, b.id)
+                   for i, a in enumerate((A, B, C, D))
+                   for b in (A, B, C, D)[i + 1:]):
+            continue
+        seen.add(quad)
+        src_order = (A, B, C) if variant == "order_matched" else (A, C, B)
+        dst_order = (A, B, D)
+        out.append(DiffTriggerInstance(
+            datatype=datatype,
+            src_order=src_order,
+            dst_order=dst_order,
+            src_progress=[A.id, B.id],
+            dst_progress=[A.id],
+            diff_target=D.id,
+            dst_native=B.id,
+            src_target=C.id,
+            var_name=bank.var_names[0],
+            presentation=presentation, src_lang=src_lang, dst_lang=dst_lang,
+            naming=naming, letter_stub=letter_stub,
+            meta={"datatype": datatype, "variant": variant,
+                  "dst_next": B.id, "diff_target": D.id, "src_target": C.id},
+        ))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # setup generators — a few contrastive instances per (datatype, presentation, language)
 # ══════════════════════════════════════════════════════════════════════════════
 def q_transfer_setups(

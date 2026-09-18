@@ -328,3 +328,83 @@ def distill_kl(teacher_logits_t: torch.Tensor, student_logits_t: torch.Tensor) -
     log_q = F.log_softmax(student_logits_t, dim=-1)  # student (model output)
     # F.kl_div(input=log_q, target=log_p, log_target) = Σ p·(log p − log q) = KL(p‖q); batchmean → /T
     return F.kl_div(log_q, log_p, log_target=True, reduction="batchmean")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Read-out at inference (verbalize the subspace projection) — apply_goalscope-format output
+# ═══════════════════════════════════════════════════════════════════════════════
+@torch.no_grad()
+def apply_subspace_scope(
+    mt: ModelandTokenizer,
+    probe: SubspaceProbeV2,
+    prompt: str,
+    *,
+    mode: str = "faithfulness",
+    alpha: Optional[float] = None,
+    max_new_tokens: int = 32,
+    include_noncode: bool = True,
+    token_positions: Optional[list[int]] = None,
+    batch_size: int = 16,
+) -> list[dict]:
+    """Verbalize the trained subspace read-out ``o = Wᵀ W h`` at each ``<code>`` token of ``prompt``,
+    steered (additive_norm) into the GoalScope probe. Returns the SAME ``list[dict]`` shape as
+    ``apply_goalscope`` (keys ``pos`` / ``token`` / ``patched_gen`` / ``scoped``) so it feeds straight
+    into ``src.goals.goalscope_viz``.
+
+    ``mode="faithfulness"`` → the NL "what are you doing at this line?" probe (default);
+    ``mode="causality"``    → the C++ stub (``CAUSAL_PREFIX`` prepended to each read-out for grading).
+    Read layer, steer band and α come from the probe's config (α overridable)."""
+    from src.goals.goalscope import (
+        CAUSAL_PREFIX, _build_causality_prompt, _build_goalscope_prompt, head_additive_generate,
+    )
+    from src.goals.subspace_probe import cache_source_residuals
+    from src.tokens import find_token_range
+
+    read_layer = probe.config.read_layer
+    band = list(probe.config.steer_layers)
+    a = probe.config.alpha if alpha is None else alpha
+
+    src = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
+    offsets = src.pop("offset_mapping")[0]
+    ids = src["input_ids"][0].tolist()
+    toks = [mt.tokenizer.decode([t]) for t in ids]
+
+    try:  # locate <code>…</code>; fall back to the whole sequence
+        code_start, _ = find_token_range(string=prompt, substring="<code>", tokenizer=mt.tokenizer,
+                                         occurrence=1, offset_mapping=offsets)
+        if "</code>" in prompt:
+            _, code_end = find_token_range(string=prompt, substring="</code>", tokenizer=mt.tokenizer,
+                                           occurrence=1, offset_mapping=offsets)
+        else:
+            code_end = len(ids)
+    except Exception:
+        code_start, code_end = 0, len(ids)
+
+    seg = list(range(code_start, code_end))
+    if token_positions is not None:
+        allowed = set(seg)
+        seg = [int(p) for p in token_positions if int(p) in allowed]
+
+    dest_prompt = _build_causality_prompt(mt) if mode == "causality" else _build_goalscope_prompt(mt)
+    dest_inputs = prepare_input(prompts=dest_prompt, tokenizer=mt)
+    prefix = CAUSAL_PREFIX if mode == "causality" else ""
+    model_dtype = next(mt._model.parameters()).dtype
+
+    res = cache_source_residuals(mt, prompt, seg, [read_layer])  # {pos:{layer:(d,)}}
+    readouts: dict[int, str] = {}
+    for i in range(0, len(seg), batch_size):
+        chunk = seg[i:i + batch_size]
+        o = torch.stack([probe.readout_vec(res[p][read_layer].to(mt.device).float()) for p in chunk])
+        gens = head_additive_generate(mt, dest_inputs, o.to(model_dtype), layers=band,
+                                      max_new_tokens=max_new_tokens, strategy="additive_norm", alpha=a)
+        if isinstance(gens, str):
+            gens = [gens]
+        for p, g in zip(chunk, gens):
+            readouts[p] = prefix + (g or "")
+
+    scoped = set(seg)
+    positions = range(len(ids)) if include_noncode else seg
+    out = [dict(pos=int(p), token=toks[p], patched_gen=readouts.get(p, ""),
+                scoped=(p in scoped)) for p in positions]
+    out.sort(key=lambda r: r["pos"])
+    return out

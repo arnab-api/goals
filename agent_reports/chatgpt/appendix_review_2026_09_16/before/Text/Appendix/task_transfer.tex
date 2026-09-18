@@ -1,0 +1,57 @@
+\clearpage
+\section{Task and Query Transfer}
+\label{app:task_transfer}
+Task-span KV transfer uses per-query-head output routing to avoid transferring to every query head sharing a KV head. Task spans are padded to equal length and source keys are re-rotated to destination positions; equal lengths do not imply identical absolute starts. The KV patch is active across prefill positions and decoding. Query transfer patches the specified pivot tokens and reuses the source pivot query during the steering window (32 forward passes in the evaluation CLI, including prefill). The reported transfer configurations also amplify selected OV contributions with coefficient 2; this differs from the GoalScope probe's coefficient 0.1.
+
+The principal multi-predicate 250-head runs report approximately 94\% source-directed generation for query transfer ($n=2048$) and 99\% for KV transfer at the assignment pivot ($n=512$), spanning four datatypes and four language directions. The latter uses no non-goal-head ablation. These rates count source-or-both oracle labels and do not imply perfect program correctness. GoalScope's patched source readout is a separate outcome. Q-filter examples exhibit readout/behavior disagreement; aggregate readout success should not be treated as a substitute for implementation success.
+
+The qualitative task-order example in \Cref{fig:query-order} uses unequal source/destination progress. It should not be described as an identical-progress experiment. Broader conclusions about query content require a systematic crossed design. We make no claim that these interventions demonstrate a particular set-subtraction operation.
+
+
+
+
+\subsection{KV transfer: aggregate and datatype results}
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{Figures/appendix/kv_aggregate.pdf}
+\caption{\textbf{KV transfer across languages.} Each language direction pools 128 pairs across four datatypes. Causal transfer counts source-or-both implementation verdicts; source-directed readout counts exclusively source-labeled patched descriptions. Both use all pairs in the denominator. Runs use 250 heads, assignment pivots, task-span padding, OV amplification 2, and no non-goal-head ablation.}
+\label{fig:kv-aggregate}
+\end{figure}
+
+\begin{figure}[ht]\centering
+\includegraphics[width=\linewidth]{Figures/appendix/kv_datatypes.pdf}
+\caption{\textbf{KV transfer by datatype.} Breakdown of \Cref{fig:kv-aggregate}, with 32 pairs per language direction in each panel. Metrics, settings, and denominators are unchanged.}
+\label{tab:kv-datatypes}
+\label{fig:kv-datatypes}
+\end{figure}
+The source-directed readout score counts patched descriptions judged exclusively source-directed, with all examples in the denominator. The stored \texttt{valid} flag asks whether the original source and destination readouts match their respective frontiers, allowing a both-goal verdict; its rates are 99.2\%, 96.9\%, 96.1\%, and 94.5\% for Python--Python, Python--C++, C++--Python, and C++--C++, respectively. The stored \texttt{shifted} flag counts patched source-only or both-goal readouts, without requiring either clean readout to be correct. Its unconditional rates happen to match the source-directed readout scores here because none of these patched readouts is labeled both. The evaluation script also reports shift conditional on \texttt{valid}; that denominator differs from the unconditional scores shown here.
+
+\clearpage
+\subsection{A free-form KV-transfer example}
+\begin{figure}[!ht]\centering
+\includegraphics[width=\linewidth]{Figures/author/kv_freeform.pdf}
+\caption{\textbf{KV transfer after a shared initial sub-task.} The source and destination both sort the words by length (blue), then pursue different tasks: a vowel test on the shortest word versus a palindrome test on the longest word. Replacing the destination task-span keys and values available to the goal heads with those from the source changes the continuation to a vowel test on the shortest word. The readout shifts accordingly. Source, native destination, and patched continuations are red, green, and purple; yellow marks their pivots. This is an illustrative slide example, separate from the scored multi-predicate cohort. In the evaluated implementation, the fixed source span is routed to selected query heads at every forward pass; other heads retain destination KV access.}
+\label{fig:kv-freeform}
+\end{figure}
+
+\clearpage
+\subsection{Query transfer under a task-order contrast}
+Let $A$ count characters, $B$ count uppercase letters, $C$ test whether any word is a palindrome, and $D$ count vowel-initial words. The source orders $(A,B,C,D)$ and has completed $(A,B)$; the destination orders $(A,B,D,C)$ and has completed only $A$. Its native next task is therefore $B$. A transferred state encoding only completed tasks $(A,B)$ would make $D$ next under destination order, whereas the source's next goal is $C$. The slide example shows a query-patched continuation implementing $C$, accompanied by a palindrome readout. This is a qualitative contrast, not a factorial evaluation of progress and goal identity.
+
+\begin{figure}[!ht]
+\centering
+\begin{minipage}[c]{.50\linewidth}
+\centering\includegraphics[width=\linewidth]{Figures/slides/query_source_destination.pdf}
+\end{minipage}\hfill
+\begin{minipage}[c]{.47\linewidth}
+\small\textbf{Source (upper prompt):} completed $A,B$; next $C$.\par\medskip
+\textbf{Destination (lower prompt):} completed $A$; native next $B$.\par\medskip
+\textbf{Query patch:} transfer the source pivot queries to destination goal heads.\par\medskip
+Completed-task prediction: $D$.\par
+Observed patched goal: $C$.
+\end{minipage}\par\smallskip
+\includegraphics[width=\linewidth]{Figures/slides/query_result.pdf}
+\caption{\textbf{A query-transfer contrast from the exploratory slides.} The source and destination contain the same four tasks in different orders and have unequal prefills. The patched destination computes whether any word is a palindrome, matching the source's upcoming goal. Ellipses in the prompt panels mark the capture/patch boundary; the saved readout identifies position 141. This example does not establish that query states contain only goal information.}
+\label{fig:query-order}
+\end{figure}
+
+\clearpage

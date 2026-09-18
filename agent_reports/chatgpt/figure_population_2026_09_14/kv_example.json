@@ -1,0 +1,66 @@
+{
+  "key": "multi|int|shared=is_two_digit|src=is_even|dst=is_multiple_of_3",
+  "setup": "multi_pred",
+  "datatype": "int",
+  "group": "shared:is_two_digit",
+  "naming": "letters",
+  "presentation": "listed",
+  "src_lang": "python",
+  "dst_lang": "cpp",
+  "var_name": "n",
+  "expected_next": "is_even",
+  "expected_next_desc": "whether the number is even",
+  "dst_next": "is_multiple_of_3",
+  "dst_next_desc": "whether the number is a multiple of three",
+  "letter_stub": "var_eq",
+  "raw": {
+    "src_prompt": "<|im_start|>system\nYou are a helpful assistant proficient in programming. Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.<|im_end|>\n<|im_start|>user\nWrite a Python program that implements a function `func` which, given an integer `n`, computes:\n(1) whether the number has exactly two digits\n(2) whether the number is even\n<|im_end|>\n<|im_start|>assistant\n<code>\ndef func(n: int):\n    a = (10 <= abs(n) <= 99)\n    b =",
+    "dst_prompt": "<|im_start|>system\nYou are a helpful assistant proficient in programming. Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.<|im_end|>\n<|im_start|>user\nWrite a C++ program that implements a function `func` which, given an integer `n`, computes:\n(1) whether the number has exactly two digits\n(2) whether the number is a multiple of three\nAssume that all the libraries have been already imported.\n<|im_end|>\n<|im_start|>assistant\n<code>\nauto func(int n){\n    auto a = (std::abs(n) >= 10 && std::abs(n) <= 99);\n    auto b =",
+    "piv_src": 115,
+    "piv_dst": 137,
+    "src_span": [
+      61,
+      83
+    ],
+    "dst_span": [
+      62,
+      84
+    ],
+    "gen_src": " (n % 2 == 0)\n    return a, b\n</code>",
+    "gen_dst": " (n % 3 == 0);\n    return std::make_pair(a, b);\n}\n</code>",
+    "gen_patched": " (n % 2 == 0);\n    return std::make_pair(a, b);\n}\n</code>",
+    "ro_src": "I'm checking if the number is even by using the modulus operator (`%`). If `number % 2 == 0`, it's even.",
+    "ro_dst": "I'm checking if the number is divisible by 3 (i.e., `number % 3 == 0`).",
+    "ro_patched": "I'm checking if the number is even (i.e., divisible by 2)."
+  },
+  "causal": {
+    "label": "src",
+    "why": "The first computation is `n % 2 == 0`, which checks whether n is even (divisible by 2), directly pursuing sub-goal A.",
+    "raw": "<verdict>A</verdict>\n<why>The first computation is `n % 2 == 0`, which checks whether n is even (divisible by 2), directly pursuing sub-goal A.</why>",
+    "triggered": true
+  },
+  "readout": {
+    "source": "src",
+    "dest": "dst",
+    "patched": "src",
+    "valid": true,
+    "shifted": true,
+    "details": {
+      "source": {
+        "label": "src",
+        "why": "The text explicitly describes checking if a number is even using `number % 2 == 0`, which is the definition of sub-goal A.",
+        "raw": "<verdict>A</verdict>\n<why>The text explicitly describes checking if a number is even using `number % 2 == 0`, which is the definition of sub-goal A.</why>"
+      },
+      "dest": {
+        "label": "dst",
+        "why": "The phrase explicitly describes checking divisibility by 3 (`number % 3 == 0`), which is sub-goal (B).",
+        "raw": "<verdict>B</verdict>\n<why>The phrase explicitly describes checking divisibility by 3 (`number % 3 == 0`), which is sub-goal (B).</why>"
+      },
+      "patched": {
+        "label": "src",
+        "why": "The phrase explicitly states checking divisibility by 2, which is the definition of sub-goal A (whether the number is even).",
+        "raw": "<verdict>A</verdict>\n<why>The phrase explicitly states checking divisibility by 2, which is the definition of sub-goal A (whether the number is even).</why>"
+      }
+    }
+  }
+}

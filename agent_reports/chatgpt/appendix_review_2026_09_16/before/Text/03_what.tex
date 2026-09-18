@@ -1,0 +1,38 @@
+\section{The Next Sub-Goal Is Encoded Before Implementation}
+\label{sec:what}
+Can we read what the model is about to do before it writes the implementation? We first locate attention heads that carry a portable representation of a code operation. We then use their contributions at the pivot to describe the upcoming sub-goal and to trigger its implementation in a new context.
+
+\subsection{Localizing goal heads}
+\label{sec:what:approach}
+\label{sec:heads:localize}
+We begin by locating a set of attention heads (\goalheads) that carry the encoding of the next sub-goal on a simpler, single-predicate task. A source and a destination prompt request different predicates on the same datatype, written in different programming languages. Both prompts end where the next token distinguishes the requested implementations. We cache the source head contributions and learn a sparse mask $m^{\ell j}$ jointly over attention heads. In the destination run, the mask controls which contributions are replaced:
+\begin{equation}
+a_{-1}^{\ell j}\leftarrow \mathrm{mask}^{\ell j}a_{\mathrm{src}}^{\ell j}+(1-\mathrm{mask}^{\ell j})a_{-1}^{\ell j}.
+\label{eqn:opt-int}
+\end{equation}
+The mask is optimized to promote a token that would begin implementing the \emph{source predicate in the destination language}. We choose this target to differ from the source's next token, so the localization objective rewards transfer across different token realizations. We call the selected set $H$ the \goalheads. Our main selection contains 122 heads in layers 28--55 of the 64-layer model. The mask-learning procedure and head-set construction are described in \Cref{app:head_loc}. We next test the selected heads on full readout continuations.
+
+\subsection{GoalScope and implementation transfer}
+\label{sec:what:readout}
+We use the attention heads identified in \ref{sec:heads:localize} to build \goalscope, a lightweight probe that verbalizes the sub-goal encoded at a single token position. Building on Patchscope \citep{ghandeharioun2024patchscope}, we cache what the selected heads write to the residual stream at the source pivot and sum these contributions into one vector. A separate run of the same model receives a fixed prompt asking what operation it is performing. We inject the cached vector into this probe's residual stream and generate a natural-language description. The source task reaches the probe through the injected activations; its instructions and code are not supplied as text.
+
+Our main configuration adds the vector at layers 35--45, scaled to $0.1$ times the local residual norm. We reuse the same source vector at the probe's last prompt position and every subsequent decoding step, generating the readout greedily. \Cref{app:goalscope} gives the exact prompt, normalization, and other design choices to perform the intervention.
+
+\paragraph{Faithfulness.} We ask whether the verbalization faithfully describes a nontrivial part of what the LM actually generates as its implementation of the next \emph{meaningful} step. In our controlled setup, we prefill until a target sub-task $g_k$, giving us a gold target to measure the fidelity of the readouts.
+
+\paragraph{Causality.} We inject the same encoding into a code stub in another programming language and ask whether it triggers a nontrivial part of the source operation $g_k$. For example, an encoding captured from Python is used to steer a C++ continuation. This tests whether the encoding of $g_k$, captured by the \goalheads, are abstract from the concrete tokens that implement it and whether this encoding can nudge the LM towards implementing the same sub-task $g_k$ in a new context (C++) with a different sequence of generated tokens.
+
+% This tests whether the representation can guide a new implementation of the operation. We refer to this metric as \emph{implementation transfer}; saved evaluation plots label it ``causality.'' We test the heads' role in the model's original generation separately in \Cref{sec:heads}.
+
+These two measures expose complementary properties of the encoding: a natural-language description reveals its semantic content, while cross-language transfer shows that it can guide a different realization of the operation. For both measures, we ask an LLM oracle (\texttt{claude-sonnet-4-6}) to compare the readout with the extracted LM implementation of the frontier $g_k$ on the source prompt. A positive judgment credits nontrivial agreement, including partial implementations. For \emph{causality} we ensure that the frontier is not aligned with the LM's default behavior to the specific prompt. Exact oracle prompts with additional details are in \Cref{app:oracle_prompts}.
+
+\subsection{Readout across capture positions}
+\arnab{doesn't need a different section. illustration of pivot positions + results should be absorbed in \ref{fig:goal-eval}.}
+\label{sec:what:results}
+% At the assignment operator, before the first implementation token, the 122-head readout achieves 97.2\% faithfulness and 95.7\% implementation transfer on the 253-specification corpus (\Cref{fig:sparsity})\arnab{the numbers don't match with what we are plotting on Figure 1 {\color{red}RECHECK}}. The model thus carries a readable and portable representation of the upcoming operation at this pivot.
+
+% Readout quality varies with the capture position. It is strongest near the assignment operator and first implementation token, and weaker at the end of the previous line. Pooled over all five positions, including the first implementation token, the scores are 87.9\% faithfulness and 79.2\% implementation transfer. \Cref{fig:goal-eval} shows the positional pattern on the separate OVReader evaluation corpus; \Cref{app:sparsity_pivots} reports the head-budget results at the remaining positions on the 253-specification corpus.
+
+% \input{Text/Figures/goal_eval}
+
+We next examine how compactly the encoding can be read and how the heads contribute to the model's own implementation.

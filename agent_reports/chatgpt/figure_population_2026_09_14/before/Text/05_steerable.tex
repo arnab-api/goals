@@ -1,0 +1,24 @@
+\section{Beyond Explicitly Specified Code Tasks}
+\label{sec:generalization}
+\label{sec:steer:noncode}
+\arnab{didn't check any writing here. will depend on the concrete findings from ongoing experiments.}
+Do the heads localized on code also carry an operation that the model infers from examples? Our controlled code tasks name each sub-goal in the prompt. We now examine a few-shot setting where the intended relation is conveyed through demonstrations.
+
+\paragraph{Few-shot relation tasks.}
+Following the function-vector setting \citep{todd2024function}, we provide input--output pairs demonstrating a relation, followed by a new input. We retain the 122 heads localized on code and adapt the probe question to ask for the hidden rule in a short phrase. For example, an antonym prompt contains the following pairs:
+
+\begin{quote}\small\ttfamily
+Q: enter\quad A: exit\\
+Q: feasible\quad A: infeasible\\
+\ldots\\
+Q: mercy\quad A:
+\end{quote}
+The model answers ``cruelty'' and continues generating question--answer pairs. At the newline following ``cruelty,'' \goalscope reads \emph{``Identifying antonyms.''} At the answer-prefix token \texttt{A} before a later answer, ``slow,'' it again reads \emph{``Identifying antonyms.''} The probe is given neither the name of the relation nor the demonstrations as text. The code-localized head contributions carry enough information to describe the inferred operation.
+
+These are qualitative readouts during the continuing sequence, with the first captured after the initial answer and the second before a later answer. Nearby positions also produce vague or incorrect descriptions. \Cref{app:non-code} gives the full demonstration list, exact probe wording, token indices, and contrasting readouts. The example shows that the code-localized heads can expose an inferred non-code relation; a quantitative evaluation across relations and positions remains to be completed.
+
+\paragraph{Code without enumerated sub-goals.}
+Free-form code poses a related question: can the readout describe a step that the model chooses while solving a broader programming request? Here, evaluation must identify a meaningful operation in the model's continuation, which may be a local statement or a larger enclosing computation. This extension requires qualitative examples and an explicit choice of sub-goal granularity.
+% TODO: Populate app:unspecified with source code, capture positions, and actual readouts before presenting a free-form result.
+
+We report replications within other model families and sizes in \Cref{app:model_comparison}. Further exploratory non-code settings are discussed in \Cref{app:non-code}.

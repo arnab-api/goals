@@ -82,7 +82,7 @@ pre.gs-code{margin:0;font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Con
 .gs-tok.bi{color:var(--bi)}
 .gs-tok.num{color:var(--num)}
 svg.gs-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;overflow:visible;}
-.gs-callout{position:absolute;left:6px;max-width:calc(var(--leftw) - 34px);background:#fff;border:1px solid var(--box);
+.gs-callout{position:absolute;left:20px;max-width:calc(var(--leftw) - 48px);background:#fff;border:1px solid var(--box);
   border-radius:12px;padding:11px 14px;box-shadow:0 1px 3px rgba(16,24,40,.07);z-index:3;
   font-size:15px;line-height:1.45;font-style:italic;color:#111827;}
 .gs-callout .idx{position:absolute;left:-11px;top:-11px;width:22px;height:22px;border-radius:50%;

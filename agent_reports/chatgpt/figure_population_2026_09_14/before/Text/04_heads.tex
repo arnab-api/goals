@@ -1,0 +1,55 @@
+\section{Goal Heads Carry and Mediate the Sub-Goal}
+\label{sec:heads}
+How many heads are needed to read the sub-goal, and how important are these heads for carrying it out? We study both questions: first by varying the number of heads used for readout, then by restricting their access to task information during the model's own code generation.
+
+\arnab{\Cref{fig:sparsity} and \Cref{tab:goal-ablation} needs to be side-by-side. save space on the main text. maybe \Cref{tab:goal-ablation} should be a bar-chart.}
+
+\subsection{Small head sets support effective readout}
+\label{sec:heads:sparsity}
+\begin{figure}[t]
+\centering
+\includegraphics[width=.80\linewidth]{Figures/sparsity_eq.pdf}
+\caption{Readout versus head budget at the assignment-operator pivot, before implementation (253 matched specifications; norm-relative additive injection, $\alpha=.1$). Lines show available head selections; stars mark the separately selected 122-head reference. Selections are not strictly nested, so connecting points guides comparison rather than isolating an effect of head count alone. Other capture positions appear in \Cref{app:sparsity_pivots}.}
+\label{fig:sparsity}
+\end{figure}
+Twenty-five selected heads, approximately 0.98\% of the model's 2,560 query heads, achieve 93.7\% readout faithfulness and 90.5\% implementation transfer at the assignment pivot. The 122-head reference achieves 97.2\% and 95.7\%, respectively (\Cref{fig:sparsity}). Much of the sub-goal's semantic content can therefore be recovered from a small fraction of the attention heads.
+\arnab{recheck the numbers.}
+
+Larger selections do not improve performance monotonically. The selections differ in membership and are not strictly nested, so the curves compare available head sets rather than isolate head count alone. 
+% Results at the other capture positions appear in \Cref{app:sparsity_pivots}. 
+% Comparisons with full-attention and residual-stream readouts are in \Cref{app:readout_sources}.
+
+\subsection{Goal heads mediate implementation}
+\label{sec:mechanism:ablation}
+We next ask whether the model relies on the \goalheads to implement the next sub-goal. On the same 253 specifications, we intervene at the assignment pivot and continue the intervention during decoding. We compare the original generation with interventions on the 122-head core, a broader 250-head set, and random-head controls.
+
+\paragraph{Sufficiency of goal-head access.}
+We preserve the selected heads' access to the upcoming task and code span while blocking that access for other heads in layers 20 and above. The blocked span begins just before the frontier description and ends at the final prompt token.\arnab{needs illustration of the ablation setup with a specific prompt, either here or in the appendix} Lower layers, MLPs, and attention to positions outside this span operate as usual. This tests whether goal-head access can sustain implementation when other upper-layer attention heads lose access to the same information. The control preserves access for a comparable number of random heads distributed on the upper layers. The exact spans and sampling pools are in \Cref{app:ablation}.
+
+\paragraph{Necessity of goal-head access.}
+\label{sec:mechanism:necessity}
+In the complementary experiment, we restrict the selected heads to attend only to position zero, the attention sink, while other heads operate normally. The selected heads still contribute the sink value but lose access to the task and code tokens. We compare with applying the same restriction to an equal-size random set, drawn from the depth pool and disjoint from the goal heads.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{lcc}
+\toprule
+Condition & 122 heads & 250 heads\\
+\midrule
+Clean baseline & .925 & .925\\
+Spare goal-head access & .806 & .913\\
+Spare random-head access & .091 & .095\\
+\midrule
+Restrict goal heads to sink & .854 & .158\\
+Restrict random heads to sink & .925 & .921\\
+\bottomrule
+\end{tabular}
+\caption{Frontier implementation success under span restriction and sink-attention interventions ($n=253$). ``Spare'' preserves selected heads' access to the blocked task/code span in layers 20 and above. ``Restrict'' limits the selected heads to attention at position zero.}
+\label{tab:goal-ablation}
+\end{table}
+
+\Cref{tab:goal-ablation} shows that the LM's competency of implementing the the next sub-goal is largely preserved when only goal heads can access the task information, with most of the heads in deeper layers are blinded. This indicates that the smaller set of 122 goal heads are sufficient in mediating the $g_k$ encoding to later layers for concrete implementation. On the complementary necessity experiment we find that blinding a broader set of 250 goal heads reduces LM competency sharply, confirming that the goal heads are a crucial bottleneck mediating the $g_k$ encoding to the implementation. However, blinding the smaller set of 122 heads keeps the performance largely intact. This means the LM is flexible enough to compensate for the ablation by using other \goalheads (not in the 122 set) to communicate $g_k$ to later layers.
+
+% Preserving access for the 250 goal heads retains 91.3\% implementation success, close to the 92.5\% clean baseline; preserving random-head access retains only 9.5\% (\Cref{tab:goal-ablation}). Conversely, restricting the 250 goal heads to the sink reduces success to 15.8\%, while the random control remains at 92.1\%. The broader goal-head set therefore plays a causal role in mediating the model's implementation of the sub-goal.
+
+% The 122-head core shows a smaller effect: restricting it leaves success at 85.4\%. Taken together with the readout curves, this reveals a distinction between the heads needed to expose the sub-goal and the broader set whose access is important for execution. These sufficiency and necessity tests concern access under the specified interventions; the heads operate within the rest of the network.

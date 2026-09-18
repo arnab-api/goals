@@ -1,0 +1,55 @@
+\section{How Goal Heads Access the Upcoming Sub-Goal}
+\label{sec:mechanism}
+\label{sec:steer}
+What information do the \goalheads use to guide the next operation? We examine where the heads attend, how changing their queries or task-span keys and values affects the continuation, and where the sub-goal can be read from the residual stream.
+
+\subsection{Attention to relevant task descriptions}
+\label{sec:mechanism:gaze}
+The \goalheads often look back to the task they are about to implement. At a frontier position, their collective value-weighted attention concentrates on tokens in the prompt describing the upcoming predicate. This resembles the \emph{gaze} behavior observed during generation in other settings \citep{gandikota2026gaze}. These qualitative attention patterns suggest a connection between the task descriptions and the goal encoding. We test that connection causally by changing the information available through the heads' keys and values.
+% TODO: Add representative gaze plots and complete the quantitative analysis in app:gaze.
+
+\subsection{Key-Value Transfer Overwrites the Frontier}
+\label{sec:steer:transplant}
+\label{sec:steer:crosslang}
+\label{sec:steer:kv-transfer}
+\arnab{simplified figure showing the KV-transfer.}
+
+\input{Text/Figures/kv_transfer}
+Consider a source prompt with tasks $(A,B)$ and a destination with tasks $(A,D)$, both with $A$ already implemented. The next requested sub-goal is $B$ in the source and $C$ in the destination. We cache the keys and values of the source task tokens and transplant them into the destination's goal-head attention. The destination prompt still requests $C$; the patched heads now access the source task information $B$. We ask whether this change makes the model implement $B$. \arnab{needs concrete illustrative example.}
+
+In {\color{red} Figure/Table X}, we show 2 scores to evaluate the setup: (i) \emph{causal-shift}, whether the LM implements the source frontier; and (ii) \emph{readout-shift}, whether the \goalscope shifts to the source frontier. This KV-transfer experiment with 250 goal heads show strong generalization across datatypes, even cross-language transfer. The success rate of the KV-transfer in overwriting the destination frontier complements \Cref{sec:mechanism:necessity}'s finding that the goal head set are a crucial bottleneck in the LM's mediation of the sub-goal signal to later layers. The cross-language intervention success also confirm that the goal heads \emph{read} the task information to encode an abstract representation of the next sub-task $g_k$, which when patched to a different environment is realized in a different sequence of tokens. \arnab{show the concrete scores, across language confusion table with the format \texttt{causality \{read-out shift\}} here. }
+
+% These results confirm that the goal heads \emph{read} the task information to encode an abstract representation of the next sub-task $g_k$ 
+% 
+
+% At the assignment pivot, the 250-head intervention produces source-directed continuations in approximately 99\% of cases across four datatypes and four language directions. Here, \emph{source-directed} includes the oracle's labels for the source goal alone or both source and destination goals. A separate \goalscope readout identifies the source goal exclusively in approximately 96\% of cases. Transfer also works across programming languages, producing a destination-language realization of the source operation. These results show that the task information accessed through goal-head keys and values can redirect the model's next sub-goal. Configurations and scoring details are in \Cref{app:task_transfer}.
+
+% The patch is routed to the selected query heads, accounting for shared KV heads, and remains active across prefill and decoding. Earlier patched outputs can therefore influence later destination states and queries. The result establishes adaptation to changed task information; locating the progress representation requires additional controls over these interactions.
+
+\subsection{Queries Already Know the Next Sub-Goal}
+\label{sec:mechanism:precommit}
+\label{sec:steer:q-transfer}
+\arnab{not yet sure if this should be in the main text}
+
+% We next cache the source queries at the pivot and transplant them into the destination's goal heads. In the multi-predicate setup, this produces approximately 94\% source-directed continuations across the four language directions (\Cref{app:task_transfer}). Query states thus carry information that can steer the choice of sub-goal. To examine whether this information concerns completed work or the upcoming operation, we use a task-order contrast in which the two predict different continuations.
+
+% The source orders tasks $(A,B,C,D)$ and has completed $(A,B)$, making $C$ its next task. The destination orders tasks $(A,B,D,C)$ and has completed only $A$. If the transferred state specifies only the completed prefix $(A,B)$, the destination order would make $D$ the next task. A state that carries the source's upcoming sub-goal would instead favor $C$. The observed query transfer favors $C$.
+
+% This qualitative contrast supports the presence of goal-specific information in the query. A systematic evaluation that independently varies progress, task order, and target identity is needed to determine how broadly this interpretation holds and how progress information also contributes.
+
+\subsection{Reading intermediate residual states with OVReader}
+\label{sec:mechanism:upstream}
+\arnab{no need to show 2 figures on \Cref{fig:ovreader}. just one figure showing both faithfulness and causality lines together, with standard deviation across the datatypes. maybe pair the figure with the 122 goal head distribution in the model.}
+
+\arnab{add citations to sheridan's work. rename the terms to match exactly. polish the presentation}
+At what depth does the upcoming sub-goal become readable? We introduce \textbf{OVReader}, which uses the goal heads' value and output projections to read intermediate residual states. Formally, an attention head, its output and value projection read from $OV(h) = W_OW_V \mathrm{ln}(h) = \nicefrac{1}{rms(h)} \times W_OW_v(\mu \odot h)$. Qwen-2.5 series of LMs use $\mathrm{RMSNorm}$ with $\mu$ as the element-wise stretching and $\nicefrac{1}{rms(h)}$ is the rescaling to the unit ball. If we ignore the rescaling the OV read becomes, $OV(h) = W_OW_V\mathrm{diag}(\mu)\;h$. $W_OW_V\mathrm{diag}(\mu)$ can be absorbed into a single transformation $W_{OV}$. For multiple goal heads we can absorb their OV reads into a single transformation  $\mathbf{W_{OV}}$, by simply adding each head's OV-transformation matrices.\arnab{maybe Appendix is a better place for the full derivation.}
+
+We apply the aggregated transformation $\mathbf{W_{OV}}$ on a residual state $h$, and use the output as the steering vector (on {\color{red} Figure X}) to get the readout, which we score using the same \emph{faithfulness} and \emph{causality} scores introduced in \Cref{sec:what:readout}. \Cref{fig:ovreader} shows the readout performance across layers on the \texttt{`` =''} token, right before the LM's $g_k$ implementation starts. OVReader readout performance already peaks by layer 40, before the layers where most of the goal heads are concentrated. So, by the time most of the goal heads take action, the next sub-task $g_k$ is already committed and is decodable in the residual latents. \arnab{needs an end.}
+
+% For a residual state at the pivot, we apply each selected head's projections, normalize the transformed vectors, and aggregate them. The resulting direction steers the \goalscope probe. This gives us a readout built from the model's own weights, with no additional decoder training (\Cref{app:ovreader}).
+
+% At the assignment operator, OVReader can recover the sub-goal around layer 40, with readout quality approaching that of the selected heads' actual outputs (\Cref{fig:ovreader}). Across the five capture positions, performance generally peaks around layers 48--52 and declines toward the final layer; earlier token positions show different emergence profiles. The upcoming sub-goal is therefore accessible in intermediate residual states before implementation begins. These depths overlap the selected-head range of layers 28--55. The curves locate where the readout is effective; determining where the sub-goal is first selected requires further causal interventions.
+
+\input{Text/Figures/ovreader}
+
+% The experiments identify complementary parts of the mechanism: task-span keys and values provide information that can redirect the operation, queries can favor a particular sub-goal, and the goal heads' projections make that sub-goal readable from intermediate residual states. Understanding how these components combine completed work with the task specification remains an open question.

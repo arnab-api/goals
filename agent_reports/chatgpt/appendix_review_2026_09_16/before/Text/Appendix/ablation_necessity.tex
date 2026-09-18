@@ -1,0 +1,24 @@
+\section{Necessity of Goal-Head Access}
+\label{app:necessity}
+We restrict selected heads' access at the final prompt token and all subsequent decoding positions. The sink intervention allows attention only to key position zero, denoted by generic \texttt{<bos>} in \Cref{fig:necessity-setup} (\texttt{<|im\_start|>} in Qwen). It preserves the sink value contribution and is not equivalent to zeroing a head. Two further interventions block the frontier description (including its preceding token), or extend that span through the prompt's final assignment token. Earlier query positions remain unmodified.
+
+\begin{figure}[ht]\centering
+\includegraphics[width=.70\linewidth]{Figures/author/ablation_necessity.pdf}
+\caption{\textbf{Necessity intervention with sink-only attention.} Selected heads cannot attend to the orange span and attend only to position zero. Purple marks the final assignment query. The same sink restriction continues throughout decoding.}
+\label{fig:necessity-setup}
+\end{figure}
+
+\begin{table}[ht]\centering\small
+\input{Text/Appendix/tables/necessity}
+\caption{Frontier implementation success under three access restrictions ($n=253$). The clean baseline is .925. Each goal condition has a random-head control with the same total selected count, sampled from the corresponding depth pool.}
+\label{tab:ablation-spans}
+\end{table}
+
+Blocking the frontier description alone has a smaller effect than blocking the description and progress span together. The sink intervention substantially reduces success for the broader 250-head set, whereas the 122-head core produces a smaller reduction. These outcomes depend on head membership, depth coverage, and the access restriction being tested.
+
+\begin{table}[ht]\centering\small
+\input{Text/Appendix/tables/necessity_example}
+\caption{\textbf{An observed necessity example.} The same evenness frontier as \Cref{tab:ablation-example}, using the 250-head set. Task-only restriction preserves evenness, task-and-progress restriction repeats digit count, and sink restriction produces a malformed continuation. The random sink control preserves the correct operation.}
+\label{tab:necessity-example}
+\end{table}
+\clearpage

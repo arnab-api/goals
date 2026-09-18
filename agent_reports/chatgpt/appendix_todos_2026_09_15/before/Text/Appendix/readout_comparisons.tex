@@ -1,0 +1,27 @@
+\section{Readout Sources and Head Budgets}
+\label{app:readout_sources}
+\label{sec:heads:residual}
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lcc}\toprule
+Injected source & Faithfulness & Implementation transfer\\\midrule
+122-head aggregate & .879 & .792\\
+Attention output, L40--50 & .343 & .334\\
+Residual, L25--56 & .031 & .020\\
+Residual, L40--50 & .009 & .006\\\bottomrule
+\end{tabular}
+\arnab{should be a bar chart.}
+\caption{Source comparison under norm-relative injection at $\alpha=.1$ on the locked corpus, pooled over five positions. Poor raw-residual injection is a result about this readout configuration, not proof that the residual lacks subgoal information.}
+\label{tab:heads-vs-residual}
+\end{table}
+Selected contributions provide a substantially more effective injection direction than the tested full-attention and raw-residual aggregates. Equal relative norm controls overall perturbation magnitude, but does not ensure that a shared injection strength or aggregation rule is optimal for every source. OVReader provides a separate test of information extracted from the residual.
+
+\subsection{Head-budget results at other capture positions}
+\label{app:sparsity_pivots}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{Figures/sparsity_other_pivots.pdf}
+\caption{Head-budget curves for the remaining four capture positions, using the same 253 specifications and configurations as \Cref{fig:sparsity}. Stars indicate the 122-head reference; blue solid lines show readout faithfulness and orange dashed lines implementation transfer. The first implementation token is a comparison position, not evidence of encoding before implementation. The common vertical scale makes differences across positions visible.}
+\label{fig:sparsity-other-pivots}
+\end{figure}
+We recompute each rate as the fraction of saved oracle verdicts equal to \texttt{YES}, including all 253 records per position in its denominator. The same specification identifiers occur at every head budget in both evaluation modes. Each position is a repeated measurement of those specifications. All runs use norm-relative additive injection at $\alpha=.1$, layers 35--45, and steering throughout probe decoding. The head selections differ in construction and are not strictly nested; the 122-head reference is displayed separately from the connected sweep.

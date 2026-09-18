@@ -1,0 +1,21 @@
+\section{Introduction}
+\label{sec:intro}
+
+\arnab{I am using terms like ``sub-goal'', ``intention'', ... interchangeably in the intro. We need to come to a consensus on what term to use.}
+
+Consider a programmer asked to implement \emph{merge sort}, a task that decomposes into several sub-tasks: \emph{split the array}, \emph{sort the two halves}, and \emph{merge the sorted halves}. Before writing the loop that combines the two sorted arrays, the programmer already has a coherent goal: \textit{``merge the two halves.''} We ask whether large language models (LLMs) write code the same way: when an LLM emits a long span of tokens to satisfy a multi-step specification, does it hold an explicit representation of the \emph{next} instrumental sub-goal before it begins its implementation?
+
+We study the \emph{instrumental} level of this hierarchy: the \emph{broader goal} (implement merge sort) decomposes into \emph{instrumental sub-goals} (merge the two sorted arrays), each of which admits many \emph{implementations} (such as using a \emph{for} loop or a \emph{while} loop). Our question concerns a representation of \emph{which sub-goal the model is about to pursue}, and whether that representation can be separated from its concrete realizations in code.
+
+Although LLMs are trained to predict one token at a time, a growing body of work shows that they \emph{look ahead}: they encode information about tokens they have not yet emitted \citep{pal2023futurelens} and plan toward constraints several tokens in the future \citep{lindsey2025biology}. We ask what the plan for the \emph{next step} looks like as a concrete internal object, and whether that object is one we can read and move between contexts.\arnab{maybe move to Related Works if the intro gets long.}
+
+We investigate this question through activation patching on code tasks with multiple sub-goals. Our main experiments use \texttt{Qwen2.5-Coder-32B-Instruct}, with replications across model families and sizes. Our analysis yields three key findings.
+
+\textbf{The next sub-goal is encoded before implementation, and is verbalizable (\Cref{sec:what}).} We localize the encoding of the LM's next sub-goal to a compact set of attention heads, which we call the \goalheads. We introduce \goalscope, a lightweight probe built on these heads that verbalizes the upcoming sub-goal directly from the LM's internal activations. Before the model writes the implementation, we can extract what the heads write to the residual stream and use it to generate a faithful description of the operation it is about to perform.
+
+\textbf{The encoding is abstract and portable (\Cref{sec:what:readout}).} Transplanting the encoding steers a fresh code context to pursue the source sub-goal. A goal extracted from Python can trigger the same operation in C++, and vice versa. This portability provides evidence that the heads carry a representation of the operation that generalizes across its surface realizations. We also explore whether the same heads can verbalize sub-goals in code whose component steps are not explicitly listed, and inferred relations in non-code few-shot tasks (\Cref{sec:generalization}).
+
+\textbf{Goal heads mediate the model's implementation of the sub-goal (\Cref{sec:heads,sec:mechanism}).} A small set of heads suffices for effective readout, and a broader set is causally important for carrying out the operation. When we restrict other upper-layer heads' access to the upcoming task and code span, preserving goal-head access largely preserves implementation performance. Conversely, restricting the broader goal-head set to the attention sink sharply reduces performance, while restricting random heads has little effect. The heads attend to relevant task descriptions, and changing their query or key/value states can redirect the sub-goal pursued. Using their value and output projections, we also introduce \textbf{OVReader} to trace where the upcoming sub-goal becomes readable in intermediate residual states.
+
+Our results provide concrete, testable evidence that code LLMs represent and pursue intermediate goals: a compact, portable, causally manipulable encoding of \emph{intent} that precedes action.
+\arnab{Teaser figure: the readout + one steering example, framed as ``intent before action''.}
