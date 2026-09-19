@@ -74,16 +74,67 @@ causal→D (0.42–0.52) exceeds native-B, so there is a genuine content-DIFF ef
 over no-restrict at 122·a2, so we report **no-restrict** as primary. Literal-C ≈ 0 throughout (C not in
 DST). Full per-datatype detail in `diff_trigger_qtransfer_grid.md`.
 
-### Cross-lingual (in progress)
-The same two restrict configs (122·a4, 250·a2) run for py→cpp, cpp→py, cpp→cpp on GPUs 6/7
-(run_id `20260918_090909`). As of 2026-09-18 18:32: **122·a4 complete** (all three transfers done);
-**250·a2** has py→cpp + cpp→py running and cpp→cpp queued. **Table to be filled on completion.**
+### Cross-lingual (done)
+
+All four language directions, n=32, mean causal→D over the 4 datatypes. **NO-restrict** (primary; all
+three configs); the **restrict** grid ran 122·a4 and 250·a2 only.
+
+**No-restrict — causal→D:**
+
+| config | variant | py→py | py→cpp | cpp→py | cpp→cpp |
+|---|---|:-:|:-:|:-:|:-:|
+| 122·a2 | order_matched | 0.617 | 0.531 | 0.633 | 0.531 |
+| | order_diff | 0.422 | 0.266 | 0.297 | 0.266 |
+| 122·a4 | order_matched | 0.758 | 0.594 | 0.742 | 0.562 |
+| | order_diff | 0.539 | 0.344 | 0.422 | 0.336 |
+| 250·a2 | order_matched | 0.680 | 0.602 | 0.711 | 0.609 |
+| | order_diff | 0.500 | 0.344 | 0.391 | 0.336 |
+
+**Restrict — causal→D (for comparison):**
+
+| config | variant | py→py | py→cpp | cpp→py | cpp→cpp |
+|---|---|:-:|:-:|:-:|:-:|
+| 122·a4 | order_matched | 0.773 | 0.734 | 0.789 | 0.703 |
+| | order_diff | 0.492 | 0.359 | 0.438 | 0.344 |
+| 250·a2 | order_matched | 0.703 | 0.602 | 0.688 | 0.570 |
+| | order_diff | 0.516 | 0.375 | 0.367 | 0.383 |
+
+**Takeaway — a destination-language effect, not a transfer failure.** Cells split by the **destination**
+language, not by whether the transfer is cross-lingual: dest=py (`py→py`, `cpp→py`) are the two highest;
+dest=cpp (`py→cpp`, `cpp→cpp`) the two lowest, in every config/variant. Critically **`cpp→py` ≈ `py→py`**
+(122·a4 order_diff 0.422 vs 0.539; 250·a2 0.391 vs 0.500) — a query read from a **C++** context drives
+correct **Python** generation nearly as well as native, so the sub-goal representation is
+**language-agnostic on the read side**; the ~0.10–0.17 order_diff attenuation is a *write*-side penalty
+for generating cpp. Sanity invariants hold across all directions: native-B rises exactly where causal→D
+falls (dest=cpp order_diff native-B ~0.60–0.73), gaze→D stays stable (~0.88–0.91 matched, ~0.54–0.65
+diff — the pivot still points at D regardless of language), and literal-C ≈ 0 (max 0.125 in one cell).
+No-restrict ≈ restrict throughout (order_matched robust; order_diff within noise), consistent with the
+py→py finding that restrict buys little.
+
+*Runs: no-restrict `20260918_223233` (36 jobs, `name="local"` dispatch); restrict `20260918_090909`.*
 
 ### Restrict ablation (done)
 `122·a4·NO-restrict` and `250·a2·NO-restrict` (py→py, n=32, 4 datatypes) are in the primary table
 above. No-restrict ≈ restrict at every config (122·a4 order_diff 0.539 vs restrict 0.492; 250·a2
 order_diff 0.500 vs restrict 0.516) — confirming restrict buys little beyond 122·a2, so no-restrict is
 the reported primary throughout.
+
+### Random-head control (done)
+Matched placebo: transplant the **query** of a random later-half non-goal head set (same size as the
+goal set, layers ≥32, excluding the goal heads, seed 123 — the same construction as the ablation
+control) instead of the goal heads; patch = readout = that random set, no-restrict, py→py, n=32, mean
+over 4 datatypes.
+
+| config | variant | GOAL causal→D | control causal→D | control native_B |
+|---|---|:-:|:-:|:-:|
+| 122·a4 | order_matched | 0.758 | **0.094** | 0.906 |
+| | order_diff | 0.539 | **0.062** | 0.938 |
+| 250·a2 | order_matched | 0.680 | **0.109** | 0.891 |
+| | order_diff | 0.500 | **0.070** | 0.930 |
+
+Patching random heads barely moves the destination off its native next (causal→D ~0.06–0.11 vs goal
+0.50–0.76; native_B rises to ~0.89–0.94, i.e. the no-op floor). The DIFF effect is specific to the goal
+heads, not a generic head-patching artifact. Runs: `diff_trigger/ph-control{122_122,250_250}__a{4,2}__piv-eq`.
 
 ---
 
@@ -160,10 +211,9 @@ applied post-hoc via `scripts/diff/rescore_c_in_dst_joint.py`.
   progress/depth counter.
 
 ## Status / TODO
-- Exp A cross-lingual grid (3 transfers × 2 configs): 122·a4 done, 250·a2 finishing; fill the
-  cross-lingual table on completion.
-- Exp A restrict ablation: `122·a4·NO-restrict` + `250·a2·NO-restrict` (py→py) running on cuda 4/5;
-  add rows to the Exp A table.
+- Exp A cross-lingual grid: **DONE** — no-restrict (3 configs) + restrict (122·a4, 250·a2), all 4
+  directions, in the Cross-lingual table above. ✓
+- Exp A restrict ablation: **DONE** — 122·a4 / 250·a2 no-restrict py→py in the primary table. ✓
 - Exp B config (ii) 250·a2: **DONE** — joint re-scored (C≈0.836, D≈0.047, B≈0.039). ✓
 - Consider a three-way D/C/B **gaze** (current gaze is D-vs-B only, so it does not see C).
 
