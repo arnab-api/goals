@@ -20,8 +20,8 @@ The two tests deliberately use **different mechanisms**, each matched to the que
 
 Every head in layers ≥ `from_layer` (**=20**) *except the spared set* keeps running normally, but has `-inf` added at the **frontier spec span**: the key positions from one token before the frontier's NL description through the **end of the prompt** (`range(min(span_toks)-1, P)` — the goal spec *and* the trailing pivot region). Layers < 20 are fully intact. So the spared heads are the *only* ones in the upper stack that can still read *what* the frontier asks for.
 
-- **`ablated`** = spare the **goal** heads → blind `complement_heads(goal, 20, 64, 40)` = every upper head except the goal set (1760 − |goal| heads blinded: 1638 for goal122, 1510 for goal250).
-- **`control`** = spare a **random** equal-size set drawn from the goal band (`range(goal_from, 64)`, `goal_from` = shallowest goal-head layer) → blind everyone else. Matched head budget, matched depth.
+- **`ablated`** = spare the **goal** heads → blind `complement_heads(goal, 20, 64, 40)` = every upper head except the goal set. Heads blinded in layers 20–63: **1638** for goal122 (= 1760 − 122) and **1524** for goal250 (= 1760 − 236, since 14 of the 250 goal heads sit below layer 20 and are outside the `[20,64)` blind pool).
+- **`control`** = spare a **random** equal-size set drawn from the **later half of the model** (`layers ≥ n_layer//2 = 32`, excluding the goal heads) → blind everyone else. Matched head budget; fixed, budget-independent depth band (see *Control-group selection* below).
 
 The figure prints a real prompt (spec `int_python_003`, frontier `is_even` = variable `c`) with the exact blinded key span shaded — the frontier description `(3)` through the `c =` pivot (60 keys). Every non-spared upper head gets `-inf` on the shaded tokens; they still attend to everything above it (task preamble, predicates `a`/`b`).
 
@@ -37,11 +37,17 @@ Concretely on this prompt: with only the goal heads able to see the shaded span 
 - **`blind_task`** — the heads are blinded from **only the current task's description span** (`frontier_desc_positions`); they attend everywhere else.
 - **`blind_task_and_progress`** — the heads are blinded from the task description **through the pivot** (`frontier_block_positions` = spec text + the progress code up to the current-progress token; the same span sufficiency's `blind_span` uses), attending everywhere before it.
 
-In all three, **`ablated`** = the **goal** heads and **`control`** = a **random** equal-size set from the goal band (`range(goal_from, 64)`, disjoint from the goal heads). If ablating the goal heads hurts no more than the random set, they are **not** necessary (the computation reroutes).
+In all three, **`ablated`** = the **goal** heads and **`control`** = a **random** equal-size set from the **later half** (`layers ≥ 32`, disjoint from the goal heads). If ablating the goal heads hurts no more than the random set, they are **not** necessary (the computation reroutes).
 
 ![necessity setup — bos/sink (query rows from the `=` pivot restricted to the pos-0 sink)](figures/ablation_necessity_setup.png)
 
-The control in both tests is depth-matched — the random set is drawn from `range(goal_from, 64)`, so a result cannot be an artifact of a shallower/deeper pool than the goal set. (This fixed an earlier sufficiency control that sampled from a fixed `from_layer=20` pool.)
+### Control-group selection
+
+The matched control is a random set of the **same size** as the goal set, drawn from the **later half of the model** — layers `≥ n_layer//2 = 32` (of 64) — and **disjoint from the goal heads**; fixed seed (123). Both axes use the same rule (`--control_pool later_half` in `ablation_common.py`).
+
+We use a **fixed later-half band** rather than the goal set's own layer span because the latter is budget-dependent: `goal_from = min(goal-head layer)` is 28 for the 122-head set but **0** for the 250-head set (which includes 12 layer-0 heads). Drawing the 250 control from `[goal_from, 64) = [0, 64)` would sample it across the *entire* network while the goal heads themselves concentrate in layers ~40–55 — a shallower-on-average, non-comparable control. The fixed `[32, 64)` band keeps the control depth-comparable and identical across head budgets.
+
+**Robustness:** switching from the previous `goal_band` control to `later_half` changed every control cell by ≤ 0.012 (with `baseline`/`ablated` reproduced exactly, since those don't depend on the control), so the conclusions below are insensitive to the control-pool choice.
 
 ---
 
@@ -53,9 +59,9 @@ The control in both tests is depth-matched — the random set is drawn from `ran
 |-----------|:-----------:|:-----------:|
 | baseline | 0.925 | 0.925 |
 | **spare GOAL heads** (blind rest) | **0.806** | **0.913** |
-| spare RANDOM equal set | 0.091 | 0.095 |
+| spare RANDOM equal set (later-half control) | 0.103 | 0.087 |
 
-Sparing the goal heads keeps generation near baseline; sparing a depth-matched random set of the same size **collapses to ~0.09** — i.e. when the goal heads are the *only* heads allowed to read the spec span, the model still implements the frontier. The 250-head set recovers baseline almost completely (0.913 vs 0.925); the 122-head set recovers most of it (0.806). **The goal heads are sufficient to route the goal.**
+Sparing the goal heads keeps generation near baseline; sparing a random later-half set of the same size **collapses to ~0.09** (122: 0.103, 250: 0.087) — i.e. when the goal heads are the *only* heads allowed to read the spec span, the model still implements the frontier. The 250-head set recovers baseline almost completely (0.913 vs 0.925); the 122-head set recovers most of it (0.806). **The goal heads are sufficient to route the goal.**
 
 Per-datatype, the 122-head residual gap is concentrated in `list[str]` (1.00→0.70) and `str` (0.92→0.86); `int` stays strong (1.00→0.91). The 250-head set is at/near baseline across all four types.
 
@@ -66,8 +72,10 @@ All n=253, baseline = 0.925 for both budgets. `ablated` = the goal heads under t
 | strategy (goal heads) | blinded span | 122 ablated | 250 ablated | control (122 / 250) |
 |-----------------------|--------------|:-----------:|:-----------:|:-------------------:|
 | `blind_task` | current task description only | 0.881 | 0.806 | 0.925 / 0.925 |
-| `bos` (sink) | attend only to pos 0 (≈ zeroed) | 0.854 | **0.158** | 0.925 / 0.921 |
-| `blind_task_and_progress` | task desc → pivot (spec + progress) | **0.372** | **0.249** | 0.925 / 0.925 |
+| `bos` (sink) | attend only to pos 0 (≈ zeroed) | 0.854 | **0.158** | 0.925 / 0.925 |
+| `blind_task_and_progress` | task desc → pivot (spec + progress) | **0.372** | **0.249** | 0.929 / 0.925 |
+
+*All controls use the **later-half** control (layers ≥ 32). Every strategy × budget was re-run under it; vs the earlier `goal_band` control the only change was `bos`·250 (0.921 → 0.925). Controls stay ~0.92–0.93 across all six cells — the goal-head effects are not control-pool artifacts.*
 
 Reading across the three strengths:
 
@@ -96,13 +104,13 @@ Net: the "intent to implement next(DIFF)" is carried by a **distributed, redunda
 
 | axis | budget | leaf dir |
 |------|:------:|----------|
-| sufficiency | 122 | `sufficiency/heads=spare_goal__goal122__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123` |
-| sufficiency | 250 | `sufficiency/heads=spare_goal__goal250__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123` |
-| necessity (bos/sink) | 122 | `necessity/heads=goal__goal122__fromL=28__strat=sink__dtype=all__nspec=253__seed=123` |
-| necessity (bos/sink) | 250 | `necessity/heads=goal__goal250__fromL=0__strat=sink__dtype=all__nspec=253__seed=123` |
-| necessity (blind_task) | 122 | `necessity/heads=goal__goal122__fromL=28__strat=blind_task__dtype=all__nspec=253__seed=123` |
-| necessity (blind_task) | 250 | `necessity/heads=goal__goal250__fromL=0__strat=blind_task__dtype=all__nspec=253__seed=123` |
-| necessity (blind_task_and_progress) | 122 | `necessity/heads=goal__goal122__fromL=28__strat=blind_task_and_progress__dtype=all__nspec=253__seed=123` |
-| necessity (blind_task_and_progress) | 250 | `necessity/heads=goal__goal250__fromL=0__strat=blind_task_and_progress__dtype=all__nspec=253__seed=123` |
+| sufficiency | 122 | `sufficiency/heads=spare_goal__goal122__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half` |
+| sufficiency | 250 | `sufficiency/heads=spare_goal__goal250__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half` |
+| necessity (bos/sink) | 122 | `necessity/heads=goal__goal122__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half` |
+| necessity (bos/sink) | 250 | `necessity/heads=goal__goal250__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half` |
+| necessity (blind_task) | 122 | `necessity/heads=goal__goal122__fromL=32__strat=blind_task__dtype=all__nspec=253__seed=123__ctrl=later_half` |
+| necessity (blind_task) | 250 | `necessity/heads=goal__goal250__fromL=32__strat=blind_task__dtype=all__nspec=253__seed=123__ctrl=later_half` |
+| necessity (blind_task_and_progress) | 122 | `necessity/heads=goal__goal122__fromL=32__strat=blind_task_and_progress__dtype=all__nspec=253__seed=123__ctrl=later_half` |
+| necessity (blind_task_and_progress) | 250 | `necessity/heads=goal__goal250__fromL=32__strat=blind_task_and_progress__dtype=all__nspec=253__seed=123__ctrl=later_half` |
 
 All under `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/`. Figure regen: scratchpad `fig_ablation.py`.

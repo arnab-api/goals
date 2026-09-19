@@ -22,7 +22,7 @@ import sys
 sys.path.append(".")
 
 from scripts.evaluation.ablation_common import (  # noqa: E402
-    common_argparser, complement_heads, load_setup, run_ablation_eval,
+    common_argparser, complement_heads, control_from_layer, load_setup, run_ablation_eval,
 )
 
 
@@ -32,10 +32,11 @@ def main():
 
     ablated = complement_heads(goal_heads, args.from_layer, mt.n_layer, mt.n_heads)  # blind all-but-goal
     # control: spare a RANDOM |goal|-size set instead of the goal heads (13_middle §5 RAND_ABL). Draw the
-    # random spare set from the goal band (layers >= shallowest goal-head layer), matching necessity's pool.
-    goal_from = min(l for l, _ in goal_heads)
+    # random spare set from the --control_pool floor, DISJOINT from the goal heads (matching necessity).
+    ctrl_from = control_from_layer(args, goal_heads, mt.n_layer)
+    gh = set(map(tuple, goal_heads))
     rng = random.Random(args.seed)
-    pool = [(l, h) for l in range(goal_from, mt.n_layer) for h in range(mt.n_heads)]
+    pool = [(l, h) for l in range(ctrl_from, mt.n_layer) for h in range(mt.n_heads) if (l, h) not in gh]
     rand_preserve = rng.sample(pool, min(len(goal_heads), len(pool)))
     control = complement_heads(rand_preserve, args.from_layer, mt.n_layer, mt.n_heads)
 

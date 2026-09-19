@@ -32,7 +32,7 @@ import sys
 sys.path.append(".")
 
 from scripts.evaluation.ablation_common import (  # noqa: E402
-    common_argparser, load_setup, random_heads_like, run_ablation_eval,
+    common_argparser, control_from_layer, load_setup, random_heads_like, run_ablation_eval,
 )
 
 
@@ -47,17 +47,17 @@ def main():
     args = ap.parse_args()
     mt, goal_heads, datapoints, config, results_dir = load_setup(args)
 
-    # ablate exactly the goal heads; matched control = a random |goal| set from the goal band (so it is
-    # depth-comparable; from_layer = the shallowest goal-head layer).
-    goal_from = min(l for l, _ in goal_heads)
+    # ablate exactly the goal heads; matched control = a random |goal| set (disjoint from the goal heads)
+    # drawn from the --control_pool floor (goal_band = shallowest goal layer; later_half = n_layer//2).
+    ctrl_from = control_from_layer(args, goal_heads, mt.n_layer)
     rng = random.Random(args.seed)
-    control = random_heads_like(goal_heads, goal_from, mt.n_layer, mt.n_heads, goal_heads, rng)
+    control = random_heads_like(goal_heads, ctrl_from, mt.n_layer, mt.n_heads, goal_heads, rng)
 
     strategy = "sink" if args.sink_strat == "bos" else args.sink_strat
     run_ablation_eval(
         mt, datapoints, goal_heads, control, goal_heads,
         axis="necessity", ablated_name="goal", strategy=strategy, config=config,
-        results_dir=results_dir, from_layer=goal_from, sink_pos=args.sink_pos,
+        results_dir=results_dir, from_layer=ctrl_from, sink_pos=args.sink_pos,
         gen_max_new_tokens=args.gen_max_new_tokens, seed=args.seed, overwrite=args.overwrite,
     )
 

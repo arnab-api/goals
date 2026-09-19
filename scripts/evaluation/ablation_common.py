@@ -263,6 +263,9 @@ def run_dir_for(results_dir, model, axis, config):
     leaf = (f"heads={config['ablated_name']}__goal{config['n_goal']}__fromL={config['from_layer']}"
             f"__strat={config['strategy']}__dtype={config['datatype']}__nspec={config['n_specs']}"
             f"__seed={config['seed']}")
+    # tag non-default control pools so they don't clobber the historical (goal_band) runs
+    if config.get("control_pool", "goal_band") != "goal_band":
+        leaf += f"__ctrl={config['control_pool']}"
     return Path(results_dir) / "evaluation" / "ablation" / slug / axis / leaf
 
 
@@ -278,6 +281,10 @@ def common_argparser(description):
     ap.add_argument("--from_layer", type=int, default=20,
                     help="sufficiency: blind non-goal heads in layers >= this (layers < it untouched). "
                          "necessity: lower bound of the matched random-control pool.")
+    ap.add_argument("--control_pool", choices=["goal_band", "later_half"], default="goal_band",
+                    help="where the matched random control heads are drawn from (both exclude the goal "
+                         "heads). goal_band: layers >= shallowest goal-head layer (historical). "
+                         "later_half: layers >= n_layer//2 (depth-stable across head budgets).")
     ap.add_argument("--sink_pos", type=int, default=0,
                     help="sink strategy only: the single key an ablated head may attend to (default 0)")
     ap.add_argument("--gen_max_new_tokens", type=int, default=64, help="frontier-body greedy budget")
@@ -318,8 +325,17 @@ def load_setup(args):
     goal_heads = load_json_heads(heads_path, mt.n_layer, mt.n_heads)
     config = dict(model=args.model, dataset=str(args.dataset), datatype=_dt_tag(args.datatypes),
                   datatypes=list(args.datatypes), n_specs=len(datapoints), seed=args.seed,
-                  sink_pos=args.sink_pos, heads_spec=heads_path, n_goal=len(goal_heads))
+                  sink_pos=args.sink_pos, heads_spec=heads_path, n_goal=len(goal_heads),
+                  control_pool=getattr(args, "control_pool", "goal_band"))
     return mt, goal_heads, datapoints, config, results_dir
+
+
+def control_from_layer(args, goal_heads, n_layer):
+    """Lower bound of the matched random-control pool for the chosen ``--control_pool``:
+    later_half → n_layer//2 (depth-stable across head budgets); goal_band → shallowest goal-head layer."""
+    if getattr(args, "control_pool", "goal_band") == "later_half":
+        return n_layer // 2
+    return min(l for l, _ in goal_heads)
 
 
 def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, *, axis, ablated_name,
