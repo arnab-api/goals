@@ -98,6 +98,12 @@ def _summarize(records):
         native_b_rate=rate(lambda r: (r["causal"]["label"] == "dst") if r.get("causal") else None),
         gaze_shift_rate=rate(lambda r: r["gaze"]["shifted"] if r.get("gaze") else None),
         gaze_clean_baseline_rate=rate(lambda r: r["gaze"].get("clean_prefers_src") if r.get("gaze") else None),
+        # joint B/C/D verdict — MUTUALLY EXCLUSIVE shares (sum to 1 minus parse errors), unlike the
+        # binary causal(D)/literalC(C) marginals above which can double-count when C and D compete.
+        joint_native_rate=rate(lambda r: (r["joint"]["label"] == "native") if r.get("joint") else None),
+        joint_c_rate=rate(lambda r: (r["joint"]["label"] == "src_target") if r.get("joint") else None),
+        joint_d_rate=rate(lambda r: (r["joint"]["label"] == "diff_target") if r.get("joint") else None),
+        joint_neither_rate=rate(lambda r: (r["joint"]["label"] == "neither") if r.get("joint") else None),
     )
 
 
@@ -141,9 +147,11 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             n_steer=args.n_steer, max_new=args.max_new, alpha=alpha, n_pivot=1,
             restrict_to_task=args.restrict_goal_heads_to_task,
         )
-        causal = literal_c = readout = None
+        causal = literal_c = readout = joint = None
         if not args.no_oracle:
             causal = E.judge_causal(inst, raw["gen_patched"], model_name=args.oracle_model)
+            # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
+            joint = E.judge_joint(inst, raw["gen_patched"], model_name=args.oracle_model)
             # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
             readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"],
                                       model_name=args.oracle_model)
@@ -162,9 +170,10 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
         _ro = (f"readout={readout['source']}>{readout['dest']}>{readout['patched']}"
                f"[{'shift→D' if readout['shifted'] else 'no'}]") if readout else ""
         _l = f"literalC={'YES' if literal_c['wrote_c'] else 'no'}" if literal_c else ""
+        _j = f"joint={ {'native':'B','src_target':'C','diff_target':'D','neither':'-'}.get(joint['label'],'?') }" if joint else ""
         _g = (f"gaze={'shift→D' if gaze['shifted'] else 'no'}(m={gaze['margin']:+.3f},"
               f"clean_prefers_src={gaze['clean_prefers_src']})" if gaze else "—")
-        logger.info(f"[{variant}/{tag}]   => {_c} · {_ro} · {_l} · {_g}")
+        logger.info(f"[{variant}/{tag}]   => {_c} · {_ro} · {_l} · {_j} · {_g}")
 
         records[key] = dict(
             key=key, variant=variant, datatype=dt, src_lang=sl, dst_lang=dl,
@@ -173,7 +182,7 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             native_desc=inst.dst_next_desc,
             gen_src=raw["gen_src"], gen_dst=raw["gen_dst"], gen_patched=raw["gen_patched"],
             ro_src=raw["ro_src"], ro_dst=raw["ro_dst"], ro_patched=raw["ro_patched"],
-            causal=causal, readout=readout, literal_c=literal_c, gaze=gaze,
+            causal=causal, readout=readout, literal_c=literal_c, joint=joint, gaze=gaze,
         )
         results_fp.write_text(json.dumps(list(records.values()), indent=2))
 
@@ -183,6 +192,9 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
                 f"readout(D)={summ['readout_shift_rate']} native(B)={summ['native_b_rate']} "
                 f"literalC={summ['literal_c_rate']} gaze={summ['gaze_shift_rate']} "
                 f"(clean_baseline={summ['gaze_clean_baseline_rate']}) n={summ['n']}")
+    logger.info(f"[{variant}/{tag}] JOINT (exclusive): B(no-op)={summ['joint_native_rate']} "
+                f"C(src-target)={summ['joint_c_rate']} D(progress)={summ['joint_d_rate']} "
+                f"neither={summ['joint_neither_rate']}")
     return dict(variant=variant, datatype=dt, src_lang=sl, dst_lang=dl, **summ)
 
 
@@ -191,7 +203,7 @@ def parse_args():
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument("--cuda", default=None)
     ap.add_argument("--variants", nargs="+", default=["order_matched", "order_diff"],
-                    choices=["order_matched", "order_diff"])
+                    choices=["order_matched", "order_diff", "c_in_dst"])
     ap.add_argument("--datatypes", nargs="+", default=["int", "str", "list[int]", "list[str]"])
     ap.add_argument("--lang-transfers", nargs="+", default=["py-py"], choices=list(LANG_TRANSFERS))
     ap.add_argument("--naming", default="letters", choices=["natural", "letters"])

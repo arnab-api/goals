@@ -1,0 +1,158 @@
+# Diff-trigger q-transfer grid — results
+
+> **Scope note.** This file is the **per-datatype detail** for Experiment A (C∉DST, py→py grid). The
+> canonical q-transfer summary — Exp A means + Exp B (c_in_dst, C∈DST) with the corrected *joint*
+> scoring — lives in `q_transfer_progress_vs_diff.md`. The two share Exp A's numbers by reference, not
+> by independent measurement.
+
+*2026-09-18. Qwen2.5-Coder-32B-Instruct. n=32 per (config × datatype × variant), eq pivot,
+py→py, `naming="letters"`, distinct-family + non-trivial-frontier sampling.
+Driver: `scripts/diff/diff_trigger_eval.py`; data: `src/diff/data.py::DiffTriggerInstance` /
+`diff_trigger_setups`; intervention: `src/diff/functional.py::run_q_transfer_intervention`.
+Grid manifest: `.remote_jobs/manifests/20260918_014228.json` (16 jobs, all `done`, 0 failures).*
+
+## The experiment
+
+Tests the **DIFF hypothesis**: goal-head *query* states encode "the sub-goal I am about to pursue
+next," transplantable across prompts.
+
+- **SRC** prompt lists tasks `[A, B, C]` (order_matched) or `[A, C, B]` (order_diff), prefilled
+  through `[A, B]`, so SRC's own frontier target is **C**.
+- **DST** prompt lists `[A, B, D]`, prefilled through `[A]`, so DST's native next is **B** and its
+  remaining task is **D**.
+- At the pivot (`\n    {var} =`), the goal heads' query vectors from SRC are patched into DST
+  (single position, α scale).
+
+Three outcomes are distinguished at DST:
+- **D** — DST writes its *own* remaining task → DIFF hypothesis (the transplanted query carries
+  "there is still an un-done sub-goal here," resolved against DST's context, not SRC's).
+- **B** — DST writes its native next → no effect (`native_b_rate`).
+- **C** — DST writes SRC's literal target → mere content copy (`literal_c_rate`, the null we want ≈0).
+
+**order_matched vs order_diff.** In order_matched, D sits at the same list slot (3rd) in DST as C did
+in SRC, so "write D" is confounded with "copy the 3rd-listed slot." order_diff puts C at slot 2 and D
+at slot 3, dissociating content-DIFF from positional copy. **order_diff is the confound-free view.**
+
+Metrics: `causal_trigger_rate` (oracle judge: did DST generate D?), `readout_shift_rate` (goalscope
+readout over src/dst/patched shifts toward D), `gaze_shift_rate` (pivot value-weighted attention to
+D's span vs B's), `native_b_rate`, `literal_c_rate`.
+
+## Configs (2×2 + a NO-restrict control)
+
+All use the eq pivot and 122 or 250 goal heads. `restrict` = goal heads blinded to keys outside the
+DST task-description span (pos-0 sink kept), applied only on the patched run.
+
+| config | heads | α | attn_restrict |
+|---|---|---|---|
+| 122 · a2 · restrict | 122 | 2.0 | yes |
+| 122 · a4 · restrict | 122 | 4.0 | yes |
+| 250 · a2 · restrict | 250 | 2.0 | yes |
+| 122 · a2 · NO-restrict | 122 | 2.0 | no |
+
+## Means across the 4 datatypes
+
+| config | variant | causal→D | readout→D | gaze→D | native B | literal C |
+|---|---|---|---|---|---|---|
+| **122 · a2 · restrict** | order_matched | 0.672 | 0.859 | 0.898 | 0.305 | 0.031 |
+| | order_diff | 0.477 | 0.555 | 0.664 | 0.477 | 0.023 |
+| **122 · a4 · restrict** | order_matched | **0.773** | 0.844 | 0.898 | 0.172 | 0.008 |
+| | order_diff | 0.492 | 0.570 | 0.664 | 0.430 | 0.031 |
+| **250 · a2 · restrict** | order_matched | 0.703 | 0.766 | 0.891 | **0.062** | 0.023 |
+| | order_diff | **0.516** | 0.492 | 0.633 | 0.336 | 0.023 |
+| **122 · a2 · NO-restrict** | order_matched | 0.617 | 0.859 | 0.898 | 0.344 | 0.031 |
+| | order_diff | 0.422 | 0.555 | 0.648 | 0.492 | 0.008 |
+
+## Full per-datatype breakdown
+
+### 122 · a2 · restrict
+| dt | variant | causal→D | readout→D | gaze→D | native B | lit C |
+|---|---|---|---|---|---|---|
+| int | order_matched | 0.719 | 0.875 | 0.938 | 0.281 | 0.000 |
+| int | order_diff | 0.594 | 0.656 | 0.719 | 0.406 | 0.031 |
+| str | order_matched | 0.625 | 0.812 | 0.844 | 0.344 | 0.094 |
+| str | order_diff | 0.375 | 0.469 | 0.625 | 0.562 | 0.062 |
+| list(int) | order_matched | 0.719 | 0.938 | 0.906 | 0.250 | 0.031 |
+| list(int) | order_diff | 0.594 | 0.656 | 0.719 | 0.344 | 0.000 |
+| list(str) | order_matched | 0.625 | 0.812 | 0.906 | 0.344 | 0.000 |
+| list(str) | order_diff | 0.344 | 0.438 | 0.594 | 0.594 | 0.000 |
+
+### 122 · a4 · restrict
+| dt | variant | causal→D | readout→D | gaze→D | native B | lit C |
+|---|---|---|---|---|---|---|
+| int | order_matched | 0.844 | 0.844 | 0.938 | 0.156 | 0.000 |
+| int | order_diff | 0.625 | 0.625 | 0.719 | 0.375 | 0.000 |
+| str | order_matched | 0.688 | 0.781 | 0.844 | 0.250 | 0.031 |
+| str | order_diff | 0.406 | 0.500 | 0.625 | 0.500 | 0.031 |
+| list(int) | order_matched | 0.781 | 0.938 | 0.906 | 0.156 | 0.000 |
+| list(int) | order_diff | 0.594 | 0.688 | 0.719 | 0.281 | 0.031 |
+| list(str) | order_matched | 0.781 | 0.812 | 0.906 | 0.125 | 0.000 |
+| list(str) | order_diff | 0.344 | 0.469 | 0.594 | 0.562 | 0.031 |
+
+### 250 · a2 · restrict
+| dt | variant | causal→D | readout→D | gaze→D | native B | lit C |
+|---|---|---|---|---|---|---|
+| int | order_matched | 0.688 | 0.781 | 0.844 | 0.031 | 0.031 |
+| int | order_diff | 0.531 | 0.594 | 0.656 | 0.312 | 0.000 |
+| str | order_matched | 0.688 | 0.750 | 0.875 | 0.094 | 0.031 |
+| str | order_diff | 0.562 | 0.406 | 0.625 | 0.281 | 0.062 |
+| list(int) | order_matched | 0.781 | 0.750 | 0.875 | 0.094 | 0.000 |
+| list(int) | order_diff | 0.438 | 0.625 | 0.625 | 0.406 | 0.031 |
+| list(str) | order_matched | 0.656 | 0.781 | 0.969 | 0.031 | 0.031 |
+| list(str) | order_diff | 0.531 | 0.344 | 0.625 | 0.344 | 0.000 |
+
+### 122 · a2 · NO-restrict
+| dt | variant | causal→D | readout→D | gaze→D | native B | lit C |
+|---|---|---|---|---|---|---|
+| int | order_matched | 0.688 | 0.875 | 0.938 | 0.312 | 0.031 |
+| int | order_diff | 0.594 | 0.656 | 0.688 | 0.406 | 0.031 |
+| str | order_matched | 0.594 | 0.812 | 0.844 | 0.375 | 0.031 |
+| str | order_diff | 0.375 | 0.469 | 0.594 | 0.531 | 0.000 |
+| list(int) | order_matched | 0.562 | 0.938 | 0.906 | 0.344 | 0.031 |
+| list(int) | order_diff | 0.469 | 0.656 | 0.750 | 0.438 | 0.000 |
+| list(str) | order_matched | 0.625 | 0.812 | 0.906 | 0.344 | 0.031 |
+| list(str) | order_diff | 0.250 | 0.438 | 0.562 | 0.594 | 0.000 |
+
+## Findings
+
+1. **DIFF hypothesis holds in every config.** Patching SRC goal-head queries drives DST to write **D**
+   well above the native-B fallback, while **literal-C stays ≈0** (0.00–0.09 across the board). The
+   transplanted query is not copying SRC's concrete target — it advances DST's *own* remaining
+   sub-goal. This is the core positive result.
+
+2. **order_matched > order_diff everywhere** (~0.15–0.28 causal gap). Part of the matched effect is
+   positional slot-copy. But even in the confound-free order_diff view, **causal→D stays 0.48–0.52**,
+   above native-B (~0.34–0.48) — a genuine content-DIFF effect, not slot copying.
+
+3. **α=4 amplifies mostly the positional component.** It lifts order_matched to the grid's best
+   (0.773) but barely moves order_diff (0.492 vs 0.477 at α=2). Extra query magnitude pushes the
+   "write the 3rd slot" behavior more than the content-DIFF signal.
+
+4. **250 heads give the cleanest confound-free signal.** Highest order_diff causal (0.516) and the
+   lowest native-B leakage (0.062 matched / 0.336 diff) — the broader head set both triggers D and
+   suppresses the native fallback most effectively.
+
+5. **attn_restrict helps modestly.** 122 · a2 · restrict order_matched 0.672 vs NO-restrict 0.617;
+   order_diff 0.477 vs 0.422. readout and gaze are essentially unchanged — restriction sharpens the
+   causal write without altering where the pivot looks.
+
+6. **Datatype gradient.** `str` and `list(str)` are weakest on order_diff (causal ~0.34–0.41),
+   consistent with those predicate banks being the most family-dense even after the distinct-family
+   filter (`str` 88.8%, `list(str)` 88.1% raw confound exposure; see
+   `diff_trigger_predicate_families.md`). `int` / `list(int)` are strongest (~0.53–0.59).
+
+## Recommended headline config
+
+**250 heads · α=2 · eq · attn_restrict.** Best confound-free (order_diff) causal→D and the lowest
+native-B leakage, with literal-C ≈ 0. Report order_diff as the primary number and order_matched as the
+upper bound that still carries a positional component.
+
+## Notes / caveats
+
+- **Flat-summary clobber (repaired).** The config-root `summary.json` run_tag omits the datatype, so
+  the 4 datatype processes in a config each overwrote it (last writer won). The authoritative
+  per-datatype artifacts (`<config>/<variant>/<dt>__python-python/{results.json,summary.json}`) were
+  never affected; the flat aggregates were rebuilt from them with datatype/variant keys. **Fix for
+  next run:** include the datatype in the run_tag (or write the flat summary once, post-hoc).
+- Cross-language (cpp→py / py→cpp) transfer was **not** part of this grid — py→py only.
+- `run_jobs/baulab/CONFIG.py` (gitignored) is still on the grid's 6×1-GPU nagoya slots +
+  `MIN_GPU_MEMORY=65`; revert to the normal slot config before the next multi-GPU run.

@@ -2351,7 +2351,7 @@ def _diff_family(datatype: str, pred_id: str) -> str:
 
 def diff_trigger_setups(
     datatype: str,
-    variant: Literal["order_matched", "order_diff"] = "order_matched",
+    variant: Literal["order_matched", "order_diff", "c_in_dst"] = "order_matched",
     n_samples: int = 8,
     seed: int = 0,
     presentation: Presentation = "listed",
@@ -2366,9 +2366,16 @@ def diff_trigger_setups(
     pairwise-compatible predicates A, B, C, D from the datatype's :data:`QTASKS` bank and builds the
     shared-{A,B} contrast. ``variant="order_matched"`` lists SRC as [A,B,C] (C in the 3rd slot, like
     DST's D); ``variant="order_diff"`` lists SRC as [A,C,B] (C in the 2nd slot) to dissociate the DIFF
-    outcome (D) from a positional "copy the 3rd-listed" account. Deduped by the ordered 4-tuple;
-    reproducible via ``seed``."""
-    assert variant in ("order_matched", "order_diff")
+    outcome (D) from a positional "copy the 3rd-listed" account.
+
+    ``variant="c_in_dst"`` is the *target-present* setup: BOTH sides list all four predicates so that
+    SRC's transplant target C is also available in DST — SRC=[A,B,C,D] prefill{A,B} (frontier C),
+    DST=[A,B,D,C] prefill{A} (native B). Transplanting SRC's pivot query then has three legible
+    outcomes: **B** (no-op, DST's native next), **C** (query is content-addressed / "already knows what
+    it's looking for" — C now exists in DST), or **D** (query carries only progress ⟨A,B⟩, so DST's
+    slot after ⟨A,B⟩ is D = the DIFF prediction). Scored via the usual roles: causal→D, literal→C,
+    native→B. Deduped by the ordered 4-tuple; reproducible via ``seed``."""
+    assert variant in ("order_matched", "order_diff", "c_in_dst")
     bank = QTASKS[datatype]
     preds = list(bank.predicates)
     assert len(preds) >= 4, f"need >=4 predicates in the {datatype!r} bank, have {len(preds)}"
@@ -2397,8 +2404,13 @@ def diff_trigger_setups(
                    for b in (A, B, C, D)[i + 1:]):
             continue
         seen.add(quad)
-        src_order = (A, B, C) if variant == "order_matched" else (A, C, B)
-        dst_order = (A, B, D)
+        if variant == "c_in_dst":
+            # target-present: both sides list all four; SRC target C is also in DST (last slot).
+            src_order = (A, B, C, D)
+            dst_order = (A, B, D, C)
+        else:
+            src_order = (A, B, C) if variant == "order_matched" else (A, C, B)
+            dst_order = (A, B, D)
         out.append(DiffTriggerInstance(
             datatype=datatype,
             src_order=src_order,

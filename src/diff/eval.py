@@ -127,6 +127,90 @@ def judge_causal(inst, patched_gen: str, **kw) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 1b. joint B/C/D classifier — a single MUTUALLY-EXCLUSIVE verdict
+# ══════════════════════════════════════════════════════════════════════════════
+# For the ``c_in_dst`` (target-present) setup, both the SRC target (C) and the DST progress-slot (D)
+# are available in DST, so the two independent binary calls (causal=D-vs-B, literal=C-vs-B) can BOTH
+# fire on one generation and the marginals need not sum to <=1. This single call sorts each generation
+# into exactly one of {native (B), src_target (C), diff_target (D), neither}, so the shares partition.
+JointLabel = Literal["native", "src_target", "diff_target", "neither", "parse_error"]
+
+_J2LABEL = {"1": "native", "2": "src_target", "3": "diff_target",
+            "NEITHER": "neither", "PARSE_ERROR": "parse_error"}
+
+
+def _joint_prompt(text: str, native_desc: str, src_desc: str, diff_desc: str,
+                  task_desc: str, kind: str) -> str:
+    return f"""A language model is writing code for this task:
+  TASK: {task_desc}
+
+Three candidate sub-goals it might pursue next:
+  (1): {native_desc}
+  (2): {src_desc}
+  (3): {diff_desc}
+
+Below is {kind}. Decide which ONE of the three sub-goals it expresses / pursues. Treat a non-trivial
+partial implementation or an explicit mention as pursuing that sub-goal.
+
+IMPORTANT — judge by the actual COMPUTATION / logic the code performs, NOT by variable, function, or
+identifier names. Names can be arbitrary, autocompleted, or outright misleading, so a statement that
+*computes* sub-goal X is pursuing X even when its variable is named after something else (e.g.
+`num_digits = (n < 0) ? -n : n;` computes an absolute value regardless of the name `num_digits`).
+
+--- BEGIN ---
+{text}
+--- END ---
+
+Classify as exactly one of:
+  1        - pursues (1), not (2) or (3)
+  2        - pursues (2), not (1) or (3)
+  3        - pursues (3), not (1) or (2)
+  NEITHER  - none of the three (unrelated, empty, or generic)
+If it clearly computes more than one, pick the one it performs FIRST.
+
+Answer with: <verdict>1|2|3|NEITHER</verdict> then a one-line <why>...</why>."""
+
+
+def _parse_joint(text: str) -> tuple[str, str]:
+    m = re.search(r"<verdict>\s*(1|2|3|NEITHER)\s*</verdict>", text, re.I)
+    v = m.group(1).upper() if m else "PARSE_ERROR"
+    w = re.search(r"<why>\s*(.*?)\s*</why>", text, re.I | re.S)
+    return v, (w.group(1).strip() if w else "")
+
+
+def classify_joint(text: str, native_desc: str, src_desc: str, diff_desc: str, task_desc: str,
+                   kind: str = "code the model generated", model_name: str = "claude-sonnet-4-6",
+                   use_cache: bool = True) -> dict:
+    """Single mutually-exclusive verdict: does ``text`` pursue the native (B), src_target (C), or
+    diff_target (D) sub-goal (or neither)? Returns ``{"label": JointLabel, "why": str, "raw": str}``."""
+    if not text or not text.strip():
+        return {"label": "neither", "why": "empty", "raw": ""}
+    from src.utils.oracle_llms import ask_claude
+
+    raw = ask_claude(
+        _joint_prompt(text, native_desc, src_desc, diff_desc, task_desc, kind),
+        system_prompt=CONCEPT_SYSTEM, max_tokens=768, use_cache=use_cache, model_name=model_name,
+    )
+    v, why = _parse_joint(raw)
+    return {"label": _J2LABEL[v], "why": why, "raw": raw}
+
+
+def judge_joint(inst, patched_gen: str, **kw) -> dict:
+    """Joint B/C/D verdict over the patched DST continuation (judging only its FIRST computation).
+    ``label`` is exactly one of native (B) / src_target (C) / diff_target (D) / neither."""
+    return classify_joint(
+        patched_gen,
+        native_desc=inst.dst_next_desc,      # B — DST's own next
+        src_desc=inst.src_target_desc,       # C — SRC transplant target (present in DST for c_in_dst)
+        diff_desc=inst.expected_next_desc,   # D — DST progress-slot (the DIFF-predicted outcome)
+        task_desc=inst.task_desc,
+        kind="the code the model generated to continue the function after the pivot. Judge ONLY the "
+             "FIRST computation/statement it performs (ignore anything it does afterwards)",
+        **kw,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 2. readout shift — classify all three goalscope readouts
 # ══════════════════════════════════════════════════════════════════════════════
 def eval_readouts(inst, source_readout: str, dest_readout: str, patched_readout: str, **kw) -> dict:
