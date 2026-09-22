@@ -317,8 +317,10 @@ def _unit(M):
     return (M / M.norm(dim=-1, keepdim=True)).numpy()
 
 
-def compute_curves(records, prog_grid=DEFAULT_PROG_GRID):
-    """cos(pivot_i, encoding_at_p_j) aggregated over relation masks, incl. cross-language same-sub-goal."""
+def compute_curves(records, prog_grid=DEFAULT_PROG_GRID, collapse_lang=False):
+    """cos(pivot_i, encoding_at_p_j) aggregated over relation masks. With ``collapse_lang=True`` the
+    same-lang/cross-lang variants of the diff-context comparisons are pooled (ii+ii* → "same pred, diff
+    ctx"; iv+iv* → "diff pred, diff ctx"), giving the 4-mask view; else the 6-mask split is returned."""
     if not records:
         return {}
     P = _unit(torch.stack([r["pivot"] for r in records]))
@@ -332,14 +334,22 @@ def compute_curves(records, prog_grid=DEFAULT_PROG_GRID):
     same_ctx = ctx[:, None] == ctx[None, :]
     same_lang = lang[:, None] == lang[None, :]
     # note: same_ctx ⟹ same_lang (ctx_key includes the language), so there is no cross-lang `iii`.
-    masks = {
-        "i   same condition": eye,
-        "ii  same pred, diff ctx, same lang": same_pred & ~same_ctx & same_lang,
-        "ii* same pred, diff ctx, cross lang": same_pred & ~same_ctx & ~same_lang,
-        "iii diff pred, same ctx": ~same_pred & same_ctx,
-        "iv  diff pred, diff ctx, same lang": ~same_pred & ~same_ctx & same_lang,
-        "iv* diff pred, diff ctx, cross lang": ~same_pred & ~same_ctx & ~same_lang,
-    }
+    if collapse_lang:
+        masks = {
+            "i   same condition": eye,
+            "ii  same pred, diff ctx": same_pred & ~same_ctx,
+            "iii diff pred, same ctx": ~same_pred & same_ctx,
+            "iv  diff pred, diff ctx": ~same_pred & ~same_ctx,
+        }
+    else:
+        masks = {
+            "i   same condition": eye,
+            "ii  same pred, diff ctx, same lang": same_pred & ~same_ctx & same_lang,
+            "ii* same pred, diff ctx, cross lang": same_pred & ~same_ctx & ~same_lang,
+            "iii diff pred, same ctx": ~same_pred & same_ctx,
+            "iv  diff pred, diff ctx, same lang": ~same_pred & ~same_ctx & same_lang,
+            "iv* diff pred, diff ctx, cross lang": ~same_pred & ~same_ctx & ~same_lang,
+        }
     curves = {}
     for name, m in masks.items():
         curves[name] = {}

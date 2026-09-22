@@ -66,7 +66,7 @@ def metric_kw(metric: str, color: str) -> dict:
     hatched = m in ("causality", "readout", "readout_shift", "readout-shift", "readout shift")
     kw = dict(color=color, edgecolor="white", linewidth=0.6)
     if hatched:
-        kw.update(hatch=HATCH, edgecolor=color, color="none")  # outline + hatch in the series colour
+        kw.update(hatch=HATCH, edgecolor="white")  # coloured FILL + white diagonal stripes
     return kw
 
 
@@ -105,13 +105,25 @@ def set_style(base_fontsize: int = 10):
 
 
 # ── legend proxies + save ─────────────────────────────────────────────────────────
-def metric_legend_handles():
-    """Two proxy handles explaining the solid/hatched metric convention."""
+def metric_legend_handles(labels=("faithfulness", "causality")):
+    """Two proxy handles explaining the solid/hatched metric convention (colour fill + white stripes)."""
     from matplotlib.patches import Patch
     return [
-        Patch(facecolor="grey", edgecolor="white", label="faithfulness"),
-        Patch(facecolor="none", edgecolor="grey", hatch=HATCH, label="causality"),
+        Patch(facecolor="grey", edgecolor="white", label=labels[0]),
+        Patch(facecolor="grey", edgecolor="white", hatch=HATCH, label=labels[1]),
     ]
+
+
+def legend_top(ax, handles=None, labels=None, title_pad=26, **kw):
+    """Place the legend in a single row at the TOP of the axes, just below the title.
+    Call after set_title. Pass handles/labels or let it read them from the axes."""
+    if handles is None:
+        handles, labels = ax.get_legend_handles_labels()
+    if ax.get_title():
+        ax.set_title(ax.get_title(), pad=title_pad)
+    ax.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 1.0),
+              ncol=len(labels), frameon=False, handlelength=1.6, columnspacing=1.4,
+              borderaxespad=0.2, **kw)
 
 
 def save_fig(fig, group: str, name: str, also_png: bool = True):
