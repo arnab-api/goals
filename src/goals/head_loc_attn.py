@@ -313,6 +313,10 @@ def get_o_proj_inputs_batch(
         if isinstance(prompts, list):
             error_msg += f"\nList element types: {[type(p) for p in prompts]}"
         raise ValueError(error_msg)
+    # nnsight requires envoys (layers) be accessed in ascending order within a trace, else
+    # OutOfOrderError. Callers may pass layers in arbitrary order (e.g. heads drawn by random
+    # sampling), so sort defensively — the returned dict is keyed by layer, so order-independent.
+    layers = sorted(layers)
     if patch_interface is None:
         saves: dict[int, Any] = {}
         with mt.trace(inputs, scan=False, validate=False):

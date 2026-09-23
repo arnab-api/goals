@@ -218,9 +218,11 @@ def cache_dir(slug, results_dir=None):
     return os.path.join(rd, "temporal_persistence", slug)
 
 
-def _cond_key(slug, budget, datatype, pred_id, lang, ctx_key, max_new):
+def _cond_key(slug, budget, datatype, pred_id, lang, ctx_key, max_new, head_tag="goal"):
     payload = (f"{slug}|{budget}|{datatype}|{pred_id}|{lang}|{ctx_key}|{max_new}"
                f"|{PRIMITIVE_VERSION}|{DESIGN_VERSION}")
+    if head_tag != "goal":  # keep goal keys unchanged (reuse existing cache); control gets its own
+        payload += f"|{head_tag}"
     return hashlib.md5(payload.encode()).hexdigest()[:16]
 
 
@@ -242,11 +244,18 @@ def build_records(
     force=False,
     results_dir=None,
     progress=True,
+    head_tag="goal",
 ):
     """Return list[record] for one (datatype, lang). Each non-seed condition of each context is probed
     with a frontier prefill and cached per (sub-task, lang, context). record = dict(datatype, lang,
-    pred_id, pred, ctx_key, var, pos, pivot(T), traj(T), n_impl, model, budget)."""
+    pred_id, pred, ctx_key, var, pos, pivot(T), traj(T), n_impl, model, budget).
+
+    ``goal_heads`` is the head set whose summed residual write forms the encoding; ``head_tag`` names it
+    (``goal`` = the goal heads, cached in the root dir; anything else, e.g. ``control``, is cached in a
+    ``<head_tag>/`` subdir so it never collides with the goal cache)."""
     cdir = cache_dir(slug, results_dir)
+    if head_tag != "goal":
+        cdir = os.path.join(cdir, head_tag)
     os.makedirs(cdir, exist_ok=True)
     setups = D.multi_predicate_setups(
         datatype, n_conditions=list(n_cond), n_samples=n_trials, seed=seed,
@@ -266,7 +275,7 @@ def build_records(
         preds = inst._preds_for(inst.src_frontier)
         for t in range(1, len(preds)):  # probe every non-seed condition (a=pos0 is the prefilled seed)
             pid = preds[t].id
-            cpath = os.path.join(cdir, f"cond_{_cond_key(slug, budget, datatype, pid, lang, ck, max_new)}.pt")
+            cpath = os.path.join(cdir, f"cond_{_cond_key(slug, budget, datatype, pid, lang, ck, max_new, head_tag)}.pt")
             if os.path.exists(cpath) and not force:
                 rec = torch.load(cpath)["record"]
                 if rec["n_impl"] >= min_impl:  # apply the filter on reload too (cache ignores min_impl)
@@ -295,7 +304,7 @@ def build_records(
             rec = dict(
                 datatype=datatype, lang=lang, pred_id=pid, pred=preds[t].description,
                 ctx_key=ck, var=tv, pos=t, pivot=enc[0].clone(), traj=enc[1:].clone(),
-                n_impl=len(impl), model=slug, budget=budget,
+                n_impl=len(impl), model=slug, budget=budget, head_tag=head_tag,
             )
             tmp = cpath + ".tmp"
             torch.save({"record": rec}, tmp)

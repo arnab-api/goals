@@ -62,6 +62,11 @@ def parse_args():
     ap.add_argument("--prog-grid", type=float, nargs="+", default=TP.DEFAULT_PROG_GRID)
     ap.add_argument("--oracle-model", default="claude-sonnet-4-6")
     ap.add_argument("--no-oracle", action="store_true", help="rule-based python segmentation (no oracle)")
+    ap.add_argument("--control", action="store_true",
+                    help="use a matched-count CONTROL head set (later-half of the LM, non-goal) instead of "
+                         "the goal heads; records go to a 'control/' sub-dir (head_tag='control')")
+    ap.add_argument("--control-seed", type=int, default=7,
+                    help="RNG seed for sampling the control head set")
     ap.add_argument("--force", action="store_true", help="ignore cache; recompute every condition")
     ap.add_argument("--dry-run", action="store_true", help="build corpus + prompts only; NO model/oracle")
     logging_utils.add_logging_args(ap)
@@ -106,20 +111,42 @@ def main():
 
     import torch
     from src.models import ModelandTokenizer
+    # When --cuda pins a single visible GPU, force the whole model onto it ({"":0}) instead of
+    # device_map="auto". "auto" leaves headroom and offloads the LAST layers to CPU/meta on a tight
+    # GPU; reading an offloaded head's o_proj.weight OUTSIDE a forward pass then raises
+    # "Cannot copy out of meta tensor". The control heads live in the later half (layers 32-63), so
+    # they hit exactly those offloaded layers. Weight placement doesn't affect the numeric result.
+    single_gpu = args.cuda is not None and "," not in str(args.cuda)
+    device_map = {"": 0} if single_gpu else "auto"
     mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
-                           device_map="auto", attn_implementation="eager")
+                           device_map=device_map, attn_implementation="eager")
     goal_heads = TP.load_goal_heads(mt, slug, args.head_budget)
-    logger.info(f"{slug}: {len(goal_heads)} goal heads (budget={args.head_budget}) -> {out_dir}")
+    head_tag = "goal"
+    heads = goal_heads
+    if args.control:
+        import random as _random
+        sys.path.append(os.path.join(os.path.dirname(__file__)))
+        from ablation_common import random_heads_like
+        rng = _random.Random(args.control_seed)
+        heads = random_heads_like(
+            ablated=goal_heads, from_layer=mt.n_layer // 2,
+            n_layer=mt.n_layer, n_heads=mt.n_heads, exclude=goal_heads, rng=rng,
+        )
+        head_tag = "control"
+        logger.info(f"{slug}: CONTROL head set — {len(heads)} heads sampled from layers "
+                    f"[{mt.n_layer // 2}, {mt.n_layer}) (seed={args.control_seed}), disjoint from goal heads")
+    logger.info(f"{slug}: {len(heads)} {head_tag} heads (budget={args.head_budget}) -> {out_dir}")
 
     all_records = []
     per_cell = {}
     for dt in args.datatypes:
         for lang in args.langs:
             recs = TP.build_records(
-                mt, slug, goal_heads, dt, lang,
+                mt, slug, heads, dt, lang,
                 budget=args.head_budget, n_trials=args.n_trials, n_cond=tuple(args.n_cond),
                 seed=args.seed, min_impl=args.min_impl, max_new=args.max_new,
                 use_oracle=not args.no_oracle, oracle_model=args.oracle_model, force=args.force,
+                head_tag=head_tag,
             )
             per_cell[f"{dt}/{lang}"] = len(recs)
             all_records.extend(recs)
@@ -136,10 +163,12 @@ def main():
         for cell in per_cell
     }
     summ = dict(
-        model=args.model, budget=args.head_budget, n_conditions_total=len(all_records),
+        model=args.model, budget=args.head_budget, head_tag=head_tag,
+        n_conditions_total=len(all_records),
         per_cell_counts=per_cell, prog_grid=args.prog_grid, pooled=pooled, by_cell=by_cell,
     )
-    with open(os.path.join(out_dir, "summary.json"), "w") as f:
+    summ_name = "summary.json" if head_tag == "goal" else f"summary_{head_tag}.json"
+    with open(os.path.join(out_dir, summ_name), "w") as f:
         json.dump(summ, f, indent=2)
 
     logger.info(f"=== {slug} · pooled retention curves (n_conditions={len(all_records)}) ===")
