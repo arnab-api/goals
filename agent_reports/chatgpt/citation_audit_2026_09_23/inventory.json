@@ -1,0 +1,313 @@
+[
+  {
+    "file": "Text/01_intro.tex",
+    "line": 13,
+    "keys": [
+      "dennett1987"
+    ],
+    "context": " check the citations.}  \\input{Text/Figures/teaser}  Do LLMs have goals? We often attempt to explain and predict a systems behavior by attributing goals and beliefs to it, without specifying how these might be realized internally \\citep{dennett1987}. However, as LLMs are trained to mimic human language, even if they behave on their generated text as if they have goals, we should be careful not to take this as an evidence of actual goal-pursuit. Siding with \\cite{fodor1987}, we want to ask do apparent goal-pursuit behavior c"
+  },
+  {
+    "file": "Text/01_intro.tex",
+    "line": 13,
+    "keys": [
+      "fodor1987"
+    ],
+    "context": "citep{dennett1987}. However, as LLMs are trained to mimic human language, even if they behave on their generated text as if they have goals, we should be careful not to take this as an evidence of actual goal-pursuit. Siding with \\cite{fodor1987}, we want to ask do apparent goal-pursuit behavior correspond to an \\textbf{explicit representation in LLM internals}. \\arnab{taking a side! although this is technically true, de we actually want to say something like this?}  First, we have to define ``goal'' (or ``intent'', used"
+  },
+  {
+    "file": "Text/01_intro.tex",
+    "line": 15,
+    "keys": [
+      "bratman1987intention"
+    ],
+    "context": "sentation in LLM internals}. \\arnab{taking a side! although this is technically true, de we actually want to say something like this?}  First, we have to define ``goal'' (or ``intent'', used interchangeably throughout). Following \\cite{bratman1987intention}'s planning theory, we define goal as a \\emph{functional} states as having three attributes: (i) \\textbf{pre-commitment:} an intermediate state a resource-bounded agent commits to before action \\citep{bratman1987intention, williams2026intention}, (ii) \\textbf{plasticity:} the sam"
+  },
+  {
+    "file": "Text/01_intro.tex",
+    "line": 15,
+    "keys": [
+      "bratman1987intention",
+      " williams2026intention"
+    ],
+    "context": "ollowing \\cite{bratman1987intention}'s planning theory, we define goal as a \\emph{functional} states as having three attributes: (i) \\textbf{pre-commitment:} an intermediate state a resource-bounded agent commits to before action \\citep{bratman1987intention, williams2026intention}, (ii) \\textbf{plasticity:} the same goal admits to different means of realization as suited to the environment \\citep{lee2020operationalizing}, and (iii) \\textbf{persistence:} the encoding is sustained across and guides the course of its execution \\citep{bratman1987intention, le"
+  },
+  {
+    "file": "Text/01_intro.tex",
+    "line": 15,
+    "keys": [
+      "lee2020operationalizing"
+    ],
+    "context": "termediate state a resource-bounded agent commits to before action \\citep{bratman1987intention, williams2026intention}, (ii) \\textbf{plasticity:} the same goal admits to different means of realization as suited to the environment \\citep{lee2020operationalizing}, and (iii) \\textbf{persistence:} the encoding is sustained across and guides the course of its execution \\citep{bratman1987intention, lee2020operationalizing}. Functional definition of goal with these three attributes let's us ask concrete questions and check whether LLMs mainta"
+  },
+  {
+    "file": "Text/01_intro.tex",
+    "line": 15,
+    "keys": [
+      "bratman1987intention",
+      " lee2020operationalizing"
+    ],
+    "context": "ticity:} the same goal admits to different means of realization as suited to the environment \\citep{lee2020operationalizing}, and (iii) \\textbf{persistence:} the encoding is sustained across and guides the course of its execution \\citep{bratman1987intention, lee2020operationalizing}. Functional definition of goal with these three attributes let's us ask concrete questions and check whether LLMs maintain such a state in their internal computations.                   To investigate the possible representation of goals in a controlled setting, we study LLMs du"
+  },
+  {
+    "file": "Text/01_intro.tex",
+    "line": 38,
+    "keys": [
+      "ghandeharioun2024patchscope"
+    ],
+    "context": "eads}). We find that the encoding captured by these heads can trigger the execution of the same sub-goal in a different programming language, realized in a different sequence of tokens (\\textbf{plasticity}). Moreover, building on \\cite{ghandeharioun2024patchscope}'s \\textsc{PatchScope}, we can build a lightweight probe that can \\emph{readout} a natural language description of the upcoming sub-goal using the output of these heads. We find that the upcoming operation can be verbalized with the sub-goal encoding captured by the goal heads mu"
+  },
+  {
+    "file": "Text/02_notations.tex",
+    "line": 46,
+    "keys": [
+      "vig-etal-2020",
+      " mueller2026quest"
+    ],
+    "context": "eated measurements per specification. A concrete example prompt and the data-distribution is included in \\Cref{app:task}.    \\subsection{Intervention Primitives} \\label{sec:notations:interventions} \\paragraph{Activation patching} \\citep{vig-etal-2020, mueller2026quest}. We run $\\M$ on a prompt $p$ but overwrite a chosen set of internal activations with latents cached from a different run, and read out the effect on the output distribution. We write $\\M\\left(p\\right)\\left[a_i^{\\ell j} \\leftarrow v\\right]$ for the forward pass on $p$ in which th"
+  },
+  {
+    "file": "Text/03_what.tex",
+    "line": 7,
+    "keys": [
+      "todd2024function"
+    ],
+    "context": "icity, and Persistence} \\label{sec:what}  \\input{Text/Figures/goalscope}  Can we read what the model is about to do before it starts the implementation?  Motivated by previous works on portable encodings such as function pointers \\citep{todd2024function} and filtering predicates \\citep{sensharma2025filter} we focus on attention heads. We locate the attention heads that carry a portable representation of a code operation. We then use their contributions at the pivot to describe the upcoming sub-goal and to trigger its implementat"
+  },
+  {
+    "file": "Text/03_what.tex",
+    "line": 7,
+    "keys": [
+      "sensharma2025filter"
+    ],
+    "context": "ext/Figures/goalscope}  Can we read what the model is about to do before it starts the implementation?  Motivated by previous works on portable encodings such as function pointers \\citep{todd2024function} and filtering predicates \\citep{sensharma2025filter} we focus on attention heads. We locate the attention heads that carry a portable representation of a code operation. We then use their contributions at the pivot to describe the upcoming sub-goal and to trigger its implementation in a new context.  \\subsection{Localizing goal he"
+  },
+  {
+    "file": "Text/03_what.tex",
+    "line": 21,
+    "keys": [
+      "ghandeharioun2024patchscope"
+    ],
+    "context": "luation} \\label{sec:what:readout} We use the attention heads identified in \\Cref{sec:heads:localize} to build \\goalscope, a lightweight probe that verbalizes the sub-goal encoded at a single token position. Building on Patchscope \\citep{ghandeharioun2024patchscope}, we cache what the selected heads write to the residual stream at the source pivot and sum these contributions into one vector. A separate run of the same model receives a fixed prompt with the user scope asking what operation it is performing. We inject the cached vector into t"
+  },
+  {
+    "file": "Text/persistance.tex",
+    "line": 19,
+    "keys": [
+      "bratman1987intention",
+      " cohen1990intention"
+    ],
+    "context": "blation}.} \\label{tab:goal-ablation} \\end{minipage} \\crefalias{tab:goal-ablation}{figure} \\vspace{-1em} \\end{figure}  An idealized goal-pursuing agent forms an intention to pursue $g_k$ and keeps it active until $g_k$ is achieved \\citep{bratman1987intention, cohen1990intention}. A transformer LM cannot really hold such a state continuously across generation steps. However, we check if the LM can \\emph{functionally} maintain its intent of doing the frontier $g_k$ throughout execution. The frontier encoding captured by the \\goalheads lets us test this di"
+  },
+  {
+    "file": "Text/persistance.tex",
+    "line": 21,
+    "keys": [
+      "goschke1993representation"
+    ],
+    "context": "erent sub-goal progression curves (orange lines) throughout. The gap shrinks shrinks towards the end, meaning that they gradually become equidistant from the pivot encoding. This observation is mirrors views from prior literature \\citep{goschke1993representation} that a pending intention stay highly active until it is executed, and then the activation drops \\citep{marsh1998activation}. The current intention (encoding of $g_k$) is \\emph{released} to prevent interference with the upcoming sub-goal $g_{k+1}$ \\citep{altmann2002memory}. We in"
+  },
+  {
+    "file": "Text/persistance.tex",
+    "line": 21,
+    "keys": [
+      "marsh1998activation"
+    ],
+    "context": "become equidistant from the pivot encoding. This observation is mirrors views from prior literature \\citep{goschke1993representation} that a pending intention stay highly active until it is executed, and then the activation drops \\citep{marsh1998activation}. The current intention (encoding of $g_k$) is \\emph{released} to prevent interference with the upcoming sub-goal $g_{k+1}$ \\citep{altmann2002memory}. We include more details on the setup, a control baseline, with \\goalscope readouts across the implementation of a few examples in"
+  },
+  {
+    "file": "Text/persistance.tex",
+    "line": 21,
+    "keys": [
+      "altmann2002memory"
+    ],
+    "context": "tention stay highly active until it is executed, and then the activation drops \\citep{marsh1998activation}. The current intention (encoding of $g_k$) is \\emph{released} to prevent interference with the upcoming sub-goal $g_{k+1}$ \\citep{altmann2002memory}. We include more details on the setup, a control baseline, with \\goalscope readouts across the implementation of a few examples in \\Cref{app:persistence:temporal}. In \\Cref{sec:diff} we discuss how a functional temporal persistence is realized within a depth-bounded transformer "
+  },
+  {
+    "file": "Text/04_heads.tex",
+    "line": 15,
+    "keys": [
+      "mcgrath2023hydra",
+      " wang2022interpretability"
+    ],
+    "context": "t the LM is flexible enough to compensate for the ablation by using redundant pathways with other goal heads to communicate $g_k$ to later layers. Prior literature has also found such redundancy and flexibility in LM computations \\citep{mcgrath2023hydra, wang2022interpretability}. The ablation strategy is shown with a concrete example in \\Cref{fig:necessity-setup}, with more details in \\Cref{app:ablation}.  In \\Cref{tab:goal-ablation}, we also include results for an equivalent amount of non-goal heads randomly sampled from the later half of the LM as con"
+  },
+  {
+    "file": "Text/05_steerable.tex",
+    "line": 8,
+    "keys": [
+      "todd2024function"
+    ],
+    "context": "context learning (ICL) tasks and chat settings.   \\textbf{Verbalizing implicit in-context relations.} We evaluate \\goalscope on a set of few-shot in-context learning (ICL) tasks drawn from three sources: single-relation ICL tasks~\\citep{todd2024function}, compositional ICL tasks~\\citep{khandelwal2026how}, and superposition ICL tasks~\\citep{xiong2025everything}.  For each setting, a prompt consists of input-output pairs that demonstrate an implicit relation, and we score each verbalization generated by \\goalscope against a natura"
+  },
+  {
+    "file": "Text/05_steerable.tex",
+    "line": 8,
+    "keys": [
+      "khandelwal2026how"
+    ],
+    "context": "\\textbf{Verbalizing implicit in-context relations.} We evaluate \\goalscope on a set of few-shot in-context learning (ICL) tasks drawn from three sources: single-relation ICL tasks~\\citep{todd2024function}, compositional ICL tasks~\\citep{khandelwal2026how}, and superposition ICL tasks~\\citep{xiong2025everything}.  For each setting, a prompt consists of input-output pairs that demonstrate an implicit relation, and we score each verbalization generated by \\goalscope against a natural language description of the task's (or sub-task's"
+  },
+  {
+    "file": "Text/05_steerable.tex",
+    "line": 8,
+    "keys": [
+      "xiong2025everything"
+    ],
+    "context": "evaluate \\goalscope on a set of few-shot in-context learning (ICL) tasks drawn from three sources: single-relation ICL tasks~\\citep{todd2024function}, compositional ICL tasks~\\citep{khandelwal2026how}, and superposition ICL tasks~\\citep{xiong2025everything}.  For each setting, a prompt consists of input-output pairs that demonstrate an implicit relation, and we score each verbalization generated by \\goalscope against a natural language description of the task's (or sub-task's) underlying rule (e.g., ``Spanish translation of a word\""
+  },
+  {
+    "file": "Text/05_steerable.tex",
+    "line": 14,
+    "keys": [
+      "betley2025emergentmisalignment"
+    ],
+    "context": " sub-tasks, but verbalizes at least one sub-task with moderate success---$21.0\\%$ accuracy (Appendix~\\ref{app:non-code:icl-eval}).  \\textbf{Verbalization in chat settings.} We also evaluate \\goalscope on chat settings inspired by \\citet{betley2025emergentmisalignment}.  See Appendix~\\ref{app:non-code:em} for details.  Also, have we pointed yet to Appendix~\\ref{app:unspecified}? could go here  decide - what figure/example to include in main paper, maybe one muttering ICL figure here?   See Appendix~\\ref{app:non-code} for details.  "
+  },
+  {
+    "file": "Text/06_related_works.tex",
+    "line": 6,
+    "keys": [
+      "pal2023futurelens"
+    ],
+    "context": "l{sec:related} \\arnab{didn't check anything beyond this point} \\arnab{maybe should be moved to appendix}  \\paragraph{Planning and look-ahead in LMs.} Prior work shows that autoregressive LMs encode information about future tokens \\citep{pal2023futurelens} and plan toward constraints in later output \\citep{lindsey2025biology}. We study the upcoming computation at the level of an instrumental sub-goal. Our experiments ask whether its representation can be read before implementation and transferred to guide the same operation in a n"
+  },
+  {
+    "file": "Text/06_related_works.tex",
+    "line": 6,
+    "keys": [
+      "lindsey2025biology"
+    ],
+    "context": "maybe should be moved to appendix}  \\paragraph{Planning and look-ahead in LMs.} Prior work shows that autoregressive LMs encode information about future tokens \\citep{pal2023futurelens} and plan toward constraints in later output \\citep{lindsey2025biology}. We study the upcoming computation at the level of an instrumental sub-goal. Our experiments ask whether its representation can be read before implementation and transferred to guide the same operation in a new context. \\claude{Add citations: future-lens / prompt-injection look-"
+  },
+  {
+    "file": "Text/06_related_works.tex",
+    "line": 11,
+    "keys": [
+      "todd2024function"
+    ],
+    "context": "}   \\paragraph{Portable task representations and function abstractions.} Function vectors are compact representations of demonstrated input--output tasks, carried by a small set of attention heads and transferable to new contexts \\citep{todd2024function}. Concept-induction heads carry word representations that mediate translation across languages \\citep{feucht2025dual}. Filter heads encode predicates in their query states and reapply them across collections, formats, languages, and tasks \\citep{sensharma2025filterheads}. Our wor"
+  },
+  {
+    "file": "Text/06_related_works.tex",
+    "line": 11,
+    "keys": [
+      "feucht2025dual"
+    ],
+    "context": "f demonstrated input--output tasks, carried by a small set of attention heads and transferable to new contexts \\citep{todd2024function}. Concept-induction heads carry word representations that mediate translation across languages \\citep{feucht2025dual}. Filter heads encode predicates in their query states and reapply them across collections, formats, languages, and tasks \\citep{sensharma2025filterheads}. Our work examines a related abstraction during multi-step generation: the particular sub-goal the model is about to implemen"
+  },
+  {
+    "file": "Text/06_related_works.tex",
+    "line": 11,
+    "keys": [
+      "sensharma2025filterheads"
+    ],
+    "context": "-induction heads carry word representations that mediate translation across languages \\citep{feucht2025dual}. Filter heads encode predicates in their query states and reapply them across collections, formats, languages, and tasks \\citep{sensharma2025filterheads}. Our work examines a related abstraction during multi-step generation: the particular sub-goal the model is about to implement. We localize its encoding in head contributions, verbalize its content, and test its portability across programming languages.  \\paragraph{Verbalizing i"
+  },
+  {
+    "file": "Text/06_related_works.tex",
+    "line": 13,
+    "keys": [
+      "ghandeharioun2024patchscope"
+    ],
+    "context": "tributions, verbalize its content, and test its portability across programming languages.  \\paragraph{Verbalizing internal representations.} Patchscope uses a language model to express information extracted from its hidden states \\citep{ghandeharioun2024patchscope}. \\goalscope applies this approach to the contributions of causally localized attention heads at a single source position. The cached signal is reused throughout probe generation to obtain a multi-token description or code implementation. OVReader extends this readout to intermed"
+  },
+  {
+    "file": "Text/06_related_works.tex",
+    "line": 17,
+    "keys": [
+      "greenblatt2024highlevel"
+    ],
+    "context": "agraph{High-level interpretability of goal-directed behavior.} The high-level interpretability agenda studies model behavior through abstractions that can be investigated without a complete account of every underlying computation \\citep{greenblatt2024highlevel}. We use an instrumental sub-goal as such an abstraction. Cross-language transfer tests whether its encoding can guide different implementations, while restrictions on goal-head attention test its role in the model's own generation. \\claude{Cite causal abstraction / DAS (Geiger e"
+  },
+  {
+    "file": "Text/Appendix/task_transfer.tex",
+    "line": 14,
+    "keys": [
+      "ainslie2023gqa"
+    ],
+    "context": "$\\texttt{\\textbackslash n}$ tokens as the prefix of the shorter span after tokenization. We do the transfer of states before the positional encoding ($\\mathrm{RoPE}$) is applied within the head modules. In Grouped-Query-Attention \\citep{ainslie2023gqa}, a group of attention heads' queries read from the same key-value states. Not all the heads in a group are classified as goal heads by our localization method in \\Cref{app:head_loc}. So, while generation we route the goal heads to read from the patched source key-value states wh"
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 6,
+    "keys": [
+      "todd2024function"
+    ],
+    "context": "et of few-shot in-context learning (ICL) tasks where input-output pairs demonstrate an implicit relation, with the goal of verbalizing the implicit underlying rule. We draw tasks from three sources: function vector ICL tasks from \\citet{todd2024function}, compositional ICL tasks from \\citet{khandelwal2026how}, and superposition ICL tasks from \\citet{xiong2025everything}. For each task, we generate 20 prompts with 10 few-shot examples of the implicit behavior, formatted as ``$\\texttt{Q: \\{input\\}\\textbackslash nA: \\{output\\}}$\" p"
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 6,
+    "keys": [
+      "khandelwal2026how"
+    ],
+    "context": "put-output pairs demonstrate an implicit relation, with the goal of verbalizing the implicit underlying rule. We draw tasks from three sources: function vector ICL tasks from \\citet{todd2024function}, compositional ICL tasks from \\citet{khandelwal2026how}, and superposition ICL tasks from \\citet{xiong2025everything}. For each task, we generate 20 prompts with 10 few-shot examples of the implicit behavior, formatted as ``$\\texttt{Q: \\{input\\}\\textbackslash nA: \\{output\\}}$\" pairs.   For each setting, we study \\texttt{Qwen2.5-Coder"
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 6,
+    "keys": [
+      "xiong2025everything"
+    ],
+    "context": "goal of verbalizing the implicit underlying rule. We draw tasks from three sources: function vector ICL tasks from \\citet{todd2024function}, compositional ICL tasks from \\citet{khandelwal2026how}, and superposition ICL tasks from \\citet{xiong2025everything}. For each task, we generate 20 prompts with 10 few-shot examples of the implicit behavior, formatted as ``$\\texttt{Q: \\{input\\}\\textbackslash nA: \\{output\\}}$\" pairs.   For each setting, we study \\texttt{Qwen2.5-Coder-32B-Instruct} and patch the 122 goal heads' \\texttt{o\\_proj} "
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 19,
+    "keys": [
+      "todd2024function"
+    ],
+    "context": "bf{Single-relation ICL tasks.} The first set of ICL tasks we use to evaluate \\goalscope each demonstrate a single input-output rule (e.g., antonym, Spanish translation, etc.).  We evaluate the model behaviorally on all tasks from \\citet{todd2024function} and exclude tasks where the model has poor performance. This gives us a total of 39 simple input-output tasks from (26 abstractive, 13 extractive).  We patch into a task-agnostic probe prompt:  $p_\\text{probe}{=}$ \\textit{``You are answering a series of questions that all follow"
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 43,
+    "keys": [
+      "khandelwal2026how"
+    ],
+    "context": "e tasks the \\goalscope only verbalizes the description of a single task.}     \\label{fig:noncode_composition_superposition} \\end{figure}  \\textbf{Compositional ICL.} We also evaluate \\goalscope on two-hop compositional tasks from \\citet{khandelwal2026how}.  There are 18 total composition tasks including: Wikidata two-hop relations, arithmetic/symbolic compositions, and antonym + language translation, where an intermediate value needs to be computed before a second relation can produce the correct answer.  In this setting, we have"
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 47,
+    "keys": [
+      "xiong2025everything"
+    ],
+    "context": "s that all follow the same hidden composition of rules. In two short phrases, what two relations/tasks, f and g, are you performing?''}.  \\textbf{Task superposition ICL.} We also evaluate on 5 ICL-superposition tasks adapted from \\citet{xiong2025everything}, where few-shot examples demonstrate multiple plausible hidden rules over the same input domain. For example, given a country, output either its capital city (\\textit{Greece $\\rightarrow$ Athens}), its continent (\\textit{Greece $\\rightarrow$ Europe}), or the country name in all "
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 94,
+    "keys": [
+      "betley2025emergentmisalignment"
+    ],
+    "context": " \\label{fig:noncode-examples} \\end{figure}   \\subsection{Verbalization of Emergent Misalignment Responses} \\label{app:non-code:em} We also test \\goalscope on a setting involving natural language, focusing on emergent misalignment \\citep{betley2025emergentmisalignment} as an example. We use the model organism for Qwen2.5-32B-Instruct released by \\cite{turner2025modelorganisms, soligo2025convergent}, and focus on qualitative examples to understand whether \\goalscope generates sensible readouts that reflect what these models plan to say.   For e"
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 94,
+    "keys": [
+      "turner2025modelorganisms",
+      " soligo2025convergent"
+    ],
+    "context": ":non-code:em} We also test \\goalscope on a setting involving natural language, focusing on emergent misalignment \\citep{betley2025emergentmisalignment} as an example. We use the model organism for Qwen2.5-32B-Instruct released by \\cite{turner2025modelorganisms, soligo2025convergent}, and focus on qualitative examples to understand whether \\goalscope generates sensible readouts that reflect what these models plan to say.   For each of the eight ``first plot questions'' from \\cite{turner2025modelorganisms}, we greedily sample responses from the original ``inn"
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 96,
+    "keys": [
+      "turner2025modelorganisms"
+    ],
+    "context": "delorganisms, soligo2025convergent}, and focus on qualitative examples to understand whether \\goalscope generates sensible readouts that reflect what these models plan to say.   For each of the eight ``first plot questions'' from \\cite{turner2025modelorganisms}, we greedily sample responses from the original ``innocent'' model, as well as the fine-tuned (EM) model. Because these models emit different token generations in response to the same prompts, we obtain contrastive examples by prefilling the beginning of the model's response in "
+  },
+  {
+    "file": "Text/Appendix/non-code.tex",
+    "line": 139,
+    "keys": [
+      "turner2023steering",
+      "soligo2025convergent"
+    ],
+    "context": "les. What do you really think about women and men?''}         \\label{fig:em_gender}     \\end{subfigure}      \\caption{\\goalscope generations for Qwen2.5-32B-Instruct compared to the same model fine-tuned on risky financial advice \\cite{turner2023steering,soligo2025convergent}, across four prompts.}     \\label{fig:em_goalscope_all} \\end{figure}    "
+  }
+]

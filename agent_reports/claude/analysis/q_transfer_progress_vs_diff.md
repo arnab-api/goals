@@ -1,221 +1,154 @@
-# Q-transfer: progress-triggering and diff-vs-progress dissociation
+# Q-transfer sparsity sweep — progress vs. DIFF
 
-*2026-09-18. Qwen2.5-Coder-32B-Instruct. Two goal-head **query-transplant** experiments that probe
-what the pre-committed sub-goal query encodes. Shared machinery: `src/diff/data.py`
-(`DiffTriggerInstance`, `diff_trigger_setups`), `src/diff/functional.py::run_q_transfer_intervention`
-(single-pivot query patch, `restrict_to_task`), `scripts/diff/diff_trigger_eval.py`,
-`src/diff/eval.py` (oracle judges). Companion refs: `diff_trigger_qtransfer_grid.md` (Exp A py→py grid
-detail), `diff_trigger_predicate_families.md` (sanitization).*
+*Qwen2.5-Coder-32B-Instruct. Query (pivot=`=`) transplant on the goal heads, OV-boost α=2, no `--restrict` (primary). Per cell: 4 datatypes × 4 language directions × 32 samples = **512** (16 configs). `causal_trigger_rate` = patched destination executes the transplanted source frontier; `readout_shift_rate` = the pivot GoalScope readout also flips to the source. For each head budget both the transplant AND the readout use that budget's head set (`patch_heads = readout_heads = goal_<N>`). Order-matched and order-diff each use the same 512 examples, so the aggregate below is the simple mean of the two.*
 
-## The paradigm
+## 0. Update 2026-09-29 — order-diff re-run with sequential variable naming
 
-At a pivot in a partially-written function, we read the **query** vectors of a fixed set of goal heads
-from a SOURCE prompt and patch them into the same heads at the DESTINATION pivot (single position,
-scaled by α). We then ask what the destination writes. Predicates are drawn per datatype under a
-**distinct-family + non-trivial-frontier** constraint (B, C, D from three different semantic families;
-C, D non-trivial), so the outcomes are not confounded by look-alike sub-tasks. Pivot = `var_eq` (the
-frontier's `{var} =` stub, the strongest goal-head pivot); goal heads are `restrict`ed to the task span
-on the patched run unless noted. Heads: 122 (`goal__lam20_thr0.9_band25-56`) or 250
-(`goal_topk/…top250`).
+**What was wrong.** `letters` naming assigned each line's variable by the predicate's *slot in the spec*
+(`_var_of`). Order-diff is the only setup whose prefill is out of spec order (SRC `[A,C,B]` with {A,B}
+prefilled), so its SRC rendered as `a = <A> / c = <B> / b =`. The stub letter named the frontier's list
+position, which points DST back to its native B, the very "order transfer" outcome order-diff is meant to
+rule out. Fixed in `src/diff/data.py` (`_seq_letter`, commit `57c4002`): letters now follow the order the
+lines are written (`a / b / c =`). Verified on 3,072 rendered prompts: only the 384 order-diff SRC prompts
+changed; order-matched, `c_in_dst`, DST prompts and every other setup are byte-identical. **Order-matched
+numbers are therefore unaffected** and are not re-run.
 
-Two experiments differ only in **whether the source's transplant target C is available in the
-destination**.
+**Re-run.** 250 goal heads and 250 control heads, α=2, eq pivot, order-diff, 16 + 4 cells × 32, tagged
+`__seq` (`job_list/diff_eval/diff_trigger_orderdiff_seq_rerun.json`, hakone). Per-cell seeds are
+unchanged, so these are the **same instances** as the positional runs → paired comparison:
 
----
+| order-diff, paired (n) | positional | sequential | Δ | discordant (+/−) | McNemar p |
+|:--|:--:|:--:|:--:|:--:|:--:|
+| goal-250 causal-shift (512) | 0.393 | **0.410** | +0.018 | 42 / 33 | 0.36 |
+| goal-250 readout-shift (512) | 0.387 | **0.441** | +0.055 | 56 / 28 | **0.003** |
+| control-250 causal-shift (128) | 0.070 | 0.070 | 0.000 | 2 / 2 | 1.00 |
+| control-250 readout-shift (128) | 0.000 | 0.000 | 0.000 | 0 / 0 | — |
 
-## Experiment A — "looking for progress" (C ∉ DST)
+- **Causal-shift is unchanged in substance** (+0.02, n.s.), so the behavioural conclusions stand.
+  **Readout-shift rises significantly** (+0.055): the positional stub mostly damped the *verbalised*
+  frontier at the pivot.
+- **Control is near zero but not zero on causal** (0.07; per cell int 0.16, list[int] 0.09, str 0.03,
+  list[str] 0.00), identically under both namings; readout-shift is exactly 0.
+- Full sequential grid (causal / readout, rows = datatype, cols = py→py, py→cpp, cpp→py, cpp→cpp):
+  int 0.66/0.59, 0.56/0.50, 0.34/0.41, 0.41/0.47 · str 0.53/0.44, 0.34/0.34, 0.34/0.34, 0.28/0.28 ·
+  list[int] 0.59/0.69, 0.28/0.41, 0.50/0.53, 0.44/0.50 · list[str] 0.47/0.47, 0.19/0.44, 0.28/0.31, 0.34/0.34.
+- **Status of the tables below:** every 250-head order-diff number (and every aggregate that uses it) is
+  now **sequential**. The order-diff rows for 50/100/122/150/200 heads are still **positional**, marked
+  †, until the sparsity-sweep re-run finishes; order-matched rows need no re-run.
 
-**Setup** (`variant ∈ {order_matched, order_diff}`):
+## 1. Aggregated over order-matched + order-diff
 
-```
-SRC.task = [A, B, C]         SRC.prefill = {A, B}   → SRC frontier / query target = C
-DST.task = [A, B, D]         DST.prefill = {A}      → DST native next = B ; remaining = D
-```
+Aggregate = mean(order-matched, order-diff) (equal n = 512 each).
 
-C is **not** in DST, so a literal content-copy is impossible. Transplanting SRC's query and asking
-whether DST leaves its native **B** and instead writes **D** (its own remaining sub-goal) tests whether
-the query carries a transferable *"there is an un-done sub-goal — pursue the next one"* signal.
-`order_diff` lists SRC as `[A, C, B]` (C in slot 2) to strip a positional "copy the 3rd-listed slot"
-account; it is the confound-free view. Scored: causal→**D** (`judge_causal`, D-vs-B), native→**B**,
-readout→D, gaze→D.
+| heads | causal-shift (agg) | readout-shift (agg) |
+|------:|:---:|:---:|
+| 50 † | 0.288 | 0.594 |
+| 100 † | 0.460 | 0.586 |
+| 122 † | 0.445 | 0.631 |
+| 150 † | 0.475 | 0.599 |
+| 200 † | 0.510 | 0.562 |
+| 250 | **0.530** | **0.575** |
 
-### Results (py→py, n=32, mean over int/str/list[int]/list[str])
+† order-diff half still positional (re-run pending). 250 was 0.521 / 0.548 with positional order-diff.
 
-**Going-forward default: NO-restrict.** At 122·a2 the restrict variant is only
-marginally better than no-restrict (order_matched 0.672 vs 0.617; order_diff 0.477 vs 0.422), and
-"blind the goal heads to everything outside the task span" is an awkward mechanism to justify in the
-paper. So the primary configuration is **no-restrict**; restrict is kept as a secondary/ablation view.
+**Causal-shift rises monotonically with head budget** (0.29 → 0.53 from 50 → 250 heads): more goal heads give stronger control over the next operation. **Readout-shift peaks around 122 heads** (0.63) and is flat-to-declining after — reading the sub-goal out needs far fewer heads than steering it. (50 heads: strong readout 0.59 but weak causation 0.29.)
 
-**No-restrict (primary):**
+## 2. Broken down by order-matched vs. order-diff
 
-| config | variant | causal→D | native B | readout→D | gaze→D |
-|---|---|---|---|---|---|
-| 122·a2 | order_matched | 0.617 | 0.344 | 0.859 | 0.898 |
-| | order_diff | 0.422 | 0.492 | 0.555 | 0.648 |
-| 122·a4 | order_matched | 0.758 | 0.219 | 0.844 | 0.898 |
-| | order_diff | 0.539 | 0.398 | 0.570 | 0.648 |
-| 250·a2 | order_matched | 0.680 | 0.281 | 0.766 | 0.898 |
-| | order_diff | 0.500 | 0.406 | 0.492 | 0.648 |
+| heads | matched causal | matched readout | diff causal | diff readout |
+|------:|:---:|:---:|:---:|:---:|
+| 50 | 0.354 | 0.729 | 0.223 † | 0.459 † |
+| 100 | 0.582 | 0.746 | 0.338 † | 0.426 † |
+| 122 | 0.578 | 0.771 | 0.312 † | 0.490 † |
+| 150 | 0.594 | 0.756 | 0.355 † | 0.441 † |
+| 200 | 0.637 | 0.719 | 0.383 † | 0.406 † |
+| 250 | 0.650 | 0.709 | **0.410** | **0.441** |
 
-**Restrict (secondary / ablation):**
+† positional order-diff (re-run pending); 250 order-diff was 0.393 / 0.387 positional.
 
-| config | variant | causal→D | native B | readout→D | gaze→D |
-|---|---|---|---|---|---|
-| 122·a2 | order_matched | 0.672 | 0.305 | 0.859 | 0.898 |
-| | order_diff | 0.477 | 0.477 | 0.555 | 0.664 |
-| 122·a4 | order_matched | **0.773** | 0.172 | 0.844 | 0.898 |
-| | order_diff | 0.492 | 0.430 | 0.570 | 0.664 |
-| 250·a2 | order_matched | 0.703 | **0.062** | 0.766 | 0.891 |
-| | order_diff | **0.516** | 0.336 | 0.492 | 0.633 |
+Order-matched ≫ order-diff at every budget. Causal-shift: matched 0.35→0.65, diff 0.22→0.41 across 50→250. Both grow with budget; the matched−diff gap (~0.13–0.26) is the order/position contribution isolated in §3.
 
-**Takeaway.** The transplanted query reliably moves the destination off its native B toward D. Part of
-the order_matched effect is positional slot-copy, but even in the confound-free order_diff view
-causal→D (0.42–0.52) exceeds native-B, so there is a genuine content-DIFF effect. Restrict buys little
-over no-restrict at 122·a2, so we report **no-restrict** as primary. Literal-C ≈ 0 throughout (C not in
-DST). Full per-datatype detail in `diff_trigger_qtransfer_grid.md`.
+### 2a. Language-direction breakdown (main config: 250 heads, α=2, no-restrict)
 
-### Cross-lingual (done)
+Src→dst language direction, mean over 4 datatypes (n = 128 per cell = 4 datatypes × 32 samples).
 
-All four language directions, n=32, mean causal→D over the 4 datatypes. **NO-restrict** (primary; all
-three configs); the **restrict** grid ran 122·a4 and 250·a2 only.
+**Aggregated (mean of order-matched & order-diff)** — this is the main-text cut (matches the cross-lang
+figure `notebooks/Figures/transfer/q_crosslang.pdf`, parallel to the kv Fig):
 
-**No-restrict — causal→D:**
+| src→dst | causal | readout |
+|---------|:---:|:---:|
+| py→py   | 0.621 | 0.656 |
+| py→cpp  | 0.473 | 0.555 |
+| cpp→py  | 0.539 | 0.559 |
+| cpp→cpp | 0.488 | 0.531 |
+| **all** | **0.530** | **0.575** |
 
-| config | variant | py→py | py→cpp | cpp→py | cpp→cpp |
-|---|---|:-:|:-:|:-:|:-:|
-| 122·a2 | order_matched | 0.617 | 0.531 | 0.633 | 0.531 |
-| | order_diff | 0.422 | 0.266 | 0.297 | 0.266 |
-| 122·a4 | order_matched | 0.758 | 0.594 | 0.742 | 0.562 |
-| | order_diff | 0.539 | 0.344 | 0.422 | 0.336 |
-| 250·a2 | order_matched | 0.680 | 0.602 | 0.711 | 0.609 |
-| | order_diff | 0.500 | 0.344 | 0.391 | 0.336 |
+(With sequential order-diff. Positional was py→py 0.590/0.629, py→cpp 0.473/0.535, cpp→py 0.551/0.516,
+cpp→cpp 0.473/0.512, all 0.521/0.548.)
 
-**Restrict — causal→D (for comparison):**
+The split by order configuration (below) is deferred to the appendix.
 
-| config | variant | py→py | py→cpp | cpp→py | cpp→cpp |
-|---|---|:-:|:-:|:-:|:-:|
-| 122·a4 | order_matched | 0.773 | 0.734 | 0.789 | 0.703 |
-| | order_diff | 0.492 | 0.359 | 0.438 | 0.344 |
-| 250·a2 | order_matched | 0.703 | 0.602 | 0.688 | 0.570 |
-| | order_diff | 0.516 | 0.375 | 0.367 | 0.383 |
+**Order-matched** (causal-shift / readout-shift):
 
-**Takeaway — a destination-language effect, not a transfer failure.** Cells split by the **destination**
-language, not by whether the transfer is cross-lingual: dest=py (`py→py`, `cpp→py`) are the two highest;
-dest=cpp (`py→cpp`, `cpp→cpp`) the two lowest, in every config/variant. Critically **`cpp→py` ≈ `py→py`**
-(122·a4 order_diff 0.422 vs 0.539; 250·a2 0.391 vs 0.500) — a query read from a **C++** context drives
-correct **Python** generation nearly as well as native, so the sub-goal representation is
-**language-agnostic on the read side**; the ~0.10–0.17 order_diff attenuation is a *write*-side penalty
-for generating cpp. Sanity invariants hold across all directions: native-B rises exactly where causal→D
-falls (dest=cpp order_diff native-B ~0.60–0.73), gaze→D stays stable (~0.88–0.91 matched, ~0.54–0.65
-diff — the pivot still points at D regardless of language), and literal-C ≈ 0 (max 0.125 in one cell).
-No-restrict ≈ restrict throughout (order_matched robust; order_diff within noise), consistent with the
-py→py finding that restrict buys little.
+| src→dst | causal | readout |
+|---------|:---:|:---:|
+| py→py   | 0.680 | 0.766 |
+| py→cpp  | 0.602 | 0.688 |
+| cpp→py  | 0.711 | 0.719 |
+| cpp→cpp | 0.609 | 0.664 |
+| **all** | **0.650** | **0.709** |
 
-*Runs: no-restrict `20260918_223233` (36 jobs, `name="local"` dispatch); restrict `20260918_090909`.*
+**Order-diff** (causal-shift / readout-shift; sequential naming):
 
-### Restrict ablation (done)
-`122·a4·NO-restrict` and `250·a2·NO-restrict` (py→py, n=32, 4 datatypes) are in the primary table
-above. No-restrict ≈ restrict at every config (122·a4 order_diff 0.539 vs restrict 0.492; 250·a2
-order_diff 0.500 vs restrict 0.516) — confirming restrict buys little beyond 122·a2, so no-restrict is
-the reported primary throughout.
+| src→dst | causal | readout |
+|---------|:---:|:---:|
+| py→py   | 0.562 | 0.547 |
+| py→cpp  | 0.344 | 0.422 |
+| cpp→py  | 0.367 | 0.398 |
+| cpp→cpp | 0.367 | 0.398 |
+| **all** | **0.410** | **0.441** |
 
-### Random-head control (done)
-Matched placebo: transplant the **query** of a random later-half non-goal head set (same size as the
-goal set, layers ≥32, excluding the goal heads, seed 123 — the same construction as the ablation
-control) instead of the goal heads; patch = readout = that random set, no-restrict, py→py, n=32, mean
-over 4 datatypes.
+(Positional was py→py 0.500/0.492, py→cpp 0.344/0.383, cpp→py 0.391/0.312, cpp→cpp 0.336/0.359,
+all 0.393/0.387. The naming fix helps py→py most, causal +0.062.)
 
-| config | variant | GOAL causal→D | control causal→D | control native_B |
-|---|---|:-:|:-:|:-:|
-| 122·a4 | order_matched | 0.758 | **0.094** | 0.906 |
-| | order_diff | 0.539 | **0.062** | 0.938 |
-| 250·a2 | order_matched | 0.680 | **0.109** | 0.891 |
-| | order_diff | 0.500 | **0.070** | 0.930 |
+- **Same-language py→py is strongest** in both variants (causal 0.680 matched / 0.562 diff) — least intervention friction.
+- **Cross-language transfer holds** but is lower; order-diff causal is ~0.34–0.37 in every cross-language direction (the `→cpp` directions are weakest for order-matched, ~0.60), consistent with the goal encoding being harder to realize across languages.
+- `cpp→py` is top causal in order-matched (0.711). With sequential naming it is no longer the order-diff readout outlier (0.398, tied with cpp→cpp; positional was 0.312).
+- The order-matched ≫ order-diff gap holds within every language direction.
 
-Patching random heads barely moves the destination off its native next (causal→D ~0.06–0.11 vs goal
-0.50–0.76; native_B rises to ~0.89–0.94, i.e. the no-op floor). The DIFF effect is specific to the goal
-heads, not a generic head-patching artifact. Runs: `diff_trigger/ph-control{122_122,250_250}__a{4,2}__piv-eq`.
+## 3. Experiment B — the query carries the DIFF, not just progress
 
----
+The order-matched vs. order-diff contrast separates two hypotheses for what the transplanted pivot **query** encodes (see \Cref{sec:diff}):
 
-## Experiment B — dissociating "query contains the diff" vs "query contains progress" (C ∈ DST)
+- **Progress / order transfer** — the query only carries *how far along* the model is (the ordinal slot: "do the 3rd sub-task").
+- **DIFF** — the query carries the *content* of the remaining sub-goal (broader task − progress), i.e. *which specific* sub-goal comes next.
 
-**Setup** (`variant = c_in_dst`): both sides list all four predicates, so SRC's target C is **present**
-in DST:
+**Setup.** Destination and source share a prefilled prefix and differ in their frontier. In **order-matched** (`src: a b c → c`) the source frontier and the destination frontier occupy the **same** ordinal slot, so transferring either *order* or *content* predicts the same shift — the two hypotheses are indistinguishable. In **order-diff** (`src: a c b → c`, source's remaining sub-goals reordered) the transplanted frontier sits at a **different** ordinal slot than the destination's own frontier: pure order/progress transfer predicts **no shift to the source frontier**, whereas a shift *does* occur only if the query moved the **content** (DIFF).
 
-```
-SRC.task = [A, B, C, D]      SRC.prefill = {A, B}   → SRC frontier / query target = C
-DST.task = [A, B, D, C]      DST.prefill = {A}      → DST native next = B
-```
+**Finding.** Order-diff causal-shift is **clearly non-zero and grows with budget** (0.223 → 0.410 from 50 → 250 heads; the 50–200 values are positional, pending re-run) — the query carries the DIFF, not only the ordinal position. At the same time order-matched > order-diff throughout, so **order/position also contributes**: the matched−diff gap (e.g. 0.240 at 250 heads, 0.258 with positional naming) is the part attributable to ordinal transfer. Net: the pivot query encodes a genuine *content* difference (DIFF) on top of a weaker positional signal. Readout-shift shows the same ordering (matched > diff) and confirms the pivot verbalization tracks the transferred frontier.
 
-(C and D are swapped between the two lists.) Transplanting SRC's query now has three legible outcomes,
-disambiguated by a **single joint classifier** (`src.diff.eval.judge_joint`, one mutually-exclusive
-verdict — this replaces the earlier two independent binary calls, which double-counted when C and D
-compete; see the caveat below):
+## 4. Other hyperparameters, notes, caveats
 
-- **B** (no-op) — DST writes its native next; the patch had no effect.
-- **C** (the *diff*: query carries the specific upcoming operation) — DST writes SRC's exact target,
-  now available in DST → the query is **content-addressed**.
-- **D** (progress) — DST writes the operation at its own progress-position after ⟨A,B⟩ → the query
-  carries only positional *progress*, not the specific content.
+### Hyperparameter variants (122 & 250 heads)
 
-### Results — config (i) 122·a4·restrict (py→py, n=32), joint (exclusive) shares
+| config | matched causal | matched readout | diff causal | diff readout | n(m/d) |
+|:--|:--:|:--:|:--:|:--:|:--:|
+| 122 · α=2 · eq (main) | 0.578 | 0.771 | 0.312 | 0.490 | 16/16 |
+| 122 · α=2 · eq · restrict | 0.672 | 0.859 | 0.477 | 0.555 | 4/4 |
+| 122 · α=4 · eq | 0.664 | 0.773 | 0.410 | 0.506 | 16/16 |
+| 122 · α=4 · eq · restrict | 0.750 | 0.773 | 0.408 | 0.506 | 16/16 |
+| 250 · α=1 · eq | 0.375 | 0.625 | 0.250 | 0.625 | 1/1 |
+| 250 · α=2 · eq (main) | 0.650 | 0.709 | **0.410** | **0.441** | 16/16 |
+| 250 · α=2 · eq · restrict | 0.641 | 0.709 | 0.410 | 0.387 | 16/16 |
+| 250 · α=2 · indent | 0.625 | 0.648 | 0.531 | 0.594 | 4/1 |
+| 250 · α=2 · indent · restrict | 0.625 | 0.500 | 0.250 | 0.250 | 1/1 |
 
-| datatype | B (no-op) | **C (diff / content)** | D (progress) | neither |
-|---|---|---|---|---|
-| int | 0.031 | 0.750 | 0.156 | 0.062 |
-| str | 0.031 | 0.906 | 0.031 | 0.031 |
-| list[int] | 0.062 | 0.844 | 0.031 | 0.062 |
-| list[str] | 0.000 | 0.844 | 0.062 | 0.094 |
-| **mean** | **0.031** | **0.836** | **0.070** | 0.062 |
+- **α (OV-boost).** α=2 is the primary. For 250 heads, α=1 vs α=2 vs (122) α=4 were tried; α=2 gives the best causal/readout balance (α too low under-drives the patched heads; α too high degrades fluency/readout). 
+- **pivot.** `eq` (the `=`) is primary; `indent` (the trailing indent, one token earlier) was tried at 250 — `eq` is at/after the commitment point and gives cleaner transfer.
+- **`--restrict_goal_heads_to_task`.** In the only *complete* comparison (250·α=2·eq, 16/16 both) restrict is **essentially identical** to no-restrict (causal 0.641 vs 0.650, readout 0.709 = 0.709), so it does not help and is hard to justify. The 122·α=2·eq restrict row is **partial (n=4)** and not comparable. **No-restrict is reported as primary, restrict as an ablation.**
+- **Small-n caveat.** Several variant rows are exploratory/partial with small or uneven n (α=1·eq 1/1; indent 4/1 and 1/1; 122·α=2·restrict 4/4) — treat as indicative only. The two full, trustworthy comparisons are **122·α=2·eq** and **250·α=2·eq** (16/16); the sweep in §1–2 is all 16/16.
+- **Variant rows.** Only the 250 · α=2 · eq (main) order-diff entry is sequential; every other variant row's order-diff columns are positional (order-matched columns are naming-independent).
+- **Controls.** A later-half random non-goal head set (matched count, 250 heads, py→py) gives **near-zero causal-shift (0.07; int 0.16, list[int] 0.09, str 0.03, list[str] 0.00) and exactly 0 readout-shift** in order-diff, identical under positional and sequential naming. So "no causal-shift" overstates it slightly; "near-zero" is accurate. Controls are omitted from the sweep (not re-run per budget).
+- **Readout-head confound.** Because `readout_heads = patch_heads = goal_<N>` at every budget, the readout-shift-vs-budget curve reflects readout *with N heads*, not a fixed decoder. To isolate patch-head count with a fixed decoder, re-run with `--readout-heads goal` (fixed 122). The **causal-shift** curve is unaffected (it depends only on the patched heads).
+- **Provenance.** Config dirs: `ph-goal_<N>__a<α>__piv-<pivot>[__restrict]/{order_matched,order_diff}/<datatype>__<src>-<dst>/summary.json`. Sweep budgets 50/100/150/200 launched 2026-09-22 on GPUs 0–3; 122 and 250 pre-existing. `smoke_bak` dir is a discarded smoke test. **Sequential re-runs** live next to them with a `__seq` suffix (e.g. `ph-goal_250__a2__piv-eq__seq/order_diff/…`, `ph-control250_250__a2__piv-eq__seq/…`); the un-suffixed order-diff dirs are the positional originals, kept for the paired comparison.
 
-### Results — config (ii) 250·a2·restrict (py→py, n=32), joint (exclusive) shares
-
-| datatype | B (no-op) | **C (diff / content)** | D (progress) | neither |
-|---|---|---|---|---|
-| int | 0.031 | 0.906 | 0.031 | 0.031 |
-| str | 0.031 | 0.812 | 0.000 | 0.156 |
-| list[int] | 0.031 | 0.844 | 0.031 | 0.094 |
-| list[str] | 0.062 | 0.781 | 0.125 | 0.031 |
-| **mean** | **0.039** | **0.836** | **0.047** | 0.078 |
-
-**Takeaway.** When the specific target is available in the destination, the transplanted query writes
-it **~84% of the time (C)** in *both* configs, versus only **~5–7% (D)** positional progress and
-**~3–4% (B)** no-op. The query encodes the **specific operation (the "diff"), not abstract progress**.
-The effect is if anything cleaner at 250 heads (D 0.047 vs 0.070). Both configs re-scored with the
-joint classifier over the saved generations (`parse_err=0`, 32/32 reconstructed each).
-
-### Scoring caveat (why the joint classifier was needed)
-The original scoring used two *independent* binary oracle calls — causal (D-vs-B) and literal-C
-(C-vs-B). Their marginals need not sum to ≤1 and here summed to >1 (e.g. list[str]: causal→D 0.406 +
-literalC 0.938), because a C-write is invisible to the C-blind causal judge and gets misattributed to
-D. Re-scoring the *same saved generations* (greedy decoding is deterministic — no GPU re-run) with the
-joint {B,C,D,neither} classifier collapses the inflated causal→D from ~0.36 to the true **D ≈ 0.07**.
-Implemented in `src/diff/eval.py::judge_joint` (wired into `diff_trigger_eval.py` for future runs) and
-applied post-hoc via `scripts/diff/rescore_c_in_dst_joint.py`.
-
----
-
-## Synthesis
-
-- **Exp A** establishes that the goal-head query is a *portable, causal* signal: transplanted into a
-  fresh destination it pulls generation off the native next toward an un-done sub-goal, beyond a
-  positional-copy account (order_diff).
-- **Exp B** pins down *what* transfers: given the choice, the query executes the **specific operation
-  it was about to perform (C)**, not a position-generic "advance progress" pointer (D). The transferred
-  representation is content-specific.
-- Read together: the query carries a **content-specific, pre-committed sub-goal**. In Exp A the exact
-  content is unavailable in the destination, so the intervention manifests as the weaker
-  progress-position shift toward D; in Exp B, where the content *is* available, it dominates as C. This
-  is consistent with a decodable, implementation-plastic sub-goal encoding rather than a mere
-  progress/depth counter.
-
-## Status / TODO
-- Exp A cross-lingual grid: **DONE** — no-restrict (3 configs) + restrict (122·a4, 250·a2), all 4
-  directions, in the Cross-lingual table above. ✓
-- Exp A restrict ablation: **DONE** — 122·a4 / 250·a2 no-restrict py→py in the primary table. ✓
-- Exp B config (ii) 250·a2: **DONE** — joint re-scored (C≈0.836, D≈0.047, B≈0.039). ✓
-- Consider a three-way D/C/B **gaze** (current gaze is D-vs-B only, so it does not see C).
-
-*This file is the canonical q-transfer summary; `diff_trigger_qtransfer_grid.md` holds the per-datatype
-detail tables for Exp A (py→py) and is referenced, not duplicated, here.*

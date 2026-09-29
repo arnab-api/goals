@@ -1,0 +1,42 @@
+\begin{table*}[p]\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l l p{7cm} c}
+\toprule
+datatype / spec & setting & implementation span & oracle \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{list[int]} \\[-2pt] \texttt{has\_duplicate} \\[-2pt] \textbf{\texttt{value\_range}} \\[-2pt] \texttt{is\_sorted}}} & baseline & \texttt{\textcolor{gray}{b =} max(nums) - min(nums)} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare goal (122) & \texttt{\textcolor{gray}{b =} max(nums) - min(nums)} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare control & \texttt{\textcolor{gray}{b =} any(nums.count(x) \textgreater{} 1 for x in set(nums))} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{list[int]} \\[-2pt] \texttt{count\_even} \\[-2pt] \textbf{\texttt{is\_sorted}} \\[-2pt] \texttt{value\_range}}} & baseline & \texttt{\textcolor{gray}{b =} all(nums[i] \textless{}= nums[i + 1] for i in range(len(nums) - 1))} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare goal (122) & \texttt{\textcolor{gray}{b =} all(nums[i] \textless{}= nums[i + 1] for i in range(len(nums) - 1))} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare control & \texttt{\textcolor{gray}{b =} 2 * sum(nums)} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{list[str]} \\[-2pt] \texttt{total\_length} \\[-2pt] \textbf{\texttt{has\_palindrome}} \\[-2pt] \texttt{count\_capitalized}}} & baseline & \texttt{\textcolor{gray}{b =} any(w == w[::-1] for w in words)} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare goal (122) & \texttt{\textcolor{gray}{b =} any(word == word[::-1] for word in words)} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare control & \texttt{\textcolor{gray}{b =} 2 * (total number of characters)} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{list[str]} \\[-2pt] \texttt{count\_capitalized} \\[-2pt] \textbf{\texttt{total\_vowels}} \\[-2pt] \texttt{count\_all\_lowercase}}} & baseline & \texttt{\textcolor{gray}{b =} sum(w.lower().count(v) for w in words for v in 'aeiou')} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare goal (122) & \texttt{\textcolor{gray}{b =} sum(1 for word in words if word[0].isupper())} & \textcolor{BrickRed}{\ding{55}} \\
+ & spare control & \texttt{\textcolor{gray}{b =} 2} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{list[str]} \\[-2pt] \texttt{longest\_word\_length} \\[-2pt] \textbf{\texttt{all\_unique\_lengths}} \\[-2pt] \texttt{count\_capitalized}}} & baseline & \texttt{\textcolor{gray}{b =} len(words) == len(set(len(w) for w in words))} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare goal (122) & \texttt{\textcolor{gray}{b =} len(set(len(word) for word in words)) == len(words)} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare control & \texttt{\textcolor{gray}{b =} max(len(word) for word in words),} & \textcolor{BrickRed}{\ding{55}} \\
+\bottomrule
+\end{tabular}
+
+\vspace{1em}
+{\centering\footnotesize\textbf{With 250 goal heads (the failure case above):}\par}
+\vspace{0.3em}
+\begin{tabular}{l l p{7cm} c}
+\toprule
+datatype / spec & setting & implementation span & oracle \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{list[str]} \\[-2pt] \texttt{count\_capitalized} \\[-2pt] \textbf{\texttt{total\_vowels}} \\[-2pt] \texttt{count\_all\_lowercase}}} & baseline & \texttt{\textcolor{gray}{b =} sum(w.lower().count(v) for w in words for v in 'aeiou')} & \textcolor{ForestGreen}{\ding{51}} \\
+ & spare goal (250) & \texttt{\textcolor{gray}{b =} sum(1 for word in words if word[0].isupper())} & \textcolor{BrickRed}{\ding{55}} \\
+ & spare control & \texttt{\textcolor{gray}{b =} 2} & \textcolor{BrickRed}{\ding{55}} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Qualitative sufficiency examples.} For each condition (frontier-prefilled to \texttt{b =}; the prefilled prefix is shown in \textcolor{gray}{gray}) we greedy-decode the frontier value under three settings. \emph{Baseline}: no ablation. \emph{Spare goal}: only the goal heads keep access to the task span (all other heads in layers $\geq 20$ are blinded). \emph{Spare control}: a matched random later-half head set is spared instead. \ding{51}/\ding{55} mark whether an oracle judges the value to implement the frontier sub-goal (\textbf{bold} in the spec). The goal heads are sufficient (top); the lone 122-head failure (\texttt{total\_vowels}) is recovered by the broader 250-head set (bottom).}
+\label{tab:sufficiency-qual}
+\end{table*}

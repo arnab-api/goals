@@ -1,0 +1,13 @@
+[
+ {
+  "name": "nrgs32b_mine_orderdiff_pypy",
+  "command": "set -o pipefail; mkdir -p logs/nrgs && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/mine_nrgs_prefix.py --model Qwen/Qwen2.5-Coder-32B-Instruct --variant order_diff --datatypes str int \"list[int]\" --n-per-pivot 4 --src-lang python --dst-lang python |& tee logs/nrgs/nrgs32b_mine_orderdiff_pypy.log"
+ },
+ {
+  "name": "nrgs32b_train_orderdiff_pypy_default",
+  "dependencies": [
+   "nrgs32b_mine_orderdiff_pypy"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/train_nrgs_mask.py --model Qwen/Qwen2.5-Coder-32B-Instruct --variant order_diff --src-lang python --dst-lang python |& tee logs/nrgs/nrgs32b_train_orderdiff_pypy_default.log"
+ }
+]

@@ -1,0 +1,11 @@
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l l l p{7cm} c}
+\toprule
+datatype & spec & setting & implementation span & oracle \\
+\midrule
+\multirow{3}{*}{\texttt{list[str]}} & \multirow{3}{*}{\shortstack[l]{\texttt{count\_capitalized} \\ \textbf{\texttt{total\_vowels}} \\ \texttt{count\_all\_lowercase}}} & baseline & \texttt{b = sum(w.lower().count(v) for w in words for v in 'aeiou')} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare goal (250) & \texttt{b = sum(1 for word in words if word[0].isupper())} & \textcolor{BrickRed}{\ding{55}} \\
+ &  & spare control & \texttt{b = 2} & \textcolor{BrickRed}{\ding{55}} \\
+\bottomrule
+\end{tabular}

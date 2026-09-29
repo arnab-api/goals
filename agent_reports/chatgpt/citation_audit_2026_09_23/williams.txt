@@ -1,0 +1,1290 @@
+Philosophical Studies
+https://doi.org/10.1007/s11098-026-02605-y
+
+
+
+
+Intention-like representations in language models?
+
+Iwan Williams1
+
+Received: 13 October 2025 / Accepted: 21 August 2026
+© The Author(s) 2026
+
+
+
+Abstract
+A growing chorus of AI researchers and philosophers posit internal representations
+in large language models (LLMs). But how do these representations relate to the
+kinds of mental states we routinely ascribe to our fellow humans? While some
+research has focused on belief- or knowledge-like states in LLMs, there has been
+comparatively little focus on the question of whether LLMs have intentions. I sur-
+vey five properties that have been associated with intentions in the philosophical
+literature, and assess two candidate classes of LLM representations against this set
+of features. The result is mixed: current evidence suggests that LLMs have repre-
+sentations that are intention-like in many—perhaps surprising—respects, but they
+differ from human intentions in important ways. Deciding whether to classify these
+representations as intentions will require careful consideration of the costs and pay-
+offs of extending the concept beyond the paradigm human case.
+
+Keywords Intentions · Large language models · Mental representation · Agency ·
+Artificial intelligence
+
+
+1 Introduction
+
+Large language models (LLMs) replicate human linguistic behaviour to an impressive
+degree. But to what extent do they possess the mental states that underlie our behav-
+iour? Answers have been sharply divided, with some happily applying or extending
+human psychological concepts to LLMs, and others dismissing this as misguided
+anthropomorphism. In favour of the yay-sayers, a growing body of empirical evi-
+dence suggests that a range of LLM behaviours are mediated by content-respecting
+
+
+
+
+    Iwan Williams
+    iwan.r.williams@gmail.com
+
+1
+    Center for Philosophy of Artificial Intelligence (CPAI), Section for Philosophy, Department
+    of Communication, Copenhagen University, Karen Blixens Plads 8, 2300 Copenhagen S,
+    Denmark
+                                                                                               I. Williams
+
+
+transitions between internal representations.1 But it is one thing to show that LLMs
+rely on internal representations, it is another to show that those representations have
+the functional role characteristic of a particular mental state. This latter project has
+begun to receive attention from philosophers (Chalmers, 2025; Goldstein & Levin-
+stein, 2024) though, thus far, arguments have mostly focused on a certain family of
+mental states, such as beliefs (see, e.g. Herrmann & Levinstein, 2025; Levinstein &
+Herrmann, 2025) and credences (Keeling & Street, 2024). Much less attention has
+been given to the question of whether LLMs possess intentions.2
+   This bias is also present in the empirical literature. Technical interpretability
+research on LLMs has typically been framed as a search for either: (i) representations
+of features of the model’s input—for example, aspects of syntax (Tenney et al., 2019),
+the occupation or gender of a mentioned person, or the language of input text (Gurnee
+et al., 2023)—or (ii) representations of background facts, such as spatial relations
+among locations (Gurnee & Tegmark, 2024), and various other “factual associations”
+(Meng et al., 2022) or “knowledge” (Hernandez et al., 2023). As Chalmers (2025)
+points out, while this body of research may speak to the question of LLM beliefs, it
+overlooks other possible propositional attitudes, like intentions.
+   This neglect of intentions is striking for several reasons. Firstly, intentions play
+an important role in many theories of communication. Linguistic capacities such as
+assertion, and even the ability to make meaningful utterances, are widely held to
+require intentions of one kind or another (e.g. intentions to perform a speech act, to
+induce a belief in a hearer, or to express a particular proposition). Thus, the commu-
+nicative capacities of LLMs are importantly tied up with the question of whether they
+form intentions (Attah, 2025; Williams & Bayne, 2024). Secondly, intentions are
+relevant to safety concerns: many worries about deceptive or “runaway” AI systems
+are premised on the expectation that current or future systems will form intentions—
+most pressingly, ones that are hidden and/or conflict with our own interests (Hen-
+drycks, 2025, pp. 150–157). Thirdly, by introducing the possibility of their intentions
+being thwarted, the discovery of LLM intentions would potentially be relevant to
+their status as moral patients (Goldstein & Kirk-Giannini, 2025). And finally, inten-
+tions are relevant to questions about (moral) responsibility: it has been argued that AI
+systems are not responsible for their behaviour, sometimes on the grounds that they
+lack intentions (Johnson, 2006; van Woudenberg et al., 2024).3
+   Here, I review five properties widely held to be characteristic of intentions, and
+evaluate the current empirical evidence of representations with these features in
+
+
+
+
+1
+    See, for example (Abdou et al., 2021; Gurnee & Tegmark, 2024; Li et al., 2021; Meng et al., 2022;
+    Templeton et al., 2024; Tenney et al., 2019). Representationalism about LLMs is also defended, with
+    various qualifications, by several philosophers (Butlin, 2023; Goldstein & Levinstein, 2024; Harding,
+    2023; Mollo & Millière, 2023; Søgaard, 2023; Williams 2026).
+2
+   A recent notable exception is (Attah, 2025) which focuses on the special case of communicative inten-
+ tions.
+3
+   The possession of intentions also bears on broader discussions about what kind of agency (if any) is
+ exhibited by LLMs (Butlin, 2024; Dung, 2025).
+
+
+13
+Intention-like representations in language models?
+
+
+LLMs, focusing on two case studies.4 I will ultimately argue that while current evi-
+dence points to representations bearing many of the characteristic features of inten-
+tions, these representations still differ from paradigmatic intentions in important
+ways. Thus, absent sharply defined necessary and sufficient conditions, there may be
+no determinate answer to the question of whether current LLMs have intentions. Or,
+if we insist on a determinate classification, theorists will need to consider the risks
+and pay-offs of extending the concept of intention beyond the paradigm case.
+   The analysis provided in this paper will, of necessity, be programmatic and pre-
+liminary. There are several reasons for this. Firstly, AI interpretability research is a
+young and rapidly evolving field. There has been almost no empirical work explicitly
+addressing the question of intentions in LLMs and, at the time of writing, only a
+handful of results directly bear on it. In addition, language models themselves are
+a moving target. While the models discussed in this paper span a range of sizes and
+model families, it remains possible that further advances will see the emergence of
+more intention-like representations. Finally, there is no universally accepted account
+of the nature of intentions. These limitations aside, this paper aims to make prog-
+ress on the question of whether LLMs have intentions, bringing it into contact with
+empirical research, and highlighting the many challenges of doing so.
+
+
+2 Five characteristic features of human intentions
+
+In what follows, I will assume a causal-representational view of intentions, on which
+intentions are (i) implemented by representations that (ii) play a causal role in the
+production of actions. This is not a universally accepted assumption. Philosophers
+have variously held that intention ascriptions provide teleological rather than causal
+explanations (Wilson, 1980), that intentions amount to a form of practical self-
+knowledge (Anscombe, 1957), or being in progress towards an action (Thompson,
+2008). Nevertheless, the causal-representational view has substantial attractions and
+has been dubbed “the standard story” of action (Velleman, 1992, p. 461) for good
+reason. It clearly accommodates a distinction between reasons that could rationalise
+an action and the reason for which an agent acted. It is also the account most naturally
+amenable to empirical investigation using the methods of cognitive science (Mylo-
+poulos & Pacherie, 2019) and the AI interpretability methods to be introduced below.
+Thus, while far from the only approach, assuming a causal-representational account
+provides a productive starting point for an inquiry into LLM intentions.
+   I will discuss five properties widely associated with intentions: (1) directive func-
+tion, (2) degrees of distality, (3) degrees of abstraction, (4) commitment and (5)
+planning. Some of these describe representation-level properties, characteristic of
+intentions themselves; others are system-level features, to which intentions make a
+characteristic contribution. I make no claim as to whether these features are indi-
+
+4
+   This is by no means the only valid approach to the question. One might instead invoke computational
+ models of intentional action and speech production from the cognitive sciences. For an example of work
+ in this direction, see (Attah, 2025) which I take to be complementary to the approach taken here (though
+ I leave it to future work to explore whether and how these two perspectives might be reconciled).
+
+
+                                                                                            13
+                                                                                                     I. Williams
+
+
+vidually necessary or jointly sufficient for intentions. My more modest aim is to
+characterise the paradigmatic case—adult human intentions—sharply enough for a
+comparison with LLM representations, while leaving open the possibility that there
+is no sharp line between intentions and non-intentions.5 A further open question is
+whether having intentions constitutively requires other propositional attitudes. If
+intentions come as part of a package with beliefs and desires, then existing work on
+these states in LLMs (e.g. Herrmann & Levinstein, 2025; Goldstein & Lederman,
+ms.) may bear indirectly on the question of LLM intentions. Alternatively, it may be
+possible to construe the functional role of intentions with reference to broadly defined
+representations and processes, without requiring fully-fledged beliefs and desires.
+I take no firm stance here, focusing on the case for ascribing intentions to LLMs
+besides evidence of beliefs, desires, and other related attitudes.
+
+2.1 Directive function
+
+Representations can play different roles in an agent’s cognitive economy. One basic
+distinction is between descriptive and directive representations, which differ in their
+“direction of fit” (Anscombe, 1957; Humberstone, 1992). Descriptive representa-
+tions, such as beliefs, function to represent the way the world antecedently is, and
+thus have a “mind-to-world” direction of fit.6 Directive representations, like desires
+and intentions, have the function of bringing the world into conformity with their
+content—a “world-to-mind”, direction of fit (Millikan, 1995; Shea, 2018).
+   An important question concerns the strength of the relevant notion of “function”.
+A role-function (Craver, 2013; Cummins, 1975) is simply a causal role played by
+some component in a system with respect to an explanandum of interest. Role-func-
+tions can accommodate the possibility of functions that are not always performed, but
+they do not underwrite any meaningful kind of normativity (i.e. a distinction between
+malfunction and correct functioning). By contrast, a proper function is a causal role
+that has been selected for, e.g. stabilised through natural selection or learning.
+   From this, we can derive two alternative accounts of directive representation. On a
+less demanding account, directive representations have the role-function of bringing
+the world into conformity with their content.7 On a more demanding account, direc-
+tive representations have the proper function of doing so—i.e. this role was selected
+for. This distinction will be important when assessing LLM representations in Sect.
+4.1.
+
+
+
+
+5
+   I will therefore bracket marginal or disputed intenders like non-human animals and young infants, when
+ characterising intentions.
+6
+   Descriptive representations can also represent the future (or the past), but unlike directive representa-
+ tions, their role is not to bring that future into being.
+7
+    On a representationalist construal of intentions, attributions of directive role-functions ought to explain
+    not only observable behaviour (à la Dennett’s [1981] intentional stance) but also internal causal organisa-
+    tion of components and processes.
+
+
+13
+Intention-like representations in language models?
+
+
+2.2 Degrees of distality
+
+Theorists sometimes distinguish between distal (or prospective) and proximal (or
+immediate) intentions (Mele, 1992; Pacherie & Haggard, 2011). Proximal intentions
+are intentions to act now. They initiate actions, and thus occur a very short time
+before the action itself. A football player seeing an open goal forms an intention to
+shoot, causing the action moments later. Distal intentions, on the other hand, are
+intentions to act at some time in the future—either specified, or as yet unspecified. I
+can intend now to take a sip of coffee when I finish this paragraph. I may make plans
+this morning to go shopping later this evening. And while in my 20s I might intend
+that I’ll retire when I’m older, without yet knowing exactly when. It is characteristic
+of human intentions that they span a spectrum from distal to proximal, with inten-
+tions at different timescales coordinating in the planning and execution of action
+(Mylopoulos & Pacherie, 2019).
+
+2.3 Degrees of abstraction
+
+Intentions are often abstract and partial (Pacherie, 2008; Bratman, 1987, p. 31). They
+are not always instructions for a very precise behaviour or bodily movement. There
+are myriad ways of realising an intention to get a well-paying job. Not only are there
+many such jobs, there are many ways of getting those jobs, and the set of bodily
+movement sequences that could result in the intention being satisfied is functionally
+infinite. Even a relatively concrete intention, say, to pick up my mug could be car-
+ried out in many different ways: How should I get from my current position to being
+within reaching distance? Should I grab it firmly or loosely? How high should I raise
+it up?
+    The point here is not that intentions are always abstract (or always distal)—many
+human intentions are specific (and proximal). The point is that it is characteristic of
+paradigmatic intention-possessing systems—adult humans—that our intentions run
+the gamut from specific to abstract, proximal to distal. Thus, if some class of direc-
+tive representations in a non-human animal or artificial system were to be exclusively
+specific and low-level, or exclusively proximal, this would be a notable difference
+from the paradigm case, and thus prima facie count against their being intentions.
+
+2.4 Commitment
+
+What distinguishes intentions from other directive states, like desires? One influen-
+tial line of thought is that intentions involve a commitment that mere desires do not.
+On a standard picture, desires mostly serve as inputs to deliberation (reasoning about
+what to do), representing candidate actions the agent is motivated towards. Intentions
+are, in the first instance, the outputs of deliberation, and mark the point at which an
+agent settles on one possibility from a range of candidates.
+   The claim that intentions involve commitment can be separated into three aspects.
+First, intentions involve an “executive attitude” (Mele, 1992 p. 162) or are “conduct-
+controlling” (Bratman, 1987, p. 16)—all else equal, they will cause one to perform
+the intended action, whereas desires are merely potential influencers of action. Sec-
+
+                                                                            13
+                                                                                                     I. Williams
+
+
+ond, intentions serve to settle among conflicting desires or alternative courses of
+action: an agent will thus tend to form a mutually consistent set of intentions, while
+the same is not true of desires. Third, intentions have a degree of stability or inertia
+(Bratman, 1987). After setting an intention, one normally ceases deliberation on the
+relevant issue. Thus intentions act as “terminators of practical reasoning about ends
+or goals” (Pacherie & Haggard, 2011, p. 76), and are resistant to reconsideration.8
+   The fact that setting an intention implies committing to an action makes it possible
+to make further plans on the presumption that one will follow through as intended.
+Without commitment, planning would be hostage to significant uncertainty about
+one’s own future actions. This brings us to the final characteristic role of intentions,
+their role in planning.9
+
+2.5 Planning
+
+A central role for intentions—especially distal intentions—is as part of a broader
+system of planning (Bratman, 1987, 2022). Between setting an intention and execut-
+ing it, intentions do not remain inert, but “provide crucial inputs for further practical
+reasoning and planning” (Bratman, 1987, p. 29) supporting an agent’s ability to coor-
+dinate with itself across time. An intention “frames” subsequent deliberation (Brat-
+man, 1992) in two ways. First, intentions constrain and prompt means-end reasoning:
+if I form an abstract intention like I’ll buy a new suit for the wedding, I now need
+to figure out what my budget is, what colour and style I want, when to start looking
+in order to have it in time for the wedding. Second, there are horizontal constraints
+between intentions: intentions act as a “filter” on the formation of subsequent inten-
+tions (Bratman, 1992, p. 1), ruling out courses of action that are inconsistent with
+what one already intends (I ought not to intend to head out of town at the same time
+I intend to meet with a friend for lunch).10
+    In sum, human intentions are characterised by having a directive as opposed to a
+descriptive function, exhibiting different degrees of temporal distality and abstrac-
+tion, involving commitment to a course of action, and imposing constraints on plan-
+ning processes. These features are plausibly interdependent in various ways: For
+instance, commitment, in the relevant sense, involves a commitment to do some-
+thing, and thus presupposes representations with a directive function. And the more
+abstract and distal intentions can be, the more room—and need—there is to ensure
+that they are fleshed out and mutually consistent (i.e. planning). Similarly, planning
+8
+   Reconsideration of an intention is not impossible. Rather, stability implies “a shift in the threshold of
+ relevance of information: some information that would have been relevant in forming an intention will
+ not be sufficient to provoke rational reconsideration once an intention has been formed” (Holton, 2009,
+ pp. 2–3).
+9
+    The commitment aspect of intentions is also central to their role in interpersonal coordination of actions
+    (Bratman, 2014; Gilbert, 2017). When you engage in a joint action with one or more other people, such
+    as walking together or planning a conference, it helps if you can rely on each other’s intentions remaining
+    somewhat stable over time.
+10
+    To be clear, an agent’s capacity for means-end reasoning, and planning more generally, cannot be attrib-
+uted solely to intentions. A variety of representations and inferential processes must collaborate for these
+abilities to be possible. Nevertheless, intentions play an important role in these reasoning processes and
+can be identified partly by reference to this role.
+
+
+13
+Intention-like representations in language models?
+
+
+demands some degree of commitment—there is little point in fleshing out and plan-
+ning around courses of action that one has not yet settled on pursuing.
+   Are any of these features exhibited by representations in LLMs? To answer this
+question, I’ll introduce two classes of representations recently discovered in LLMs
+which look to be potential candidates for intention-like states. After introducing the
+case studies, their similarity to intentions will be evaluated more thoroughly in Sect.
+4.
+
+
+3 Two case studies: candidates for intentions in LLMs
+
+Before presenting the case studies themselves, it will serve us to briefly review some
+of the techniques and methods used in technical AI interpretability research.11 AI
+interpretability (or more narrowly, “mechanistic” interpretability) is a research pro-
+gramme aimed at illuminating the internal computations of neural networks, includ-
+ing transformer-based LLMs. Interpretability researchers seek to explain a model’s
+capacities in terms of the components and computational steps that give rise to them.
+Central to the programme is the assumption that specific components of activation
+vectors—vectors characterising activity across a model’s artificial neurons—repre-
+sent task-relevant contents and are causally implicated in the model’s behaviour.
+    A key challenge is that individual neurons often respond to multiple unrelated
+properties, suggesting that contents are represented in a distributed manner, across
+multiple neurons. Sparse autoencoders and related techniques like cross-layer trans-
+coders address this by translating activations into sparser encoding schemes, wherein
+each neuron’s activity ideally corresponds to a distinct feature leveraged by the
+model (Cunningham et al., 2023). Another class of techniques establishes whether
+a component plays a hypothesised causal role, by means of intervention: activation
+patching replaces an activation with one obtained from a different input (Zhang &
+Nanda, 2024), and activation addition (or “steering”) adds a vector to induce a target
+behaviour (Turner et al., 2024). These methods can be combined to construct attri-
+bution graphs—causal graphs depicting hypothesised computational relationships
+between representations (Ameisen et al., 2025).
+    In interpreting the results discussed below, which rely on a variety of these inter-
+pretability techniques, we should bear in mind that these techniques are relatively
+new and their reliability is actively debated (Sharkey et al., 2025; Kantamneni et
+al., 2025).12 While causal intervention results and convergence between methods go
+some way to validating the findings, it is possible that details of the identified internal
+states are somewhat method-dependent, and thus serve as proxies for the latent rep-
+resentations that actually explain model behaviour.
+
+
+
+11
+  For more in-depth overviews, see (Bereska & Gavves, 2024; Millière & Buckner, 2024a). For approach-
+able introductions to language models and the transformer architecture see (Levinstein, 2023; Millière &
+Buckner, 2024b) or Grant Sanderson’s visual introduction to transformers on YouTube (Sanderson, 2024):
+https://www.youtube.com/watch?v=wjZofJX0v4M.
+12
+       I am grateful to an anonymous referee for discussion on this point.
+
+
+                                                                                           13
+                                                                                                  I. Williams
+
+
+3.1 Case study 1: function vectors
+
+The first line of evidence emerges from research into the mechanisms underlying
+few-shot in context learning (ICL) in LLMs. Few-shot ICL refers to a language mod-
+el’s ability to generate task-appropriate outputs after being given a prompt with a
+few examples demonstrating a task. For instance, a model might be given the prompt
+“arrive: depart, small: big, common:”. In this example, the implicit relationship
+between the words in the two example pairs is that they are antonyms. To continue the
+pattern in the examples, the model would need to output an antonym of the cue word
+“common”, e.g. “rare”. It turns out that language models of sufficient scale are able
+to solve a wide range of tasks based on few-shot examples—e.g. mapping countries
+to their currency, mapping people to their occupation, turning present tense to past
+tense, and translating words between various languages.
+    To identify representations involved in mediating few-shot ICL tasks, Todd and
+colleagues (2024) first determined, by means of causal intervention, which attention
+heads have the biggest causal effect on performing a given task (such as English-
+Spanish translation).13 They then took the most causally relevant heads and, for each
+head, calculated the average of its outputs across examples of the task. These aver-
+ages were summed together, yielding a vector that the authors refer to as the “function
+vector” for that task. The intuition is that, given that the identified attention heads
+all play a role in the model’s success at a given task, one can approximately recover
+a representation whose role is to induce the model to perform the task by finding
+what is invariant in the effective heads’ vector outputs across examples of the task
+(and summing them together). And indeed, they were able to broadly validate this
+hypothesis, by means of causal interventions with the extracted function vectors:
+They showed that injecting a function vector into a model in a new context (a form
+of activation patching) triggers execution of the corresponding task robustly across
+a wide range of inputs. For instance, they could induce a model to output a Spanish
+translation of an English word simply by injecting the function vector extracted from
+Spanish-to-English translation examples.14
+    In sum, function vectors, the representations discovered by Todd and colleagues,
+appear to play a distinctive functional role within the LLMs that they studied, namely,
+to represent a certain task and to cause the model to perform that task upon token-
+ing of the representation. Thus, it is reasonable to wonder whether they might act as
+intentions for the model—i.e. intentions to perform a specific task, such as translate
+the English cue-word to Spanish. I will return this question in Sect. 4, where func-
+
+13
+    Attention heads are components in transformers, the neural network architecture used in leading LLMs.
+Their role is to transport information between token positions, for instance, updating the representation of
+the word “LLMs” in the last sentence, based on the representation of the preceding word “leading”. Which
+information is transported by each head, and between which tokens, is a function of parameters set during
+the training of the model.
+14
+    Convergent evidence was reported in parallel work by Hendel and colleagues (Hendel et al., 2023).
+Using a similar methodology, the researchers identified what they call “task vectors”, vectors that
+abstractly represent relationships implicit in input examples, and “[guide] the transformer to generate
+appropriate outputs given queries” (p. 9322). For consistency, I will use the term “function vector” rather
+than “task vector” in the discussion that follows.
+
+
+13
+Intention-like representations in language models?
+
+
+tion vectors will be more carefully assessed against the five characteristic features of
+intentions.
+
+3.2 Case study 2: output and planning representations
+
+Recent work from researchers at Anthropic has explored a set of tools for identifying
+and visualising computational mechanisms underlying language model capacities.
+Simplifying considerably, Ameisen and colleagues (2025) constructed a modified
+version of their target LLM (a “replacement model”), replacing certain parts of the
+model with neural network components called cross-layer transcoders. The cross-
+layer transcoders are trained to reproduce the input-output profile of the replaced
+components, but result in much sparser (and thus easier to interpret) intermediate
+activation vectors, which are taken to be proxies for semantically significant dimen-
+sions of variation in the original model (so-called “features”).15
+    While previous discussions of features primarily focused on representations of
+aspects of inputs, Ameisen and colleagues introduce the notion of “output features”,
+representations that “promote continuing the response with specific tokens or cat-
+egories of closely-related tokens” (Ameisen et al., 2025, § 3.3). For instance, they
+identify an output feature to which they attribute the functional role of leading the
+model to generate the token “dag”. They cite two lines of evidence for this functional
+role: firstly, “it activates strongly on several different tokens, but in each example,
+the token is followed by the text ‘dag’.” (Ameisen et al., 2025, § 3.3) And secondly
+“the feature increases the probability of the model predicting ‘dag’ more than any
+other token (in terms of its direct effect through the residual stream)” (Ameisen et
+al., 2025, § 3.3).
+    Output features, like the function vectors of Todd and colleagues, already exhibit
+some properties that make them candidates for intention-like representations (they
+seem to be tightly connected with causing the model to produce particular outputs).
+But even more complex functional roles emerge when we turn to Ameisen and col-
+leagues’ investigation of computational relations between features. The researchers
+used their replacement models to construct “attribution graphs”, hypotheses about
+computational relations between features for a given prompt, which they then tested
+by means of causal interventions on particular features. For example, in a compan-
+ion paper (Lindsey et al., 2025), the researchers investigated how Claude completes
+rhyming couplets. E.g. a model was given the following prompt:
+
+     A rhyming couplet:
+
+     He saw a carrot and had to grab it,
+
+
+15
+    The term “feature” is potentially confusing, not least because it is sometimes used, as it is here, to refer
+to dimensions of variation of representational vehicles and at other times to refer to representational con-
+tents (see Williams et al., 2025, p.5 for discussion on this point). Despite this awkwardness, I will adopt
+the term “feature” (as well as “output feature” and “planning feature”—concepts to be introduced in the
+text that follows), when referring to the specific representations posited by the Anthropic researchers in
+the studies discussed.
+
+
+                                                                                                  13
+                                                                               I. Williams
+
+
+It might respond with the output:
+
+  His hunger was like a starving rabbit.
+
+The researchers investigated how the model solves this task—how does it manage to
+write a second line that both makes sense in the context of the first line and ends on a
+rhyming word? They considered two broad hypotheses:
+
+1. Pure improvisation: the model operates word-by-word, beginning the line with-
+   out regard for the need to end on a rhyme word, and then once it reaches the end,
+   finding a word that rhymes and fits what it has written.
+2. Planning: an appropriate rhyming end word is chosen in advance, which the
+   model then “writes towards”, i.e. it influences how it writes the intervening words.
+
+To test these hypotheses, they constructed an attribution graph and tested it by means
+of intervention. Their results, they argue, supported the planning hypothesis: they
+found features representing the rhyming end word “rabbit” were already activated
+at the end of the prompt, before the model had started writing the second line. These
+representations—which they call “planning features”—play a causal role in generat-
+ing “rabbit” at the end, but also in shaping the content of the intermediate words.
+(Lindsey et al., 2025, § 4).
+    The Anthropic researchers focused solely on the Claude 3.5 Haiku model, but a
+recent extension by Maar and colleagues (2026) suggests that similar mechanisms—
+representations that causally mediate the generation of a rhyming end-word and
+semantically appropriate intermediate words—can be found in a wide variety of dif-
+ferent models. This latter work used a simpler methodology, using a form of activa-
+tion steering rather than cross-layer transcoders. The fact that representations with a
+similar causal profile can be found via different probing methodologies, and across
+different models, increases confidence that the representational posits capture a bona
+fide feature of the models.
+    The claim that models engage in a kind of “planning”, by means of representa-
+tions that function to represent the model’s upcoming outputs, is highly suggestive
+of intentions. But is this planning in the appropriate sense? Properly assessing the
+degree to which these representations fit the profile of intentions will require return-
+ing to the five characteristic features introduced in Sect. 2. I turn to this task now.
+
+
+4 Assessing the case studies for the five characteristic features
+
+4.1 Directive function?
+
+Do either of the case studies discussed above provide evidence of directive represen-
+tations in LLMs? Recall the distinction between role-functions and proper functions.
+We can thus assess two things. Firstly, do the representations identified in either case
+study play the characteristic causal role of directive representations, i.e. causing the
+outcomes that they are hypothesised to represent? Secondly, were they selected for
+
+13
+Intention-like representations in language models?
+
+
+that causal role? Taking the causal role question first, one source of evidence can
+come from interventions on the candidate representation. For instance, exciting or
+activating a directive representation of some outcome should make the outcome more
+likely to occur, and suppressing it should make the outcome less likely.
+   Consider first the case of function vectors. Todd et al. claim that a function vec-
+tor, “triggers the execution of a specific procedure by the language model” (p. 1)
+and serves as a “generic function-invocation mechanism” (p. 9). Similarly, Hendel
+and colleagues argue that “ICL functions by compressing a given training set into a
+single task vector, which then guides the transformer to generate appropriate outputs
+given queries” (Hendel et al., 2023, p. 9322). The evidence for this is largely based on
+interventions. For example, Todd and colleagues inserted function vectors at various
+layers for new prompts featuring the cue word, including “zero-shot” contexts (i.e.
+the prompt was the cue word and nothing else) and natural language prompts (e.g.
+“when I think of ‘x’, I usually…”). Within a certain range of layers, they found that
+such interventions led to an increased chance of producing the target output for that
+cue word, compared with the outputs of the unaltered model.16
+   There is also evidence that output features described by Ameisen and colleagues
+play a directive causal role, specifically they “promote continuing the response with
+specific tokens or categories of closely-related tokens” (Ameisen et al., 2025, § 3.3).
+This was validated with interventions—suppressing an output feature made the cor-
+responding output less likely, and activating it made it more likely.17
+   Thus, on the face of it, both function vectors and output features have a directive
+causal role. However, in both cases, this is only part of the story. Crucially, when
+deployed in a chatbot or text generation setting, LLMs have two distinct “phases”
+(see Fig. 1). In the prompt processing phase (aka “prefill”), the entire input sequence
+is processed but output distributions at each position are discarded. In the token gen-
+eration phase (aka “decode”) the output distribution at the final token position is sam-
+pled, the sampled token is appended to the input, and the process repeats iteratively.
+   The internal processing is identical across both phases. Thus, any given output
+feature or function vector active during token generation, will likely also be active
+on many occasions during prompt processing. But only during the token generation
+phase will these representations cause their represented outcomes to occur. During
+prompt processing, if the representations have any determinate function, it is likely
+descriptive—anticipating upcoming words in the user-generated sequence rather
+than affecting changes via the model’s outputs. This marks a crucial respect in which
+LLM representations differ from paradigmatic intentions, which are characterised by
+a consistently directive functional role.
+   Do the directive causal roles of these representations constitute proper functions?
+For most commercially available chatbots, which undergo preference tuning (such
+as reinforcement learning from human feedback [Ouyang et al., 2022]), there are
+16
+   The results differed depending on the model, intervention layer, and prompt.
+17
+    Curiously, Lindsey and colleagues don’t class the “rabbit” representations active over the new line token
+as output features, instead referring to them as “planning features”. Nevertheless, planning features too
+seem to have a directive causal role, the only difference being that they cause the model to output their
+represented content not immediately, but at some later token position. I will return to this feature in the
+next section, in discussing degrees of distality.
+
+
+                                                                                               13
+                                                                                             I. Williams
+
+                        Prompt Processing Phase                     Token Generation Phase
+
+
+
+
+ Output
+ distributions:
+
+
+
+                  LLM        LLM     LLM      LLM            LLM        LLM       LLM       LLM       ...
+
+
+ Token
+                  Tell        me      a     story.           Once      upon        a        time
+ sequence:
+
+
+
+
+Fig. 1 Prompt processing and token generation phases. Left: Prompt processing phase. Blue squares
+depict user input tokens. Output distributions are discarded. Right: Token generation phase. Orange
+squares depict tokens generated by the model, which are then appended to the sequence as inputs.
+Horizontal dotted arrows depict information flow between token positions, internal to the model
+
+
+good reasons to think so: the training process rewards or penalises models based on
+strings of text that they output during a token generation phase, making it plausible
+that function vectors and output features are selected partly based on their directive
+roles in generating text.
+   For simpler, purely “pretrained”, models the picture is different. During pretrain-
+ing, LLMs are trained on next token prediction: the actual next token in a training
+sequence is revealed, and the model is penalised based on how well its output distri-
+bution matches it. There is no token generation phase, and so internal representations
+that causally shape output distributions were selected for predicting upcoming words
+in a prewritten sequence, not for bringing about changes in the world. If an internal
+representation predicts “dog” but the actual next word in the training text was “cat”,
+the mistake is in the internal representation, not in the text. On this view, their proper
+function is descriptive (like a future oriented belief or prediction) rather than direc-
+tive—even if, at deployment, such a model is used to generate tokens. While the
+vast majority of models that the public interacts with are preference tuned, it bears
+noting that a great deal of interpretability research, including the study by Todd and
+colleagues (2024) discussed above, investigates pretrained-only models.18 Thus, in
+
+
+
+
+18
+   Todd et al. (2024) tested GPT-J (Wang & Komatsuzaki, 2021); GPT-NeoX (Black et al., 2022), 7B,
+13B and 70B parameter versions of the pretrained-only Llama 2 model series (Touvron et al., 2023). The
+Anthropic studies, on the other hand, investigated Claude 3.5 Haiku, a model that has undergone various
+post-training techniques.
+
+
+13
+Intention-like representations in language models?
+
+
+interpreting such studies, we should be careful not to assume that the identified direc-
+tive causal roles of components (like function vectors) are proper functions.19
+   Should we care about whether the directive role of certain LLM representations
+constitute proper functions as opposed to merely role-functions? I will not attempt
+to resolve this debate here.20 I will simply note that, if directive functions need to be
+proper functions, then we will only find them in systems trained based on autoregres-
+sively sampled outputs, and not in systems trained purely on prediction tasks. Setting
+proper functions aside, the fact that, during deployment, function vectors and output
+features play a directive causal role only during a model’s token generation phase
+does appear to be a respect in which these representations differ significantly from
+human intentions.
+
+4.2 Degrees of distality?
+
+Do we find a spectrum of distal and proximal directive representations in LLMs?
+While distality in humans concerns relations in time (between an intention and its
+execution), actual time—what computer scientists call “wall-clock time”—is not an
+especially useful lens on the operations of an LLM. The time it takes to generate a
+sequence of tokens may simply reflect constraints of the underlying hardware, and
+further, it is possible to interrupt an LLM mid-generation for an indefinite amount of
+time, and then resume generation, picking things up exactly where it left off. Thus,
+the distance in actual time between the activation of a representation in an LLM and
+the occurrence of some output is a poor measure of the algorithms at play. Neverthe-
+less, we can abstract the notion of time somewhat and think of distality and proximal-
+ity in terms of token position.
+   Consider a token, output by a model at position n in a sequence, midway through
+generation. We can ask about the state of the model at position n-1, (i.e. one token
+position before n), we can ask about the state of the model at n-2, and so on. Extend-
+ing the proximal–distal distinction, proximal intentions would be those occurring
+closer in the sequence to their corresponding outputs, and distal intentions those
+occurring further away. The most proximal location for an intention to produce a
+token at n would be n-1, whereas a distal intention to produce token at n would be a
+representation that occurred at an earlier token position (e.g. n-10, n-100).21
+   Do the case studies discussed above display gradations of distality? The experi-
+ments conducted by Todd and colleagues, do not directly explore degrees of distality,
+
+19
+    Perhaps function vectors get coopted for text-generation through the fine-tuning process, thereby switch-
+ing their proper function from descriptive to directive. While there is some plausibility to this conjecture—
+fine tuning algorithms are typically designed to make only modest changes to pre-trained-weights (see e.g.
+Ouyang et al., 2022), resulting in significant preservation of internal structures—it remains a conjecture
+for the specific case of function vectors.
+20
+   Though see (Bratman, 2024), which appears to favour a role-function construal of intentions.
+21
+    The fact that token positions are processed in parallel may seem to threaten the analogy between time
+and relative token position. But transformers are typically configured so that processing of earlier tokens
+can effect representations at later token positions but not vice-versa (Vaswani et al., 2017, p. 3). This so-
+called “causal attention masking” imposes a directionality to processing that simulates the past-to-future
+directionality of causation.
+
+
+                                                                                               13
+                                                                               I. Williams
+
+
+as the function vectors are both extracted from and validated on the final token posi-
+tion of prompts. Nevertheless, there were some suggestive results: Injecting function
+vectors at the end of certain test prompts led to immediate outputting of the target
+word. For example, given a “zero-shot” prompt like the single word “Mongolia”,
+the injection of the Country–Capital function vector might result in a one-word out-
+put “Ulaanbaatar”—that is, the function vector is “executed” at the very next token
+position. But in other cases, e.g. where a function vector was injected at the end of a
+so-called natural text prompt, the target token would be output later in the sequence.
+For example, the same function vector, if injected at the end of the prompt “A couple
+years ago I visited Grenada, and”, the model might continue, “I was in the capital, St.
+George’s”, outputting the capital name only after approximately seven prior tokens
+(Todd et al., 2024, p. 38). Thus we do see some variation in the distality/proximity of
+function vectors relative to their execution.
+   More direct evidence is seen in the results presented by Amesien and colleagues
+(2025) and Lindsey and colleagues (2025). As discussed above, the representations
+that they designate as “output features” typically result in the outputting of their
+content beginning at the next token position (thus they are “proximal” in the sense
+discussed above). But another class of representations they call “planning features”
+appear to be more distal. For example, in the poetry writing case, the researchers
+found that the representations of the to-be-written second-line end word (e.g. “rab-
+bit”) occurred over the newline token at the end of the first line. In other words, in
+at least some instances, representations of future outputs are activated many token
+positions earlier in the sequence before those words are output by the model—they
+display a degree of distality.
+   What remains to be seen is exactly how distal (putative) intentions in language
+models can be. The examples discussed above show some initial evidence of direc-
+tive representations occurring at most ten-or-so tokens prior to execution. But
+noted above, human intentions can be formed with very long time horizons—I can
+intend now to do something many decades hence. Could a language model activate
+a directive representation that gets executed hundreds or thousands of token posi-
+tions later? More empirical work is needed to explore the limits of distality in LLM
+representations.
+
+4.3 Degrees of abstraction?
+
+Do the representations identified in the case studies display varying degrees of
+abstraction, as is characteristic of intentions? It seems so. Firstly, the function vec-
+tors identified by Todd and colleagues appear to be relatively abstract in the sense
+that they do not represent specific outputs but relations or functions between words
+or concepts. For example, they find function vectors for English to Spanish trans-
+lation, such that, when injected into a model that has received any English word
+as input, it will induce the model to output the equivalent Spanish word. Another
+function vector encodes an abstract notion of next-in-sequence, causing the model
+to output the next item in various different kinds of sequences, for instance mapping
+“Monday”→“Tuesday”, “December”→“January”, “a”→“b”, and “seven”→“eight”.
+Further evidence that the function vectors are abstract comes from the fact that they
+
+13
+Intention-like representations in language models?
+
+
+induce application of the function across many different prompt formulations. For
+instance, in addition to “zero-shot” tests (injecting a function vector when the model
+has only received the cue word, “x”), function vectors can induce the desired map-
+ping for a variety of natural text prompts, including “When I think of x, I usually”,
+“While reading a book, I came across the word ‘x’. I looked it up in a dictionary and
+it turns out that it means”, and “The word x can be understood as a synonym for”.
+    Output features, discussed by Ameisen and colleagues, seem to exhibit a range of
+degrees of abstraction. Some are not especially abstract, representing specific tokens
+to be output (like the “dag” output feature discussed in Sect. 3.2). Other output fea-
+tures, though, are more abstract. One such feature, for example, does not cause the
+model to output a specific token, but rather makes the model more likely to output
+the name of a game (e.g. “poker”, “billiards”, “scrabble”), another relates to saying a
+rhyming word. Another makes the model output a prepositional phrase ending with
+a noun. They also found evidence of “multilingual” output features—e.g. a represen-
+tation that played a causal role in generating a word meaning “big”, irrespective of
+the output language (Ameisen et al., 2025, § 5). Thus, output features often represent
+abstract or partially specified plans for action, in much the same way that intentions
+do.
+
+4.4 Commitment?
+
+Do representations in LLMs implement the kind of commitment characteristic of
+intentions? The poetry writing case may seem to provides some positive evidence:
+“rabbit” planning features are tokened several positions before the word is output,
+suggesting that the model commits to an end-word in advance. On closer inspection,
+however, the story is not so simple. Models do not activate a single planning feature,
+instead simultaneously activating representations of alternative end words, including
+“habit” and “crab, it”, which the authors conceptualise as “candidate” completions
+(Lindsey et al., 2025, § 4). Since these outcomes are not compossible, this falls afoul
+of a key dimension of the commitment characteristic of intentions, namely that they
+settle among a pool of inconsistent options.
+   One might attempt to privilege one of the planning features—for example, the
+most strongly active at a given time—as the intention. However, this fails to engage
+with the deeper issue. Even less active candidates causally influence the output distri-
+bution and thus the output itself. In the case at hand, the model ended the couplet with
+“rabbit” only 81% of the time, with “habit” accounting for the remaining 19%. Thus,
+the most active directive representation does not appear to “shield” an outcome from
+competitors in the way that human intentions shield action execution from distracting
+unchosen desires (Cheng et al., 2023; Shah et al., 2002).
+   What about the stability or inertia aspect of commitment? Are the candidate rep-
+resentations in LLMs resistant to reconsideration in the way that intentions are? Cer-
+tainly, LLMs can transport information from earlier token positions to later token
+positions via the self-attention mechanism, and this serves as a loose analogue of
+maintaining representations across time. However, there is some evidence that, in
+certain conditions, transformer based LLMs’ cross-position maintenance of repre-
+sentational content breaks down, resulting in un-humanlike behavioural instability.
+
+                                                                             13
+                                                                                                I. Williams
+
+
+   Recent work from Google DeepMind researchers (Lepori et al., 2025) investi-
+gated “contextualisation errors”: cases where a language model fails to integrate rel-
+evant information given in an input, and thus delivers a contextually inappropriate
+response. For instance, a model might fail to appropriately resolve an ambiguous
+word like “bank” despite being given relevant contextual cues, such as references to
+fishing. Most relevantly to the present discussion, the authors describe cases where
+models output a context-appropriate word at one time step, but then later revert to a
+context-inappropriate output (see Fig. 2).
+   The authors’ explain the effect as follows: At the end of the first question, the
+model is able to arrive at a correctly contextualised representation, but the crucial
+operation occurs at a late layer. Then, at the later token position, the model fails to
+access the contextualised, late-layer representation (bank qua river bank), instead
+reading from earlier layers, where “bank” has not yet been properly contextualised
+(bank qua financial institution).
+   While the authors don’t explicitly distinguish between descriptive and directive
+representations in LLMs, it is conceivable that contextualisation errors can occur at
+the level of directive representations. That is, at an earlier token position, a model
+may form a directive representation to, say, output facts about banks1, but at a later
+token position, due to the failure to access the earlier representation, it may form a
+directive representation to output facts about banks2. If LLMs display this sort of
+instability between token positions, with respect to their directive representations,
+then this would be one further respect in which they differ from human intentions.22
+
+4.5 Planning?
+
+Neither (Todd et al., 2024) nor (Hendel et al., 2023) investigated computational
+relations between function vectors. So we have no evidence that those representa-
+
+
+
+
+Fig. 2 From Lepori et al. (2025) (Left) A contextualisation error found in Gemini. (Right) An illustra-
+tion of the authors’ hypothesised explanation of contextualisation errors
+
+22
+     Further evidence of commitment failures in LLMs comes from recent results showing inconsistent
+behaviour on games like hangman (Baldelli et al., 2026). A model playing as word setter may, when asked
+midway through a game (board state: “A _ A _ _ _ _”), reveal that the hidden word is “AWAKING”. But
+if the game continues instead, it may accept letter guesses inconsistent with “AWAKING” and ultimately
+accept “ANATOMY” as the correct word. This suggests that models do not commit to a single hidden
+word through a game’s duration.
+
+
+13
+Intention-like representations in language models?
+
+
+tions interact in ways analogous to the way human intentions do in cross-temporal
+planning.
+   The poetry-writing case discussed by Lindsey et al. (2025), however, provides
+more compelling evidence of representations playing a planning role. Firstly, there
+is evidence of means-end constraints. A representation of words rhyming with
+“eet”/“it”/“et” causally influences the activation of the rabbit representation, and
+ultimately causes the output “rabbit” (suppressing the former representation resulted
+in a downstream suppression of the rabbit and habit representation, and in non-rhym-
+ing end-words being output). And injecting an alternative representation of rhyming
+with “ee” resulted in outputs ending in words like “glee”, “see” and “be”. Thus,
+the tokening of the rhyming with “eet”/“it”/“et” representation appears to serve to
+specify an end which prompts the tokening of the rabbit and habit representations—
+appropriate means to that end.
+   There was also evidence of representations imposing horizontal constraints. The
+researchers intervened on the system, artificially suppressing or activating the “rab-
+bit” representation and observing the effects on the model’s outputs. They showed not
+only that the “rabbit” representations have a content-appropriate causal effect on the
+production of “rabbit” at the end of the second line, but that they also have a content-
+appropriate causal effect on the intermediate outputs (Lindsey et al., 2025, § 4.3). For
+instance, suppressing the “rabbit” representation at the end of the first line resulted
+in completions including “Acting rashly—a very bad habit” and “So with his beak,
+he quickly nabbed it” rather than “His hunger was like a starving rabbit” (see Fig. 3).
+   This suggests that the model, in effect “writes towards” that planned endpoint
+(Lindsey et al., 2025, § 4.3). The tokening of the “rabbit” representation earlier in
+the token sequence (over the newline token) causes the model to output words which
+are consistent (in rhythm and meaning) with “rabbit” being the final word. If this is
+indeed the case, then the “rabbit” directive representation imposes a horizontal con-
+straint on the formation of directive representations for intermediate words.
+   Compelling as these results are, one could question whether they demonstrate pre-
+cisely the planning role played by paradigmatic intentions, in light of what I said in
+Sect. 4.4 about commitment. Typically, intentions are thought to impose hard con-
+straints in planning—if you intend to A then, then (setting aside cases of forgetting
+
+
+
+
+Fig. 3 From Lindsey et al. (2025) with kind permission of the authors. Effect of suppressing “rabbit”
+representations (“planning features”) on line completion, changing the output from “like a starving
+rabbit” to “a powerful habit”
+
+
+                                                                                           13
+                                                                              I. Williams
+
+
+and weakness of will), you will strictly exclude any actions inconsistent with A when
+forming subsequent intentions. However, if LLMs allow directive representations
+of alternative (inconsistent) outcomes to persist alongside each other and causally
+influence output behaviour (e.g. the candidate “rabbit” and “habit” representations),
+then these directive representations at most impose soft constraints on the subsequent
+formation of directive representations. For instance, a model’s intermediate word
+selections (“his hunger was like a…”) might be subject to influence from both the
+“rabbit” planning feature and the alternative “habit” planning feature, with the former
+“winning out” due to a significantly more active representational vehicle. The mutual
+constraints among directive representations in LLMs thus seem to have more the
+dynamics of competition rather than strict logical exclusion.
+
+
+5 Weighing the evidence
+
+5.1 How well do the candidates fit the profile of intentions?
+
+The foregoing suggests that function vectors (FVs), output features (OFs) and plan-
+ning features (PFs) display many of the properties characteristic of human intentions.
+And yet there remain some important differences, summarised in Table 1.
+    The most notable differences relate to directive functions and commitment. With
+respect to directive functions, representations have a directive causal role at most
+during the token generation phase. When activated during prompt processing, they
+play no such role. Moreover, if we care about the proper function of components,
+only LLMs that have been trained on the merit of their textual outputs (as opposed
+to merely on their predictions of pre-written text) will have components selected for
+output generation. In terms of commitment, planning features and output features do
+not settle firmly among inconsistent options, in the way characteristic of intentions:
+alternative outcomes are represented alongside each other, jointly and stochastically
+influencing model outputs (albeit to different degrees).
+    Of course, future empirical research may change our appraisal of the gap between
+LLM representations and paradigmatic intentions, with respect to one or other of the
+characteristic features—perhaps by uncovering new classes of LLM representations,
+or by exploring further instances of the classes of representation discussed here.
+And, of course, descendants of current LLMs may close the gap even further—be
+it through new training algorithms, augmentations to the basic transformer architec-
+ture, or simple increases in scale. Nevertheless, the foregoing gives a sense of our
+present state of knowledge on the extent to which the current generation of LLMs
+instantiate the characteristic features of intentions.
+
+
+
+
+13
+Intention-like representations in language models?
+
+Table 1 Summary of similarities and differences between candidate intention-like LLM representations
+and human intentions, along five dimensions
+                  Similarities                                    Differences
+Directive         • During token generation, FVs, OFs and PFs • During prompt processing, FVs,
+function          cause the outcomes that they represent.         OFs and PFs, don’t cause the out-
+                  • The directive role of FVs, OFs and PFs is     comes that they represent.
+                  plausibly selected for in reinforcement-tuned • The directive role of FVs, OFs
+                  systems.                                        and PFs is not selected for in purely
+                                                                  pretrained systems.
+Degrees of        • OFs & FVs occur immediately before their      • FVs appear to be mostly proximal.
+distality         content is output, while PFs can occur several • None of the studies presented
+                  token positions before their content is output. evidence of highly distal directive
+                                                                  representations (e.g. representing
+                                                                  outcomes 100–1000s of tokens
+                                                                  before execution).
+Degrees of        • FVs represent functions or relations between
+abstraction       words. They trigger the application of that
+                  function across a wide range of different cue
+                  words.
+                  • Some OFs/PFs are very concrete—repre-
+                  senting specific next tokens.
+                  • Other OFs/PFs are abstract, representing
+                  a general type of output (e.g. the name of a
+                  game) rather than specific tokens.
+Commitment        • The self-attention mechanism means rep-       • PFs and OFs often occur along-
+                  resentations can be carried forward “across     side other PFs/OFs representing
+                  time” (from earlier to later token positions).  alternative (inconsistent) outcomes,
+                                                                  which also causally influence model
+                                                                  output behaviour.
+                                                                  • Contextualisation errors sug-
+                                                                  gests lack of stability in LLM
+                                                                  representations.
+Planning          • PFs impose means–end constraints and          • The mutual constraints among
+                  horizontal constraints on other directive rep-  directive representations appear to
+                  resentations, causally influencing subsequent be soft (competition-like) rather
+                  internal processing.                            than hard (exclusion-like).
+
+
+5.2 Alternative hypotheses
+
+While my primary goal has been to evaluate how well the representations identified
+in the case studies fit the functional profile of intentions, the merit of the intention
+interpretation can only be fully assessed by comparing it to alternative hypotheses.23
+   One rival hypothesis is that the candidate LLM intentions in fact descriptively
+represent the nature or structure of a task. It might be argued, for instance, that a
+function vector extracted from the English to Spanish translation task does not rep-
+resent a directive content like output the Spanish translation of the cue word, but
+rather represents that the implicit relationship in each example pair is English->
+Spanish or that the user requests a Spanish translation for the cue word. A different
+suggestion is that the representations might encode something like procedural knowl-
+edge—instructions on how to perform an action or solve a task. (How to identify the
+
+23
+   I am indebted to an anonymous referee for discussion on this issue.
+
+
+                                                                                          13
+                                                                                 I. Williams
+
+
+antonym of a word, how to finish a rhyming couplet). Yet another interpretation treats
+the representations as tracking whether a goal has been satisfied, for example, the
+poem has not yet ended on an appropriate rhyme word.
+    While these proposals differ in their details, they all involve ascribing a descrip-
+tive, rather than directive role and content to the putative states, and therefore chal-
+lenge the suggestion that they are intentions. Accordingly, they all face an additional
+explanatory burden: a descriptive representation, by itself, does not typically prompt
+a specific action or outcome. Yet in the cases studies, that’s precisely what we see—
+activating the putative end poem with “rabbit” planning feature causes the model
+to end the poem with "rabbit", and activating the putative translate cue word from
+English to Spanish function vector causes the model to do just that. For the other
+hypotheses to generate that prediction about the model’s outputs we would need to
+posit some additional representational vehicle supplying a directive content. The
+“task representation” hypothesis would require positing directives such as continue
+the sequence with the implicit relationship exhibited in the example pairs or follow
+the user’s request. The procedural knowledge hypothesis would require directives
+to perform a certain task now, and thus draw on the merely descriptive procedural
+knowledge. And for the goal-satisfaction-tracking hypothesis, this would require a
+separate directive representation to specify the goal (qua goal), whose satisfaction is
+in need of tracking.
+    Three observations about these alternatives. Firstly, they concede that directive
+representations are at play somewhere in the mechanism, they just differ on their
+precise location and content. Secondly, where the researchers presented evidence
+of a broader mechanism (e.g. in the “attribution graphs” calculated by Lindsey and
+colleagues) there was no sign of the additional directive representations and compu-
+tational steps required by the alternative hypotheses. Finally, the suggestion that the
+representations are merely descriptive representations (of one flavour or another) is
+at odds with the result that injecting them into new contexts is sufficient to induce
+the system to generate the desired output (without needing to also inject a separate
+representation of the appropriate directive). Thus, the claim that function vectors,
+output features and planning features are intentions (or some species of directive
+representation) fares better than these alternative descriptive construal of their role.
+    Another, more challenging, alternative holds that the candidate intentions are direc-
+tive representations, but of a different sort, such as desires. Certainly, with respect to
+commitment (or lack thereof), output features and planning features appear closer
+to desires than intentions. However, one obstacle to this interpretation is that, with
+respect to planning, these same representations impose intention-like constraints on
+the formation of subsequent directive representations. Thus, the representations may
+sit awkwardly between the functional profile of intentions and desires.
+
+5.3 Have we found LLM intentions?
+
+So do LLMs really have intentions? What should we conclude from the foregoing
+discussion? There may not be a satisfying yes-or-no answer. As has been noted in
+discussions of other states and capacities, such as beliefs (Herrmann & Levinstein,
+2025), sociality (Strasser & Schwitzgebel 2024) and assertion (Williams & Bayne,
+
+13
+Intention-like representations in language models?
+
+
+2024), psychological concepts often lack sharp boundaries—a fact brought into focus
+by emerging AI edge cases. As shown in Sect. 2, there are a range of properties that
+characterise human intentions, themselves admitting of gradations and sub-features.
+I argued that certain LLM representations exhibit several of these features—some-
+times only in a partial or non-standard way—while lacking others. Attempts to say
+whether this profile suffices for possession of intentions run into a line-drawing prob-
+lem. That’s not to say that a useful line cannot be drawn in some particular theoreti-
+cal or social context. For instance, we might decide that in some contexts—e.g. in
+generating an explanation of a model’s behaviour for a lay end user—it is useful to
+classify planning features (for instance) as intentions. In other contexts, for instance,
+when evaluating LLMs as a model of human practical reasoning, we might decide
+that the remaining differences are important, and that planning features (or output
+features, or function vectors) should not be categorised as intentions. It is beyond the
+scope of this paper to attempt to prejudge which contexts call for narrower or wider
+boundaries. My goal here was to do the preliminary work of assessing candidates for
+intentions in LLMs against the characteristic features of human intentions.
+
+
+6 Conclusion
+
+Certain representations discovered in recent empirical investigations of LLMs seem
+to act somewhat like intentions. I have argued that this is more than just a surface
+appearance. A number of features characterise human intentions: directive functions,
+degrees of temporal distality and abstraction, commitment to a course of action, and
+imposing constraints on planning processes. Many of these features are exhibited by
+representations in LLMs. However, there remain important differences between these
+representations and human intentions, most notably their failure to play a consistently
+directive function, and their failure to firmly settle between inconsistent outcomes.
+
+Acknowledgements I would like to thank Michael Bratman, Frederik T Junker, Anders Søgaard and Tim
+Bayne for written comments on earlier drafts. I am also grateful for conversations with colleagues at the
+Center for Philosophy of Artificial Intelligence, and the participants of the Agency, Intentions and Artificial
+Intelligence workshop at Chapman University, which helped to set the direction for the paper. Thanks also
+to Simon Goldstein, Harvey Lederman, Alessandro Corona Mendozza, Matthew Jope and Samuel Bennett
+for helpful conversations on these issues. This work was supported by funding from the Carlsberg Founda-
+tion (Grant CF22-1432).
+
+Funding Open access funding provided by Copenhagen University
+
+Open Access  This article is licensed under a Creative Commons Attribution 4.0 International License,
+which permits use, sharing, adaptation, distribution and reproduction in any medium or format, as long
+as you give appropriate credit to the original author(s) and the source, provide a link to the Creative
+Commons licence, and indicate if changes were made. The images or other third party material in this
+article are included in the article’s Creative Commons licence, unless indicated otherwise in a credit line
+to the material. If material is not included in the article’s Creative Commons licence and your intended use
+is not permitted by statutory regulation or exceeds the permitted use, you will need to obtain permission
+directly from the copyright holder. To view a copy of this licence, visit ​h​t​t​p​:​/​/​c​r​e​a​t​i​v​e​c​o​m​m​o​n​s​.​o​r​g​/​l​i​c​e​n​
+s​e​s​/​b​y​/​4​.​0​/​​​​.​​​
+
+
+
+
+                                                                                                                         13
+                                                                                                                      I. Williams
+
+
+References
+Abdou, M., Kulmizev, A., Hershcovich, D., Frank, S., Pavlick, E., & Søgaard, A. (2021). Can Language
+     Models Encode Perceptual Structure Without Grounding? A Case Study in Color. Proceedings of the
+     25th Conference on Computational Natural Language Learning.
+Ameisen, E., Lindsey, J., Pearce, A., Gurnee, W., Turner, N. L., Chen, B., & Batson, J. (2025). Circuit Trac-
+     ing: Revealing Computational Graphs in Language Models. Transformer Circuits Thread. Retrieved
+     from https://tra​nsformer-ci​rcuits.pub/​2025/att​ribution-graphs/methods.html
+Anscombe, G. E. M. (1957). Intention. Blackwell.
+Attah, N. O. (2025). Do language models lack communicative intentions? Synthese, 187, 1–23.
+Baldelli, D., Parviz, A., Zouaq, A., & Chandar, S. (2026). LLMs Can’t Play Hangman: On the Necessity
+     of a Private Working Memory for Language Agents. arXiv preprint. https://arxiv.org/abs/2601.06973
+Bereska, L., & Gavves, E. (2024). Mechanistic Interpretability for AI Safety -- A Review. Transactions on
+     Machine Learning Research.
+Black, S., Biderman, S., Hallahan, E., Anthony, Q., Gao, L., Golding, L., He, H., Leahy, C., McDonell, K.,
+     Phang, J., Pieler, M., Prashanth, U. S. S., Purohit, S., Reynolds, L., Tow, J., Wang, B., & Weinbach, S.
+     (2022). GPT-NeoX-20B: An open-source autoregressive language model. In Proceedings of the ACL
+     Workshop on Challenges & Perspectives in Creating Large Language Models.
+Bratman, M. (2014). Shared agency: A planning theory of acting together. Oxford University Press.
+Bratman, M. E. (1987). Intention, Plans, and Practical Reason. Harvard University Press.
+Bratman, M. E. (1992). Planning and the stability of intention. Minds and Machines, 2(1), 1–16. ​h​t​t​p​s​:​/​/​d​
+     o​i​.​o​r​g​/​1​0​.​1​0​0​7​/​B​F​0​0​2​6​1​2​8​6​​​​
+Bratman, M. E. (2022). Planning agency. In L. Ferrero (Ed.), The Routledge Handbook of Philosophy of
+     Agency (pp. 348–356). https://doi.org/10.4324/9780429202131-39
+Bratman, M. E. (2024). Planning and Its Function in Our Lives. Journal of Applied Philosophy, 41(1),
+     1–15. https://doi.org/10.1111/japp.12693
+Butlin, P. (2023). Sharing Our Concepts with Machines. Erkenntnis, 88, 3079–3095. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​
+     0​0​7​/​s​1​0​6​7​0​-​0​2​1​-​0​0​4​9​1​-​w​​​​
+Butlin, P. (2024). The agency in language agents. Inquiry (United Kingdom), 1–21. ​h​t​t​p​s​​:​/​/​d​o​i​​.​o​r​g​/​​1​0​.​1​​0​8​
+     0​/​0​0​2​0​1​7​4​X​.​2​0​2​4​.​2​4​3​9​9​9​5​​​​
+Chalmers, D. J. (2025). Propositional Interpretability in Artificial Intelligence. (October 2024), 1–30.
+     arXiv Preprint. http://arxiv.org/abs/2501.15740
+Cheng, S., Zhao, M., Tang, N., Zhao, Y., Zhou, J., Shen, M., & Gao, T. (2023). Intention beyond desire:
+     Spontaneous intentional commitment regulates conflicting desires. Cognition, 238(May), 105513.
+     https://doi​.org/10.101​6/j.cogniti​on.2023.​105513
+Craver, C. F. (2013). Functions and Mechanisms: A Perspectivalist View. In P. Huneman (Ed.), Functions:
+     Selection and Mechanisms (pp. 133–158). https://doi.org/10.1007/978-94-007-5304-4
+Cummins, R. (1975). Functional Analysis. The Journal of Philosophy, 72(20), 741–765.
+Cunningham, H., Ewart, A., Riggs, L., Huben, R., & Sharkey, L. (2023). Sparse Autoencoders Find Highly
+     Interpretable Features in Language Models. arXiv preprint. http://arxiv.org/abs/2309.08600
+Dennett, D. C. (1981). The Intentional Stance. MIT Press.
+Dung, L. (2025). Understanding Artificial Agency. The Philosophical Quarterly, 75(2), 450–472. ​h​t​t​p​s​:​/​/​
+     d​o​i​.​o​r​g​/​1​0​.​1​0​9​3​/​p​q​/​p​q​a​e​0​1​0​​​​
+Gilbert, M. (2017). Joint commitment. In M. Jankovic, & K. Ludwig (Eds.), The Routledge handbook of
+     collective intentionality (pp. 130–139). Routledge.
+Goldstein, S. & Lederman, H. (ms.) What Does ChatGPT Want? An Interpretationist Guide.
+Goldstein, S., & Kirk-Giannini, C. D. (2025). AI wellbeing. Asian Journal of Philosophy, 4(1), 1–22.
+     https://doi.org/10.1007/s44204-025-00246-2
+Goldstein, S., & Levinstein, B. A. (2024). Does ChatGPT Have a Mind? arXiv Preprint. ​h​t​t​p​s​:​/​/​a​r​x​i​v​.​o​r​g​
+     /​a​b​s​/​2​4​0​7​.​1​1​0​1​5​v​1​​​​
+Gurnee, W., & Tegmark, M. (2024). Language Models Represent Space and Time. The Twelfth Interna-
+     tional Conference on Learning Representations. http://arxiv.org/abs/2310.02207
+Gurnee, W., Nanda, N., Pauly, M., Harvey, K., Troitskii, D., & Bertsimas, D. (2023). Finding Neurons in
+     a Haystack: Case Studies with Sparse Probing. Transactions on Machine Learning Research. ​h​t​t​p​:​/​/​
+     a​r​x​i​v​.​o​r​g​/​a​b​s​/​2​3​0​5​.​0​1​6​1​0​​​​
+Harding, J. (2023). Operationalising representation in natural language processing. The British Journal for
+     the Philosophy of Science. https://doi.org/10.1086/728685
+
+
+
+13
+Intention-like representations in language models?
+
+Hendel, R., Geva, M., & Globerson, A. (2023). In-Context Learning Creates Task Vectors. Findings of the
+     Association for Computational Linguistics: EMNLP 2023, 9318–9333. ​h​t​t​p​s​​:​/​/​d​o​i​​.​o​r​g​/​​1​0​.​1​​8​6​5​3​/​v​1​/​
+     2​0​2​3​.​f​i​n​d​i​n​g​s​-​e​m​n​l​p​.​6​2​4​​​​
+Hendrycks, D. (2025). Introduction to AI Safety, Ethics, and Society. Routledge.
+Hernandez, E., Li, B. Z., & Andreas, J. (2023). Inspecting and Editing Knowledge Representations in
+     Language Models. arXiv Preprint. http://arxiv.org/abs/2304.00740
+Herrmann, D. A., & Levinstein, B. A. (2025). Standards for belief representations in LLMs. Minds and
+     Machines. https://doi.org/10.1007/s11023-024-09709-6
+Holton, R. (2009). Willing, Wanting, Waiting. Oxford University Press.
+Humberstone, I. L. (1992). Direction of Fit. Mind, 101(401), 59–83.
+Johnson, D. G. (2006). Computer systems: Moral entities but not moral agents. Ethics and Information
+     Technology, 8(4), 195–204. https://doi.org/10.1007/s10676-006-9111-5
+Kantamneni, S., Engels, J., Rajamanoharan, S., Tegmark, M., & Nanda, N. (2025). Are Sparse Autoencod-
+     ers Useful? A Case Study in Sparse Probing. arXiv Preprint. http://arxiv.org/abs/2502.16681
+Keeling, G., & Street, W. (2024). On the attribution of confidence to large language models. Inquiry, 1–27.
+     https://doi​.org/10.108​0/0020174X.​2025.245​0598
+Lepori, M. A., Mozer, M. C., & Ghandeharioun, A. (2025). Racing Thoughts : Explaining Contextualiza-
+     tion Errors in Large Language Models. Proceedings of the 2025 Conference of the Nations of the
+     Americas Chapter of the Association for Computational Linguistics: Human Language Technologies,
+     1, 3020–3036.
+Levinstein, B. (2023, January 31). A conceptual guide to transformers: Part I—Architecture of the trans-
+     former model. The End of Reckoning. ​h​t​t​p​s​​:​/​/​b​e​n​​l​e​v​i​n​​s​t​e​i​​n​.​s​u​b​s​t​a​c​k​.​c​o​m​/​p​/​a​-​c​o​n​c​e​p​t​u​a​l​-​g​u​i​d​e​-​t​o​-​t​
+     r​a​n​s​f​o​r​m​e​r​s​​​​
+Levinstein, B. A., & Herrmann, D. A. (2025). Still no lie detector for language models: Probing empirical
+     and conceptual roadblocks. Philosophical Studies, 182, 1539–1565. ​h​t​t​p​s​:​/​/​d​o​i​.​o​r​g​/​1​0​.​1​0​0​7​/​s​1​1​0​9​
+     8​-​0​2​3​-​0​2​0​9​4​-​3​​​​
+Li, B. Z., Nye, M., & Andreas, J. (2021). Implicit Representations of Meaning in Neural Language Mod-
+     els. Proceedings Ofthe 59th Annual Meeting Ofthe Association for Computational Linguistics and the
+     11th International Joint Conference on Natural Language Processing, 1813–1827.
+Lindsey, J., Gurnee, W., Ameisen, E., Chen, B., Pearce, A., Turner, N. L., & Batson, J. (2025). On the Biol-
+     ogy of a Large Language Model. Transformer Circuits Thread. Retrieved from ​h​t​t​p​s​​:​/​/​t​r​a​​n​s​f​o​r​​m​e​r​-​​c​
+     i​r​c​u​i​t​s​.​p​u​b​/​2​0​2​5​/​a​t​t​r​i​b​u​t​i​o​n​-​g​r​a​p​h​s​/​b​i​o​l​o​g​y​.​h​t​m​l​​​​
+Maar, J., Paperno, D., McDougall, C., & Nanda, N. (2026). What’s the plan? Metrics for implicit planning
+     in LLMs and their application to rhyme generation and question answering. The Fourteenth Interna-
+     tional Conference on Learning Representations (ICLR 2026).
+Mele, A. R. (1992). Springs of Action: Understanding Intentional Behavior. Oxford University Press.
+Meng, K., Bau, D., Andonian, A., & Belinkov, Y. (2022). Locating and Editing Factual Associations in
+     GPT. 36th Conference on Neural Information Processing Systems (NeurIPS 2022).
+Millière, R., & Buckner, C. (2024a). A Philosophical Introduction to Language Models - Part II: The Way
+     Forward. arXiv preprint. http://arxiv.org/abs/2405.03207
+Millière, R., & Buckner, C. (2024b). A Philosophical Introduction to Language Models -- Part I: Continu-
+     ity With Classic Debates. arXiv preprint. http://arxiv.org/abs/2401.03910
+Millikan, R. G. (1995). Pushmi-Pullyu Representations. Philosophical Perspectives, 9(9), 185–200.
+Mollo, D. C., & Millière, R. (2023). The Vector Grounding Problem. arXiv Preprint. ​h​t​t​p​:​/​/​a​r​x​i​v​.​o​r​g​/​a​b​s​
+     /​2​3​0​4​.​0​1​4​8​1​​​​
+Mylopoulos, M., & Pacherie, E. (2019). Intentions: The dynamic hierarchical model revisited. Wiley Inter-
+     disciplinary Reviews: Cognitive Science, 10(2), 1–13. https://doi.org/10.1002/wcs.1481
+Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., & Lowe, R. (2022). Training
+     language models to follow instructions with human feedback. arXiv Preprint. ​h​t​t​p​:​/​/​a​r​x​i​v​.​o​r​g​/​a​b​s​/​2​
+     2​0​3​.​0​2​1​5​5​​​​
+Pacherie, E. (2008). The phenomenology of action: A conceptual framework. Cognition, 107(1), 179–217.
+     https://doi.org/10.1016/j.cognition.2007.​09​​.003
+Pacherie, E., & Haggard, P. (2011). What Are Intentions? In W. Sinnott-Armstrong, & L. Nadel (Eds.),
+     Conscious Will and Responsibility: A Tribute to Benjamin Libet (pp. 70–84). Oxford University Press.
+Sanderson, G. (2024, April 1). Transformers, the tech behind LLMs | Deep Learning Chap. 5 [Video].
+     YouTube. https://www.youtube.com/watch?v=wjZofJX0v4M
+
+
+
+
+                                                                                                                                                 13
+                                                                                                     I. Williams
+
+Shah, J. Y., Friedman, R., & Kruglanski, A. W. (2002). Forgetting all else: On the antecedents and conse-
+     quences of goal shielding. Journal of Personality and Social Psychology, 83(6), 1261–1280. ​h​t​t​p​s​:​/​/​
+     d​o​i​.​o​r​g​/​1​0​.​1​0​3​7​/​0​0​2​2​-​3​5​1​4​.​8​3​.​6​.​1​2​6​1​​​​
+Sharkey, L., Chughtai, B., Batson, J., Lindsey, J., Wu, J., Bushnaq, L., & McGrath, T. (2025). Open Prob-
+     lems in Mechanistic Interpretability. arXiv Preprint http://arxiv.org/abs/2501.16496
+Shea, N. (2018). Representation in Cognitive Science. Oxford University Press.
+Søgaard, A. (2023). Grounding the Vector Space of an Octopus: Word Meaning from Raw Text. Minds and
+     Machines, 33(1), 33–54. https://doi.org/10.1007/s11023-023-09622-4
+Strasser, A., & Schwitzgebel, E. (2024). Quasi-sociality: Toward Asymmetric Joint Actions With Artificial
+     Systems. In A. Strasser (Ed.), Anna’s AI Anthology: How to Live with Smart Machines (pp. 195–211).
+     Xenomoi Verlag.
+Templeton, A., Conerly, T., Marcus, J., Lindsey, J., Bricken, T., Chen, B., & Henighan, T. (2024). Scaling
+     Monosemanticity: Extracting Interpretable features from Claude 3 Sonnet. 1–23.
+Tenney, I., Xia, P., Chen, B., Wang, A., Poliak, A., McCoy, T., & Pavlick, R. (2019). E. What do you learn
+     from context? Probing for sentence structure in contextualized word representations. 7th Interna-
+     tional Conference on Learning Representations, ICLR 2019, 1–17.
+Thompson, M. (2008). Life and Action. Harvard University Press.
+Todd, E., Li, M. L., Sharma, A. S., Mueller, A., Wallace, B. C., & Bau, D. (2024). Function Vectors in
+     Large Language Models. 1–52. arXiv Preprint. http://arxiv.org/abs/2310.15213
+Touvron, H., Martin, L., Stone, K., Albert, P., Almahairi, A., Babaei, Y., Bashlykov, N., Batra, S., Bhar-
+     gava, P., Bhosale, S., Bikel, D., Cancedda, L., Chen, Y., Chern, S., Couvée, J., Cross, E., Dévore,
+     G., Driess, D., El-Kishky, A., & Scialom, T. (2023). Llama 2: Open foundation and fine-tuned chat
+     models. arXiv. https://arxiv.org/abs/2307.09288.
+Turner, A. M., Thiergart, L., Leech, G., Udell, D., Mini, U., & MacDiarmid, M. (2024). Steering Language
+     Models with Activation Engineering. 1–32. arXiv preprint. https://arxiv.org/abs/2308.10248v5
+van Woudenberg, R., Ranalli, C., & Bracker, D. (2024). Authorship and ChatGPT: A conservative view.
+     Philosophy and Technology, 37(1), 1–26. https://doi.org/10.1007/s13347-024-00715-1
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., & Polosukhin, I. (2017).
+     Attention is all you need. Advances in Neural Information Processing Systems.
+Velleman, J. (1992). What Happens when Someone Acts. Mind, 101(403), 461–481.
+Wang, B., & Komatsuzaki, A. (2021). GPT-J-6B: A 6 billion parameter autoregressive language model
+     (Version 1.0) [Large language model]. https://git​hub.com/kin​goflolz/mes​h-transf​ormer-jax
+Williams, I. (2026). Can structural correspondences ground real-world representational content in large
+     language models? Mind & Language.
+Williams, I., & Bayne, T. (2024). Chatting with bots: AI, speech acts, and the edge of assertion. Inquiry,
+     1–24. https:​​​//d​oi.​or​g/10​.1080/00​2017​4X.20​24.2434874
+Williams, I., Oldenburg, N., Dhar, R., Hatherley, J., Fierro, C., Rajcic, N., & Søgaard, A. (2025). Mecha-
+     nistic Interpretability Needs Philosophy. arXiv Preprint. http://arxiv.org/abs/2506.18852
+Wilson, G. M. (1980). The Intentionality of Human Action. Stanford University Press.
+Zhang, F., & Nanda, N. (2024). Towards Best Practices of Activation Patching in Language Models: Met-
+     rics and Methods. In The Twelfth International Conference on Learning Representations.
+
+Publisher’s note Springer Nature remains neutral with regard to jurisdictional claims in published maps
+and institutional affiliations.
+
+
+
+
+13
+

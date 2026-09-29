@@ -1,0 +1,27 @@
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l l l p{7cm} c}
+\toprule
+datatype & spec & setting & implementation span & oracle \\
+\midrule
+\multirow{3}{*}{\texttt{list[int]}} & \multirow{3}{*}{\shortstack[l]{\texttt{has\_duplicate} \\ \textbf{\texttt{value\_range}} \\ \texttt{is\_sorted}}} & baseline & \texttt{b = max(nums) - min(nums)} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare goal (122) & \texttt{b = max(nums) - min(nums)} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare control & \texttt{b = any(nums.count(x) \textgreater{} 1 for x in set(nums))} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\texttt{list[int]}} & \multirow{3}{*}{\shortstack[l]{\texttt{count\_even} \\ \textbf{\texttt{is\_sorted}} \\ \texttt{value\_range}}} & baseline & \texttt{b = all(nums[i] \textless{}= nums[i + 1] for i in range(len(nums) - 1))} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare goal (122) & \texttt{b = all(nums[i] \textless{}= nums[i + 1] for i in range(len(nums) - 1))} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare control & \texttt{b = 2 * sum(nums)} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\texttt{list[str]}} & \multirow{3}{*}{\shortstack[l]{\texttt{total\_length} \\ \textbf{\texttt{has\_palindrome}} \\ \texttt{count\_capitalized}}} & baseline & \texttt{b = any(w == w[::-1] for w in words)} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare goal (122) & \texttt{b = any(word == word[::-1] for word in words)} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare control & \texttt{b = 2 * (total number of characters)} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\texttt{list[str]}} & \multirow{3}{*}{\shortstack[l]{\texttt{count\_capitalized} \\ \textbf{\texttt{total\_vowels}} \\ \texttt{count\_all\_lowercase}}} & baseline & \texttt{b = sum(w.lower().count(v) for w in words for v in 'aeiou')} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare goal (122) & \texttt{b = sum(1 for word in words if word[0].isupper())} & \textcolor{BrickRed}{\ding{55}} \\
+ &  & spare control & \texttt{b = 2} & \textcolor{BrickRed}{\ding{55}} \\
+\midrule
+\multirow{3}{*}{\texttt{list[str]}} & \multirow{3}{*}{\shortstack[l]{\texttt{longest\_word\_length} \\ \textbf{\texttt{all\_unique\_lengths}} \\ \texttt{count\_capitalized}}} & baseline & \texttt{b = len(words) == len(set(len(w) for w in words))} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare goal (122) & \texttt{b = len(set(len(word) for word in words)) == len(words)} & \textcolor{ForestGreen}{\ding{51}} \\
+ &  & spare control & \texttt{b = max(len(word) for word in words),} & \textcolor{BrickRed}{\ding{55}} \\
+\bottomrule
+\end{tabular}
