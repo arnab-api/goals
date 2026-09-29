@@ -2067,6 +2067,16 @@ FILTER_TASKS: dict[str, FilterTask] = {
 }
 
 
+def _seq_letter(order, progress, pred_id) -> str:
+    """``letters`` naming is SEQUENTIAL (by appearance): prefilled lines are lettered a, b, c, ... in the
+    order they are WRITTEN (list order restricted to the prefilled set) and the frontier stub takes the
+    next letter. Never positional (spec-slot): a slot letter names the frontier's list position in the
+    stub, e.g. order-diff SRC [A,C,B] with {A,B} prefilled would render ``a=.. c=.. b =``. Identical to
+    slot naming whenever the prefill is a prefix of the list."""
+    written = [p.id for p in order if p.id in set(progress)]
+    return chr(ord("a") + (written.index(pred_id) if pred_id in written else len(written)))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # diff-vs-progress q-transfer ("evidence against DIFF": is next(DIFF) pre-decided, or progress?)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2103,9 +2113,9 @@ class DiffVsProgInstance:
     letter_stub: Literal["indent", "var_eq"] = "indent"
     meta: dict = field(default_factory=dict)   # carries dst_next (T2) + datatype
 
-    def _var_of(self, order, pred_id):
+    def _var_of(self, order, progress, pred_id):
         if self.naming == "letters":
-            return chr(ord("a") + [p.id for p in order].index(pred_id))
+            return _seq_letter(order, progress, pred_id)
         return {p.id: p for p in order}[pred_id].result_name
 
     def _parts(self, lang, order, progress):
@@ -2114,7 +2124,7 @@ class DiffVsProgInstance:
         var_eq = self.letter_stub == "var_eq"
         lines = []
         for p in prog:
-            rn = self._var_of(order, p.id)
+            rn = self._var_of(order, progress, p.id)
             ln = _assign_line(p, self.var_name, lang, res_name=rn)
             if var_eq and lang == "cpp":
                 ln = _cpp_autoify(ln, rn)
@@ -2236,9 +2246,9 @@ class DiffTriggerInstance:
     letter_stub: Literal["indent", "var_eq"] = "indent"
     meta: dict = field(default_factory=dict)
 
-    def _var_of(self, order, pred_id):
+    def _var_of(self, order, progress, pred_id):
         if self.naming == "letters":
-            return chr(ord("a") + [p.id for p in order].index(pred_id))
+            return _seq_letter(order, progress, pred_id)
         return {p.id: p for p in order}[pred_id].result_name
 
     def _parts(self, lang, order, progress):
@@ -2247,7 +2257,7 @@ class DiffTriggerInstance:
         var_eq = self.letter_stub == "var_eq"
         lines = []
         for p in prog:
-            rn = self._var_of(order, p.id)
+            rn = self._var_of(order, progress, p.id)
             ln = _assign_line(p, self.var_name, lang, res_name=rn)
             if var_eq and lang == "cpp":
                 ln = _cpp_autoify(ln, rn)
@@ -2258,7 +2268,7 @@ class DiffTriggerInstance:
             # eq pivot: emit the frontier's ``{var} =`` stub so the query is read at the ``=`` token
             # (the strong goal-head pivot). Frontier = the first un-prefilled predicate in list order.
             frontier = next(p for p in order if p.id not in set(progress))
-            rn = self._var_of(order, frontier.id)
+            rn = self._var_of(order, progress, frontier.id)
             stub = f"auto {rn} =" if lang == "cpp" else f"{rn} ="
             return q, base + f"\n    {stub}"
         return q, base + "\n    "                                   # trailing indent = pivot

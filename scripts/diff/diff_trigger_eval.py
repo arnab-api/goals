@@ -229,6 +229,9 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true", default=True)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--tag-suffix", default="",
+                    help="appended to the run tag (e.g. '__seq'): a fresh output dir, so resume never picks "
+                         "up records from a run whose prompts differ (the resume key is predicate ids only)")
     return ap.parse_args()
 
 
@@ -250,6 +253,7 @@ def main():
         run_tag = f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-{args.pivot}"
         if args.restrict_goal_heads_to_task:
             run_tag += "__restrict"
+        run_tag += args.tag_suffix
         out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(f"########## OV boost alpha={alpha} -> {run_tag} ##########")
