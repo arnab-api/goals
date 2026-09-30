@@ -63,7 +63,12 @@ def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
-    ap.add_argument("--variant", default="order_diff")
+    ap.add_argument("--variant", default="order_diff",
+                    help="legacy dataset tag (results/nrgs_prefix/<model>/<tag>__<sl>-<dl>/); see --data-tag")
+    ap.add_argument("--data-tag", default=None,
+                    help="dataset dir tag from mine_nrgs_prefix.py, e.g. 'mixed' (default: --variant)")
+    ap.add_argument("--configs", nargs="+", default=None,
+                    help="train on these config shards of the dataset only (default: every config in it)")
     ap.add_argument("--src-lang", default="python")
     ap.add_argument("--dst-lang", default="python")
     ap.add_argument("--dataset", default=None, help="override the dataset.json path")
@@ -93,8 +98,17 @@ def parse_args():
     return ap.parse_args()
 
 
+SHORT = {"order_diff_1": "od1", "order_diff_2": "od2", "order_diff_3": "od3", "order_matched_1": "om1",
+         "order_matched_2": "om2", "diff_vs_prog_1": "dvp1"}
+
+
+def _data_label(args):
+    tag = args.data_tag or args.variant
+    return tag + ("+" + "-".join(SHORT.get(c, c) for c in N.resolve_configs(args.configs)) if args.configs else "")
+
+
 def _run_tag(args, lo, hi):
-    t = (f"{args.variant}__{args.src_lang}-{args.dst_lang}__L{lo}-{hi}__lam{args.lambda_sparse:g}"
+    t = (f"{_data_label(args)}__{args.src_lang}-{args.dst_lang}__L{lo}-{hi}__lam{args.lambda_sparse:g}"
          f"__kl{args.w_kl:g}_dir{args.w_dir:g}_ctrl{args.w_ctrl:g}__{args.dir_loss}__s{args.seed}")
     return t + (f"__{args.tag}" if args.tag else "")
 
@@ -107,9 +121,12 @@ def main():
     lo, hi = (int(x) for x in args.layers.split("-"))
     ds_fp = Path(args.dataset) if args.dataset else (
         Path(env_utils.DEFAULT_RESULTS_DIR) / "nrgs_prefix" / model_short
-        / f"{args.variant}__{args.src_lang}-{args.dst_lang}" / "dataset.json")
-    records = json.loads(ds_fp.read_text())["instances"]
-    logger.info(f"dataset {ds_fp}: {len(records)} instances")
+        / f"{args.data_tag or args.variant}__{args.src_lang}-{args.dst_lang}" / "dataset.json")
+    records = N.load_dataset(ds_fp, configs=args.configs)
+    import collections
+    by_cfg = collections.Counter(N.canonical(r.get("config", r.get("variant"))) for r in records)
+    logger.info(f"dataset {ds_fp}: {len(records)} instances"
+                + (f" (shards {N.resolve_configs(args.configs)})" if args.configs else "") + f" · per config {dict(by_cfg)}")
 
     ctx = N.load_ctx(args.model)
     mt = ctx.mt
@@ -118,14 +135,16 @@ def main():
     # ── cache (all layers; shared across runs on the same dataset) ──
     ds_hash = hashlib.md5(ds_fp.read_bytes()).hexdigest()[:10]
     cache_fp = Path(env_utils.DEFAULT_RESULTS_DIR) / "nrgs_mask" / model_short / "cache" / \
-        f"{args.variant}__{args.src_lang}-{args.dst_lang}__{ds_hash}.pt"
+        f"{_data_label(args)}__{args.src_lang}-{args.dst_lang}__{ds_hash}.pt"
     if cache_fp.exists():
         caches = [NM.NRGSCache(**c) for c in torch.load(cache_fp, weights_only=False)]
         logger.info(f"cache hit: {cache_fp} ({len(caches)})")
     else:
         caches = NM.build_caches(mt, ctx, records, batch_size=args.micro_batch)
         cache_fp.parent.mkdir(parents=True, exist_ok=True)
-        torch.save([c.__dict__ for c in caches], cache_fp)
+        tmp = cache_fp.with_suffix(f".tmp{os.getpid()}")      # atomic: parallel runs may build the same cache
+        torch.save([c.__dict__ for c in caches], tmp)
+        os.replace(tmp, cache_fp)
         logger.info(f"cache -> {cache_fp}")
     train = [c for c in caches if c.split == "train"]
     val = [c for c in caches if c.split == "val"]
@@ -183,13 +202,17 @@ def main():
             continue
         heads = [(int(l), int(h)) for l, h in json.loads(fp.read_text())]
         variants[f"{name}{len(heads)}"] = NM.mask_from_heads(heads, layers, mt.n_heads, dev)
-    roles = [False, True] if val and val[0].q_ctrl is not None else [False]
+    roles = [False, True] if any(c.q_ctrl is not None for c in val) else [False]
     final_eval = {}
     for name, mv in variants.items():
         for use_ctrl in roles:
             k = f"{name}|{'src_ctrl' if use_ctrl else 'src'}"
             final_eval[k] = NM.evaluate(mt, mv, layers, val, args.micro_batch, use_ctrl=use_ctrl)
-            logger.info(f"final  {k:24s} {final_eval[k]}")
+            e = final_eval[k]
+            logger.info(f"final  {k:24s} n={e['n']:4d}  flip={e['flip']:.3f}  margin_gain={e['margin_gain']:+.2f}  kl={e['kl']:.2f}")
+            for cf, ec in e["by_config"].items():
+                logger.info(f"         {'':24s}   {cf:16s} n={ec['n']:4d}  flip={ec['flip']:.3f}  "
+                            f"margin_gain={ec['margin_gain']:+.2f}  kl={ec['kl']:.2f}")
     save(mask, hist, final_eval)
     (out_dir / "final_eval.json").write_text(json.dumps(final_eval, indent=1))
 

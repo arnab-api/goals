@@ -90,19 +90,21 @@ def run_config(mt, args, dt, naming, sl, dl, patch_heads, readout_heads, out_roo
             max_new=args.max_new,
             alpha=args.alpha,
             n_pivot=1,
+            compute_readout=not args.no_readout,
         )
         causal = readout = None
         if not args.no_oracle:
             causal = E.judge_causal(
                 inst, raw["gen_patched"], model_name=args.oracle_model
             )
-            readout = E.eval_readouts(
-                inst,
-                raw["ro_src"],
-                raw["ro_dst"],
-                raw["ro_patched"],
-                model_name=args.oracle_model,
-            )
+            if not args.no_readout:
+                readout = E.eval_readouts(
+                    inst,
+                    raw["ro_src"],
+                    raw["ro_dst"],
+                    raw["ro_patched"],
+                    model_name=args.oracle_model,
+                )
         _c = (
             f"{'HIT' if causal['triggered'] else 'miss'}({causal['label']})"
             if causal
@@ -216,6 +218,11 @@ def parse_args():
     p.add_argument("--oracle-model", default="claude-sonnet-4-6")
     p.add_argument(
         "--no-oracle", action="store_true", help="skip the causal+readout oracle"
+    )
+    p.add_argument(
+        "--no-readout",
+        action="store_true",
+        help="skip the goalscope readouts + readout-shift oracle (readout_shift_rate -> None)",
     )
     p.add_argument(
         "--force", action="store_true", help="re-run instances even if present"

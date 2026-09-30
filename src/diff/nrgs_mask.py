@@ -48,9 +48,10 @@ class NRGSCache:
     b_id: int
     d_id: int
     q_src: torch.Tensor           # (n_layer, width) float32 CPU — SRC `` =`` query, all layers
-    q_ctrl: Optional[torch.Tensor]  # (n_layer, width) — SRC' query (order_diff only)
+    q_ctrl: Optional[torch.Tensor]  # (n_layer, width) — SRC' query; None when the config has no SRC'
     log_p_target: torch.Tensor    # (vocab,) float32 CPU — DST* next-token log-probs
     clean_margin: float           # clean DST: logp[d] - logp[b]
+    config: str = "order_diff_1"  # contrast config (nrgs_prefix.CONFIGS); old caches predate the field
 
 
 def _q_proj(mt, layer):
@@ -77,7 +78,9 @@ def build_caches(mt, ctx, records: list[dict], batch_size: int = 8) -> list[NRGS
         insts = [N.from_record(r) for r in chunk]
         ps = [x.prompts(ctx) for x in insts]
         q_src = q_last_batch(mt, [p["src"] for p in ps])
-        q_ctrl = q_last_batch(mt, [p["src_ctrl"] for p in ps]) if "src_ctrl" in ps[0] else None
+        ic = [i for i, p in enumerate(ps) if "src_ctrl" in p]                  # configs with an SRC' control
+        qc = q_last_batch(mt, [ps[i]["src_ctrl"] for i in ic]) if ic else None
+        q_ctrl = {i: qc[j] for j, i in enumerate(ic)}
         lp_star = N.last_token_logprobs(mt, [p["dst_star"] for p in ps])
         lp_dst = N.last_token_logprobs(mt, [p["dst"] for p in ps])
         for i, (r, p) in enumerate(zip(chunk, ps)):
@@ -87,8 +90,9 @@ def build_caches(mt, ctx, records: list[dict], batch_size: int = 8) -> list[NRGS
             out.append(NRGSCache(
                 key=r["key"], datatype=r["datatype"], pair=(r["datatype"], r["b"], r["d"]), split=r["split"],
                 dst_prompt=p["dst"], b_id=b, d_id=d, q_src=q_src[i],
-                q_ctrl=q_ctrl[i] if q_ctrl is not None else None,
+                q_ctrl=q_ctrl.get(i),
                 log_p_target=lp_star[i], clean_margin=float(lp_dst[i][d] - lp_dst[i][b]),
+                config=r.get("config", r.get("variant", "order_diff_1")),
             ))
         el = time.time() - t0
         logger.info(f"cache: {len(out)}/{len(records)}  ({el:.0f}s, ETA {el / len(out) * (len(records) - len(out)):.0f}s)")
@@ -161,17 +165,26 @@ class History:
 
 @torch.no_grad()
 def evaluate(mt, mask_values, layers, caches, batch_size=8, use_ctrl=False) -> dict:
-    """flip = top-1 becomes d_id; d_margin_gain = mean (logp[d] - logp[b]) - clean; kl vs DST*."""
-    flips, gains, kls = [], [], []
+    """flip = top-1 becomes d_id (the target); margin_gain = mean (logp[d] - logp[b]) - clean; kl vs DST*.
+    ``use_ctrl`` evaluates the SRC' query, on the instances whose config defines it. Returns the pooled
+    scores plus ``by_config``."""
+    if use_ctrl:
+        caches = [c for c in caches if c.q_ctrl is not None]
+    rows = []
     for s in range(0, len(caches), batch_size):
         cs = caches[s: s + batch_size]
         lp = patched_logprobs(mt, mask_values, layers, cs, use_ctrl=use_ctrl)
         for i, c in enumerate(cs):
-            flips.append(int(lp[i].argmax()) == c.d_id)
-            gains.append(float(lp[i][c.d_id] - lp[i][c.b_id]) - c.clean_margin)
-            kls.append(float(F.kl_div(c.log_p_target.to(lp.device), lp[i], reduction="sum", log_target=True)))
-    n = max(1, len(caches))
-    return dict(n=len(caches), flip=sum(flips) / n, margin_gain=sum(gains) / n, kl=sum(kls) / n)
+            rows.append((c.config, int(lp[i].argmax()) == c.d_id,
+                         float(lp[i][c.d_id] - lp[i][c.b_id]) - c.clean_margin,
+                         float(F.kl_div(c.log_p_target.to(lp.device), lp[i], reduction="sum", log_target=True))))
+    def agg(rs):
+        n = max(1, len(rs))
+        return dict(n=len(rs), flip=sum(r[1] for r in rs) / n, margin_gain=sum(r[2] for r in rs) / n,
+                    kl=sum(r[3] for r in rs) / n)
+    out = agg(rows)
+    out["by_config"] = {cf: agg([r for r in rows if r[0] == cf]) for cf in sorted({r[0] for r in rows})}
+    return out
 
 
 def train_nrgs_mask(mt, train: list[NRGSCache], val: list[NRGSCache], layers: list[int], *,
@@ -182,8 +195,8 @@ def train_nrgs_mask(mt, train: list[NRGSCache], val: list[NRGSCache], layers: li
     step, all layers, threshold 0.9). ``batch_size`` instances per optimizer step, gradients accumulated
     over forwards of ``micro_batch`` (a 64-wide backward through a 32B model does not fit). ``threshold``
     only affects the logged ``n_active``. ``on_epoch(epoch, mask, hist)`` runs after every epoch."""
-    if w_ctrl > 0 and train[0].q_ctrl is None:
-        raise ValueError("w_ctrl > 0 needs SRC' queries (order_diff datasets only)")
+    if w_ctrl > 0 and not any(c.q_ctrl is not None for c in train):
+        raise ValueError("w_ctrl > 0 needs SRC' queries; no training instance's config defines one")
     for p in mt._model.parameters():
         p.requires_grad_(False)
     dev = next(mt._model.parameters()).device
@@ -197,6 +210,7 @@ def train_nrgs_mask(mt, train: list[NRGSCache], val: list[NRGSCache], layers: li
         loss_sparse = lambda_sparse * mask.values.mean()                       # once per step
         loss_sparse.backward()
         step = dict(kl=0.0, dir=0.0, ctrl=0.0, sparse=float(loss_sparse.detach()))
+        n_ctrl = sum(c.q_ctrl is not None for c in batch)                       # SRC' term: mean over these
         for m in range(0, len(batch), micro):                                  # grad accumulation
             cs = batch[m: m + micro]
             w = len(cs) / len(batch)                                           # -> batch-mean over the step
@@ -212,14 +226,18 @@ def train_nrgs_mask(mt, train: list[NRGSCache], val: list[NRGSCache], layers: li
                 (w * (w_kl * loss_kl + w_dir * loss_dir)).backward()
             step["kl"] += w * float(loss_kl.detach())
             step["dir"] += w * float(loss_dir.detach())
-            if w_ctrl > 0:                                                     # SRC' query: must not flip
-                with q_blend(mt, mask.values, layers, cs, use_ctrl=True):
-                    lpc = dst_logprobs(mt, cs)
-                    clean = torch.tensor([c.clean_margin for c in cs], device=lpc.device)
-                    ar, b, d = ar.to(lpc.device), b.to(lpc.device), d.to(lpc.device)
-                    loss_ctrl = F.relu(lpc[ar, d] - lpc[ar, b] - clean).mean()
-                    (w * w_ctrl * loss_ctrl).backward()
-                step["ctrl"] += w * float(loss_ctrl.detach())
+            cc = [c for c in cs if c.q_ctrl is not None]
+            if w_ctrl > 0 and cc:                                              # SRC' query: must not flip
+                wc = len(cc) / n_ctrl
+                with q_blend(mt, mask.values, layers, cc, use_ctrl=True):
+                    lpc = dst_logprobs(mt, cc)
+                    clean = torch.tensor([c.clean_margin for c in cc], device=lpc.device)
+                    arc = torch.arange(len(cc), device=lpc.device)
+                    bc = torch.tensor([c.b_id for c in cc], device=lpc.device)
+                    dc = torch.tensor([c.d_id for c in cc], device=lpc.device)
+                    loss_ctrl = F.relu(lpc[arc, dc] - lpc[arc, bc] - clean).mean()
+                    (wc * w_ctrl * loss_ctrl).backward()
+                step["ctrl"] += wc * float(loss_ctrl.detach())
         return step
 
     steps_per_epoch = -(-len(train) // batch_size)
@@ -259,7 +277,7 @@ def train_nrgs_mask(mt, train: list[NRGSCache], val: list[NRGSCache], layers: li
             n_steps += 1
             logger.info(f"  e{epoch + 1:03d} step {n_steps}/{steps_per_epoch}  loss={step['loss']:.3f}  "
                         f"kl={step['kl']:.3f}  dir={step['dir']:.3f}  ctrl={step['ctrl']:.3f}  "
-                        f"mask_mean={float(mask.values.mean()):.3f}  n>{threshold}={mask.n_active(threshold)}  "
+                        f"mask_mean={float(mask.values.detach().mean()):.3f}  n>{threshold}={mask.n_active(threshold)}  "
                         f"({time.time() - t_ep:.0f}s into epoch)")
         for k in agg:
             getattr(hist, k).append(agg[k] / max(1, n_steps))

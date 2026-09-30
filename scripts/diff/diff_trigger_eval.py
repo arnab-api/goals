@@ -146,6 +146,7 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             mt, inst, patch_heads, readout_heads=readout_heads,
             n_steer=args.n_steer, max_new=args.max_new, alpha=alpha, n_pivot=1,
             restrict_to_task=args.restrict_goal_heads_to_task,
+            compute_readout=not args.no_readout,
         )
         causal = literal_c = readout = joint = None
         if not args.no_oracle:
@@ -153,8 +154,9 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
             joint = E.judge_joint(inst, raw["gen_patched"], model_name=args.oracle_model)
             # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
-            readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"],
-                                      model_name=args.oracle_model)
+            if not args.no_readout:
+                readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"],
+                                          model_name=args.oracle_model)
             # literal-C check: does the patched continuation express SRC's literal target C (vs native B)?
             lit = E.classify_concept(raw["gen_patched"], inst.src_target_desc, inst.dst_next_desc,
                                      inst.task_desc, model_name=args.oracle_model,
@@ -225,6 +227,8 @@ def parse_args():
                          "each runs in its own __a<alpha> dir (e.g. --alphas 1.0 2.0)")
     ap.add_argument("--oracle-model", default="claude-sonnet-4-6")
     ap.add_argument("--no-oracle", action="store_true")
+    ap.add_argument("--no-readout", action="store_true",
+                    help="skip the goalscope readouts + readout-shift oracle (readout_shift_rate -> None)")
     ap.add_argument("--max-instances", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true", default=True)

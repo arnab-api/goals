@@ -22,6 +22,7 @@ contexts the pivots were mined in.
 from __future__ import annotations
 
 import glob
+import itertools
 import json
 import os
 import random
@@ -32,7 +33,6 @@ import torch
 
 import src.diff.data as D
 
-VARIANTS = ("order_diff", "order_matched", "c_in_dst")
 PIVOT_POOL = "data/head_loc/pairs/{model}.json"
 PRED_DIR = "data/head_loc/predicates"
 AUG_WRAPPERS = ("bool(", "int(", "not not ", "True and ", "False or ")  # = head_loc_oracle.AUGMENTATION_WRAPPERS
@@ -158,7 +158,108 @@ def load_pivots(model_name: str, datatypes=None, core_only: bool = True) -> list
     return out
 
 
-# ── the contrastive instance ──────────────────────────────────────────────────────────────────
+# ── contrastive configs (notation: ``p: a'bc' -> b`` = spec order a, b, c; x' prefilled; arrow = frontier) ──
+@dataclass(frozen=True)
+class Config:
+    """One SRC/DST contrast. Letters are tasks (shared letters = the same task in SRC and DST). ``target`` is
+    the q-transfer target: the frontier of DST* (DST with every task listed before ``target`` prefilled),
+    whose next-token distribution after the shared prefix is the training target. The shared prefix is
+    between the implementations of DST's native frontier and ``target`` (a goal-head localization pivot)."""
+    name: str
+    group: str                       # order_diff | order_matched | diff_vs_prog
+    src: tuple
+    src_prefill: frozenset
+    src_next: str                    # SRC frontier (the notation's arrow; validated)
+    dst: tuple
+    dst_prefill: frozenset
+    native: str                      # DST frontier (the notation's arrow; validated)
+    target: str
+    note: str = ""
+
+    @property
+    def letters(self) -> tuple:
+        return tuple(sorted(set(self.src) | set(self.dst)))
+
+    @property
+    def others(self) -> tuple:       # letters filled from the bank (native / target come from the pivot)
+        return tuple(x for x in self.letters if x not in (self.native, self.target))
+
+    @property
+    def dst_star_prefill(self) -> frozenset:
+        return frozenset(self.dst[: self.dst.index(self.target)])
+
+    @property
+    def src_ctrl_prefill(self):
+        """SRC' = SRC with every prefilled task listed AFTER the SRC frontier un-prefilled: same frontier
+        ("look for" the same task), but not the progress that makes ``target`` pending. ``None`` when no
+        such task exists (the control is then undefined for this config)."""
+        after = {x for x in self.src[self.src.index(self.src_next) + 1:] if x in self.src_prefill}
+        return (self.src_prefill - after) if after else None
+
+    @property
+    def notation(self) -> str:
+        f = lambda order, pre, nxt: "".join(x + ("'" if x in pre else "") for x in order) + f" -> {nxt}"  # noqa: E731
+        return f"src {f(self.src, self.src_prefill, self.src_next)} | dst {f(self.dst, self.dst_prefill, self.native)} | target {self.target}"
+
+
+def _first_open(order, prefill):
+    return next(x for x in order if x not in prefill)
+
+
+def _parse(side: str):
+    body, nxt = (t.strip() for t in side.split("->"))
+    order, pre = [], set()
+    for ch in body:
+        if ch == "'":
+            pre.add(order[-1])
+        elif ch.strip():
+            order.append(ch)
+    return tuple(order), frozenset(pre), nxt
+
+
+def _cfg(name, group, src, dst, target, note=""):
+    so, sp, sn = _parse(src)
+    do, dp, dn = _parse(dst)
+    c = Config(name, group, so, sp, sn, do, dp, dn, target, note)
+    assert _first_open(so, sp) == sn, f"{name}: SRC frontier is {_first_open(so, sp)}, notation says {sn}"
+    assert _first_open(do, dp) == dn, f"{name}: DST frontier is {_first_open(do, dp)}, notation says {dn}"
+    assert target in do and target not in dp and target != dn, f"{name}: bad target {target}"
+    assert _first_open(do, c.dst_star_prefill) == target, f"{name}: DST* frontier != target"
+    assert len(set(so)) == len(so) and len(set(do)) == len(do), f"{name}: repeated task"
+    return c
+
+
+CONFIGS: dict[str, Config] = {c.name: c for c in (
+    _cfg("order_diff_1", "order_diff", "a'cb' -> c", "a'bd -> b", "d", "the original order-diff"),
+    _cfg("order_diff_2", "order_diff", "a'bc'd' -> b", "a'dec -> d", "e", "count ('3 done -> 4th') would predict c"),
+    _cfg("order_diff_3", "order_diff", "a'b'cd' -> c", "a'bde -> b", "e"),
+    _cfg("order_matched_1", "order_matched", "a'b'c -> c", "a'bd -> b", "d"),
+    _cfg("order_matched_2", "order_matched", "a'b'c'd -> d", "a'bce -> b", "e"),
+    _cfg("diff_vs_prog_1", "diff_vs_prog", "a'b'cd -> c", "a'bdc -> b", "d",
+         "d = the output of the progress; c = the SRC frontier (the 'next op')"),
+)}
+ALIASES = {"order_diff": "order_diff_1", "order_matched": "order_matched_1", "c_in_dst": "diff_vs_prog_1"}
+VARIANTS = tuple(CONFIGS) + tuple(ALIASES)       # accepted names (CLI choices)
+
+
+def canonical(name: str) -> str:
+    name = ALIASES.get(name, name)
+    assert name in CONFIGS, f"unknown config {name!r}; one of {sorted(CONFIGS)} or aliases {sorted(ALIASES)}"
+    return name
+
+
+def resolve_configs(names) -> list[str]:
+    """``None`` / ``['all']`` -> every config; group names (order_diff, ...) expand only via their alias."""
+    if not names or list(names) == ["all"]:
+        return list(CONFIGS)
+    out = []
+    for n in names:
+        c = canonical(n)
+        if c not in out:
+            out.append(c)
+    return out
+
+
 def _with_prefix(part, prefix):
     q, code = part
     return q, code + " " + prefix
@@ -166,21 +267,43 @@ def _with_prefix(part, prefix):
 
 @dataclass
 class NRGSPrefixInstance:
-    pivot: Pivot
-    a: str
-    c: str
-    variant: str = "order_diff"
+    pivot: Pivot                      # b = DST native predicate, d = target predicate, shared prefix
+    assign: dict                      # config letter -> predicate id, for Config.others
+    config: str = "order_diff_1"
     src_lang: str = "python"
     dst_lang: str = "python"
     presentation: str = "listed"
 
     def __post_init__(self):
-        assert self.variant in VARIANTS, self.variant
+        self.config = canonical(self.config)
         for lang in (self.src_lang, self.dst_lang):
             if lang != "python":
                 raise NotImplementedError("the head_loc bank has Python one-liners only; add C++ twins first")
-        ids = [self.a, self.pivot.b, self.c, self.pivot.d]
-        assert len(set(ids)) == 4, f"A, B, C, D must be distinct: {ids}"
+        cfg = self.cfg
+        assert set(self.assign) == set(cfg.others), f"{cfg.name}: need letters {cfg.others}, got {sorted(self.assign)}"
+        ids = list(self.roles.values())
+        assert len(set(ids)) == len(ids), f"{cfg.name}: tasks must be distinct: {self.roles}"
+
+    @property
+    def cfg(self) -> Config:
+        return CONFIGS[self.config]
+
+    @property
+    def roles(self) -> dict:          # letter -> predicate id, all letters
+        return {**self.assign, self.cfg.native: self.pivot.b, self.cfg.target: self.pivot.d}
+
+    # backward-compatible names (order_diff_1 letters)
+    @property
+    def variant(self) -> str:
+        return self.config
+
+    @property
+    def a(self):
+        return self.roles.get("a")
+
+    @property
+    def c(self):
+        return self.roles.get("c")
 
     @property
     def datatype(self) -> str:
@@ -188,46 +311,41 @@ class NRGSPrefixInstance:
 
     @property
     def key(self) -> str:
-        p = self.pivot
-        return (f"{self.variant}|{p.datatype}|A={self.a}|B={p.b}|C={self.c}|D={p.d}"
-                f"|prefix={p.prefix}|{self.src_lang}-{self.dst_lang}")
+        r = self.roles
+        return (f"{self.config}|{self.datatype}|" + "|".join(f"{x}={r[x]}" for x in sorted(r))
+                + f"|prefix={self.pivot.prefix}|{self.src_lang}-{self.dst_lang}")
 
     @property
     def base(self) -> D.DiffTriggerInstance:
         """The SRC/DST pair as a regular diff-trigger instance (same renderer as the eval pipeline)."""
-        dt, bank = self.datatype, BANK[self.datatype]
-        A, B, C, Dp = (bank[x] for x in (self.a, self.pivot.b, self.c, self.pivot.d))
-        if self.variant == "c_in_dst":
-            src_order, dst_order = (A, B, C, Dp), (A, B, Dp, C)
-        elif self.variant == "order_matched":
-            src_order, dst_order = (A, B, C), (A, B, Dp)
-        else:
-            src_order, dst_order = (A, C, B), (A, B, Dp)
+        dt, bank, cfg, r = self.datatype, BANK[self.datatype], self.cfg, self.roles
         return D.DiffTriggerInstance(
-            datatype=dt, src_order=src_order, dst_order=dst_order,
-            src_progress=[A.id, B.id], dst_progress=[A.id],
-            diff_target=Dp.id, dst_native=B.id, src_target=C.id,
+            datatype=dt, src_order=tuple(bank[r[x]] for x in cfg.src), dst_order=tuple(bank[r[x]] for x in cfg.dst),
+            src_progress=[r[x] for x in cfg.src if x in cfg.src_prefill],
+            dst_progress=[r[x] for x in cfg.dst if x in cfg.dst_prefill],
+            diff_target=r[cfg.target], dst_native=r[cfg.native], src_target=r[cfg.src_next],
             var_name=VAR_NAME[dt], presentation=self.presentation,
             src_lang=self.src_lang, dst_lang=self.dst_lang,
             naming="letters", letter_stub="var_eq",
-            meta={"variant": self.variant, "dst_next": B.id, "diff_target": Dp.id,
-                  "src_target": C.id, "datatype": dt, "prefix": self.pivot.prefix},
+            meta={"variant": self.config, "config": self.config, "dst_next": r[cfg.native],
+                  "diff_target": r[cfg.target], "src_target": r[cfg.src_next], "datatype": dt,
+                  "prefix": self.pivot.prefix},
         )
 
     def parts(self) -> dict[str, tuple[str, str]]:
-        """role -> (question, code prefill). Roles: src, dst, dst_star, and src_ctrl (order_diff only:
-        SRC' needs C listed before B so that C stays the frontier with B un-prefilled)."""
-        i = self.base
-        A, B = i.src_progress
-        dstar = i._parts(i.dst_lang, i.dst_order, [A, B])
-        assert dstar[1].rstrip().endswith("c ="), "DST* stub must be the third line (frontier D)"
+        """role -> (question, code prefill). Roles: src, dst, dst_star, and src_ctrl when the config has an
+        SRC' control (:attr:`Config.src_ctrl_prefill`)."""
+        i, cfg, r = self.base, self.cfg, self.roles
+        star_pre = [r[x] for x in cfg.dst if x in cfg.dst_star_prefill]
+        dstar = i._parts(i.dst_lang, i.dst_order, star_pre)
+        assert dstar[1].rstrip().endswith(f"{chr(ord('a') + len(star_pre))} ="), "DST* stub must be the target's line"
         out = {
             "src": i.src_parts(),
             "dst": _with_prefix(i.dst_parts(), self.pivot.prefix),
             "dst_star": _with_prefix(dstar, self.pivot.prefix),
         }
-        if self.variant == "order_diff":
-            out["src_ctrl"] = i._parts(i.src_lang, i.src_order, [A])
+        if cfg.src_ctrl_prefill is not None:
+            out["src_ctrl"] = i._parts(i.src_lang, i.src_order, [r[x] for x in cfg.src if x in cfg.src_ctrl_prefill])
         return out
 
     def prompts(self, ctx) -> dict[str, str]:
@@ -238,51 +356,68 @@ class NRGSPrefixInstance:
 
 
 def to_record(inst: NRGSPrefixInstance) -> dict:
-    """JSON-able instance (pivot fields + roles) — round-trips through :func:`from_record`."""
+    """JSON-able instance — round-trips through :func:`from_record`."""
     p = inst.pivot
-    return dict(key=inst.key, datatype=p.datatype, a=inst.a, b=p.b, c=inst.c, d=p.d, prefix=p.prefix,
-                b_tok=p.b_tok, d_tok=p.d_tok, variant=inst.variant, src_lang=inst.src_lang,
-                dst_lang=inst.dst_lang, presentation=inst.presentation)
+    return dict(key=inst.key, config=inst.config, group=inst.cfg.group, datatype=p.datatype, assign=dict(inst.assign),
+                b=p.b, d=p.d, prefix=p.prefix, b_tok=p.b_tok, d_tok=p.d_tok,
+                src_lang=inst.src_lang, dst_lang=inst.dst_lang, presentation=inst.presentation)
 
 
 def from_record(r: dict) -> NRGSPrefixInstance:
+    """Also reads legacy (pre-registry) records: ``variant`` + ``a`` / ``c`` (order_diff_1 letters)."""
     pv = Pivot(r["datatype"], r["b"], r["d"], r["prefix"], r["b_tok"], r["d_tok"])
-    return NRGSPrefixInstance(pv, r["a"], r["c"], r["variant"], r["src_lang"], r["dst_lang"],
+    if "config" in r:
+        return NRGSPrefixInstance(pv, dict(r["assign"]), r["config"], r["src_lang"], r["dst_lang"],
+                                  r.get("presentation", "listed"))
+    return NRGSPrefixInstance(pv, {"a": r["a"], "c": r["c"]}, r["variant"], r["src_lang"], r["dst_lang"],
                               r.get("presentation", "listed"))
 
 
-def build_instances(pivots, variant="order_diff", n_per_pivot=1, seed=0, distinct_families=True,
-                    src_lang="python", dst_lang="python") -> list[NRGSPrefixInstance]:
-    """For each pivot (b, d, prefix), draw ``n_per_pivot`` (A, C) orderings from the rest of the bank."""
+def load_dataset(path, configs=None, split=None) -> list[dict]:
+    """Records of a mined ``dataset.json``, optionally one or more config shards and/or one split."""
+    recs = json.load(open(path))["instances"]
+    keep = set(resolve_configs(configs)) if configs else None
+    return [x for x in recs
+            if (keep is None or canonical(x.get("config", x.get("variant"))) in keep)
+            and (split is None or x["split"] == split)]
+
+
+def build_instances(pivots, variant=None, n_per_pivot=1, seed=0, distinct_families=True,
+                    src_lang="python", dst_lang="python", configs=None) -> list[NRGSPrefixInstance]:
+    """For each pivot (native b, target d, prefix) and config, draw ``n_per_pivot`` assignments of the
+    config's other letters from the rest of the bank. ``variant`` (one config) is kept for old callers."""
+    cfgs = [canonical(variant)] if (variant and not configs) else resolve_configs(configs)
     rng = random.Random(seed)
     out = []
     for pv in pivots:
         used = {_fam(pv.b), _fam(pv.d)}
         pool = [p for p in BANK[pv.datatype]
                 if p not in (pv.b, pv.d) and (not distinct_families or _fam(p) not in used)]
-        pairs = [(a, c) for a in pool for c in pool
-                 if a != c and (not distinct_families or _fam(a) != _fam(c))]
-        rng.shuffle(pairs)
-        out += [NRGSPrefixInstance(pv, a, c, variant, src_lang, dst_lang) for a, c in pairs[:n_per_pivot]]
+        for name in cfgs:
+            others = CONFIGS[name].others
+            combos = [c for c in itertools.permutations(pool, len(others))
+                      if not distinct_families or len({_fam(x) for x in c}) == len(c)]
+            rng.shuffle(combos)
+            out += [NRGSPrefixInstance(pv, dict(zip(others, c)), name, src_lang, dst_lang) for c in combos[:n_per_pivot]]
     return out
 
 
 def pair_id(inst: NRGSPrefixInstance) -> tuple:
-    """Unordered (b, d) pair — (b, d) and (d, b) share predicates and tokens, so split on this."""
+    """Unordered (native, target) pair — shared across configs and directions, so split on this."""
     return (inst.datatype, frozenset({inst.pivot.b, inst.pivot.d}))
 
 
 def stratified_sample(instances, n, seed=0):
-    """``n`` instances balanced across datatypes and, within a datatype, spread round-robin over the
-    (b, d) pairs (random order within a pair) — so no datatype or pair dominates a small sample."""
+    """``n`` instances balanced across (config, datatype) strata and, within one, spread round-robin over
+    the (native, target) pairs (random order within a pair) — no stratum or pair dominates a small sample."""
     import collections
 
     rng = random.Random(seed)
-    by_dt = collections.defaultdict(lambda: collections.defaultdict(list))
+    by = collections.defaultdict(lambda: collections.defaultdict(list))
     for x in instances:
-        by_dt[x.datatype][pair_id(x)].append(x)
+        by[(x.config, x.datatype)][pair_id(x)].append(x)
     queues = {}
-    for dt, pairs in by_dt.items():
+    for st, pairs in by.items():
         groups = [rng.sample(v, len(v)) for _, v in sorted(pairs.items(), key=lambda kv: sorted(kv[0][1]))]
         rng.shuffle(groups)
         q = []
@@ -290,12 +425,12 @@ def stratified_sample(instances, n, seed=0):
             for g in groups:
                 if g:
                     q.append(g.pop())
-        queues[dt] = q
-    out, dts = [], sorted(queues)
-    while len(out) < n and any(queues[d] for d in dts):
-        for d in dts:
-            if queues[d] and len(out) < n:
-                out.append(queues[d].pop(0))
+        queues[st] = q
+    out, sts = [], sorted(queues)
+    while len(out) < n and any(queues[k] for k in sts):
+        for k in sts:
+            if queues[k] and len(out) < n:
+                out.append(queues[k].pop(0))
     return out
 
 
@@ -361,7 +496,7 @@ def gate(mt, ctx, instances, batch_size=8) -> list[dict]:
             tb, td = dec(b_id), dec(d_id)
             diverge = b_id != d_id and _tokens_differ_meaningfully(tb, td)
             rows.append(dict(
-                key=x.key, datatype=x.datatype, b=x.pivot.b, d=x.pivot.d, prefix=x.pivot.prefix,
+                key=x.key, config=x.config, datatype=x.datatype, b=x.pivot.b, d=x.pivot.d, prefix=x.pivot.prefix,
                 b_id=b_id, d_id=d_id, top1_dst=tb, top1_dst_star=td,
                 p_dst_b=float(ld[b_id].exp()), p_dst_d=float(ld[d_id].exp()),
                 p_star_b=float(ls[b_id].exp()), p_star_d=float(ls[d_id].exp()),

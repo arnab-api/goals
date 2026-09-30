@@ -926,6 +926,7 @@ def run_q_transfer_intervention(
     alpha=1.0,
     n_pivot=1,
     compute_gaze=True,
+    compute_readout=True,
     restrict_to_task=False,
     ctx=None,
 ):
@@ -941,6 +942,8 @@ def run_q_transfer_intervention(
     boosts the OV write of ``patch_heads`` at the decision token during the PATCHED generation and
     readout (amplifying how much they write to the residual). Attention (the gaze signal) is always
     measured under the PLAIN patch — an OV boost scales the write, not the attention weights.
+
+    ``compute_readout=False`` skips the three goalscope readout generations (``ro_*`` -> None).
 
     Works for both ``QTransferInstance`` (TASK = numbered predicate list) and
     ``FilterTransferInstance`` (TASK = the composed phrase); the span is chosen accordingly.
@@ -1025,9 +1028,12 @@ def run_q_transfer_intervention(
             "patched_gen"
         ]
 
-    ro_src = _ro(src_prompt, piv_src)
-    ro_dst = _ro(dst_prompt, piv_dst)
-    ro_patched = _ro(dst_prompt, piv_dst, iface=_patched_iface())
+    if compute_readout:
+        ro_src = _ro(src_prompt, piv_src)
+        ro_dst = _ro(dst_prompt, piv_dst)
+        ro_patched = _ro(dst_prompt, piv_dst, iface=_patched_iface())
+    else:
+        ro_src = ro_dst = ro_patched = None
 
     # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched. Under
     # restrict_to_task the patched attention is measured WITH the task-span restriction active, so the

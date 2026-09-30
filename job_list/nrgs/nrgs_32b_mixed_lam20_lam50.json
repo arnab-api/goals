@@ -1,0 +1,76 @@
+[
+ {
+  "name": "nrgs32b_mine_mixed_pypy",
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/mine_nrgs_prefix.py --model Qwen/Qwen2.5-Coder-32B-Instruct --configs all --n-per-pivot 4 --src-lang python --dst-lang python |& tee logs/nrgs/nrgs32b_mine_mixed_pypy.log"
+ },
+ {
+  "name": "nrgs32b_train_mixed_lam20",
+  "dependencies": [
+   "nrgs32b_mine_mixed_pypy"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/train_nrgs_mask.py --model Qwen/Qwen2.5-Coder-32B-Instruct --data-tag mixed --src-lang python --dst-lang python --epochs 10 --lambda-sparse 20 --micro-batch 4 |& tee logs/nrgs/nrgs32b_train_mixed_lam20.log"
+ },
+ {
+  "name": "nrgs32b_select_mixed_lam20",
+  "dependencies": [
+   "nrgs32b_train_mixed_lam20"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/select_nrgs_heads.py --mask results/nrgs_mask/Qwen2.5-Coder-32B-Instruct/mixed__python-python__L0-64__lam20__kl1_dir1_ctrl0__logistic__s0/mask.pt --out head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam20__nrgs_mixed_thr0.9.json --threshold 0.9 |& tee logs/nrgs/nrgs32b_select_mixed_lam20.log"
+ },
+ {
+  "name": "pmix20_od_pypy",
+  "dependencies": [
+   "nrgs32b_select_mixed_lam20"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 2 --pivot eq --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam20__nrgs_mixed_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_diff --lang-transfers py-py --n-samples 32 --tag-suffix __ro-goal250__seq |& tee logs/diff_trigger/pmix20_od_pypy.log"
+ },
+ {
+  "name": "pmix20_om_pypy",
+  "dependencies": [
+   "nrgs32b_select_mixed_lam20"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 2 --pivot eq --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam20__nrgs_mixed_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_matched --lang-transfers py-py --n-samples 32 --tag-suffix __ro-goal250__seq |& tee logs/diff_trigger/pmix20_om_pypy.log"
+ },
+ {
+  "name": "pmix20_dvp_pypy",
+  "dependencies": [
+   "nrgs32b_select_mixed_lam20"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam20__nrgs_mixed_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 2 |& tee logs/diff_vs_prog/pmix20_dvp_pypy.log"
+ },
+ {
+  "name": "nrgs32b_train_mixed_lam50",
+  "dependencies": [
+   "nrgs32b_mine_mixed_pypy"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/train_nrgs_mask.py --model Qwen/Qwen2.5-Coder-32B-Instruct --data-tag mixed --src-lang python --dst-lang python --epochs 10 --lambda-sparse 50 --micro-batch 4 |& tee logs/nrgs/nrgs32b_train_mixed_lam50.log"
+ },
+ {
+  "name": "nrgs32b_select_mixed_lam50",
+  "dependencies": [
+   "nrgs32b_train_mixed_lam50"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/select_nrgs_heads.py --mask results/nrgs_mask/Qwen2.5-Coder-32B-Instruct/mixed__python-python__L0-64__lam50__kl1_dir1_ctrl0__logistic__s0/mask.pt --out head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam50__nrgs_mixed_thr0.9.json --threshold 0.9 |& tee logs/nrgs/nrgs32b_select_mixed_lam50.log"
+ },
+ {
+  "name": "pmix50_od_pypy",
+  "dependencies": [
+   "nrgs32b_select_mixed_lam50"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 2 --pivot eq --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam50__nrgs_mixed_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_diff --lang-transfers py-py --n-samples 32 --tag-suffix __ro-goal250__seq |& tee logs/diff_trigger/pmix50_od_pypy.log"
+ },
+ {
+  "name": "pmix50_om_pypy",
+  "dependencies": [
+   "nrgs32b_select_mixed_lam50"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 2 --pivot eq --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam50__nrgs_mixed_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_matched --lang-transfers py-py --n-samples 32 --tag-suffix __ro-goal250__seq |& tee logs/diff_trigger/pmix50_om_pypy.log"
+ },
+ {
+  "name": "pmix50_dvp_pypy",
+  "dependencies": [
+   "nrgs32b_select_mixed_lam50"
+  ],
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/progress-mix-lam50__nrgs_mixed_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 2 |& tee logs/diff_vs_prog/pmix50_dvp_pypy.log"
+ }
+]
