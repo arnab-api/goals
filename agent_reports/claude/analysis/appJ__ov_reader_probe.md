@@ -1,5 +1,10 @@
 # OVReader — probing the residual's OV-write subspace for the goal (DIFF)
 
+> **Paper usage** (section numbers as of the 2026-09-29 build of `Overleaf-draft/Goals-Overleaf/main.pdf`)
+> - App J Tracking the Sub-Goal Encoding in Residual Representation (`app:ovreader`) — J.1 approach, J.2 `fig:ovreader`, `fig:ov-by-pivot`, `fig:ovreader-other-pivots`.
+> - Not cited in the main text (the §5 OVReader sentence is commented out).
+
+
 *Companion to `src/goals/goalscope.py` (`OVReader`), `scripts/evaluation/eval_ov_reader.py`,
 `scripts/evaluation/ov_reader_io.py`, and `notebooks/diff/7_ov_reader_eval_demo.ipynb`.
 Last updated 2026-09-16. **Both modes have been re-run on the locked, sanitized 253-spec corpus**
@@ -22,7 +27,7 @@ whether the upcoming sub-goal (the "DIFF") is *already present in the residual* 
 concentrate. It does so by turning that OV image of `h` into a steering vector and reading it out through
 GoalScope.
 
-This is the **write-side** complement to the goal-head *transplant* evals (`diff_eval_analysis.md`): those
+This is the **write-side** complement to the goal-head *transplant* evals (`5.1_appI__diff_eval_analysis.md`): those
 ask "can I move the goal by transplanting head q/k/v"; OVReader asks "is the goal *linearly readable* from
 the residual, in the exact form a goal head would write it, and from which layer on".
 
@@ -35,7 +40,7 @@ transplant evals show the goal heads' pivot **output** carries it (GoalScope rea
 observations push the locus *earlier*:
 
 1. the goal-head **query** already carries the computed next goal, not just progress
-   (`diff_eval_analysis.md` ★ Headline);
+   (`5.1_appI__diff_eval_analysis.md` ★ Headline);
 2. we want to know **where in depth** the goal first becomes linearly present in the residual.
 
 OVReader answers (2) on the write side: it sweeps `L` and asks at each layer whether the goal is in the

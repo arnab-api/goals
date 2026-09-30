@@ -155,5 +155,5 @@ studies of how models represent, pursue, and hand off goals.
   sentence in §2 to "left for future work" (drop the `\Cref`).
 - **`app:persistence:obstacle`** and **`sec:noncode`** are referenced — both exist.
 - Keep §1/§3/§5 language aligned with the **recomputation-not-storage** thesis (see
-  `analysis/diff_persistence_recomputation_revision.md`); the short conclusion leads with it.
+  `analysis/1_3.4_5__diff_persistence_recomputation_revision.md`); the short conclusion leads with it.
 ```

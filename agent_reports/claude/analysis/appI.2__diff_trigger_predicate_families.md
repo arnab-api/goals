@@ -1,5 +1,10 @@
 # Predicate-family overlaps in the QTASKS banks (diff-trigger confound audit)
 
+> **Paper usage** (section numbers as of the 2026-09-29 build of `Overleaf-draft/Goals-Overleaf/main.pdf`)
+> - App I.2 (`app:transfer:q`) and App I.3 — the distinct-family + non-trivial-frontier sampling constraint behind every q-transfer instance (`src/diff/data.py`). Not cited explicitly in the text.
+> - Methodology audit only; no reported numbers.
+
+
 *2026-09-18. Audit of the 4 datatype predicate banks (`src/diff/data.py::QTASKS`) for the
 "overlapping family" confound in the diff-trigger q-transfer experiment
 (`scripts/diff/diff_trigger_eval.py`, `DiffTriggerInstance`).*

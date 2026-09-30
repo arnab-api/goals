@@ -1,5 +1,11 @@
 # Goal-head ablation: sufficiency & necessity
 
+> **Paper usage** (section numbers as of the 2026-09-29 build of `Overleaf-draft/Goals-Overleaf/main.pdf`)
+> - Main: §4 A Causal Bottleneck Imposed by Goal Heads — sufficiency (`sec:mechanism:ablation`) and necessity (`sec:mechanism:necessity`) paragraphs; results figure `tab:goal-ablation` (`Figures/ablation/ablation_results-crop.pdf`, placed in the §3.4 source file `persistance.tex`); the 250-head choice is re-cited in §5.1.1 KV-transfer.
+> - App G Sufficiency of Goal-Head Access (`app:sufficiency`) — `fig:sufficiency-setup`, `tab:goal-ablation-exact`, `tab:sufficiency-qual`.
+> - App H Necessity of Goal-Head Access (`app:necessity`) — `fig:necessity-setup`, `tab:goal-ablation-necessity`.
+
+
 **Model:** Qwen2.5-Coder-32B-Instruct · **Data:** locked prefill-to-frontier eval (`data/goalscope_eval.json`), all 4 datatypes aggregated, **n = 253** · **Metric:** oracle judge on the greedy-decoded frontier value — "does the completion still implement the frontier description?"
 
 Two head budgets are tested: the **122** core goal heads (mask thr>0.9, band 25–56) and the **250**-head superset (top-250 by training-snapshot count, `goal__lam20_top250.json`, spanning from layer 0).

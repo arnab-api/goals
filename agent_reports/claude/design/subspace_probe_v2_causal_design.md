@@ -3,7 +3,7 @@
 *Design doc, 2026-09-15. Supersedes the training setup in `subspace_probe_design.md` /
 `notebooks/11_goalscope_subspace.ipynb` / `src/goals/subspace_probe.py`. Companion evals:
 `scripts/evaluation/eval_subspace_probe.py`, `eval_ov_reader.py`, `eval_goalscope.py`
-(causality mode). Read the OVReader mechanism in `agent_reports/claude/analysis/ov_reader_probe.md`
+(causality mode). Read the OVReader mechanism in `agent_reports/claude/analysis/appJ__ov_reader_probe.md`
 first — this design reuses its read→steer→grade pipeline, swapping the OV transform for a learned W.*
 
 ---
@@ -103,7 +103,7 @@ Reuse the `eval_ov_reader` corpus builder (`D.QTASKS[datatype]`, prefill-to-fron
 frontier predicate is the **known goal `g_k`**. Read `h` at the pivot of the source prompt.
 
 - **Pivots:** read at the strong pivots — `eq` (`c =`) and `first_impl` (these carry the goal cleanly;
-  see `ov_reader_probe.md` §5.2). Optionally pool all 5, but `prev_end` is near-useless and would add
+  see `appJ__ov_reader_probe.md` §5.2). Optionally pool all 5, but `prev_end` is near-useless and would add
   noise. **Default: `{eq, first_impl}`.**
 - **Random sampling for scale:** re-sample tasks / predicate subsets / `j` / condition-count `T` (and
   datatypes) to generate many more source instances than the fixed 253 (which is reserved for eval —
@@ -232,7 +232,7 @@ OVReader / goal-head causality.
 - **v1 subspace probe** (0.058) — the thing we're fixing.
 
 **Success criterion:** v2 causality ≫ v1 (0.058) and approaching OVReader's causality peak
-(~0.6–0.8 mid-stack, `ov_reader_probe.md` §5.1). Also worth the **layerwise curve** (train `W_l` per
+(~0.6–0.8 mid-stack, `appJ__ov_reader_probe.md` §5.1). Also worth the **layerwise curve** (train `W_l` per
 read layer) to see whether a learned subspace pushes the emergence earlier than the fixed OV transform.
 
 ---

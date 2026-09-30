@@ -1,5 +1,10 @@
 # Cross-model goal-head transfer: Coder-32B heads → Qwen2.5-32B-Instruct
 
+> **Paper usage** (section numbers as of the 2026-09-29 build of `Overleaf-draft/Goals-Overleaf/main.pdf`)
+> - App F.2 Effect of Code-finetuning and RL-tuning — `fig:comparison-code` (Coder-32B's 122 heads applied to Qwen2.5-32B-Instruct, additive_norm α=0.1).
+> - Not cited in the main text.
+
+
 *2026-09-21. Do the goal heads localized in `Qwen2.5-Coder-32B-Instruct` carry a goal signal that is
 **faithful and causal in a different model** — the non-coder `Qwen2.5-32B-Instruct`? We apply the Coder's
 122-head goal set directly to the non-coder and run GoalScope faithfulness + causality, then compare

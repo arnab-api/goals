@@ -1,5 +1,10 @@
 # Obstacle robustness of code LLMs (behavioral)
 
+> **Paper usage** (section numbers as of the 2026-09-29 build of `Overleaf-draft/Goals-Overleaf/main.pdf`)
+> - App M.2 Obstacle Persistence (`app:persistence:obstacle`) — `fig:obstacle-datatype`, `tab:obstacle-models`, `tab:obstacle-ov-boost` (the `0 +`→`0j` OV-boost table).
+> - Main text: only a pointer from §1 Introduction (persistence paragraph, `\Cref{app:persistence:obstacle}`).
+
+
 *Core model: Qwen2.5-Coder-32B-Instruct (figure + tables); cross-model comparison across 6 models below.*
 
 *2026-09-20. How robustly does the model still implement a sub-goal when its frontier is forced to start

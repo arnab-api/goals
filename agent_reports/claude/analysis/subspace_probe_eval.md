@@ -36,7 +36,7 @@ the C++ stub (`CAUSAL_PREFIX`) as the assistant turn.
 
 (An 8-datapoint smoke gave 0.30, matching the full 0.32.)
 
-## vs. goal-head GoalScope (same corpus, Axis (a) of `goalscope_eval_axis.md`)
+## vs. goal-head GoalScope (same corpus, Axis (a) of `appE_appF__goalscope_eval_axis.md`)
 
 | read-out | faithfulness | causality |
 |----------|:-----------:|:---------:|

@@ -2313,7 +2313,7 @@ class DiffTriggerInstance:
 
 # Semantic predicate families — used ONLY by the diff-trigger q-transfer to avoid sampling A/B/C/D
 # sets with overlapping sub-tasks (e.g. two "length" ops, or even/odd complements), which confound the
-# "did DST switch to D vs stay on B" test. See agent_reports/claude/analysis/diff_trigger_predicate_families.md.
+# "did DST switch to D vs stay on B" test. See agent_reports/claude/analysis/appI.2__diff_trigger_predicate_families.md.
 # NOT used by the other setups (the overlap issue is minor there). Any predicate id not listed falls
 # back to a singleton family (its own id).
 DIFF_TRIGGER_FAMILIES: dict[str, dict[str, list[str]]] = {
