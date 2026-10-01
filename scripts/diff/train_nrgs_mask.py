@@ -9,12 +9,18 @@ Defaults reproduce the recipe behind the 122 goal heads (results/localization/<m
 all 64 layers as candidates, lambda 20, lr 1e-2, 50 epochs, 64 instances per optimizer step; selection =
 mask > 0.9 within layers [25, 56). The full-depth mask is always saved, so any other selection is post-hoc.
 
+One mask per query-content hypothesis: each hypothesis (H1 / H1c / H2 / H3) has its own mined dataset
+(``mine_nrgs_prefix.py --configs H3`` -> data tag ``h3``) whose DST* target is that hypothesis's prediction,
+so ``--data-tag h3`` trains the heads whose SRC query moves DST to the H3 letter. The run tag starts with
+the data tag, so masks of different hypotheses never collide.
+
 Outputs (``results/nrgs_mask/<model>/<run_tag>/``):
     mask.pt          {mask_values (full depth), layers, selected_heads, history, config, final_eval}
     final_eval.json  val flip / margin gain / KL: learned (soft, binarized) vs goal / control heads,
-                     under SRC's and (order_diff) SRC''s query
+                     under SRC's and (configs that define one) SRC''s query
 and the selected heads as a head set: ``head_sets/<model>/nrgs/progress__<run_tag>.json``.
 Usage:
+    conda run -n goals python scripts/diff/train_nrgs_mask.py --cuda 0,1 --data-tag h3 --epochs 10
     conda run -n goals python scripts/diff/train_nrgs_mask.py --cuda 0,1,2 --variant order_diff \\
         --lambda-sparse 5 --epochs 30 --batch-size 8
     # smoke: 2 epochs on 16 train instances
@@ -66,9 +72,11 @@ def parse_args():
     ap.add_argument("--variant", default="order_diff",
                     help="legacy dataset tag (results/nrgs_prefix/<model>/<tag>__<sl>-<dl>/); see --data-tag")
     ap.add_argument("--data-tag", default=None,
-                    help="dataset dir tag from mine_nrgs_prefix.py, e.g. 'mixed' (default: --variant)")
+                    help="dataset dir tag from mine_nrgs_prefix.py: 'mixed' (H1), 'h1c', 'h2', 'h3', or a config "
+                         "name (default: --variant)")
     ap.add_argument("--configs", nargs="+", default=None,
-                    help="train on these config shards of the dataset only (default: every config in it)")
+                    help="train on these config shards of the dataset only (config or hypothesis names; "
+                         "default: every config in it)")
     ap.add_argument("--src-lang", default="python")
     ap.add_argument("--dst-lang", default="python")
     ap.add_argument("--dataset", default=None, help="override the dataset.json path")
@@ -99,7 +107,8 @@ def parse_args():
 
 
 SHORT = {"order_diff_1": "od1", "order_diff_2": "od2", "order_diff_3": "od3", "order_matched_1": "om1",
-         "order_matched_2": "om2", "diff_vs_prog_1": "dvp1"}
+         "order_matched_2": "om2", "diff_vs_prog_1": "dvp1",
+         "h1c_1": "h1c1", "h1c_2": "h1c2", "h2_1": "h2a", "h2_2": "h2b", "h3_1": "h3a", "h3_2": "h3b"}
 
 
 def _data_label(args):
@@ -127,6 +136,12 @@ def main():
     by_cfg = collections.Counter(N.canonical(r.get("config", r.get("variant"))) for r in records)
     logger.info(f"dataset {ds_fp}: {len(records)} instances"
                 + (f" (shards {N.resolve_configs(args.configs)})" if args.configs else "") + f" · per config {dict(by_cfg)}")
+    hyps = sorted({N.CONFIGS[c].hypothesis for c in by_cfg})
+    if len(hyps) > 1:
+        logger.warning(f"training one mask across hypotheses {hyps} — their targets differ; "
+                       f"use one hypothesis per run (--configs H3 / a single-hypothesis --data-tag)")
+    for c in sorted(by_cfg):
+        logger.info(f"  {c:16s} {N.CONFIGS[c].notation}")
 
     ctx = N.load_ctx(args.model)
     mt = ctx.mt

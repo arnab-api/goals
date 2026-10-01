@@ -175,10 +175,16 @@ class Config:
     native: str                      # DST frontier (the notation's arrow; validated)
     target: str
     note: str = ""
+    hypothesis: str = "H1"           # which query-content hypothesis ``target`` is the prediction of (HYPOTHESES)
 
     @property
     def letters(self) -> tuple:
         return tuple(sorted(set(self.src) | set(self.dst)))
+
+    @property
+    def predictions(self) -> dict:
+        """DST letter each query-content hypothesis predicts for this contrast (:func:`predict`)."""
+        return predict(self.src, self.src_prefill, self.dst, self.dst_prefill)
 
     @property
     def others(self) -> tuple:       # letters filled from the bank (native / target come from the pivot)
@@ -194,16 +200,50 @@ class Config:
         ("look for" the same task), but not the progress that makes ``target`` pending. ``None`` when no
         such task exists (the control is then undefined for this config)."""
         after = {x for x in self.src[self.src.index(self.src_next) + 1:] if x in self.src_prefill}
-        return (self.src_prefill - after) if after else None
+        if not after:
+            return None
+        ctrl = self.src_prefill - after
+        # not a negative when the hypothesis predicts the target under SRC' too (e.g. H2: same frontier slot)
+        if predict(self.src, ctrl, self.dst, self.dst_prefill).get(self.hypothesis) == self.target:
+            return None
+        return ctrl
 
     @property
     def notation(self) -> str:
         f = lambda order, pre, nxt: "".join(x + ("'" if x in pre else "") for x in order) + f" -> {nxt}"  # noqa: E731
-        return f"src {f(self.src, self.src_prefill, self.src_next)} | dst {f(self.dst, self.dst_prefill, self.native)} | target {self.target}"
+        return (f"src {f(self.src, self.src_prefill, self.src_next)} | dst {f(self.dst, self.dst_prefill, self.native)}"
+                f" | target {self.target} ({self.hypothesis})")
 
 
 def _first_open(order, prefill):
     return next(x for x in order if x not in prefill)
+
+
+# ── query-content hypotheses (agent_reports/claude/analysis/q_transfer_query_content_hypotheses_design.md) ──
+HYPOTHESES = ("H1", "H1c", "H2", "H3")
+
+
+def predict(src, src_pre, dst, dst_pre) -> dict:
+    """DST letter each hypothesis predicts when SRC's pivot query is transplanted into DST (None = undefined).
+
+    H0  transfer fails            -> DST native
+    H1  set progress D_src         -> first DST item not in D_src
+    H1c count |D_src|              -> DST spec slot |D_src|
+    H2  order id pos_src(t_src)    -> DST spec slot pos_src(t_src)
+    H3  induction "I follow x", x = spec predecessor of t_src -> the item after x in DST spec;
+        defined only for an ORDER-MATCHED SRC (everything before t_src done, nothing after), where x is
+        also the last-written item — in an order-broken SRC the target's key ("I follow x") and the last
+        written line disagree, so there is no induction target."""
+    t = _first_open(src, src_pre)
+    i = src.index(t)
+    matched = all(x in src_pre for x in src[:i]) and not any(x in src_pre for x in src[i:])
+    at = lambda k: dst[k] if 0 <= k < len(dst) else None  # noqa: E731
+    x = src[i - 1] if i > 0 else None
+    return {"H0": _first_open(dst, dst_pre),
+            "H1": next((y for y in dst if y not in src_pre), None),
+            "H1c": at(len(src_pre)),
+            "H2": at(i),
+            "H3": (dst[dst.index(x) + 1] if matched and x in dst and dst.index(x) + 1 < len(dst) else None)}
 
 
 def _parse(side: str):
@@ -217,19 +257,32 @@ def _parse(side: str):
     return tuple(order), frozenset(pre), nxt
 
 
-def _cfg(name, group, src, dst, target, note=""):
+def _cfg(name, group, src, dst, target, note="", hypothesis="H1", strict=False):
+    """``strict`` (the H1c / H2 / H3 configs): the target must be that hypothesis's UNIQUE prediction — not
+    the native, not predicted by any other (defined) hypothesis, never seen in SRC (a letter SRC wrote or
+    listed could be picked up by a copy / completeness bias) — and SRC's own frontier must be absent from
+    DST (else the transplanted target identity, App I.3, would dominate)."""
     so, sp, sn = _parse(src)
     do, dp, dn = _parse(dst)
-    c = Config(name, group, so, sp, sn, do, dp, dn, target, note)
+    c = Config(name, group, so, sp, sn, do, dp, dn, target, note, hypothesis)
+    assert hypothesis in HYPOTHESES, f"{name}: unknown hypothesis {hypothesis}"
     assert _first_open(so, sp) == sn, f"{name}: SRC frontier is {_first_open(so, sp)}, notation says {sn}"
     assert _first_open(do, dp) == dn, f"{name}: DST frontier is {_first_open(do, dp)}, notation says {dn}"
     assert target in do and target not in dp and target != dn, f"{name}: bad target {target}"
     assert _first_open(do, c.dst_star_prefill) == target, f"{name}: DST* frontier != target"
     assert len(set(so)) == len(so) and len(set(do)) == len(do), f"{name}: repeated task"
+    P = c.predictions
+    assert P[hypothesis] == target, f"{name}: {hypothesis} predicts {P[hypothesis]}, target is {target}"
+    if strict:
+        rivals = {h: v for h, v in P.items() if h not in ("H0", hypothesis) and v is not None}
+        assert target not in rivals.values(), f"{name}: target {target} also predicted by {rivals}"
+        assert target not in so, f"{name}: target {target} appears in SRC"
+        assert sn not in do, f"{name}: SRC frontier {sn} appears in DST"
     return c
 
 
 CONFIGS: dict[str, Config] = {c.name: c for c in (
+    # ── H1 set progress (the original q-transfer targets; other hypotheses may coincide) ──
     _cfg("order_diff_1", "order_diff", "a'cb' -> c", "a'bd -> b", "d", "the original order-diff"),
     _cfg("order_diff_2", "order_diff", "a'bc'd' -> b", "a'dec -> d", "e", "count ('3 done -> 4th') would predict c"),
     _cfg("order_diff_3", "order_diff", "a'b'cd' -> c", "a'bde -> b", "e"),
@@ -237,9 +290,25 @@ CONFIGS: dict[str, Config] = {c.name: c for c in (
     _cfg("order_matched_2", "order_matched", "a'b'c'd -> d", "a'bce -> b", "e"),
     _cfg("diff_vs_prog_1", "diff_vs_prog", "a'b'cd -> c", "a'bdc -> b", "d",
          "d = the output of the progress; c = the SRC frontier (the 'next op')"),
+    # ── H1c count progress: order-broken SRC with |D| != pos(t_src) (5 tasks) ──
+    _cfg("h1c_1", "h1c", "a'bc' -> b", "a'de -> d", "e", "2 done -> slot 2; H1 = H2 = native d",
+         hypothesis="H1c", strict=True),
+    _cfg("h1c_2", "h1c", "a'bc' -> b", "a'dec -> d", "e", "as h1c_1, plus a SRC-done task c pending in DST (H1 skips it)",
+         hypothesis="H1c", strict=True),
+    # ── H2 order id: order-broken SRC, target slot = pos(t_src) (6 tasks: needs 6 distinct families) ──
+    _cfg("h2_1", "h2", "a'b'cd' -> c", "a'efb -> e", "f", "pos(c) = 2 -> slot 2; H1 = native e, H1c -> b",
+         hypothesis="H2", strict=True),
+    _cfg("h2_2", "h2", "a'b'cd' -> c", "a'efd -> e", "f", "as h2_1 with H1c -> d (a SRC-done task)",
+         hypothesis="H2", strict=True),
+    # ── H3 induction: order-matched SRC, target = the task after pred(t_src) = b in DST (5 tasks) ──
+    _cfg("h3_1", "h3", "a'b'c -> c", "a'ebd -> e", "d", "'I follow b' -> d; H1 = native e, H1c = H2 -> b",
+         hypothesis="H3", strict=True),
+    _cfg("h3_2", "h3", "a'b'c -> c", "a'dbe -> d", "e", "'I follow b' -> e; H1 = native d, H1c = H2 -> b",
+         hypothesis="H3", strict=True),
 )}
 ALIASES = {"order_diff": "order_diff_1", "order_matched": "order_matched_1", "c_in_dst": "diff_vs_prog_1"}
 VARIANTS = tuple(CONFIGS) + tuple(ALIASES)       # accepted names (CLI choices)
+BY_HYPOTHESIS = {h: [n for n, c in CONFIGS.items() if c.hypothesis == h] for h in HYPOTHESES}
 
 
 def canonical(name: str) -> str:
@@ -249,14 +318,17 @@ def canonical(name: str) -> str:
 
 
 def resolve_configs(names) -> list[str]:
-    """``None`` / ``['all']`` -> every config; group names (order_diff, ...) expand only via their alias."""
+    """``None`` / ``['all']`` -> every config (all hypotheses — targets differ across them!); a hypothesis
+    name (``H1`` / ``H1c`` / ``H2`` / ``H3``, case-insensitive) -> its configs; group names (order_diff, ...)
+    expand only via their alias."""
     if not names or list(names) == ["all"]:
         return list(CONFIGS)
+    hyp = {h.lower(): h for h in HYPOTHESES}
     out = []
     for n in names:
-        c = canonical(n)
-        if c not in out:
-            out.append(c)
+        for c in (BY_HYPOTHESIS[hyp[n.lower()]] if n.lower() in hyp else [canonical(n)]):
+            if c not in out:
+                out.append(c)
     return out
 
 
@@ -358,7 +430,8 @@ class NRGSPrefixInstance:
 def to_record(inst: NRGSPrefixInstance) -> dict:
     """JSON-able instance — round-trips through :func:`from_record`."""
     p = inst.pivot
-    return dict(key=inst.key, config=inst.config, group=inst.cfg.group, datatype=p.datatype, assign=dict(inst.assign),
+    return dict(key=inst.key, config=inst.config, group=inst.cfg.group, hypothesis=inst.cfg.hypothesis,
+                datatype=p.datatype, assign=dict(inst.assign),
                 b=p.b, d=p.d, prefix=p.prefix, b_tok=p.b_tok, d_tok=p.d_tok,
                 src_lang=inst.src_lang, dst_lang=inst.dst_lang, presentation=inst.presentation)
 

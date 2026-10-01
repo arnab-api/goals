@@ -1,0 +1,14 @@
+[
+ {
+  "name": "union_g250mix20_od_a2_pypy",
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 2 --pivot eq --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/union-goal250-mixlam20__goal250_or_nrgs_mixed_lam20_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_diff --lang-transfers py-py --n-samples 32 --tag-suffix __ro-goal250__seq |& tee logs/diff_trigger/union_g250mix20_od_a2_pypy.log"
+ },
+ {
+  "name": "union_g250mix20_om_a2_pypy",
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 2 --pivot eq --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/union-goal250-mixlam20__goal250_or_nrgs_mixed_lam20_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_matched --lang-transfers py-py --n-samples 32 --tag-suffix __ro-goal250__seq |& tee logs/diff_trigger/union_g250mix20_om_a2_pypy.log"
+ },
+ {
+  "name": "union_g250mix20_dvp_a2_pypy",
+  "command": "set -o pipefail; mkdir -p logs/nrgs logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/union-goal250-mixlam20__goal250_or_nrgs_mixed_lam20_thr0.9.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 2 |& tee logs/diff_vs_prog/union_g250mix20_dvp_a2_pypy.log"
+ }
+]

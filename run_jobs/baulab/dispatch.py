@@ -116,6 +116,11 @@ except ImportError as e:
         "CONDA_ENV, LOCAL_PROJECT_DIR, REMOTE_PROJECT_DIR, REMOTE_STAGING_SUBDIR)."
     )
 
+try:  # optional per-GPU free-memory floor (GB) for multi-GPU slots; None = total-only check
+    from CONFIG import MIN_FREE_PER_GPU
+except ImportError:
+    MIN_FREE_PER_GPU = None
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Scheduler invariants (logic, not deployment config — keep here).
@@ -929,6 +934,10 @@ def schedule(run_id: str, jobs: list[dict], pool: list[Worker], user: str, pw: s
             if not ok:
                 continue
             free = free_across(gpus, w.cuda)
+            # optional per-GPU floor (CONFIG.MIN_FREE_PER_GPU): the total alone lets a multi-GPU slot land on
+            # a GPU another job already fills (e.g. 55 + 28 GB free passes a 65 GB total).
+            if MIN_FREE_PER_GPU is not None and any(gpus.get(g, (0.0, 0.0))[1] < MIN_FREE_PER_GPU for g in w.cuda):
+                continue
             if free >= MIN_GPU_MEMORY:
                 cands.append((w, free))
         cands.sort(key=lambda c: c[1], reverse=True)  # most free first

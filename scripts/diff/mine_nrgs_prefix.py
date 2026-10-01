@@ -1,13 +1,27 @@
 #!/usr/bin/env python
 """Mine the NRGS common-prefix contrastive dataset for one or more contrast configs
-(``src/diff/nrgs_prefix.py::CONFIGS``; notation ``p: a'bc' -> b`` = spec order, x' prefilled, arrow = frontier):
+(``src/diff/nrgs_prefix.py::CONFIGS``; notation ``p: a'bc' -> b`` = spec order, x' prefilled, arrow = frontier).
+Each config's target is the prediction of one query-content hypothesis (design doc:
+``agent_reports/claude/analysis/q_transfer_query_content_hypotheses_design.md``):
 
-    order_diff_1     src a'cb' -> c    | dst a'bd -> b   | target d
-    order_diff_2     src a'bc'd' -> b  | dst a'dec -> d  | target e
-    order_diff_3     src a'b'cd' -> c  | dst a'bde -> b  | target e
-    order_matched_1  src a'b'c -> c    | dst a'bd -> b   | target d
-    order_matched_2  src a'b'c'd -> d  | dst a'bce -> b  | target e
-    diff_vs_prog_1   src a'b'cd -> c   | dst a'bdc -> b  | target d
+    H1  set progress   order_diff_1     src a'cb' -> c    | dst a'bd -> b   | target d
+                       order_diff_2     src a'bc'd' -> b  | dst a'dec -> d  | target e
+                       order_diff_3     src a'b'cd' -> c  | dst a'bde -> b  | target e
+                       order_matched_1  src a'b'c -> c    | dst a'bd -> b   | target d
+                       order_matched_2  src a'b'c'd -> d  | dst a'bce -> b  | target e
+                       diff_vs_prog_1   src a'b'cd -> c   | dst a'bdc -> b  | target d
+    H1c count          h1c_1            src a'bc' -> b    | dst a'de -> d   | target e
+                       h1c_2            src a'bc' -> b    | dst a'dec -> d  | target e
+    H2  order id       h2_1             src a'b'cd' -> c  | dst a'efb -> e  | target f   (6 tasks)
+                       h2_2             src a'b'cd' -> c  | dst a'efd -> e  | target f   (6 tasks)
+    H3  induction      h3_1             src a'b'c -> c    | dst a'ebd -> e  | target d
+                       h3_2             src a'b'c -> c    | dst a'dbe -> d  | target e
+
+Mine ONE hypothesis per dataset (the targets differ, so they train separate masks): ``--configs H3`` ->
+``results/nrgs_prefix/<model>/h3__python-python/``. The default ``--configs H1`` is the original 6-config
+mix (tag ``mixed``). With the 7-predicate bank and ``distinct_families`` (default), str / list[int] have
+only 5 families, so the 6-task H2 configs yield instances for int only — add ``--allow-family-overlap``
+to fill str / list[int] (at the cost of near-duplicate roles).
 
 For every goal-head localization pivot (DST native, target, shared prefix) and config, the other letters
 are drawn from the bank; the divergence gate runs in the NRGS context (DST top-1 after the prefix = the
@@ -18,12 +32,14 @@ shared across configs. Resumable: gate rows are cached by key (the key includes 
 Everything goes to ONE file; each record carries ``config`` / ``group``, so a shard is a filter:
 ``N.load_dataset(path, configs=["order_diff_2"])`` or ``train_nrgs_mask.py --configs order_diff_2``.
 
-Outputs (``results/nrgs_prefix/<model>/<out_tag>__<sl>-<dl>/``; out_tag = ``mixed`` for >1 config, else the
-config name):
+Outputs (``results/nrgs_prefix/<model>/<out_tag>__<sl>-<dl>/``; out_tag = the config name for one config,
+``mixed`` for the H1 set, the lowercase hypothesis (``h1c`` / ``h2`` / ``h3``) for one other hypothesis,
+else ``mixed-<hyps>``):
     gate.json       every gated instance (passed or not), resumable cache
-    dataset.json    {args, configs: {name: notation + counts}, instances: [record + b_id, d_id, split]}
+    dataset.json    {args, configs: {name: notation + predictions + counts}, instances: [record + b_id, d_id, split]}
 Usage:
-    conda run -n goals python scripts/diff/mine_nrgs_prefix.py --cuda 0 --configs all --n-per-pivot 4
+    conda run -n goals python scripts/diff/mine_nrgs_prefix.py --cuda 0 --configs H1 --n-per-pivot 4
+    conda run -n goals python scripts/diff/mine_nrgs_prefix.py --cuda 0 --configs H3
     conda run -n goals python scripts/diff/mine_nrgs_prefix.py --cuda 0 --configs order_diff_2 order_diff_3
 """
 import argparse
@@ -59,14 +75,24 @@ from src.utils import env_utils, logging_utils  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+def _default_out_tag(cfgs):
+    if len(cfgs) == 1:
+        return cfgs[0]
+    hyps = sorted({N.CONFIGS[c].hypothesis for c in cfgs})
+    if hyps == ["H1"]:
+        return "mixed"                      # the original H1 mix (existing results/nrgs_prefix/.../mixed__*)
+    return hyps[0].lower() if len(hyps) == 1 else "mixed-" + "-".join(h.lower() for h in hyps)
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
-    ap.add_argument("--configs", nargs="+", default=["all"],
-                    help=f"contrast configs to mine (default all): {sorted(N.CONFIGS)}; aliases {sorted(N.ALIASES)}")
+    ap.add_argument("--configs", nargs="+", default=["H1"],
+                    help=f"contrast configs to mine: a hypothesis {list(N.HYPOTHESES)} (its configs; default H1), "
+                         f"config names {sorted(N.CONFIGS)}, aliases {sorted(N.ALIASES)}, or 'all' (every hypothesis)")
     ap.add_argument("--variant", default=None, choices=N.VARIANTS, help="(deprecated) one config; same as --configs X")
-    ap.add_argument("--out-tag", default=None, help="output dir tag (default: 'mixed' for >1 config, else its name)")
+    ap.add_argument("--out-tag", default=None, help="output dir tag (default: see Outputs above)")
     ap.add_argument("--datatypes", nargs="+", default=["str", "int", "list[int]"])
     ap.add_argument("--n-per-pivot", type=int, default=4, help="assignments of the config's other letters per (pivot, config)")
     ap.add_argument("--all-prefixes", action="store_true",
@@ -90,17 +116,28 @@ def main():
     logging_utils.configure(level=logging.INFO, force=True)
     logger.info(f"config: {json.dumps(vars(args))}")
     cfgs = N.resolve_configs([args.variant] if args.variant else args.configs)
-    out_tag = args.out_tag or ("mixed" if len(cfgs) > 1 else cfgs[0])
+    out_tag = args.out_tag or _default_out_tag(cfgs)
     out_dir = Path(env_utils.DEFAULT_RESULTS_DIR) / "nrgs_prefix" / args.model.split("/")[-1] / \
         f"{out_tag}__{args.src_lang}-{args.dst_lang}"
     out_dir.mkdir(parents=True, exist_ok=True)
+    hyps = sorted({N.CONFIGS[c].hypothesis for c in cfgs})
+    if len(hyps) > 1:
+        logger.warning(f"mixing hypotheses {hyps} in one dataset: their targets differ, so one mask would be "
+                       f"trained toward several different letters — mine one hypothesis per dataset")
     for c in cfgs:
-        logger.info(f"  {c:16s} {N.CONFIGS[c].notation}")
+        cf = N.CONFIGS[c]
+        logger.info(f"  {c:16s} {cf.notation}  predictions {cf.predictions}"
+                    + ("" if cf.src_ctrl_prefill is not None else "  (no SRC' control)"))
 
     pivots = N.load_pivots(args.model, datatypes=args.datatypes, core_only=not args.all_prefixes)
     insts = N.build_instances(pivots, configs=cfgs, n_per_pivot=args.n_per_pivot, seed=args.seed,
                               distinct_families=not args.allow_family_overlap,
                               src_lang=args.src_lang, dst_lang=args.dst_lang)
+    for c in cfgs:                          # the bank can't always fill a config's letters (families)
+        for dt in args.datatypes:
+            if not any(x.config == c and x.datatype == dt for x in insts):
+                logger.warning(f"{c} / {dt}: 0 instances — needs {len(N.CONFIGS[c].letters)} tasks from distinct "
+                               f"families; try --allow-family-overlap")
     if args.max_instances:
         insts = N.stratified_sample(insts, args.max_instances, seed=args.seed)
     logger.info(f"{len(pivots)} pivots x {len(cfgs)} configs -> {len(insts)} instances ({args.datatypes}) -> {out_dir}")
@@ -131,7 +168,8 @@ def main():
     for c in cfgs:
         rc = [r for r in records if r["config"] == c]
         cf = N.CONFIGS[c]
-        meta[c] = dict(group=cf.group, notation=cf.notation, note=cf.note,
+        meta[c] = dict(group=cf.group, hypothesis=cf.hypothesis, target=cf.target, predictions=cf.predictions,
+                       notation=cf.notation, note=cf.note,
                        has_src_ctrl=cf.src_ctrl_prefill is not None,
                        n_gated=sum(x.config == c for x in insts), n_kept=len(rc),
                        n_train=sum(r["split"] == "train" for r in rc), n_val=sum(r["split"] == "val" for r in rc))
