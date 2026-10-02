@@ -1,0 +1,38 @@
+[
+ {
+  "name": "cm_h1all_odom_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 1 --pivot eq --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/mixed__python-python__L20-56__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_diff order_matched --lang-transfers py-py --n-samples 32 --tag-suffix __seq |& tee logs/diff_trigger/cm_h1all_odom_a1_pypy.log"
+ },
+ {
+  "name": "cm_h1all_dvp_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/mixed__python-python__L20-56__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 1 |& tee logs/diff_vs_prog/cm_h1all_dvp_a1_pypy.log"
+ },
+ {
+  "name": "cm_h1goal_odom_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 1 --pivot eq --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/mixed__python-python__L20-56__only-goal__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_diff order_matched --lang-transfers py-py --n-samples 32 --tag-suffix __seq |& tee logs/diff_trigger/cm_h1goal_odom_a1_pypy.log"
+ },
+ {
+  "name": "cm_h1goal_dvp_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/mixed__python-python__L20-56__only-goal__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 1 |& tee logs/diff_vs_prog/cm_h1goal_dvp_a1_pypy.log"
+ },
+ {
+  "name": "cm_h2all_odom_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 1 --pivot eq --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/h2__python-python__L20-56__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_diff order_matched --lang-transfers py-py --n-samples 32 --tag-suffix __seq |& tee logs/diff_trigger/cm_h2all_odom_a1_pypy.log"
+ },
+ {
+  "name": "cm_h2all_dvp_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/h2__python-python__L20-56__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 1 |& tee logs/diff_vs_prog/cm_h2all_dvp_a1_pypy.log"
+ },
+ {
+  "name": "cm_h2goal_odom_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/diff_trigger_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --alphas 1 --pivot eq --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/h2__python-python__L20-56__only-goal__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --naming letters --variants order_diff order_matched --lang-transfers py-py --n-samples 32 --tag-suffix __seq |& tee logs/diff_trigger/cm_h2goal_odom_a1_pypy.log"
+ },
+ {
+  "name": "cm_h2goal_dvp_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --component-mask results/nrgs_svd_mask/Qwen2.5-Coder-32B-Instruct/h2__python-python__L20-56__only-goal__lam3__kl1_dir1_ctrl0__logistic__s0/mask.pt --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 1 |& tee logs/diff_vs_prog/cm_h2goal_dvp_a1_pypy.log"
+ },
+ {
+  "name": "goal250_dvp_a1_pypy",
+  "command": "set -o pipefail; mkdir -p logs/diff_trigger logs/diff_vs_prog && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/q_transfer_diff_vs_prog_eval.py --no-readout --datatypes \"int\" \"str\" \"list[int]\" \"list[str]\" --namings letters --lang-transfers py-py --patch-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --readout-heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json --n-samples 32 --alpha 1 |& tee logs/diff_vs_prog/goal250_dvp_a1_pypy.log"
+ }
+]

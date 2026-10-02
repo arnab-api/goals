@@ -286,3 +286,27 @@ def train_svd_mask(mt, train, val, layers, bases, *, allowed=None, n_epochs=50, 
         if on_epoch is not None:
             on_epoch(epoch, mask, hist)
     return mask, hist
+
+
+@torch.no_grad()
+def component_projectors(mt, mask_path, threshold=None, eps=1e-3):
+    """Load a trained component mask (``train_nrgs_svd_mask.py`` -> mask.pt) as per-head projectors for the
+    generation evals: ``{layer: {head: P}}`` with ``P = M diag(m) M^-1`` (d x d, float32, CPU), plus the
+    sorted list of (layer, head) that carry any component. ``threshold=None`` uses the SOFT trained values
+    (the intervention as trained); a float binarizes ``m > threshold``. Heads with max(m) <= ``eps`` are
+    dropped (left unpatched)."""
+    ck = torch.load(mask_path, map_location="cpu", weights_only=False)
+    mv = ck["mask_values"].float()                                  # (n_layer, n_heads, d), full depth
+    if threshold is not None:
+        mv = (mv > threshold).float()
+    layers = sorted({int(l) for l in torch.nonzero(mv.amax(dim=(1, 2)) > eps).flatten()})
+    bases = svd_bases(mt, layers)
+    proj, heads = {}, []
+    for l in layers:
+        b = bases[l]
+        for h in torch.nonzero(mv[l].amax(dim=1) > eps).flatten().tolist():
+            m = mv[l, h].to(b["M"].device)
+            proj.setdefault(l, {})[h] = (b["M"][h] * m.unsqueeze(0)) @ b["Minv"][h]   # M diag(m) M^-1
+            proj[l][h] = proj[l][h].cpu()
+            heads.append((l, h))
+    return proj, heads

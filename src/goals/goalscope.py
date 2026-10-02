@@ -691,12 +691,13 @@ GOALSCOPE_SYS = "You are a helpful assistant proficient in programming."
 GOALSCOPE_QUESTION = "What are you doing at this line of the code. Keep your answer as brief as possible."
 
 
-def _build_goalscope_prompt(mt) -> str:
-    """Build the GoalScope destination prompt ("What are you doing at this line?")."""
+def _build_goalscope_prompt(mt, assistant_prefill: str = "") -> str:
+    """Build the GoalScope destination prompt ("What are you doing at this line?"). ``assistant_prefill``
+    seeds the assistant turn (e.g. "Currently, I am") for models that otherwise open with a refusal."""
     messages = [
         {"role": "system", "content": GOALSCOPE_SYS},
         {"role": "user", "content": GOALSCOPE_QUESTION},
-        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": assistant_prefill},
     ]
     try:
         return mt.tokenizer.apply_chat_template(

@@ -396,7 +396,11 @@ def _layers_of(head_set, ctx=None):
 def proj_patch_hooks(mt, patch_specs):
     """Replace {which}_proj-output head-slices at `positions` with cached source vectors, for this forward.
     Positions absent from the current forward (e.g. a prompt position during a 1-token decode step) are
-    skipped — so a prefill spec is a no-op on decode, and the effect then rides the KV cache."""
+    skipped — so a prefill spec is a no-op on decode, and the effect then rides the KV cache.
+
+    Optional ``spec["proj"] = {layer: {head: P (d, d)}}`` makes the patch PARTIAL for those heads: the
+    head slice becomes ``x + (src - x) @ P`` (P = M diag(m) M^-1, an SVD-component mask of W_QK — see
+    ``src.diff.nrgs_svd_mask``) instead of ``src``. Heads without a P are fully replaced as before."""
     hd = mt.head_dim
     handles = []
     try:
@@ -407,11 +411,16 @@ def proj_patch_hooks(mt, patch_specs):
                 spec["heads"],
                 spec["positions"],
             )
+            projmap = spec.get("proj") or {}
             for layer, hset in headmap.items():
                 mod = baukit.get_module(mt._model, _proj_name(layer, which, mt))
                 src_l = cache[layer]  # (K, width)
+                pl = projmap.get(layer) or {}
+                ph = [h for h in hset if h in pl]                       # partially patched heads
+                fh = [h for h in hset if h not in pl]                   # fully replaced heads
+                P = torch.stack([pl[h] for h in ph]).float() if ph else None   # (n_ph, d, d)
 
-                def make(hset, src_l, positions):
+                def make(fh, ph, P, src_l, positions):
                     def hook(module, inp, out):
                         seq = out.shape[1]
                         pos = [p if p >= 0 else seq + p for p in positions]
@@ -419,15 +428,23 @@ def proj_patch_hooks(mt, patch_specs):
                         if not keep:
                             return out
                         o = out.clone()
-                        for h in hset:
+                        for h in fh:
                             sl = slice(h * hd, (h + 1) * hd)
                             for r, p in keep:
                                 o[:, p, sl] = src_l[r, sl].to(o.dtype).to(o.device)
+                        if ph:
+                            Pd = P.to(o.device)
+                            for r, p in keep:
+                                x = o[:, p].float().view(o.shape[0], -1, hd)[:, ph]          # (B, n_ph, d)
+                                s = src_l[r].float().to(o.device).view(-1, hd)[ph]          # (n_ph, d)
+                                new = x + torch.einsum("bhd,hde->bhe", s.unsqueeze(0) - x, Pd)
+                                for k, h in enumerate(ph):
+                                    o[:, p, h * hd:(h + 1) * hd] = new[:, k].to(o.dtype)
                         return o
 
                     return hook
 
-                handles.append(mod.register_forward_hook(make(hset, src_l, positions)))
+                handles.append(mod.register_forward_hook(make(fh, ph, P, src_l, positions)))
         yield
     finally:
         for h in handles:
@@ -928,6 +945,7 @@ def run_q_transfer_intervention(
     compute_gaze=True,
     compute_readout=True,
     restrict_to_task=False,
+    component_proj=None,
     ctx=None,
 ):
     """Run one q-transfer (or composed-filter) intervention and return all RAW artifacts as
@@ -944,6 +962,10 @@ def run_q_transfer_intervention(
     measured under the PLAIN patch — an OV boost scales the write, not the attention weights.
 
     ``compute_readout=False`` skips the three goalscope readout generations (``ro_*`` -> None).
+
+    ``component_proj`` ``{layer: {head: P (d, d)}}`` makes the query transplant PARTIAL per head
+    (``q_dst + (q_src - q_dst) @ P``, an SVD-component mask; :func:`src.diff.nrgs_svd_mask.component_projectors`)
+    for the heads it lists; ``patch_heads`` must be exactly those heads.
 
     Works for both ``QTransferInstance`` (TASK = numbered predicate list) and
     ``FilterTransferInstance`` (TASK = the composed phrase); the span is chosen accordingly.
@@ -980,15 +1002,15 @@ def run_q_transfer_intervention(
     qh = heads_per_layer(patch_heads, "q", ctx=ctx)
     if n_pivot <= 1:
         q_src = cache_src_proj(src_prompt, [piv_src], q_layers, "q", ctx=ctx)
-        pf = [dict(which="q", cache=q_src, heads=qh, positions=[piv_dst])]
-        dc = [dict(which="q", cache=q_src, heads=qh, positions=[-1])]
+        pf = [dict(which="q", cache=q_src, heads=qh, positions=[piv_dst], proj=component_proj)]
+        dc = [dict(which="q", cache=q_src, heads=qh, positions=[-1], proj=component_proj)]
     else:
         src_win = list(range(piv_src - n_pivot + 1, piv_src + 1))  # cache row r -> dst_win[r]
         dst_win = list(range(piv_dst - n_pivot + 1, piv_dst + 1))
         q_src = cache_src_proj(src_prompt, src_win, q_layers, "q", ctx=ctx)
-        pf = [dict(which="q", cache=q_src, heads=qh, positions=dst_win)]
+        pf = [dict(which="q", cache=q_src, heads=qh, positions=dst_win, proj=component_proj)]
         dcache = {l: q_src[l][-1:] for l in q_src}  # pivot-only (last row) for the decode steer
-        dc = [dict(which="q", cache=dcache, heads=qh, positions=[-1])]
+        dc = [dict(which="q", cache=dcache, heads=qh, positions=[-1], proj=component_proj)]
     iface = make_patch_interface(mt, pf)  # PLAIN patch — used for attention (gaze) regardless of alpha
 
     # OV boost of patch_heads at the decision token, active only on the PATCHED gen + readout

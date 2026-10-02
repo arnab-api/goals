@@ -1,0 +1,10 @@
+[
+ {
+  "name": "svd32b_dvp1_all_L20-56_lam3",
+  "command": "set -o pipefail; mkdir -p logs/nrgs && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/train_nrgs_svd_mask.py --model Qwen/Qwen2.5-Coder-32B-Instruct --data-tag mixed --configs diff_vs_prog_1 --src-lang python --dst-lang python --layers 20-56 --batch-size 16 --epochs 10 --lambda-sparse 3 |& tee logs/nrgs/svd32b_dvp1_all_L20-56_lam3.log"
+ },
+ {
+  "name": "svd32b_dvp1_goal_L20-56_lam3",
+  "command": "set -o pipefail; mkdir -p logs/nrgs && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/train_nrgs_svd_mask.py --model Qwen/Qwen2.5-Coder-32B-Instruct --data-tag mixed --configs diff_vs_prog_1 --src-lang python --dst-lang python --layers 20-56 --batch-size 16 --epochs 10 --lambda-sparse 3 --restrict-heads goal |& tee logs/nrgs/svd32b_dvp1_goal_L20-56_lam3.log"
+ }
+]

@@ -105,6 +105,61 @@ threshold sweep — sizes are comparable, the exact head membership per size is 
 > band (10, 36)) it sits outside the goal region, so the Olmo numbers confound "where the goal heads live"
 > with the model change (see Comparability rules below).
 
+### (d) baselines — control heads, FV heads, Olmo assistant prefill *(complete, 2026-10-02)*
+
+Job list `job_list/goalscope_eval/baselines_g1g2g3.json`. Coder-32B rows use the main config
+(`additive_norm α=0.1`, steer layers 35–46, 122 heads, n=1265 records / 253 specs); `hard_yes` per pivot.
+
+| head set (Coder-32B) | | overall | prev_end | indent | var | eq | first_impl |
+|---|---|---|---|---|---|---|---|
+| **goal heads (122)** | faith | **0.879** | 0.589 | 0.945 | 0.905 | 0.972 | 0.984 |
+| | caus | **0.792** | 0.522 | 0.802 | 0.719 | 0.957 | 0.960 |
+| **G1** control (122, random later-half non-goal; `control/control122__laterhalf.json`) | faith | 0.002 | 0.000 | 0.000 | 0.012 | 0.000 | 0.000 |
+| | caus | 0.005 | 0.000 | 0.012 | 0.008 | 0.000 | 0.004 |
+| **G3** FV heads (top-122 CMA AIE; `fv__cma_top122.json`) | faith | 0.028 | 0.000 | 0.000 | 0.012 | 0.024 | 0.107 |
+| | caus | 0.013 | 0.000 | 0.008 | 0.000 | 0.020 | 0.036 |
+
+- **Both baselines sit at the floor.** Steering is not destructive — read-outs stay fluent — but they are
+  generic: control faithfulness is ~all "I'm analyzing the specific line of code to …"; control/FV causality
+  is the stub's default `return value > 0;` (FV: 89% of read-outs). The goal signal is specific to the goal heads.
+- **FV ≠ goal heads.** The FV top-122 (CMA `aie_all_ns10_nt25.pt`, stable top-k; its top-150 reproduces
+  `fv__cma_top150.json`) spans layers 29–63 and shares 22/122 heads with the goal set, yet reads out nothing —
+  only a faint `first_impl` signal (0.11 faith), i.e. after the implementation has already started.
+
+**G2 — Olmo-3.1-32B-Instruct (+RL) with an assistant prefill.** Same config as row (c) (93 heads,
+`replace α=1`), but the GoalScope probe's assistant turn is prefilled with one of
+{"Currently, I am", "Right now, I am", "At this line, I am", "Here, I am", "At the moment, I am"}
+(deterministic per spec; new `eval_goalscope.py --assistant_prefill`; prefix is prepended to the read-out the oracle judges).
+
+| Olmo +RL faithfulness | overall | prev_end | indent | var | eq | first_impl | refusals ("I cannot …") |
+|---|---|---|---|---|---|---|---|
+| no prefill (row c) | 0.495 | 0.02 | 0.65 | 0.26 | 0.81 | 0.74 | 39% |
+| **prefilled (G2)** | **0.468** | 0.016 | 0.542 | 0.237 | 0.767 | 0.779 | 0% |
+
+- **The refusals were not hiding a goal signal.** The prefill removes every refusal, but faithfulness does not
+  move (0.47 vs 0.50): the former refusals turn into vague answers ("analyzing the code at the specified line",
+  "evaluating a condition"), not correct ones. The +RL faithfulness deficit vs SFT (0.60) is a genuine
+  read-out deficit, not an answer-format artifact.
+
+**Temporal persistence baseline (Figure 30, `fig:retention-control`).** Encoding affinity with the pivot,
+cos(v_g @ pivot, v_g @ x% of the implementation), goal vs control heads; impl spans 10–40 tokens; 573
+conditions (goal records matched to the control set). Computed from the cached trajectories
+(`results/temporal_persistence/<M>/{,control/}cond_*.pt`) — no new GPU job.
+
+| relation | goal 5% | goal 10% | goal 15% | ctrl 5% | ctrl 10% | ctrl 15% |
+|---|---|---|---|---|---|---|
+| i same condition | 0.889 | 0.829 | 0.804 | 0.598 | 0.524 | 0.496 |
+| ii same pred, diff ctx | 0.814 | 0.762 | 0.738 | 0.488 | 0.441 | 0.412 |
+| iii diff pred, same ctx | 0.487 | 0.463 | 0.444 | 0.494 | 0.452 | 0.436 |
+| iv diff pred, diff ctx | 0.343 | 0.323 | 0.310 | 0.378 | 0.355 | 0.334 |
+
+- Goal heads decay smoothly and keep a ~0.3 same-vs-different-sub-goal gap; control heads lose ~40% of their
+  pivot affinity by the first implementation token(s), after which same-pred (ii) ≈ diff-pred (iii) — they
+  track context, not the sub-goal. Goal-head curves on all 2,165 in-span conditions are within 0.01 of the matched 573.
+- Resolution: on 10–40-token spans, 5% is the 1st impl token for spans ≤20 and the 2nd beyond; 5/10/15% are 1–2 tokens apart.
+- Figure regenerated with the 5/10/15% points: `notebooks/Figures/temporal_persistence/goal_vs_control_std_impl10-40.pdf`
+  (generator: last cell of `notebooks/fig_n_table_generators/temporal_persistence.ipynb`; previous version kept as `*.grid20.bak.*`).
+
 ---
 
 ## The magnitude caveat (applies to a and b)

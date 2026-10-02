@@ -34,6 +34,7 @@ Typical use::
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -73,6 +74,9 @@ def run_leaf_name(config: dict) -> str:
     if config.get("goal_band_explicit") and config.get("goal_band"):
         b = config["goal_band"]
         parts.append(f"band={b[0]}-{b[1]}")
+    if config.get("assistant_prefill"):  # absent/None for every pre-existing run -> dirs unchanged
+        _h = hashlib.md5("|".join(config["assistant_prefill"]).encode()).hexdigest()[:6]
+        parts.append(f"aprefill={len(config['assistant_prefill'])}x{_h}")
     return "__".join(parts)
 
 

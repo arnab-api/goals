@@ -147,6 +147,7 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             n_steer=args.n_steer, max_new=args.max_new, alpha=alpha, n_pivot=1,
             restrict_to_task=args.restrict_goal_heads_to_task,
             compute_readout=not args.no_readout,
+            component_proj=getattr(args, "_component_proj", None),
         )
         causal = literal_c = readout = joint = None
         if not args.no_oracle:
@@ -227,6 +228,11 @@ def parse_args():
                          "each runs in its own __a<alpha> dir (e.g. --alphas 1.0 2.0)")
     ap.add_argument("--oracle-model", default="claude-sonnet-4-6")
     ap.add_argument("--no-oracle", action="store_true")
+    ap.add_argument("--component-mask", default=None,
+                    help="SVD-component mask.pt (train_nrgs_svd_mask.py): patch only those W_QK components of the "
+                         "heads it covers (overrides --patch-heads)")
+    ap.add_argument("--component-threshold", type=float, default=None,
+                    help="binarize the component mask at this value (default: soft trained values)")
     ap.add_argument("--no-readout", action="store_true",
                     help="skip the goalscope readouts + readout-shift oracle (readout_shift_rate -> None)")
     ap.add_argument("--max-instances", type=int, default=None)
@@ -249,12 +255,21 @@ def main():
     mt = ctx.mt
     patch_heads = _resolve_heads(ctx, args.patch_heads)
     readout_heads = _resolve_heads(ctx, args.readout_heads)
+    cm_tag = None
+    if args.component_mask:
+        import src.diff.nrgs_svd_mask as SM
+        args._component_proj, patch_heads = SM.component_projectors(mt, args.component_mask, args.component_threshold)
+        run = Path(args.component_mask).parent.name.split("__")
+        cm_tag = (f"cm-{run[0]}-{run[2]}" + ("-goal" if "only-goal" in run else "") + f"-{run[3] if 'only-goal' not in run else run[4]}"
+                  + ("-soft" if args.component_threshold is None else f"-thr{args.component_threshold:g}"))
+        logger.info(f"component mask {args.component_mask}: {len(patch_heads)} heads "
+                    f"({'soft' if args.component_threshold is None else f'> {args.component_threshold}'})")
     logger.info(f"patch_heads={_heads_tag(args.patch_heads, len(patch_heads))} (n={len(patch_heads)}) · "
                 f"readout_heads={_heads_tag(args.readout_heads, len(readout_heads))} (n={len(readout_heads)})")
 
     model_short = args.model.split("/")[-1]
     for alpha in args.alphas:
-        run_tag = f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-{args.pivot}"
+        run_tag = f"ph-{cm_tag or _heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-{args.pivot}"
         if args.restrict_goal_heads_to_task:
             run_tag += "__restrict"
         run_tag += args.tag_suffix

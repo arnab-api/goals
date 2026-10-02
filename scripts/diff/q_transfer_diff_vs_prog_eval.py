@@ -91,6 +91,7 @@ def run_config(mt, args, dt, naming, sl, dl, patch_heads, readout_heads, out_roo
             alpha=args.alpha,
             n_pivot=1,
             compute_readout=not args.no_readout,
+            component_proj=getattr(args, "_component_proj", None),
         )
         causal = readout = None
         if not args.no_oracle:
@@ -219,6 +220,11 @@ def parse_args():
     p.add_argument(
         "--no-oracle", action="store_true", help="skip the causal+readout oracle"
     )
+    p.add_argument("--component-mask", default=None,
+                   help="SVD-component mask.pt (train_nrgs_svd_mask.py): patch only those W_QK components "
+                        "(overrides --patch-heads)")
+    p.add_argument("--component-threshold", type=float, default=None,
+                   help="binarize the component mask at this value (default: soft trained values)")
     p.add_argument(
         "--no-readout",
         action="store_true",
@@ -242,6 +248,14 @@ def main():
     patch_heads = Q._resolve_patch_heads(ctx, args.patch_heads)
     readout_heads = Q._resolve_patch_heads(ctx, args.readout_heads)
     ph_tag = Q._patch_heads_tag(args.patch_heads, len(patch_heads))
+    if args.component_mask:
+        import src.diff.nrgs_svd_mask as SM
+        args._component_proj, patch_heads = SM.component_projectors(mt, args.component_mask, args.component_threshold)
+        run = Path(args.component_mask).parent.name.split("__")
+        ph_tag = (f"cm-{run[0]}-{run[2]}" + ("-goal" if "only-goal" in run else "")
+                  + f"-{run[4] if 'only-goal' in run else run[3]}"
+                  + ("-soft" if args.component_threshold is None else f"-thr{args.component_threshold:g}"))
+        logger.info(f"component mask {args.component_mask}: {len(patch_heads)} heads")
     ro_tag = Q._patch_heads_tag(args.readout_heads, len(readout_heads))
     logger.info(
         f"patch_heads={args.patch_heads}->{ph_tag}(n={len(patch_heads)}) · "

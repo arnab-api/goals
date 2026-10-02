@@ -63,7 +63,12 @@ import torch
 import src.diff.data as DATA
 from scripts.clock.score_condition_heads import load_head_scores
 from scripts.evaluation import faithfulness_io as fio
-from src.goals.goalscope import GOALSCOPE_SYS, apply_goalscope, greedy_continue
+from src.goals.goalscope import (
+    GOALSCOPE_SYS,
+    _build_goalscope_prompt,
+    apply_goalscope,
+    greedy_continue,
+)
 from src.goals.oid_gaze import cache_root
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
@@ -739,12 +744,22 @@ def parse_args():
         help="wipe an existing run dir and redo it; default is to RESUME from the last "
         "completed sample (same args => same run dir)",
     )
+    ap.add_argument(
+        "--assistant_prefill",
+        nargs="+",
+        default=None,
+        help="faithfulness only: seed the probe's assistant turn with one of these prefixes, sampled "
+        "per datapoint (deterministic in the spec id); the prefix is prepended to the read-out the "
+        "oracle sees. For models that open the probe answer with a refusal ('I cannot ...').",
+    )
     logging_utils.add_logging_args(ap)  # -v (DEBUG) / -q (WARNING); default INFO
     args = ap.parse_args()
 
     # A .json head set is the complete specification of which heads to steer. Anything that would
     # also select heads is therefore rejected — even when it happens to agree — so a run dir can
     # never claim a selection knob that had no effect on the heads actually used.
+    if args.assistant_prefill and args.mode != "faithfulness":
+        ap.error("--assistant_prefill is faithfulness-only (causality already prefills the C++ stub)")
     if args.heads.endswith(".json"):
         conflicting = [
             name
@@ -842,6 +857,7 @@ def main():
         oracle_model=ORACLE_MODEL,
         readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
         hard_rubric_tag=hashlib.md5(hard_sys.encode()).hexdigest()[:8],
+        assistant_prefill=args.assistant_prefill,
     )
     run_dir = fio.run_dir_for(config, results_dir)
 
@@ -972,6 +988,10 @@ def main():
             logger.warning(f"[{sid}] no valid pivots — skipping")
             continue
         apos = sorted(set(pivs.values()))
+        if args.assistant_prefill:
+            _i = int(hashlib.md5(str(sid).encode()).hexdigest()[:8], 16)
+            readout_prefix = args.assistant_prefill[_i % len(args.assistant_prefill)]
+            gs_kwargs["goalscope_prompt"] = _build_goalscope_prompt(mt, readout_prefix)
         res = apply_goalscope(
             full_text,
             mt=mt,
@@ -983,7 +1003,8 @@ def main():
         readouts = {r["pos"]: r for r in res}
 
         for aname, pos in pivs.items():
-            # causality prepends the C++ stub so the oracle sees a complete-ish snippet
+            # causality prepends the C++ stub (faithfulness: the assistant prefill, if any) so the
+            # oracle sees the read-out as the model's full answer
             ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
             hv = hard_eval(ro, impl_span, args.mode)
             logger.debug(
