@@ -264,42 +264,76 @@ def mask_variants(mt, spec):
 # ══════════════════════════════════════════════════════════════════════════════
 # main
 # ══════════════════════════════════════════════════════════════════════════════
-def summarize(rows):
-    """Per (mask, design, rendering, control donor): paired metrics over instances with a valid clean DST."""
+def summarize(rows, prompts=None):
+    """Per (mask, design, control donor): paired metrics over instances whose clean DST predicts the native token.
+
+    Each control donor is scored against ITS OWN expected outcome under the design's hypothesis (``expect``:
+    target or native) — e.g. ``count_high_stub_low`` should flip under the count reading. ``specificity`` =
+    flip(primary) - flip(control) is reported only for native-expected controls; ``joint`` = primary flips AND
+    the control does what it should. Subsets: ``distinguishing`` (no rival task shares the target token) and
+    ``heldout`` (the instance's predicate pair is NOT in the mask's training split — ``heldout is True`` only;
+    ``heldout_unknown`` counts fixed head sets with no training provenance). Also returns a primary-only table
+    (covers OM1, which has no control donor) and per-design donor coverage (accepted / instances)."""
     import numpy as np
     from collections import defaultdict
-    by = defaultdict(dict)  # (mask, design, rend, key) -> donor -> row
+    by = defaultdict(dict)
     for r in rows:
-        by[(r["mask"], r["design"], r["rendering"], r["key"])][r["donor"]] = r
-    agg = defaultdict(list)
-    for (mask, design, rend, key), dn in by.items():
+        by[(r["mask"], r["design"], r["key"])][r["donor"]] = r
+    paired, prim = defaultdict(list), defaultdict(list)
+    for (mask, design, key), dn in by.items():
         p = dn.get("primary")
         if p is None or not p["clean_native"]:
             continue
+        prim[(mask, design)].append(p)
         for cname, c in dn.items():
-            if cname == "primary":
-                continue
-            agg[(mask, design, rend, cname)].append((p, c))
-    out = []
-    for (mask, design, rend, cname), pairs in sorted(agg.items()):
+            if cname != "primary":
+                paired[(mask, design, cname)].append((p, c))
+    mean = lambda xs: float(np.mean(xs)) if xs else None
+    controls = []
+    for (mask, design, cname), pairs in sorted(paired.items()):
+        p0, c0 = pairs[0]
+        reading = lambda letter: "target" if letter == p0["expect"] else "native"
+        exp_count, exp_letter = reading(c0["expect"]), reading(c0.get("expect_letter", c0["expect"]))
+
         def stats(ps):
             if not ps:
                 return None
-            f = lambda k, s: float(np.mean([x[s][k] for x in ps]))
-            return dict(n=len(ps), primary_flip=f("flip", 0), primary_native=f("native", 0),
-                        control_flip=f("flip", 1), control_native=f("native", 1),
-                        joint=float(np.mean([x[0]["flip"] and x[1]["native"] for x in ps])),
-                        specificity=f("flip", 0) - f("flip", 1),
-                        logodds_diff=float(np.mean([x[0]["logodds"] - x[1]["logodds"] for x in ps])),
-                        primary_gain=f("gain", 0), control_gain=f("gain", 1))
-        p0, c0 = pairs[0]
-        reading = lambda letter: "target" if letter == p0["expect"] else "native"
-        out.append(dict(mask=mask, design=design, rendering=rend, control=cname,
-                        control_expect_count=reading(c0["expect"]), control_expect_letter=reading(c0["expect_letter"]),
-                        all=stats(pairs),
-                        distinguishing=stats([x for x in pairs if x[0]["distinguishing"]]),
-                        heldout=stats([x for x in pairs if x[0]["heldout"] is not False])))
-    return out
+            ok = (lambda c: c["flip"]) if exp_count == "target" else (lambda c: c["native"])
+            pf, cf = mean([x[0]["flip"] for x in ps]), mean([x[1]["flip"] for x in ps])
+            return dict(n=len(ps), primary_flip=pf, primary_native=mean([x[0]["native"] for x in ps]),
+                        control_flip=cf, control_native=mean([x[1]["native"] for x in ps]),
+                        control_correct=mean([ok(x[1]) for x in ps]),
+                        joint=mean([x[0]["flip"] and ok(x[1]) for x in ps]),
+                        specificity=(pf - cf) if exp_count == "native" else None,
+                        logodds_diff=mean([x[0]["logodds"] - x[1]["logodds"] for x in ps]),
+                        primary_gain=mean([x[0]["gain"] for x in ps]), control_gain=mean([x[1]["gain"] for x in ps]))
+        controls.append(dict(mask=mask, design=design, control=cname, control_expect_count=exp_count,
+                             control_expect_letter=exp_letter, all=stats(pairs),
+                             distinguishing=stats([x for x in pairs if x[0]["distinguishing"]]),
+                             heldout=stats([x for x in pairs if x[0]["heldout"] is True]),
+                             heldout_unknown=sum(x[0]["heldout"] is None for x in pairs)))
+    primary = [dict(mask=mask, design=design, n=len(ps), flip=mean([r["flip"] for r in ps]),
+                    native=mean([r["native"] for r in ps]), gain=mean([r["gain"] for r in ps]),
+                    heldout_n=sum(r["heldout"] is True for r in ps))
+               for (mask, design), ps in sorted(prim.items())]
+    coverage = {}
+    if prompts:
+        for pr in prompts:
+            d = coverage.setdefault(pr["design"], defaultdict(int))
+            d["instances"] += 1
+            for k in pr["donors"]:
+                d[k] += 1
+        coverage = {k: dict(v) for k, v in coverage.items()}
+    return dict(controls=controls, primary=primary, donor_coverage=coverage)
+
+
+def _log_summary(summ):
+    for s in summ["controls"]:
+        a = s["all"]
+        sp = f"S={a['specificity']:+.2f}" if a["specificity"] is not None else "S=n/a"
+        logger.info(f"{s['mask']:<26} {s['design']:<3} vs {s['control']:<20} (count->{s['control_expect_count']:<6} "
+                    f"letter->{s['control_expect_letter']:<6}) n={a['n']:>3} P.flip={a['primary_flip']:.2f} "
+                    f"C.flip={a['control_flip']:.2f} C.correct={a['control_correct']:.2f} joint={a['joint']:.2f} {sp}")
 
 
 def main():
@@ -311,11 +345,21 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="SMOKE: cap instances per design")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--cuda", default=None)
+    ap.add_argument("--resummarize", action="store_true",
+                    help="rebuild summary.json from an existing job's rows.jsonl / prompts.jsonl (no model)")
     logging_utils.add_logging_args(ap)
     args = ap.parse_args()
     if args.cuda:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
     logging_utils.configure(level=logging.INFO, force=True)
+    out_dir = Path(env_utils.DEFAULT_RESULTS_DIR) / "stage0_matched" / M_SHORT / args.job_tag
+    if args.resummarize:
+        rows = [json.loads(l) for l in open(out_dir / "rows.jsonl")]
+        prompts = [json.loads(l) for l in open(out_dir / "prompts.jsonl")]
+        summ = summarize(rows, prompts)
+        (out_dir / "summary.json").write_text(json.dumps(summ, indent=1))
+        logger.info(f"re-summarized {len(rows)} rows -> {out_dir / 'summary.json'}")
+        return
 
     ctx = N.load_ctx(MODEL, device_map={"": 0} if torch.cuda.device_count() == 1 else "auto")
     mt, tok = ctx.mt, ctx.mt.tokenizer
@@ -404,14 +448,9 @@ def main():
         with open(out_dir / "rows.jsonl", "w") as fh:          # rewrite after every mask (resumable inspection)
             for r in rows:
                 fh.write(json.dumps(r) + "\n")
-    summ = summarize(rows)
+    summ = summarize(rows, [json.loads(l) for l in open(out_dir / "prompts.jsonl")])
     (out_dir / "summary.json").write_text(json.dumps(summ, indent=1))
-    for s in summ:
-        a = s["all"]
-        logger.info(f"{s['mask']:<26} {s['design']:<3} vs {s['control']:<20} (count->{s['control_expect_count']:<6} "
-                    f"letter->{s['control_expect_letter']:<6}) n={a['n']:>3} "
-                    f"P.flip={a['primary_flip']:.2f} C.native={a['control_native']:.2f} C.flip={a['control_flip']:.2f} "
-                    f"joint={a['joint']:.2f} S={a['specificity']:+.2f} dLO={a['logodds_diff']:+.2f}")
+    _log_summary(summ)
     logger.info(f"done -> {out_dir}")
 
 
