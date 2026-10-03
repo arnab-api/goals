@@ -15,6 +15,12 @@ overlap x / y / z (:data:`A_OVERLAP`). The intervention is the unchanged kv-tran
 unchanged :func:`src.diff.eval.judge_causal` / :func:`src.diff.eval.eval_readouts`; :func:`rule_verdict`
 adds a cheap execution-based check of the first condition the model writes.
 
+Any side may be C++ (py->cpp, cpp->py, cpp->cpp): a C++ side's frontier is a range-for filter loop
+``std::vector<T> b;  for (const auto& w : words) if (<x_cpp> &&`` (pivot ``" &&"`` / ``" ||"``). Emptiness
+guards (``!w.empty() && …`` in the C++ bank) of any of x / y / z are PREFILLED before x, so the model only
+writes the bare test; a compound x (``a && b`` ranges) is parenthesised where precedence needs it; the two
+``[&]{…}()`` lambda conditions are excluded (:data:`CPP_EXCLUDE`).
+
 This module only READS the existing banks — it never edits them (existing results depend on them).
 """
 
@@ -26,6 +32,17 @@ from typing import Literal, Optional
 import src.diff.data as D
 
 Connective = Literal["and", "or"]
+Lang = Literal["python", "cpp"]
+CPP_OP = {"and": "&&", "or": "||"}
+CPP_ELEM_TYPE = {"list[str]": "std::string", "list[int]": "int"}
+CPP_EXCLUDE = {"perfect_square", "is_prime"}   # [&]{ ... }() lambdas — not a clean single condition
+_GUARD = "!{elem}.empty() && "
+
+
+def cpp_split(cond: D.Predicate) -> tuple[bool, str]:
+    """(has_emptiness_guard, bare C++ test template over {elem})."""
+    t = cond.impl["cpp"]
+    return (True, t[len(_GUARD):]) if t.startswith(_GUARD) else (False, t)
 Order = Literal["match", "diff"]
 HIER_DATATYPES = ("list[str]", "list[int]")
 
@@ -86,13 +103,29 @@ class HierKVInstance(D.MultiPredicateInstance):
     noun: str = "words"
 
     def _comprehension_prefix(self, lang) -> str:
-        assert lang == "python", "multi-hierarchy setup is py->py only for now"
-        x = D._fmt(self.x.impl["python"], arg=self.var_name, elem=self.elem)
-        return f"[{self.elem} for {self.elem} in {self.var_name} if {x} {self.connective}"
+        """The frontier line(s) after ``b`` up to the connective: python ``= [w for w in … if <x> and`` |
+        c++ ``;`` + the range-for loop ``for (const auto& w : words) if (<guard &&> <x> &&``."""
+        e, arg = self.elem, self.var_name
+        if lang == "python":
+            x = D._fmt(self.x.impl["python"], arg=arg, elem=e)
+            return f"[{e} for {e} in {arg} if {x} {self.connective}"
+        guarded = any(cpp_split(c)[0] for c in (self.x, self.src_cond, self.dst_cond))
+        x = D._fmt(cpp_split(self.x)[1], arg=arg, elem=e)
+        if "&&" in x or "||" in x:
+            x = f"({x})"                                          # compound x (ranges): keep it one operand
+        guard = D._fmt(_GUARD, arg=arg, elem=e) if guarded else ""
+        if self.connective == "or" and guard:
+            return f"for (const auto& {e} : {arg}) if ({guard}({x} {CPP_OP['or']}"   # guard && (x || …
+        return f"for (const auto& {e} : {arg}) if ({guard}{x} {CPP_OP[self.connective]}"
 
     def _parts(self, lang, frontier):
-        q, pf = super()._parts(lang, frontier)  # ends at "    b ="
-        return q, pf + " " + self._comprehension_prefix(lang)
+        q, pf = super()._parts(lang, frontier)  # python: ends at "    b =" ; c++: ends at "    auto b ="
+        if lang == "python":
+            return q, pf + " " + self._comprehension_prefix(lang)
+        stub = "\n    auto b ="
+        assert pf.endswith(stub), pf[-40:]
+        return q, (pf[: -len(stub)] + f"\n    std::vector<{CPP_ELEM_TYPE[self.datatype]}> b;\n    "
+                   + self._comprehension_prefix(lang))
 
     @property
     def expected_next_desc(self) -> str:
@@ -104,8 +137,10 @@ class HierKVInstance(D.MultiPredicateInstance):
 
     @property
     def task_desc(self) -> str:
+        so_far = (f"b = {self._comprehension_prefix('python')}" if self.dst_lang == "python"
+                  else self._comprehension_prefix("cpp"))
         return (f"{self.shared[0].description}; then the list of {self.noun} in `{self.var_name}` filtered "
-                f"by two conditions — the code so far is `b = {self._comprehension_prefix('python')}` "
+                f"by two conditions — the code so far is `{so_far}` "
                 f"(the first condition, that they {self.x.description}, is already written)")
 
 
@@ -128,6 +163,8 @@ def hier_kv_setups(
     seed: int = 0,
     connective: Connective = "and",
     order: Order = "match",
+    src_lang: Lang = "python",
+    dst_lang: Lang = "python",
 ) -> list[HierKVInstance]:
     """Sample ``n_samples`` (a, x, y, z) instances. x, y, z are distinct, pairwise compatible filter
     conditions (:func:`D.filter_compatible`) with ``x <conn> y`` and ``x <conn> z`` giving different
@@ -144,6 +181,8 @@ def hier_kv_setups(
         if len(out) >= n_samples:
             break
         x, y, z = rng.sample(list(conds), 3)
+        if "cpp" in (src_lang, dst_lang) and {x, y, z} & CPP_EXCLUDE:
+            continue
         if not all(D.filter_compatible(p, q) for p, q in ((x, y), (x, z), (y, z))):
             continue
         if (x, y, z) in seen:
@@ -162,20 +201,22 @@ def hier_kv_setups(
             dst_frontier=_frontier(ft, arg, conds[x], conds[y], connective),
             var_name=arg,
             presentation="listed",
-            src_lang="python",
-            dst_lang="python",
+            src_lang=src_lang,
+            dst_lang=dst_lang,
             naming="letters",
             letter_stub="var_eq",
             x=conds[x], src_cond=conds[z], dst_cond=conds[y],
             connective=connective, order=order, elem=ft.elem, noun=ft.noun,
-            meta=dict(datatype=datatype, a=a.id, x=x, y=y, z=z, connective=connective, order=order),
+            meta=dict(datatype=datatype, a=a.id, x=x, y=y, z=z, connective=connective, order=order,
+                      src_lang=src_lang, dst_lang=dst_lang),
         ))
     return out
 
 
 def inst_key(inst: HierKVInstance) -> str:
     m = inst.meta
-    return f"hier|{m['datatype']}|{m['connective']}|{m['order']}|a={m['a']}|x={m['x']}|y={m['y']}|z={m['z']}"
+    lang = "" if m.get("dst_lang", "python") == "python" else f"|{m['src_lang']}-{m['dst_lang']}"   # py-py keys unchanged
+    return f"hier|{m['datatype']}|{m['connective']}|{m['order']}|a={m['a']}|x={m['x']}|y={m['y']}|z={m['z']}{lang}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -185,7 +226,10 @@ def rule_verdict(inst: HierKVInstance, gen: str) -> dict:
     """Complete the prefilled comprehension with the FIRST line of ``gen`` and execute it on the pool.
     ``src`` = matches ``x <conn> z`` (transplant target), ``dst`` = matches ``x <conn> y`` (native),
     ``x_only`` = the second condition is vacuous, ``neither`` = runs but matches none, ``error`` = does
-    not parse/run. Restricted to the comprehension: anything after its closing ``]`` is dropped."""
+    not parse/run. Restricted to the comprehension: anything after its closing ``]`` is dropped.
+    Python DST only — a C++ DST returns ``label="na"`` (oracle only)."""
+    if inst.dst_lang != "python":
+        return dict(label="na", code="", why="c++ destination: rule check not implemented")
     conds = {c.id: c for c in D.FILTER_TASKS[inst.datatype].conditions}
     m = inst.meta
     line = gen.split("\n")[0]
