@@ -555,7 +555,9 @@ def indirect_effect(l_patched, l_dst, l_star, targ: int) -> float:
 def gate(mt, ctx, instances, batch_size=8) -> list[dict]:
     """Divergence gate in the NRGS context. b_id / d_id are the MODEL's top-1 after the prefix in DST /
     DST* (the loss targets); ``match_b`` / ``match_d`` say whether they equal the head_loc tokens."""
-    from src.goals.head_loc_oracle import _tokens_differ_meaningfully
+    from src.goals.pivot_token_filter import (
+        TOKEN_FILTER_VERSION, tokens_differ_meaningfully,
+    )
 
     dec = lambda i: mt.tokenizer.decode([i])  # noqa: E731
     rows = []
@@ -567,13 +569,19 @@ def gate(mt, ctx, instances, batch_size=8) -> list[dict]:
         for x, ld, ls in zip(chunk, lp_dst, lp_str):
             b_id, d_id = int(ld.argmax()), int(ls.argmax())
             tb, td = dec(b_id), dec(d_id)
-            diverge = b_id != d_id and _tokens_differ_meaningfully(tb, td)
+            # No generated full reference is available in this next-token-only
+            # gate: normalize the known input alias, preserve unknown local names.
+            diverge = b_id != d_id and tokens_differ_meaningfully(
+                tb, td, prefix=x.pivot.prefix,
+                variable_names=(VAR_NAME[x.datatype],),
+            )
             rows.append(dict(
                 key=x.key, config=x.config, datatype=x.datatype, b=x.pivot.b, d=x.pivot.d, prefix=x.pivot.prefix,
                 b_id=b_id, d_id=d_id, top1_dst=tb, top1_dst_star=td,
                 p_dst_b=float(ld[b_id].exp()), p_dst_d=float(ld[d_id].exp()),
                 p_star_b=float(ls[b_id].exp()), p_star_d=float(ls[d_id].exp()),
                 match_b=tb == x.pivot.b_tok, match_d=td == x.pivot.d_tok,
+                token_filter_version=TOKEN_FILTER_VERSION,
                 diverge=diverge, passed=diverge and tb == x.pivot.b_tok and td == x.pivot.d_tok,
             ))
     return rows

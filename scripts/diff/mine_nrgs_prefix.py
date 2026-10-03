@@ -70,6 +70,7 @@ if _cuda:
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import src.diff.nrgs_prefix as N  # noqa: E402
+from src.goals.pivot_token_filter import TOKEN_FILTER_VERSION  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,16 @@ def main():
 
     ctx = N.load_ctx(args.model)
     gate_fp = out_dir / "gate.json"
-    done = {r["key"]: r for r in json.loads(gate_fp.read_text())} if gate_fp.exists() else {}
+    previous = json.loads(gate_fp.read_text()) if gate_fp.exists() else []
+    # Recheck old acceptance decisions after filter changes. A versioned backup
+    # preserves their provenance, including failed candidates, without deletion.
+    stale = [r for r in previous if r.get("token_filter_version") != TOKEN_FILTER_VERSION]
+    if stale:
+        backup = gate_fp.with_name(f"gate.before-{TOKEN_FILTER_VERSION}.json")
+        if not backup.exists():
+            backup.write_text(gate_fp.read_text())
+        logger.info(f"revalidating {len(stale)} cached rows from an older token filter; backup {backup}")
+    done = {r["key"]: r for r in previous if r.get("token_filter_version") == TOKEN_FILTER_VERSION}
     todo = [x for x in insts if x.key not in done]
     logger.info(f"gate: {len(done)} cached, {len(todo)} to run -> {gate_fp}")
     chunk = 8 * args.batch_size
@@ -173,7 +183,10 @@ def main():
                        has_src_ctrl=cf.src_ctrl_prefill is not None,
                        n_gated=sum(x.config == c for x in insts), n_kept=len(rc),
                        n_train=sum(r["split"] == "train" for r in rc), n_val=sum(r["split"] == "val" for r in rc))
-    (out_dir / "dataset.json").write_text(json.dumps({"args": vars(args), "configs": meta, "instances": records}, indent=1))
+    (out_dir / "dataset.json").write_text(json.dumps({
+        "args": vars(args), "token_filter_version": TOKEN_FILTER_VERSION,
+        "configs": meta, "instances": records,
+    }, indent=1))
 
     rate = lambda g, f: sum(r[f] for r in g) / max(1, len(g))  # noqa: E731
     for c in cfgs + ["ALL"]:

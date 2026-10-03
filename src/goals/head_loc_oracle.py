@@ -30,14 +30,15 @@ are kept as utilities for notebook inspection.
 
 from __future__ import annotations
 
-import builtins
-import keyword
 import logging
 import re
 
 import torch
 
 from src.goals.eval import evaluate_single_code
+from src.goals.pivot_token_filter import (
+    tokens_differ_meaningfully as _tokens_differ_meaningfully,
+)
 from src.goals.head_loc_data import (
     HeadLocDataset,
     PivotInstance,
@@ -362,8 +363,9 @@ def _greedy_complete_and_eval(
     lcp: str,
     include_docstring: bool,
     max_new_tokens: int,
+    completion_codes: list[str] | None = None,
 ) -> bool:
-    """Generate greedily from ``return {lcp}`` and check unit tests for ``sample``."""
+    """Generate and test a completion; optionally retain its code for lexical binding roles."""
     pivot_prompt = build_python_prompt(
         mt, sample, pivot_prefix=lcp, include_docstring=include_docstring
     )
@@ -411,7 +413,10 @@ def _greedy_complete_and_eval(
         f"  eval [{sample.predicate_name}] lcp={lcp!r}"
         f"  generated={generated_text!r}  verdict={verdict_msg}"
     )
-    return result.verdict == "PASSED"
+    passed = result.verdict == "PASSED"
+    if passed and completion_codes is not None:
+        completion_codes.append(full_code)
+    return passed
 
 
 def _completion_gate(
@@ -421,6 +426,7 @@ def _completion_gate(
     lcp: str,
     include_docstring: bool = False,
     max_new_tokens: int = 32,
+    completion_codes: list[str] | None = None,
 ) -> bool:
     """True if greedy generation from ``return {lcp}`` yields passing completions
     for **both** the destination and target predicates.
@@ -441,15 +447,17 @@ def _completion_gate(
 
     Returns:
         True if both dest and target completions pass all unit tests.
+        If supplied, ``completion_codes`` receives each passing full function in
+        destination/target order. Failed pairs must not use this partial list.
     """
     dest_ok = _greedy_complete_and_eval(
-        mt, dest_sample, lcp, include_docstring, max_new_tokens
+        mt, dest_sample, lcp, include_docstring, max_new_tokens, completion_codes
     )
     if not dest_ok:
         return False
 
     return _greedy_complete_and_eval(
-        mt, targ_sample, lcp, include_docstring, max_new_tokens
+        mt, targ_sample, lcp, include_docstring, max_new_tokens, completion_codes
     )
 
 
@@ -607,9 +615,14 @@ def _mine_case3b_raw(
             div_tok_dest = mt.tokenizer.decode([tok_dest[n]])
             div_tok_targ = mt.tokenizer.decode([tok_targ[n]])
 
-            if not _tokens_differ_meaningfully(div_tok_dest, div_tok_targ):
+            if not _tokens_differ_meaningfully(
+                div_tok_dest, div_tok_targ, prefix=lcp,
+                variable_names=(dest_sample.variable_name, targ_sample.variable_name),
+                dest_code=dest_sample.python_incomplete_code + " " + impl_dest,
+                targ_code=targ_sample.python_incomplete_code + " " + impl_targ,
+            ):
                 logger.debug(
-                    f"  Skipping lcp={lcp!r}: diverging tokens differ only in naming"
+                    f"  Skipping lcp={lcp!r}: tokens differ only in known variable naming or formatting"
                     f" ({div_tok_dest!r} vs {div_tok_targ!r})"
                 )
                 continue
@@ -650,6 +663,9 @@ def _validate_candidate(
     Returns:
         ``PivotInstance`` if both gates pass, else ``None``.
     """
+    # Retain already-generated passing code: no additional model calls are needed
+    # to distinguish local variable bindings from methods and literal contents.
+    completion_codes: list[str] = []
     # Gate 1: completion — both sides must produce passing code from this prefix
     if not _completion_gate(
         mt,
@@ -658,6 +674,7 @@ def _validate_candidate(
         lcp,
         include_docstring=include_docstring,
         max_new_tokens=max_completion_tokens,
+        completion_codes=completion_codes,
     ):
         logger.debug(f"  Completion gate FAILED for lcp={lcp!r}")
         return None
@@ -686,9 +703,13 @@ def _validate_candidate(
     )
 
     if dest_tok != targ_tok:
-        if not _tokens_differ_meaningfully(dest_tok, targ_tok):
+        if not _tokens_differ_meaningfully(
+            dest_tok, targ_tok, prefix=lcp,
+            variable_names=(dest_sample.variable_name, targ_sample.variable_name),
+            dest_code=completion_codes[0], targ_code=completion_codes[1],
+        ):
             logger.debug(
-                f"  Skipping lcp={lcp!r}: diverging tokens differ only in naming"
+                f"  Skipping lcp={lcp!r}: tokens differ only in known variable naming or formatting"
                 f" ({dest_tok!r} vs {targ_tok!r})"
             )
             return None
@@ -696,42 +717,6 @@ def _validate_candidate(
             pivot_prefix=lcp, dest_top_token=dest_tok, target_top_token=targ_tok
         )
     return None
-
-
-_KEYWORDS_AND_BUILTINS: frozenset[str] = frozenset(
-    keyword.kwlist + dir(builtins)
-)
-_IDENTIFIER_RE = re.compile(r"[a-zA-Z_]\w*")
-
-
-def _normalize_token(token: str) -> str:
-    """Replace non-keyword, non-builtin identifiers with a placeholder.
-
-    ``len``, ``not``, ``True`` etc. are preserved; bare variable names like
-    ``s``, ``c``, ``result`` are replaced with ``VAR``.
-    """
-    return _IDENTIFIER_RE.sub(
-        lambda m: m.group(0) if m.group(0) in _KEYWORDS_AND_BUILTINS else "VAR",
-        token,
-    )
-
-
-def _tokens_differ_meaningfully(tok_dest: str, tok_targ: str) -> bool:
-    """True if the two diverging tokens encode a real semantic difference.
-
-    Normalizes both tokens by replacing variable-name identifiers with ``VAR``,
-    then checks whether they still differ.  Tokens that differ only in variable
-    naming convention (e.g. ``(s`` vs ``(c``, ``[item`` vs ``[elem``) become
-    identical after normalization and are rejected.
-
-    Examples:
-        ``(s``  vs ``(c``   → both → ``(VAR``        → False  (naming only)
-        ``<``   vs ``>``    → unchanged               → True   (operator)
-        ``[-``  vs ``[``    → unchanged               → True   (index structure)
-        ``not`` vs ``len(`` → ``not`` vs ``len(``     → True   (keyword vs builtin)
-        ``(len(`` vs ``(s`` → ``(len(`` vs ``(VAR``  → True   (meaningful)
-    """
-    return _normalize_token(tok_dest) != _normalize_token(tok_targ)
 
 
 def case3b_pivot_instances(
@@ -885,6 +870,7 @@ def augment_pivot_instances(
         for wrapper in wrappers:
             aug_prefix = wrapper + pi.pivot_prefix
 
+            completion_codes: list[str] = []
             # Gate 1: completion
             if not _completion_gate(
                 mt,
@@ -893,6 +879,7 @@ def augment_pivot_instances(
                 aug_prefix,
                 include_docstring=include_docstring,
                 max_new_tokens=max_completion_tokens,
+                completion_codes=completion_codes,
             ):
                 logger.debug(
                     f"  Augmentation completion FAILED: wrapper={wrapper!r}"
@@ -925,7 +912,11 @@ def augment_pivot_instances(
             dest_tok = get_top_token(mt, p_dest)
             targ_tok = get_top_token(mt, p_targ)
 
-            if dest_tok != targ_tok:
+            if dest_tok != targ_tok and _tokens_differ_meaningfully(
+                dest_tok, targ_tok, prefix=aug_prefix,
+                variable_names=(dest_sample.variable_name, targ_sample.variable_name),
+                dest_code=completion_codes[0], targ_code=completion_codes[1],
+            ):
                 augmented.append(
                     (
                         pair,
@@ -944,7 +935,8 @@ def augment_pivot_instances(
             else:
                 logger.debug(
                     f"  Augmentation divergence FAILED: wrapper={wrapper!r}"
-                    f" base={pi.pivot_prefix!r} both predict {dest_tok!r}"
+                    f" base={pi.pivot_prefix!r}: identical or naming/formatting-only"
+                    f" tokens {dest_tok!r} / {targ_tok!r}"
                 )
 
     logger.info(
@@ -1140,7 +1132,9 @@ def get_oracle_pivot_instances(
     # Insert into the pair objects and persist
     if save:
         # Clear existing pivot_instances for affected pairs, then repopulate
-        affected_pairs = {id(pair): pair for pair, _ in combined}
+        # Clear every revalidated pair, including those with zero survivors;
+        # otherwise previously accepted pivots silently survive a stricter filter.
+        affected_pairs = {id(pair): pair for pair in target_pairs}
         for pair in affected_pairs.values():
             pair.pivot_instances = []
         for pair, pi in combined:
