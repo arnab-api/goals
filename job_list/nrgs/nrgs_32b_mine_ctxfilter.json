@@ -1,0 +1,18 @@
+[
+ {
+  "name": "nrgs_mine_mixed-ctx",
+  "command": "set -o pipefail; mkdir -p logs/nrgs && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/mine_nrgs_prefix.py --model Qwen/Qwen2.5-Coder-32B-Instruct --n-per-pivot 4 --src-lang python --dst-lang python --configs H1 --out-tag mixed-ctx |& tee logs/nrgs/mine32b_mixed-ctx.log"
+ },
+ {
+  "name": "nrgs_mine_h1c-ctx",
+  "command": "set -o pipefail; mkdir -p logs/nrgs && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/mine_nrgs_prefix.py --model Qwen/Qwen2.5-Coder-32B-Instruct --n-per-pivot 4 --src-lang python --dst-lang python --configs H1c --out-tag h1c-ctx |& tee logs/nrgs/mine32b_h1c-ctx.log"
+ },
+ {
+  "name": "nrgs_mine_h2-ctx",
+  "command": "set -o pipefail; mkdir -p logs/nrgs && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/mine_nrgs_prefix.py --model Qwen/Qwen2.5-Coder-32B-Instruct --n-per-pivot 4 --src-lang python --dst-lang python --configs H2 --out-tag h2-ctx |& tee logs/nrgs/mine32b_h2-ctx.log"
+ },
+ {
+  "name": "nrgs_mine_h3-ctx",
+  "command": "set -o pipefail; mkdir -p logs/nrgs && HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/diff/mine_nrgs_prefix.py --model Qwen/Qwen2.5-Coder-32B-Instruct --n-per-pivot 4 --src-lang python --dst-lang python --configs H3 --out-tag h3-ctx |& tee logs/nrgs/mine32b_h3-ctx.log"
+ }
+]
