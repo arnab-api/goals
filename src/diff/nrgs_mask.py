@@ -31,6 +31,8 @@ import baukit
 import torch
 import torch.nn.functional as F
 
+from src.diff.query_mask_ops import q_blend_hooks
+
 import src.diff.nrgs_prefix as N
 from src.goals.head_loc_attn import HeadMask
 from src.tokens import prepare_input
@@ -99,26 +101,6 @@ def build_caches(mt, ctx, records: list[dict], batch_size: int = 8) -> list[NRGS
     return out
 
 
-def q_blend_hooks(mt, mask_values: torch.Tensor, layers: list[int], q_src: torch.Tensor):
-    """Forward hooks on each candidate q_proj blending the LAST position (differentiable, out-of-place).
-    ``mask_values`` (len(layers), n_heads) — a trainable parameter or a fixed 0/1 tensor;
-    ``q_src`` (B, len(layers), width)."""
-    hd = mt.head_dim
-    handles = []
-    for li, layer in enumerate(layers):
-        mod = baukit.get_module(mt._model, _q_proj(mt, layer))
-
-        def make(li):
-            def hook(module, inp, out):
-                o = out[0] if isinstance(out, tuple) else out                   # (B, T, width)
-                m = mask_values[li].to(o.device, o.dtype).repeat_interleave(hd)  # (width,)
-                last = m * q_src[:, li].to(o.device, o.dtype) + (1 - m) * o[:, -1]
-                o_new = torch.cat([o[:, :-1], last.unsqueeze(1)], dim=1)
-                return (o_new,) + tuple(out[1:]) if isinstance(out, tuple) else o_new
-            return hook
-
-        handles.append(mod.register_forward_hook(make(li)))
-    return handles
 
 
 @contextmanager
