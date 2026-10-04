@@ -1,4 +1,4 @@
-# Set/count localization v2: the source-order confound and the per-donor fix
+# Set/count localization v2: the source-order confound, the per-donor fix, and first localization runs
 
 *2026-10-04 · Qwen2.5-Coder-32B-Instruct (rev `381fc969`) · greedy decoding · next-token validation only*
 
@@ -125,12 +125,72 @@ Copy now predicts `b` in every view, and `b` is never a DST readout, so **copy c
 In the first run, 90/312 accepted views had a reference top token different from the stored pool token. The validator
 recomputes tokens in context, so this is harmless, but stored pool tokens should not be treated as readout labels.
 
+## Localization runs on the fixed data (Coder-32B)
+
+**Setup.** Four independent masks: {set, count} × {head, sub-head (W_QK SVD components)}. Each run used one A100 at
+about 66 GB; the base model is frozen and each view is a separate forward/backward pass. Common settings:
+
+- all 64 layers; mask initialised at 1.0; AdamW, learning rate 0.01;
+- control weight 1, KL weight 0, sparsity 20 (on the mask mean);
+- 1,000 steps, one whole family (13 views) per step, about 6 passes over the training families;
+- `--allow-next-token-only`: training and evaluation both score only the first patched token.
+
+Validation accepted 171/218 train, 4/7 dev and 7/14 test families (test: 5 string, 2 integer). Every rejection was
+"reference next tokens coincide". Test was evaluated once, after training, by resuming each mask at step 1,000 with
+`--evaluate-test` (zero further steps). Train and dev numbers reproduced exactly.
+
+**Mask size (> 0.5):**
+
+| Mask | Active |
+|---|---|
+| set, head | 141 / 2,560 heads |
+| count, head | 135 / 2,560 heads |
+| set, sub-head | 20,708 / 327,680 components, touching 1,785 heads |
+| count, sub-head | 13,028 / 327,680 components, touching 1,566 heads |
+
+**Views whose expected token is not native** (top-1 = expected):
+
+| Mask | Train | Dev (4 fam.) | Test (7 fam.) |
+|---|---|---|---|
+| count, sub-head | 1011/1026 = 99% | 19/24 = 79% | **21/42 = 50%** |
+| set, sub-head | 745/855 = 87% | 8/20 = 40% | **21/35 = 60%** |
+| count, head | 405/1026 = 39% | 9/24 = 38% | 16/42 = 38% |
+| set, head | 233/855 = 27% | 3/20 = 15% | 9/35 = 26% |
+
+**Views where set and count predict different tokens:**
+
+| Mask | Train: own / other | Dev: own / other | Test: own / other | Test always-native |
+|---|---|---|---|---|
+| count, sub-head | 99% / 0% | 85% / 0% | **23/35 = 66%** / 8/35 = 23% | 14/35 = 40% |
+| set, sub-head | 89% / 7% | 50% / 30% | **22/35 = 63%** / 12/35 = 34% | **21/35 = 60%** |
+| count, head | 55% / 38% | 55% / 40% | 19/35 = 54% / 14/35 = 40% | 14/35 = 40% |
+| set, head | 50% / 39% | 45% / 40% | 12/35 = 34% / 17/35 = 49% | 21/35 = 60% |
+
+By datatype on test (sub-head, discriminating views): count gets 16/25 (string) and 7/10 (integer); set gets 16/25 and
+6/10.
+
+**Reading:**
+
+- **Head level fails for both hypotheses,** on train as well as held-out. About 140 whole heads can't produce either
+  predicted token; the masks mostly leave the output native.
+- **Sub-head masks fit both hypotheses in-sample** (set 87%, count 99%), although the two predict different tokens on
+  the discriminating views. With 13–21k components spread over 1,500+ of the 2,560 heads, they are neither sparse nor
+  localized, and the train fit is not evidence of a mechanism.
+- **Held out, only count stays above the always-native baseline:** 66% vs 40% on test, choosing count's answer over
+  set's in both datatypes. That is well below dev (85%) and train (99%). Set's 63% is indistinguishable from leaving the
+  output native (60%).
+- **Consistent with Stage 0** (`stage0_matched_donor_specificity.md`): count is the only hypothesis-specific signal. It
+  is not localized at sparsity 20.
+- **Small and first-token only:** test is 7 families (5 string, 2 integer, 91 views). Multi-token scoring with executed
+  checks would change what counts as a hit, but not the sample size, which is the binding limit.
+- **Test has now been used.** Further tuning (sparsity sweep, layer bands) should be selected on dev or a fresh split.
+
 ## Still open
 
-- **Validation is next-token only.** Only the SRC continuations were executed. DST and teacher completions are not.
-- **Nothing has been trained on v2.** The only real-model optimization result is the v1 smoke (0/9 set, 0/18 count),
-  which used the old `result =` design.
-- **Held-out data is thin:** dev is 7 string families, test is 14 (string and integer).
+- **Scoring is first-token only.** Executed checks covered the SRC continuations only, not patched DST generations.
+- **Held-out data is small:** 4 dev and 7 test families were accepted. There are no integer-list families outside
+  train.
+- **Sub-head masks are not localized at sparsity 20.** Higher sparsity (50–200) is untested.
 - **The handoff runner's tests** (`set_count_smoke/runner/test_real_smoke.py`, not in the repo) still hard-code `'bade'`.
 
 ## Files
@@ -139,3 +199,5 @@ recomputes tokens in context, so this is harmless, but stored pool tokens should
   `families-v2-frontier-b_checkset.json` (the matched 33-family check subset)
 - Checks before the fix: `results/set_count_v2/validation/{readout_check/, source_continuations_labeled.json}`
 - Checks after the fix: `results/set_count_v2/validation_frontier_b/{readout_check/, source_continuations_labeled.json}`
+- Localization runs: `results/set_count_v2/train/{set,count}_{head,svd}_sp20/`; test evaluation in `…_sp20_test/`;
+  job lists `job_list/set_count/set_count_v2_frontier_b_{localization,eval_test}.json`; logs `logs/set_count/`
