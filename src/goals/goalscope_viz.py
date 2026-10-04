@@ -93,6 +93,12 @@ svg.gs-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:non
   font-size:13px;line-height:1.4;font-style:italic;padding:8px 11px;border-radius:8px;opacity:0;
   transition:opacity .1s;box-shadow:0 4px 14px rgba(0,0,0,.25);}
 .gs-empty{color:var(--muted);font-size:14px;font-style:italic;padding-top:6px;}
+/* readouts_side="right": callout panel to the right of the code (panels mirrored) */
+.gs-wrap.rside{flex-direction:row-reverse;}
+.gs-wrap.rside .gs-right{padding-left:0;padding-right:20px;}
+.gs-wrap.rside .gs-callout{left:auto;right:20px;}
+.gs-wrap.rside .gs-callout .idx{left:auto;right:-11px;}
+.gs-wrap.rside .gs-empty{padding-left:20px;}
 """.strip()
 
 
@@ -109,6 +115,7 @@ _JS = r"""
   const svg   = root.querySelector("svg.gs-links");
   const tip   = root.querySelector(".gs-tip");
   const pinned = [];                           // ordered list of pos (pin order)
+  const RS = root.classList.contains("rside");  // callouts to the RIGHT of the code
 
   function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 
@@ -138,7 +145,7 @@ _JS = r"""
     const empty = left.querySelector(".gs-empty"); if(empty) empty.remove();
     if(pinned.length===0){
       const e=document.createElement("div"); e.className="gs-empty";
-      e.textContent="Click a highlighted token on the right to pin its read-out here.";
+      e.textContent="Click a highlighted token on the "+(RS?"left":"right")+" to pin its read-out here.";
       left.appendChild(e); return;
     }
     // Single origin for callouts (children of root, absolute) + svg user space + measurements:
@@ -169,9 +176,9 @@ _JS = r"""
     // draw leader lines + anchor dots (after layout is known)
     order.forEach(o=>{
       const br = o.box.getBoundingClientRect();
-      const x1 = br.right - O.left, y1 = br.top - O.top + o.box.offsetHeight/2;
+      const x1 = (RS ? br.left : br.right) - O.left, y1 = br.top - O.top + o.box.offsetHeight/2;
       const tr = o.t.getBoundingClientRect();
-      const x2 = tr.left - O.left - 2, y2 = (tr.top+tr.bottom)/2 - O.top;
+      const x2 = (RS ? tr.right + 2 : tr.left - 2) - O.left, y2 = (tr.top+tr.bottom)/2 - O.top;
       const mx = (x1+x2)/2;
       const path=document.createElementNS("http://www.w3.org/2000/svg","path");
       path.setAttribute("d",`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
@@ -199,7 +206,7 @@ _JS = r"""
     const cs = getComputedStyle(root);
     const padL = parseFloat(cs.paddingLeft)||0, padR = parseFloat(cs.paddingRight)||0;
     const content = wr.width - padL - padR;
-    const w = e.clientX - (wr.left + padL);
+    const w = RS ? (wr.right - padR) - e.clientX : e.clientX - (wr.left + padL);
     const frac = Math.min(0.80, Math.max(0.18, w/content));   // clamp 18%..80%
     root.style.setProperty("--leftw", (frac*100).toFixed(2)+"%");
     render();
@@ -209,6 +216,11 @@ _JS = r"""
       document.body.style.userSelect=""; render(); }
   });
 
+  // read-outs pinned when the page opens (initial_pins); still unpinnable by click
+  __INITIAL_PINS__.forEach(p=>{
+    const el = right.querySelector('.gs-tok.scoped[data-pos="'+p+'"]');
+    if(el && pinned.indexOf(p)<0){ pinned.push(p); el.classList.add("pinned"); }
+  });
   render();
 })();
 """.strip()
@@ -221,6 +233,8 @@ def goalscope_qualitative_html(
     highlight: bool = True,
     save_path: Optional[str] = None,
     container_id: Optional[str] = None,
+    readouts_side: str = "left",
+    initial_pins: Optional[list[int]] = None,
 ) -> str:
     """Build a self-contained standalone HTML document from ``apply_goalscope`` output.
 
@@ -232,6 +246,10 @@ def goalscope_qualitative_html(
         highlight: apply lightweight Python keyword/constant/builtin tinting.
         save_path: if given, write the standalone HTML doc there.
         container_id: DOM id (auto-generated if None).
+        readouts_side: "left" (default; the paper figure's layout) or "right" (callouts to the right of the
+            code, e.g. when the page sits next to a left navigation sidebar).
+        initial_pins: token positions whose read-outs are pinned when the page opens, numbered in this
+            order (positions that are not scoped tokens are ignored).
 
     Returns:
         The standalone HTML document string.
@@ -250,7 +268,7 @@ def goalscope_qualitative_html(
             cls.append("scoped")
         else:
             cls.append("noncode")
-        if highlight:
+        if highlight and bool(r.get("scoped", True)):   # tint code only — prompt text stays uniformly dim
             tc = _tok_class(text)
             if tc:
                 cls.append(tc)
@@ -268,12 +286,12 @@ def goalscope_qualitative_html(
     code_html = "".join(spans)
     js = _JS.replace("__CID__", cid).replace(
         "__TOKENS_JSON__", json.dumps(tokens_json, ensure_ascii=False)
-    )
+    ).replace("__INITIAL_PINS__", json.dumps([int(p) for p in (initial_pins or [])]))
     doc = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_html.escape(title)}</title><style>{_CSS}</style></head>
 <body>
-<div class="gs-wrap" id="{cid}">
+<div class="gs-wrap{' rside' if readouts_side == 'right' else ''}" id="{cid}">
   <div class="gs-left"></div>
   <div class="gs-divider" title="drag to resize"></div>
   <div class="gs-right">

@@ -15,7 +15,7 @@ empirical rate at which the model chooses each strategy under sampling.
 
 Each output file is a JSON dict with keys:
     function_name  : str
-    source         : str    (custom / humaneval / mbpp)
+    source         : str    (ds_and_algo / humaneval / mbpp)
     prompt         : str    (full prompt sent to the model)
     generation     : str    (greedy LM completion, decoded — backward compat)
     prompt_bias    : str    (neutral / recursive / iterative, derived from instruction)
@@ -96,8 +96,57 @@ console = Console(width=120, highlight=False)
 
 TASKS_DIR = Path(DEFAULT_DATA_DIR) / "well-known-tasks"
 
+# ``--prompt-style v2`` (default): the GoalScope-demo prompt of notebooks/diff/13_goalscope_qualitative.ipynb.
+# The "no comments" instruction lives in the SYSTEM turn (not appended to the user instruction), and the
+# assistant prefill stops right after ``def <name>(`` so the model chooses the parameters and writes no
+# docstring. ``legacy`` reproduces the original prompts (no-comment suffix in the user turn, prefill ending
+# in an opening docstring) and writes to the original generations/ dir.
+V2_SYSTEM_PROMPT = (
+    "You are a helpful assistant proficient in programming. "
+    "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain."
+)
+
+
+def v2_prefill(sample) -> str:
+    """``def <name>(`` (or ``class <Name>`` for the class tasks) — the bank's header cut before parameters.
+    A task with ``"prefill_full_signature": true`` keeps its whole (typed) ``def`` line instead, for tasks whose
+    interface the model otherwise gets wrong (e.g. stable_marriage)."""
+    head = sample.code.split("\n", 1)[0]
+    if getattr(sample, "prefill_full_signature", False) and head.startswith("def "):
+        return head
+    if head.startswith("def ") and "(" in head:
+        return head[: head.index("(") + 1]
+    if head.startswith("class "):
+        return head.split(":", 1)[0].split("(", 1)[0] + ":"   # `class Trie:` (bare `class Trie` -> `TrieNode`)
+    raise ValueError(f"{sample.function_name}: unexpected header {head!r}")
+
+
+def _out_name(sample, args) -> str:
+    """v2 outputs are named by bank task id (unique); legacy keeps function_name (existing results)."""
+    return sample.task_id if args.prompt_style == "v2" else sample.function_name
+
+
+def comment_stats(code: str) -> dict:
+    """How much commenting the model wrote: ``#`` comments and docstrings (best effort on partial code)."""
+    import ast
+    import io
+    import tokenize
+    n_hash = 0
+    try:
+        n_hash = sum(t.type == tokenize.COMMENT for t in tokenize.generate_tokens(io.StringIO(code).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        n_hash = sum(1 for ln in code.split("\n") if ln.lstrip().startswith("#"))
+    try:
+        tree = ast.parse(code)
+        n_doc = sum(1 for n in ast.walk(tree)
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module))
+                    and ast.get_docstring(n) is not None)
+    except SyntaxError:
+        n_doc = code.count('"""') // 2 + code.count("'''") // 2
+    return {"n_hash_comments": n_hash, "n_docstrings": n_doc, "has_comments": bool(n_hash or n_doc)}
+
 # Known source subdirectories (order determines processing order)
-_ALL_SOURCES = ["custom", "humaneval", "mbpp"]
+_ALL_SOURCES = ["ds_and_algo", "humaneval", "mbpp"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,9 +201,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SRC",
         help=(
-            "Task source subdirectory to process (e.g. custom, humaneval, mbpp). "
+            "Task source subdirectory to process (e.g. ds_and_algo, humaneval, mbpp). "
             "Defaults to all sources found under data/well-known-tasks/."
         ),
+    )
+    parser.add_argument(
+        "--prompt-style",
+        default="v2",
+        choices=["v2", "legacy"],
+        help="v2: no-comment instruction in the system turn, prefill stops at `def <name>(`; legacy: original prompts.",
     )
     parser.add_argument(
         "--overwrite",
@@ -212,6 +267,8 @@ def _load_samples(
                 d = json.load(f)
             sample = IncompleteCodeSample.from_dict(d)
             sample.without_comments = True
+            sample.task_id = path.stem   # bank file name; unique, unlike function_name (e.g. 2x is_palindrome)
+            sample.prefill_full_signature = bool(d.get("prefill_full_signature", False))
             results.append((src_name, sample))
 
     return results
@@ -301,12 +358,17 @@ def _build_output_record(
     prompt_bias = detect_prompt_bias(sample.instruction)
 
     extracted_code, used_tag_fallback = extract_code_with_fallback(generation)
+    if "</code>" in extracted_code and "<code>" in prompt:
+        # the prompt opened the <code> block, so the generation holds only the closing tag: keep what precedes it
+        extracted_code = extracted_code.split("</code>", 1)[0].rstrip()
     label = label_python_strategy(extracted_code, sample.function_name)
     offset = code_offset_in_generation(generation, extracted_code)
     attach_token_positions(label.recursive_calls, mt.tokenizer, gen_ids, offset)
 
     greedy_block = {
         "extracted_code": extracted_code,
+        # v2 prompts end at `def <name>(` — score commenting on the full function (prefill header + code)
+        **comment_stats((v2_prefill(sample) if prompt.rstrip().endswith(v2_prefill(sample)) else "") + extracted_code),
         "used_code_tag_fallback": used_tag_fallback,
         "strategy": label.strategy,
         "has_recursion": label.has_recursion,
@@ -324,6 +386,7 @@ def _build_output_record(
 
     out: dict = {
         "function_name": sample.function_name,
+        "task_id": getattr(sample, "task_id", sample.function_name),
         "source": src_name,
         "prompt": prompt,
         "generation": generation,
@@ -379,7 +442,8 @@ def main() -> None:
     base_out_dir = (
         Path(args.output_dir)
         if args.output_dir
-        else Path(DEFAULT_RESULTS_DIR) / "well-known-tasks" / "generations" / model_short
+        else Path(DEFAULT_RESULTS_DIR) / "well-known-tasks"
+        / ("generations" if args.prompt_style == "legacy" else "generations_v2") / model_short
     )
 
     # ── Load samples (list of (source_name, IncompleteCodeSample)) ───────────
@@ -391,7 +455,7 @@ def main() -> None:
         source_samples = [
             (src, s)
             for src, s in source_samples
-            if not _existing_has_new_schema(base_out_dir / src / f"{s.function_name}.json")
+            if not _existing_has_new_schema(base_out_dir / src / f"{_out_name(s, args)}.json")
         ]
         skipped = before - len(source_samples)
         if skipped:
@@ -409,7 +473,16 @@ def main() -> None:
     logger.info("Building prompts...")
     prompts: list[str] = []
     for _, sample in source_samples:
-        if supports_chat_template(mt):
+        if args.prompt_style == "v2":
+            if not supports_chat_template(mt):
+                raise ValueError("--prompt-style v2 needs a chat model")
+            prompt = apply_chat_template(
+                mt,
+                user_query=sample.instruction.strip(),
+                incomplete_code=v2_prefill(sample),
+                system_prompt=V2_SYSTEM_PROMPT,
+            )
+        elif supports_chat_template(mt):
             prompt = apply_chat_template(
                 mt,
                 user_query=sample.full_instruction.strip(),
@@ -458,7 +531,7 @@ def main() -> None:
                 )
                 out_dir = base_out_dir / src_name
                 out_dir.mkdir(parents=True, exist_ok=True)
-                out_path = out_dir / f"{sample.function_name}.json"
+                out_path = out_dir / f"{_out_name(sample, args)}.json"
                 with open(out_path, "w") as f:
                     json.dump(out, f, indent=2)
                 logger.info(

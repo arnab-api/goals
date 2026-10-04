@@ -1,0 +1,2347 @@
+{
+ "task": "lru_cache",
+ "model": "Qwen2.5-Coder-32B-Instruct",
+ "source": "custom-v2",
+ "meta": {
+  "prompt": "<|im_start|>system\nYou are a helpful assistant proficient in programming. Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.<|im_end|>\n<|im_start|>user\nImplement an LRU cache with O(1) get and put operations using a doubly linked list and hash map in Python<|im_end|>\n<|im_start|>assistant\n<code>\nclass LRUCache:",
+  "generation": "    \n    class Node:\n        def __init__(self, key, value):\n            self.key = key\n            self.value = value\n            self.prev = None\n            self.next = None\n\n    def __init__(self, capacity: int):\n        self.capacity = capacity\n        self.cache = {}\n        self.head = self.Node(0, 0)\n        self.tail = self.Node(0, 0)\n        self.head.next = self.tail\n        self.tail.prev = self.head\n\n    def _remove(self, node):\n        prev = node.prev\n        nxt = node.next\n        prev.next = nxt\n        nxt.prev = prev\n\n    def _add(self, node):\n        node.prev = self.head\n        node.next = self.head.next\n        self.head.next.prev = node\n        self.head.next = node\n\n    def get(self, key: int) -> int:\n        if key in self.cache:\n            node = self.cache[key]\n            self._remove(node)\n            self._add(node)\n            return node.value\n        return -1\n\n    def put(self, key: int, value: int) -> None:\n        if key in self.cache:\n            self._remove(self.cache[key])\n        node = self.Node(key, value)\n        self._add(node)\n        self.cache[key] = node\n        if len(self.cache) > self.capacity:\n            lru = self.tail.prev\n            self._remove(lru)\n            del self.cache[lru.key]\n</code>",
+  "heads": "head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json",
+  "n_heads": 122,
+  "strategy": "additive_norm",
+  "alpha": 0.1,
+  "steer_layers": [
+   35,
+   46
+  ],
+  "max_new_tokens": 64,
+  "comments": {
+   "n_hash_comments": 0,
+   "n_docstrings": 0,
+   "has_comments": false
+  }
+ },
+ "rows": [
+  {
+   "pos": 0,
+   "token": "<|im_start|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 1,
+   "token": "system",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 2,
+   "token": "\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 3,
+   "token": "You",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 4,
+   "token": " are",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 5,
+   "token": " a",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 6,
+   "token": " helpful",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 7,
+   "token": " assistant",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 8,
+   "token": " proficient",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 9,
+   "token": " in",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 10,
+   "token": " programming",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 11,
+   "token": ".",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 12,
+   "token": " Always",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 13,
+   "token": " wrap",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 14,
+   "token": " your",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 15,
+   "token": " code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 16,
+   "token": " inside",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 17,
+   "token": " <",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 18,
+   "token": "code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 19,
+   "token": "></",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 20,
+   "token": "code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 21,
+   "token": ">",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 22,
+   "token": " blocks",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 23,
+   "token": ".",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 24,
+   "token": " Just",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 25,
+   "token": " the",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 26,
+   "token": " code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 27,
+   "token": ",",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 28,
+   "token": " no",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 29,
+   "token": " need",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 30,
+   "token": " to",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 31,
+   "token": " comment",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 32,
+   "token": " or",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 33,
+   "token": " explain",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 34,
+   "token": ".",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 35,
+   "token": "<|im_end|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 36,
+   "token": "\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 37,
+   "token": "<|im_start|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 38,
+   "token": "user",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 39,
+   "token": "\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 40,
+   "token": "Implement",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 41,
+   "token": " an",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 42,
+   "token": " L",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 43,
+   "token": "RU",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 44,
+   "token": " cache",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 45,
+   "token": " with",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 46,
+   "token": " O",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 47,
+   "token": "(",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 48,
+   "token": "1",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 49,
+   "token": ")",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 50,
+   "token": " get",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 51,
+   "token": " and",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 52,
+   "token": " put",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 53,
+   "token": " operations",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 54,
+   "token": " using",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 55,
+   "token": " a",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 56,
+   "token": " doubly",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 57,
+   "token": " linked",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 58,
+   "token": " list",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 59,
+   "token": " and",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 60,
+   "token": " hash",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 61,
+   "token": " map",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 62,
+   "token": " in",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 63,
+   "token": " Python",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 64,
+   "token": "<|im_end|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 65,
+   "token": "\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 66,
+   "token": "<|im_start|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 67,
+   "token": "assistant",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 68,
+   "token": "\n",
+   "patched_gen": "Sure, here is a brief implementation of a simple stack using Python:\n\n```python\nclass Stack:\n    def __init__(self):\n        self.items = []\n\n    def push(self, item):\n        self.items = self.items + [\n            item\n        ]\n\n    def pop(self):\n        return self.items.pop()\n\n   ",
+   "scoped": true
+  },
+  {
+   "pos": 69,
+   "token": "<",
+   "patched_gen": "Sure, here is a brief snippet of code:\n\n```python\ndef example():\n    return [i for i in range(10)]\n```\n\nThis line contains the implementation of a function that returns a list of Python code defining a simple function with a list comprehension for a basic code snippet.",
+   "scoped": true
+  },
+  {
+   "pos": 70,
+   "token": "code",
+   "patched_gen": "Certainly! Here's a brief snippet of code that could represent a specific line or lines for a function or method:\n\n```python\ndef some_function():\n    class Node:\n        def __init__(self):\n            self.data = {\n                'code': \"\"\"\nclass Node:\n    def __init__(self):\n        self.data",
+   "scoped": true
+  },
+  {
+   "pos": 71,
+   "token": ">\n",
+   "patched_gen": "I'm maintaining a dictionary using two hash maps (doubly linked list and hash map) with `OrderedDict` in Python, if that's what you're asking for. Here's a brief implementation:\n\n```python\nfrom collections import OrderedDict\n\nclass LRUCache:\n    def __init__(self, capacity:",
+   "scoped": true
+  },
+  {
+   "pos": 72,
+   "token": "class",
+   "patched_gen": "I'm managing a cache using a doubly linked list and hash map for O(1) time complexity operations.",
+   "scoped": true
+  },
+  {
+   "pos": 73,
+   "token": " LR",
+   "patched_gen": "I'm managing a cache using a doubly linked list and a hash map. Each node has pointers to the next and previous nodes, and a key-value pair. The hash map maps keys to nodes for O(1) time complexity operations.",
+   "scoped": true
+  },
+  {
+   "pos": 74,
+   "token": "UC",
+   "patched_gen": "I'm retrieving and updating the value associated with the key in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 75,
+   "token": "ache",
+   "patched_gen": "I'm retrieving and updating an item in an LRU Cache using a hash map and a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 76,
+   "token": ":",
+   "patched_gen": "I'm maintaining a reference to a node in a doubly linked list using a hash map and two classes: `Node` and `LRUCache`.\n\n```python\nclass Node:\n    def __init__(self, key=0, value=0):\n        self.key = key\n        self.value = value\n       ",
+   "scoped": true
+  },
+  {
+   "pos": 77,
+   "token": "    \n",
+   "patched_gen": "I'm maintaining a reference to the most recently used item using a doubly linked list with a hash map for O(1) time complexity operations. Here's a concise implementation:\n\n```python\nclass LRUCache:\n    class Node:\n        def __init__(self, key, value):\n            self.key = key\n",
+   "scoped": true
+  },
+  {
+   "pos": 78,
+   "token": "   ",
+   "patched_gen": "I'm managing a cache with a doubly linked list and hash map for O(1) access times.",
+   "scoped": true
+  },
+  {
+   "pos": 79,
+   "token": " class",
+   "patched_gen": "I'm managing a cache entry, updating its position in a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 80,
+   "token": " Node",
+   "patched_gen": "I'm retrieving and updating the position of a node in a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 81,
+   "token": ":\n",
+   "patched_gen": "Executing a specific operation within a data structure, typically involving setting or retrieving a node's value and adjusting its pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 82,
+   "token": "       ",
+   "patched_gen": "I'm retrieving and updating the value of a node in a doubly linked list, maintaining pointers to both the next and previous nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 83,
+   "token": " def",
+   "patched_gen": "Executing a specific operation, managing pointers to next and previous nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 84,
+   "token": " __",
+   "patched_gen": "I'm managing the reference pointers for the node being accessed.",
+   "scoped": true
+  },
+  {
+   "pos": 85,
+   "token": "init",
+   "patched_gen": "Executing a specific operation, holding references to previous and next nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 86,
+   "token": "__(",
+   "patched_gen": "I'm accessing or updating a node's position in a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 87,
+   "token": "self",
+   "patched_gen": "I'm retrieving and updating the value of a node in a doubly linked list, maintaining pointers to the previous and next nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 88,
+   "token": ",",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 89,
+   "token": " key",
+   "patched_gen": "I'm retrieving and updating a value in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 90,
+   "token": ",",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 91,
+   "token": " value",
+   "patched_gen": "Executing a specific operation, storing data, or managing pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 92,
+   "token": "):\n",
+   "patched_gen": "Executing a specific task with data stored in variables `prev` and `next`.",
+   "scoped": true
+  },
+  {
+   "pos": 93,
+   "token": "           ",
+   "patched_gen": "I'm retrieving and updating the value of a node in a doubly linked list, maintaining pointers to both the next and previous nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 94,
+   "token": " self",
+   "patched_gen": "I'm retrieving and updating the value of a node in a doubly linked list, maintaining pointers to both the next and previous nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 95,
+   "token": ".key",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 96,
+   "token": " =",
+   "patched_gen": "I'm retrieving and storing a value associated with a key in a dictionary or cache system.",
+   "scoped": true
+  },
+  {
+   "pos": 97,
+   "token": " key",
+   "patched_gen": "Executing the operation specified by the line.",
+   "scoped": true
+  },
+  {
+   "pos": 98,
+   "token": "\n",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a hash map (or dictionary) for quick access.",
+   "scoped": true
+  },
+  {
+   "pos": 99,
+   "token": "           ",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a hash map (or dictionary).",
+   "scoped": true
+  },
+  {
+   "pos": 100,
+   "token": " self",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 101,
+   "token": ".value",
+   "patched_gen": "Executing the current instruction.",
+   "scoped": true
+  },
+  {
+   "pos": 102,
+   "token": " =",
+   "patched_gen": "I'm retrieving or updating the value associated with a key in a data structure, typically a dictionary or cache.",
+   "scoped": true
+  },
+  {
+   "pos": 103,
+   "token": " value",
+   "patched_gen": "I'm processing a request, managing data between cache nodes, or handling user input/output.",
+   "scoped": true
+  },
+  {
+   "pos": 104,
+   "token": "\n",
+   "patched_gen": "Executing a command, managing pointers to next and previous nodes, and maintaining data storage.",
+   "scoped": true
+  },
+  {
+   "pos": 105,
+   "token": "           ",
+   "patched_gen": "I'm processing a request to retrieve or update a node's position in a doubly linked list, maintaining pointers for both next and previous nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 106,
+   "token": " self",
+   "patched_gen": "I'm retrieving and updating pointers to previous and next nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 107,
+   "token": ".prev",
+   "patched_gen": "Executing the current instruction.",
+   "scoped": true
+  },
+  {
+   "pos": 108,
+   "token": " =",
+   "patched_gen": "I'm here to help, but I need to know which line you're referring to. Could you provide more context or pointers to the previous and next lines?",
+   "scoped": true
+  },
+  {
+   "pos": 109,
+   "token": " None",
+   "patched_gen": "Executing the current task.",
+   "scoped": true
+  },
+  {
+   "pos": 110,
+   "token": "\n",
+   "patched_gen": "I'm retrieving and updating the position of the accessed item in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 111,
+   "token": "           ",
+   "patched_gen": "I'm processing a request to manage a node in a doubly linked list, either by inserting or removing it.",
+   "scoped": true
+  },
+  {
+   "pos": 112,
+   "token": " self",
+   "patched_gen": "I'm retrieving the item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 113,
+   "token": ".next",
+   "patched_gen": "Executing the current instruction.",
+   "scoped": true
+  },
+  {
+   "pos": 114,
+   "token": " =",
+   "patched_gen": "Executing a specific operation or command, typically involving linking to previous and next nodes in a doubly linked list structure.",
+   "scoped": true
+  },
+  {
+   "pos": 115,
+   "token": " None",
+   "patched_gen": "I'm handling the current node's pointers for linking.",
+   "scoped": true
+  },
+  {
+   "pos": 116,
+   "token": "\n\n",
+   "patched_gen": "I'm managing a node within a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 117,
+   "token": "   ",
+   "patched_gen": "I'm managing a node within a doubly linked list, handling insertions and deletions.",
+   "scoped": true
+  },
+  {
+   "pos": 118,
+   "token": " def",
+   "patched_gen": "I'm managing the cache by updating the position of the accessed node.",
+   "scoped": true
+  },
+  {
+   "pos": 119,
+   "token": " __",
+   "patched_gen": "I'm managing the cache by updating the position of the accessed node.",
+   "scoped": true
+  },
+  {
+   "pos": 120,
+   "token": "init",
+   "patched_gen": "I'm retrieving and updating an item in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 121,
+   "token": "__(",
+   "patched_gen": "I'm retrieving the value associated with the key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 122,
+   "token": "self",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 123,
+   "token": ",",
+   "patched_gen": "I'm retrieving the value associated with the key if it exists, or adding a new key-value pair if it doesn't exist, while maintaining the LRU order.",
+   "scoped": true
+  },
+  {
+   "pos": 124,
+   "token": " capacity",
+   "patched_gen": "I'm waiting for you to specify the size of the cache (maximum number of elements) and then I'll initialize the data structures.",
+   "scoped": true
+  },
+  {
+   "pos": 125,
+   "token": ":",
+   "patched_gen": "I'm storing the value in the variable `capacity`.",
+   "scoped": true
+  },
+  {
+   "pos": 126,
+   "token": " int",
+   "patched_gen": "I'm managing a cache with a fixed size, handling insertions and retrievals efficiently.",
+   "scoped": true
+  },
+  {
+   "pos": 127,
+   "token": "):\n",
+   "patched_gen": "I'm initializing the data structure with a fixed capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 128,
+   "token": "       ",
+   "patched_gen": "I'm managing memory by removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 129,
+   "token": " self",
+   "patched_gen": "I'm managing a cache with a fixed capacity, using two hash maps for quick access and a doubly linked list to maintain order. This line likely involves updating the cache's size limit or initializing the data structures.",
+   "scoped": true
+  },
+  {
+   "pos": 130,
+   "token": ".capacity",
+   "patched_gen": "I'm waiting for you to specify which line of code you're referring to, as I have a limited capacity and need to manage memory efficiently. Please provide the line or key identifier, and I'll let you know what's happening there.",
+   "scoped": true
+  },
+  {
+   "pos": 131,
+   "token": " =",
+   "patched_gen": "I'm managing a cache or data structure to store a limited number of items, and I'm currently at the point where I need to remove the least recently used item when the capacity is reached.",
+   "scoped": true
+  },
+  {
+   "pos": 132,
+   "token": " capacity",
+   "patched_gen": "I'm managing memory by evicting the least recently used item.",
+   "scoped": true
+  },
+  {
+   "pos": 133,
+   "token": "\n",
+   "patched_gen": "I'm managing memory by updating pointers for the most recently accessed item, adjusting the linked list's head and tail pointers accordingly.",
+   "scoped": true
+  },
+  {
+   "pos": 134,
+   "token": "       ",
+   "patched_gen": "I'm managing memory by updating pointers and references.",
+   "scoped": true
+  },
+  {
+   "pos": 135,
+   "token": " self",
+   "patched_gen": "I'm managing a cache with a fixed capacity, using two hash maps for O(1) access and a doubly linked list to maintain order. The current line is likely an insertion or retrieval operation.",
+   "scoped": true
+  },
+  {
+   "pos": 136,
+   "token": ".cache",
+   "patched_gen": "I'm retrieving an item from a cache dictionary using its key.",
+   "scoped": true
+  },
+  {
+   "pos": 137,
+   "token": " =",
+   "patched_gen": "I'm retrieving or storing an item from/to a dictionary using its key.",
+   "scoped": true
+  },
+  {
+   "pos": 138,
+   "token": " {}\n",
+   "patched_gen": "I'm retrieving or storing an item from/to a dictionary using its key, with pointers to the next and previous items for quick access.",
+   "scoped": true
+  },
+  {
+   "pos": 139,
+   "token": "       ",
+   "patched_gen": "I'm managing the most recently used items with pointers to the head and tail of a doubly linked list, allowing for O(1) time complexity for insertions and deletions.",
+   "scoped": true
+  },
+  {
+   "pos": 140,
+   "token": " self",
+   "patched_gen": "I'm managing a cache with a doubly linked list and hash map. This line is likely setting up pointers for the head and tail nodes, initializing the cache size to zero, or handling the insertion of a new node.",
+   "scoped": true
+  },
+  {
+   "pos": 141,
+   "token": ".head",
+   "patched_gen": "I'm managing the most recently used items, linking the head and tail nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 142,
+   "token": " =",
+   "patched_gen": "I'm initializing a reference to the head of a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 143,
+   "token": " self",
+   "patched_gen": "I'm initializing a reference to the head of a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 144,
+   "token": ".Node",
+   "patched_gen": "I'm not currently executing any line of code; I'm just a placeholder to represent the start and end of the linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 145,
+   "token": "(",
+   "patched_gen": "I'm initializing a cache entry.",
+   "scoped": true
+  },
+  {
+   "pos": 146,
+   "token": "0",
+   "patched_gen": "I'm initializing a placeholder for the current node, typically used in implementing a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 147,
+   "token": ",",
+   "patched_gen": "I'm initializing a cache entry.",
+   "scoped": true
+  },
+  {
+   "pos": 148,
+   "token": " ",
+   "patched_gen": "I'm managing the cache by updating pointers for the recently accessed item.",
+   "scoped": true
+  },
+  {
+   "pos": 149,
+   "token": "0",
+   "patched_gen": "I'm initializing a placeholder for the head of a doubly linked list, pointing to nothing.",
+   "scoped": true
+  },
+  {
+   "pos": 150,
+   "token": ")\n",
+   "patched_gen": "I'm initializing a reference to the head of a doubly linked list, setting it to null.",
+   "scoped": true
+  },
+  {
+   "pos": 151,
+   "token": "       ",
+   "patched_gen": "I'm acting as a placeholder for the most recently accessed item, with a reference to the least recently used item.",
+   "scoped": true
+  },
+  {
+   "pos": 152,
+   "token": " self",
+   "patched_gen": "I'm accessing the most recently used item, which is the head of the doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 153,
+   "token": ".tail",
+   "patched_gen": "I'm accessing the most recently used item, which is the tail of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 154,
+   "token": " =",
+   "patched_gen": "I'm here to manage the end of the linked list, acting as both the head and tail, pointing to each other in a circular fashion.",
+   "scoped": true
+  },
+  {
+   "pos": 155,
+   "token": " self",
+   "patched_gen": "I'm acting as a placeholder, connecting the head (start) and tail (end) of a doubly linked list by pointing both to each other, thus creating an empty list where head and tail are references to sentinel nodes that aren't part of the actual data list.",
+   "scoped": true
+  },
+  {
+   "pos": 156,
+   "token": ".Node",
+   "patched_gen": "I'm here to manage the cache, acting as the tail of the doubly linked list, where I hold no data but serve as a marker for the end.",
+   "scoped": true
+  },
+  {
+   "pos": 157,
+   "token": "(",
+   "patched_gen": "I'm managing the cache by updating the most recently used item.",
+   "scoped": true
+  },
+  {
+   "pos": 158,
+   "token": "0",
+   "patched_gen": "I'm not currently executing any code; I'm just a placeholder to represent the end of the data structure, ready to handle new entries.",
+   "scoped": true
+  },
+  {
+   "pos": 159,
+   "token": ",",
+   "patched_gen": "I'm retrieving or setting a value in a cache, using the least recently used (LRU) eviction policy.",
+   "scoped": true
+  },
+  {
+   "pos": 160,
+   "token": " ",
+   "patched_gen": "I'm retrieving and updating the most recently accessed item.",
+   "scoped": true
+  },
+  {
+   "pos": 161,
+   "token": "0",
+   "patched_gen": "I'm initializing pointers to create a doubly linked list, setting both `head` and `tail` to point to each other, forming a circular reference where `head.next` points to `tail` and `tail.prev` points to `head`.",
+   "scoped": true
+  },
+  {
+   "pos": 162,
+   "token": ")\n",
+   "patched_gen": "I'm initializing pointers to create a doubly linked list, setting both `head` and `tail` to point to each other, forming a circular reference where `head.next` points to `tail` and `tail.prev` points to `head`.",
+   "scoped": true
+  },
+  {
+   "pos": 163,
+   "token": "       ",
+   "patched_gen": "I'm initializing pointers to create a doubly linked list where `head` and `tail` point to each other, forming a circular reference.",
+   "scoped": true
+  },
+  {
+   "pos": 164,
+   "token": " self",
+   "patched_gen": "I'm initializing the pointers for the head and tail of a doubly linked list, setting both to null.",
+   "scoped": true
+  },
+  {
+   "pos": 165,
+   "token": ".head",
+   "patched_gen": "I'm acting as a placeholder, connecting the head (newest entry) and tail (oldest entry) of a doubly linked list, ensuring both point to each other.",
+   "scoped": true
+  },
+  {
+   "pos": 166,
+   "token": ".next",
+   "patched_gen": "I'm here to assist you, so I'm connected between the head (most recent operation) and the tail (least recent operation) of the list. This line sets up the initial state where the head points to the tail and the tail points to the head.",
+   "scoped": true
+  },
+  {
+   "pos": 167,
+   "token": " =",
+   "patched_gen": "I'm here to assist, so I'm pointing to the start of the list, with my next being the first item, and the previous being the last item, which is also pointing back to me. Essentially, I act as both the head and the tail of a doubly linked list, keeping the list circular.",
+   "scoped": true
+  },
+  {
+   "pos": 168,
+   "token": " self",
+   "patched_gen": "I'm not currently pointing to any specific line of code, as I don't have a direct reference to a \"tail\" node that would typically be used in a doubly linked list setup. My current position is effectively between the head and tail nodes, with the head pointing to the tail and the tail pointing back to the",
+   "scoped": true
+  },
+  {
+   "pos": 169,
+   "token": ".tail",
+   "patched_gen": "I'm here to assist you, so I'm not actually at any specific line of code; I'm acting as a bridge between the head and tail of a doubly linked list, where the head and tail are placeholders. This means I'm currently pointing to nothing on either side, as my previous (tail) and next",
+   "scoped": true
+  },
+  {
+   "pos": 170,
+   "token": "\n",
+   "patched_gen": "I'm here to assist, so I'm both the head and tail of a doubly linked list, meaning I point to each other, effectively making us the start and end of the list with no elements between us. At any given moment, I'm also between the current head and tail, ready to accept insertions or",
+   "scoped": true
+  },
+  {
+   "pos": 171,
+   "token": "       ",
+   "patched_gen": "I'm initializing pointers for the head and tail of the doubly linked list, setting them to point to each other, and ensuring they both point to null (empty list).",
+   "scoped": true
+  },
+  {
+   "pos": 172,
+   "token": " self",
+   "patched_gen": "I'm waiting for the next command to link the new node to the existing list.",
+   "scoped": true
+  },
+  {
+   "pos": 173,
+   "token": ".tail",
+   "patched_gen": "I'm here to handle the request, so I'm both the head and tail of this linked list, meaning I point to each other. In this context, \"this line\" refers to the connection between the head and tail, where the head's `prev` points to the tail and the tail's `next`",
+   "scoped": true
+  },
+  {
+   "pos": 174,
+   "token": ".prev",
+   "patched_gen": "I'm here to assist you, but I need to know which line you're referring to. Please provide more context by linking the line to its neighbors (either previous or next).",
+   "scoped": true
+  },
+  {
+   "pos": 175,
+   "token": " =",
+   "patched_gen": "I'm here to assist, so I'm both the head and tail of this setup—right after the head is me, and right before me is the head. In essence, I'm maintaining the connection between the two ends.",
+   "scoped": true
+  },
+  {
+   "pos": 176,
+   "token": " self",
+   "patched_gen": "I'm managing the cache by removing the least recently used item when the cache is full.",
+   "scoped": true
+  },
+  {
+   "pos": 177,
+   "token": ".head",
+   "patched_gen": "I'm managing the reference pointers for the most recently used items, ensuring quick access to both the head and tail of the doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 178,
+   "token": "\n\n",
+   "patched_gen": "I'm managing the reference pointers for the most recently used item, adjusting the links between nodes to maintain the order from least recently used to most recently used.",
+   "scoped": true
+  },
+  {
+   "pos": 179,
+   "token": "   ",
+   "patched_gen": "I'm managing the cache by removing the least recently used item.",
+   "scoped": true
+  },
+  {
+   "pos": 180,
+   "token": " def",
+   "patched_gen": "I'm retrieving the value associated with a key and moving it to the front of the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 181,
+   "token": " _",
+   "patched_gen": "I'm managing the cache by moving the accessed node to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 182,
+   "token": "remove",
+   "patched_gen": "I'm managing the cache by moving the accessed node to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 183,
+   "token": "(self",
+   "patched_gen": "I'm removing the node from the doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 184,
+   "token": ",",
+   "patched_gen": "I'm removing the node from the doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 185,
+   "token": " node",
+   "patched_gen": "I'm removing the reference to the node from the linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 186,
+   "token": "):\n",
+   "patched_gen": "I'm removing the reference to the node from its current position in the doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 187,
+   "token": "       ",
+   "patched_gen": "I'm removing the reference to the node from its neighbors, effectively unlinking it from the doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 188,
+   "token": " prev",
+   "patched_gen": "I'm removing the reference to the node from its previous and next nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 189,
+   "token": " =",
+   "patched_gen": "I'm removing the reference to the node before it from the node after it.",
+   "scoped": true
+  },
+  {
+   "pos": 190,
+   "token": " node",
+   "patched_gen": "I'm updating the previous node's next pointer to skip the current node.",
+   "scoped": true
+  },
+  {
+   "pos": 191,
+   "token": ".prev",
+   "patched_gen": "Executing the line before and after the current line.",
+   "scoped": true
+  },
+  {
+   "pos": 192,
+   "token": "\n",
+   "patched_gen": "I'm removing the reference to the current node from its neighbors by updating their pointers to skip over it.",
+   "scoped": true
+  },
+  {
+   "pos": 193,
+   "token": "       ",
+   "patched_gen": "I'm removing the reference to the node from its neighbors.",
+   "scoped": true
+  },
+  {
+   "pos": 194,
+   "token": " nxt",
+   "patched_gen": "I'm currently between two nodes, acting as a bridge. I update the `next` pointer of the previous node to point to the next node, and the `prev` pointer of the next node to point to the previous node.",
+   "scoped": true
+  },
+  {
+   "pos": 195,
+   "token": " =",
+   "patched_gen": "Executing the next line of code.",
+   "scoped": true
+  },
+  {
+   "pos": 196,
+   "token": " node",
+   "patched_gen": "I'm updating the pointers to skip the current node.",
+   "scoped": true
+  },
+  {
+   "pos": 197,
+   "token": ".next",
+   "patched_gen": "Executing the next line by linking the previous and next nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 198,
+   "token": "\n",
+   "patched_gen": "I'm updating pointers to bypass the current node, effectively removing it from the linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 199,
+   "token": "       ",
+   "patched_gen": "I'm removing the reference to the node from its previous and next nodes, effectively linking them directly to each other.",
+   "scoped": true
+  },
+  {
+   "pos": 200,
+   "token": " prev",
+   "patched_gen": "I'm connecting the previous node to the next node, effectively removing the current node from the linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 201,
+   "token": ".next",
+   "patched_gen": "Executing the next instruction.",
+   "scoped": true
+  },
+  {
+   "pos": 202,
+   "token": " =",
+   "patched_gen": "Executing the next instruction.",
+   "scoped": true
+  },
+  {
+   "pos": 203,
+   "token": " nxt",
+   "patched_gen": "I'm here to assist, so I'm connected between the previous and next lines of code. The previous line points to me, and the next line points back to it, effectively removing me from the sequence.",
+   "scoped": true
+  },
+  {
+   "pos": 204,
+   "token": "\n",
+   "patched_gen": "I'm removing the reference to the node from its previous and next nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 205,
+   "token": "       ",
+   "patched_gen": "I'm updating pointers to bypass the node being removed.",
+   "scoped": true
+  },
+  {
+   "pos": 206,
+   "token": " nxt",
+   "patched_gen": "I'm connecting the previous and next nodes to each other, effectively removing the current node from the list.",
+   "scoped": true
+  },
+  {
+   "pos": 207,
+   "token": ".prev",
+   "patched_gen": "I'm updating the pointers to skip over the node being removed.",
+   "scoped": true
+  },
+  {
+   "pos": 208,
+   "token": " =",
+   "patched_gen": "I'm updating the pointers to skip over the current node.",
+   "scoped": true
+  },
+  {
+   "pos": 209,
+   "token": " prev",
+   "patched_gen": "I'm removing the reference to the node by adjusting the pointers of its neighboring nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 210,
+   "token": "\n\n",
+   "patched_gen": "I'm removing the reference to the node by adjusting pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 211,
+   "token": "   ",
+   "patched_gen": "I'm removing the node from its current position.",
+   "scoped": true
+  },
+  {
+   "pos": 212,
+   "token": " def",
+   "patched_gen": "I'm retrieving and moving the item to the front of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 213,
+   "token": " _",
+   "patched_gen": "I'm moving the node to the front of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 214,
+   "token": "add",
+   "patched_gen": "I'm retrieving the item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 215,
+   "token": "(self",
+   "patched_gen": "I'm adding the element to the end of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 216,
+   "token": ",",
+   "patched_gen": "I'm adding the new node right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 217,
+   "token": " node",
+   "patched_gen": "I'm inserting the new element right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 218,
+   "token": "):\n",
+   "patched_gen": "I'm inserting the element right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 219,
+   "token": "       ",
+   "patched_gen": "I'm inserting the new node right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 220,
+   "token": " node",
+   "patched_gen": "I'm inserting the new element right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 221,
+   "token": ".prev",
+   "patched_gen": "I'm inserting the new element right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 222,
+   "token": " =",
+   "patched_gen": "I'm setting up to be the new head of the list, linking myself between the head and the old first element.",
+   "scoped": true
+  },
+  {
+   "pos": 223,
+   "token": " self",
+   "patched_gen": "I'm inserting the new element right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 224,
+   "token": ".head",
+   "patched_gen": "I'm here to assist you, so I'll be right after the \"start\" of your code (which is actually the head of the list). My \"previous\" element is the start, and my \"next\" element is what was previously the first item. I'll adjust pointers accordingly.",
+   "scoped": true
+  },
+  {
+   "pos": 225,
+   "token": "\n",
+   "patched_gen": "I'm setting up to be the next instruction after the current one, with my previous instruction being the current one's next.",
+   "scoped": true
+  },
+  {
+   "pos": 226,
+   "token": "       ",
+   "patched_gen": "I'm setting up to be the new head of the list, linking my next to the old head and my previous to the tail (which is the current head).",
+   "scoped": true
+  },
+  {
+   "pos": 227,
+   "token": " node",
+   "patched_gen": "I'm inserting the new element right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 228,
+   "token": ".next",
+   "patched_gen": "Executing the next command after initialization.",
+   "scoped": true
+  },
+  {
+   "pos": 229,
+   "token": " =",
+   "patched_gen": "I'm setting up to be the next item after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 230,
+   "token": " self",
+   "patched_gen": "I'm processing the request immediately following the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 231,
+   "token": ".head",
+   "patched_gen": "I'm here to assist you, so I'll be right after the \"head\" of the list, which is the start of your code. Essentially, I'll be the next item after whatever you currently have as the first actual piece of code (which would be pointing to me as its next item).",
+   "scoped": true
+  },
+  {
+   "pos": 232,
+   "token": ".next",
+   "patched_gen": "I'm here to assist you, so I'll be right after the current \"head\" of the list. The item currently after me is what used to be the head. I'll adjust my pointers: my `next` will point to the old head, and the old head's `previous` will point to me",
+   "scoped": true
+  },
+  {
+   "pos": 233,
+   "token": "\n",
+   "patched_gen": "I'm setting the next node's previous pointer to the current node, and the current node's next pointer to the next node.",
+   "scoped": true
+  },
+  {
+   "pos": 234,
+   "token": "       ",
+   "patched_gen": "I'm setting the next node's previous pointer to the current node.",
+   "scoped": true
+  },
+  {
+   "pos": 235,
+   "token": " self",
+   "patched_gen": "I'm setting the next node's previous pointer to the current node, and the current node's next pointer to the next node.",
+   "scoped": true
+  },
+  {
+   "pos": 236,
+   "token": ".head",
+   "patched_gen": "I'm inserting the new element right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 237,
+   "token": ".next",
+   "patched_gen": "I'm setting the next node's previous pointer to the new node, and the new node's next pointer to the current next node.",
+   "scoped": true
+  },
+  {
+   "pos": 238,
+   "token": ".prev",
+   "patched_gen": "I'm processing the request to be after the specified line and before it, effectively inserting myself into that position in the sequence.",
+   "scoped": true
+  },
+  {
+   "pos": 239,
+   "token": " =",
+   "patched_gen": "I'm setting the next node's previous pointer to the new node.",
+   "scoped": true
+  },
+  {
+   "pos": 240,
+   "token": " node",
+   "patched_gen": "I'm setting the next node's previous pointer to the current node.",
+   "scoped": true
+  },
+  {
+   "pos": 241,
+   "token": "\n",
+   "patched_gen": "I'm inserting the new element right after the head, making it the new head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 242,
+   "token": "       ",
+   "patched_gen": "I'm inserting the new node right after the head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 243,
+   "token": " self",
+   "patched_gen": "I'm updating the reference to the new node.",
+   "scoped": true
+  },
+  {
+   "pos": 244,
+   "token": ".head",
+   "patched_gen": "I'm inserting the new node right after the head.",
+   "scoped": true
+  },
+  {
+   "pos": 245,
+   "token": ".next",
+   "patched_gen": "Executing the next instruction.",
+   "scoped": true
+  },
+  {
+   "pos": 246,
+   "token": " =",
+   "patched_gen": "Executing the command to insert the new line after the current position, making it the new head of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 247,
+   "token": " node",
+   "patched_gen": "I'm inserting the new node right after the head.",
+   "scoped": true
+  },
+  {
+   "pos": 248,
+   "token": "\n\n",
+   "patched_gen": "I'm moving the element to the front of the list by first removing it from its current position and then adding it to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 249,
+   "token": "   ",
+   "patched_gen": "I'm retrieving the value associated with a key from a dictionary.",
+   "scoped": true
+  },
+  {
+   "pos": 250,
+   "token": " def",
+   "patched_gen": "I'm retrieving the value associated with a key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 251,
+   "token": " get",
+   "patched_gen": "I'm retrieving the value associated with the given key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 252,
+   "token": "(self",
+   "patched_gen": "Retrieving value by key.",
+   "scoped": true
+  },
+  {
+   "pos": 253,
+   "token": ",",
+   "patched_gen": "Retrieving the value associated with the key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 254,
+   "token": " key",
+   "patched_gen": "Retrieving value by key.",
+   "scoped": true
+  },
+  {
+   "pos": 255,
+   "token": ":",
+   "patched_gen": "Retrieving the value associated with the key provided.",
+   "scoped": true
+  },
+  {
+   "pos": 256,
+   "token": " int",
+   "patched_gen": "Retrieving value by key.",
+   "scoped": true
+  },
+  {
+   "pos": 257,
+   "token": ")",
+   "patched_gen": "I'm retrieving and returning the value associated with the key if it exists in the cache, otherwise, I return -1.",
+   "scoped": true
+  },
+  {
+   "pos": 258,
+   "token": " ->",
+   "patched_gen": "Retrieving the value associated with the key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 259,
+   "token": " int",
+   "patched_gen": "Retrieving value from cache.",
+   "scoped": true
+  },
+  {
+   "pos": 260,
+   "token": ":\n",
+   "patched_gen": "Retrieving and returning the value associated with the key if it exists; otherwise, returns `None`.",
+   "scoped": true
+  },
+  {
+   "pos": 261,
+   "token": "       ",
+   "patched_gen": "I'm retrieving and returning the value associated with the key if it exists in the cache, otherwise, I return -1.",
+   "scoped": true
+  },
+  {
+   "pos": 262,
+   "token": " if",
+   "patched_gen": "I'm retrieving the value associated with the key if it exists in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 263,
+   "token": " key",
+   "patched_gen": "I'm retrieving the value associated with the key if it exists in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 264,
+   "token": " in",
+   "patched_gen": "I'm retrieving the value associated with the key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 265,
+   "token": " self",
+   "patched_gen": "I'm retrieving the value associated with the key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 266,
+   "token": ".cache",
+   "patched_gen": "I'm retrieving the value associated with the key from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 267,
+   "token": ":\n",
+   "patched_gen": "Retrieving and updating the value associated with the key if it exists.",
+   "scoped": true
+  },
+  {
+   "pos": 268,
+   "token": "           ",
+   "patched_gen": "I'm retrieving and updating the position of the node in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 269,
+   "token": " node",
+   "patched_gen": "Retrieving and updating the value associated with the key in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 270,
+   "token": " =",
+   "patched_gen": "Retrieving and updating the reference to the object in cache.",
+   "scoped": true
+  },
+  {
+   "pos": 271,
+   "token": " self",
+   "patched_gen": "Retrieving and updating the node's position in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 272,
+   "token": ".cache",
+   "patched_gen": "I'm retrieving the node from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 273,
+   "token": "[key",
+   "patched_gen": "Retrieving and updating the reference to the object.",
+   "scoped": true
+  },
+  {
+   "pos": 274,
+   "token": "]\n",
+   "patched_gen": "Retrieving and updating the reference to the object.",
+   "scoped": true
+  },
+  {
+   "pos": 275,
+   "token": "           ",
+   "patched_gen": "Retrieving and updating the position of the element in the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 276,
+   "token": " self",
+   "patched_gen": "I'm retrieving and updating the position of the element in the data structure by moving it to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 277,
+   "token": "._",
+   "patched_gen": "I'm retrieving and updating the position of the element by moving it to the front of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 278,
+   "token": "remove",
+   "patched_gen": "I'm retrieving the item from the cache and moving it to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 279,
+   "token": "(node",
+   "patched_gen": "I'm retrieving the item from the data structure and placing it at the front.",
+   "scoped": true
+  },
+  {
+   "pos": 280,
+   "token": ")\n",
+   "patched_gen": "I'm retrieving and updating the position of the element in the data structure, making it the most recently used by moving it to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 281,
+   "token": "           ",
+   "patched_gen": "I'm retrieving and updating the position of the item in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 282,
+   "token": " self",
+   "patched_gen": "I'm retrieving and placing the item at the front of the list.",
+   "scoped": true
+  },
+  {
+   "pos": 283,
+   "token": "._",
+   "patched_gen": "I'm moving the specified line to the top of the list, making it the most recently accessed.",
+   "scoped": true
+  },
+  {
+   "pos": 284,
+   "token": "add",
+   "patched_gen": "I'm retrieving the item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 285,
+   "token": "(node",
+   "patched_gen": "I'm retrieving and updating the value of the variable to make it the most recently accessed.",
+   "scoped": true
+  },
+  {
+   "pos": 286,
+   "token": ")\n",
+   "patched_gen": "I'm retrieving and returning the value of the variable, updating its position in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 287,
+   "token": "           ",
+   "patched_gen": "Retrieving and returning the value associated with the key.",
+   "scoped": true
+  },
+  {
+   "pos": 288,
+   "token": " return",
+   "patched_gen": "Retrieving and returning the value associated with the key.",
+   "scoped": true
+  },
+  {
+   "pos": 289,
+   "token": " node",
+   "patched_gen": "I'm retrieving and returning the value associated with the key.",
+   "scoped": true
+  },
+  {
+   "pos": 290,
+   "token": ".value",
+   "patched_gen": "I'm retrieving and returning the value associated with the key.",
+   "scoped": true
+  },
+  {
+   "pos": 291,
+   "token": "\n",
+   "patched_gen": "I'm retrieving and returning the value associated with the key, or -1 if the key is not found.",
+   "scoped": true
+  },
+  {
+   "pos": 292,
+   "token": "       ",
+   "patched_gen": "I'm retrieving and returning the value associated with the key, or -1 if the key is not found.",
+   "scoped": true
+  },
+  {
+   "pos": 293,
+   "token": " return",
+   "patched_gen": "I'm retrieving and returning the value associated with the key, or -1 if the key is not found.",
+   "scoped": true
+  },
+  {
+   "pos": 294,
+   "token": " -",
+   "patched_gen": "I'm retrieving the value associated with the key provided, or returning -1 if the key is not found.",
+   "scoped": true
+  },
+  {
+   "pos": 295,
+   "token": "1",
+   "patched_gen": "Retrieving the value associated with the key provided.",
+   "scoped": true
+  },
+  {
+   "pos": 296,
+   "token": "\n\n",
+   "patched_gen": "I'm retrieving and returning the value associated with `key`. If `key` is not found, I add it with `value` and remove the oldest item if necessary.\n\n```python\ndef get(self, key):\n    if key in self.cache:\n        self.move_to_end(key)\n        return self.cache[key]\n",
+   "scoped": true
+  },
+  {
+   "pos": 297,
+   "token": "   ",
+   "patched_gen": "I'm retrieving and updating an item in a cache with a fixed size limit. Here's a simplified version of how it works:\n\n```python\nclass LRUCache:\n    def __init__(self, capacity: int):\n        self.cache = {}\n        self.capacity = capacity\n        self.order = {}\n\n    def get",
+   "scoped": true
+  },
+  {
+   "pos": 298,
+   "token": " def",
+   "patched_gen": "I'm retrieving and updating the value associated with a key in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 299,
+   "token": " put",
+   "patched_gen": "I'm retrieving or updating the value associated with a key in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 300,
+   "token": "(self",
+   "patched_gen": "Updating or retrieving an item in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 301,
+   "token": ",",
+   "patched_gen": "I'm storing or retrieving a value based on the key provided.",
+   "scoped": true
+  },
+  {
+   "pos": 302,
+   "token": " key",
+   "patched_gen": "I'm updating or inserting a value into a data structure, typically a dictionary or list, based on a key and value pair. If the key exists, I update the value; if not, I add the key-value pair.",
+   "scoped": true
+  },
+  {
+   "pos": 303,
+   "token": ":",
+   "patched_gen": "I'm assigning a value to a key in a dictionary.",
+   "scoped": true
+  },
+  {
+   "pos": 304,
+   "token": " int",
+   "patched_gen": "I'm processing a request to either update or add a new entry in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 305,
+   "token": ",",
+   "patched_gen": "I'm storing or retrieving a value based on the key provided.",
+   "scoped": true
+  },
+  {
+   "pos": 306,
+   "token": " value",
+   "patched_gen": "I'm updating the value associated with the key in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 307,
+   "token": ":",
+   "patched_gen": "Updating or initializing a variable in the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 308,
+   "token": " int",
+   "patched_gen": "Updating or inserting a value into the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 309,
+   "token": ")",
+   "patched_gen": "I'm processing a request to either retrieve or insert data into a cache. If the requested data key is not present, I'll add it to the cache. If the cache is full and the new data item needs to be added, I'll remove the least recently used item to make space.",
+   "scoped": true
+  },
+  {
+   "pos": 310,
+   "token": " ->",
+   "patched_gen": "I'm updating or retrieving an item in a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 311,
+   "token": " None",
+   "patched_gen": "I'm processing the input to either update or retrieve data based on the given key-value pair.",
+   "scoped": true
+  },
+  {
+   "pos": 312,
+   "token": ":\n",
+   "patched_gen": "Updating or retrieving an item in a data structure, typically involving adding a new item or updating an existing one. If the item exceeds capacity, the least recently used item is discarded.",
+   "scoped": true
+  },
+  {
+   "pos": 313,
+   "token": "       ",
+   "patched_gen": "I'm updating or inserting an item into a data structure, typically a cache or dictionary, by either adding a new item or moving an existing item to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 314,
+   "token": " if",
+   "patched_gen": "I'm updating or retrieving an item from a data structure, typically a cache or dictionary. If the item is new, I add it to the structure. If the item is already present, I update its value.",
+   "scoped": true
+  },
+  {
+   "pos": 315,
+   "token": " key",
+   "patched_gen": "I'm updating or retrieving an item from a cache.",
+   "scoped": true
+  },
+  {
+   "pos": 316,
+   "token": " in",
+   "patched_gen": "I'm updating or retrieving an item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 317,
+   "token": " self",
+   "patched_gen": "I'm updating or retrieving an item.",
+   "scoped": true
+  },
+  {
+   "pos": 318,
+   "token": ".cache",
+   "patched_gen": "Updating the value of an existing key.",
+   "scoped": true
+  },
+  {
+   "pos": 319,
+   "token": ":\n",
+   "patched_gen": "Updating an existing entry.",
+   "scoped": true
+  },
+  {
+   "pos": 320,
+   "token": "           ",
+   "patched_gen": "Updating the value of an existing key.",
+   "scoped": true
+  },
+  {
+   "pos": 321,
+   "token": " self",
+   "patched_gen": "Updating the value of an existing variable.",
+   "scoped": true
+  },
+  {
+   "pos": 322,
+   "token": "._",
+   "patched_gen": "Updating the value of an existing variable.",
+   "scoped": true
+  },
+  {
+   "pos": 323,
+   "token": "remove",
+   "patched_gen": "Updating the value associated with the key.",
+   "scoped": true
+  },
+  {
+   "pos": 324,
+   "token": "(self",
+   "patched_gen": "Updating the value associated with the key in the dictionary.",
+   "scoped": true
+  },
+  {
+   "pos": 325,
+   "token": ".cache",
+   "patched_gen": "Updating the value associated with the key.",
+   "scoped": true
+  },
+  {
+   "pos": 326,
+   "token": "[key",
+   "patched_gen": "Updating the value of the variable.",
+   "scoped": true
+  },
+  {
+   "pos": 327,
+   "token": "])\n",
+   "patched_gen": "Updating the value of an existing key.",
+   "scoped": true
+  },
+  {
+   "pos": 328,
+   "token": "       ",
+   "patched_gen": "Updating or inserting a new value.",
+   "scoped": true
+  },
+  {
+   "pos": 329,
+   "token": " node",
+   "patched_gen": "I'm updating or inserting a new value into the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 330,
+   "token": " =",
+   "patched_gen": "I'm updating or inserting a new value into the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 331,
+   "token": " self",
+   "patched_gen": "I'm creating a new node or updating an existing one.",
+   "scoped": true
+  },
+  {
+   "pos": 332,
+   "token": ".Node",
+   "patched_gen": "I'm updating or inserting a new key-value pair into the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 333,
+   "token": "(key",
+   "patched_gen": "I'm initializing or updating the value associated with a key in a data structure, typically a dictionary or cache.",
+   "scoped": true
+  },
+  {
+   "pos": 334,
+   "token": ",",
+   "patched_gen": "I'm updating or inserting the value for the key.",
+   "scoped": true
+  },
+  {
+   "pos": 335,
+   "token": " value",
+   "patched_gen": "I'm inserting a new element into the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 336,
+   "token": ")\n",
+   "patched_gen": "I'm updating or adding a new entry to the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 337,
+   "token": "       ",
+   "patched_gen": "I'm adding a new element to the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 338,
+   "token": " self",
+   "patched_gen": "I'm adding a new element to the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 339,
+   "token": "._",
+   "patched_gen": "I'm adding the new element to the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 340,
+   "token": "add",
+   "patched_gen": "I'm inserting the new element into the data structure.",
+   "scoped": true
+  },
+  {
+   "pos": 341,
+   "token": "(node",
+   "patched_gen": "I'm adding a new entry to the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 342,
+   "token": ")\n",
+   "patched_gen": "I'm updating or adding an entry to a data structure, typically a dictionary or hash map, and if the structure is full, I'm removing the oldest entry.",
+   "scoped": true
+  },
+  {
+   "pos": 343,
+   "token": "       ",
+   "patched_gen": "I'm updating or inserting a new key-value pair into a data structure, typically a dictionary or hash map, and if the limit is reached, I'm evicting the least recently used item.",
+   "scoped": true
+  },
+  {
+   "pos": 344,
+   "token": " self",
+   "patched_gen": "I'm storing the new value in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 345,
+   "token": ".cache",
+   "patched_gen": "I'm storing or updating the reference to the new object in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 346,
+   "token": "[key",
+   "patched_gen": "I'm updating or adding a new entry to the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 347,
+   "token": "]",
+   "patched_gen": "I'm managing a node in a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 348,
+   "token": " =",
+   "patched_gen": "I'm storing or updating the reference to the new object.",
+   "scoped": true
+  },
+  {
+   "pos": 349,
+   "token": " node",
+   "patched_gen": "I'm adding a new entry to the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 350,
+   "token": "\n",
+   "patched_gen": "I'm processing a line of code that likely involves adding a new element to a data structure like a list or dictionary. If it exceeds the capacity, I'll remove the oldest item if necessary to maintain the size limit, typically by removing from the start if the limit is exceeded.",
+   "scoped": true
+  },
+  {
+   "pos": 351,
+   "token": "       ",
+   "patched_gen": "I'm updating or retrieving an item from a cache, potentially evicting the least recently used item if necessary.",
+   "scoped": true
+  },
+  {
+   "pos": 352,
+   "token": " if",
+   "patched_gen": "I'm managing memory by removing the least recently used item when the cache exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 353,
+   "token": " len",
+   "patched_gen": "I'm managing memory by removing the least recently used item when the cache exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 354,
+   "token": "(self",
+   "patched_gen": "I'm managing memory by removing the least recently used item when the cache exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 355,
+   "token": ".cache",
+   "patched_gen": "I'm managing memory by removing the least recently used item when the cache exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 356,
+   "token": ")",
+   "patched_gen": "I'm managing memory by removing the least recently used item when the cache exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 357,
+   "token": " >",
+   "patched_gen": "I'm managing memory by evicting the least recently used item when the cache exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 358,
+   "token": " self",
+   "patched_gen": "I'm managing memory by removing the least recently used item when the cache exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 359,
+   "token": ".capacity",
+   "patched_gen": "I'm removing the least recently used item from the cache when it exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 360,
+   "token": ":\n",
+   "patched_gen": "I'm removing the least recently used item from the cache when it exceeds its capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 361,
+   "token": "           ",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 362,
+   "token": " l",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 363,
+   "token": "ru",
+   "patched_gen": "I'm removing the least recently used item from the cache, which is the node right after the head.",
+   "scoped": true
+  },
+  {
+   "pos": 364,
+   "token": " =",
+   "patched_gen": "I'm removing the least recently used item from the cache, which is the node right after the head.",
+   "scoped": true
+  },
+  {
+   "pos": 365,
+   "token": " self",
+   "patched_gen": "I'm removing the least recently used item from the cache, which is the node right after the head.",
+   "scoped": true
+  },
+  {
+   "pos": 366,
+   "token": ".tail",
+   "patched_gen": "I'm processing the request to remove an item from the least recently used (LRU) cache, which is the `prev` node of the `tail`. This operation typically involves updating pointers to disconnect the `tail.prev` from the list, making it the new `tail`.",
+   "scoped": true
+  },
+  {
+   "pos": 367,
+   "token": ".prev",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 368,
+   "token": "\n",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 369,
+   "token": "           ",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 370,
+   "token": " self",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 371,
+   "token": "._",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 372,
+   "token": "remove",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 373,
+   "token": "(l",
+   "patched_gen": "I'm managing a cache using a doubly linked list and a hash map for O(1) access.",
+   "scoped": true
+  },
+  {
+   "pos": 374,
+   "token": "ru",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 375,
+   "token": ")\n",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 376,
+   "token": "           ",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 377,
+   "token": " del",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 378,
+   "token": " self",
+   "patched_gen": "I'm updating or retrieving an item from a dictionary based on its key.",
+   "scoped": true
+  },
+  {
+   "pos": 379,
+   "token": ".cache",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 380,
+   "token": "[l",
+   "patched_gen": "I'm processing a request to retrieve or modify data associated with a key in a hash map.",
+   "scoped": true
+  },
+  {
+   "pos": 381,
+   "token": "ru",
+   "patched_gen": "I'm removing the reference to the object being deleted from the dictionary or list.",
+   "scoped": true
+  },
+  {
+   "pos": 382,
+   "token": ".key",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 383,
+   "token": "]\n",
+   "patched_gen": "I'm removing the least recently used item from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 384,
+   "token": "</",
+   "patched_gen": "I'm defining a function to initialize a new instance of a class.",
+   "scoped": true
+  },
+  {
+   "pos": 385,
+   "token": "code",
+   "patched_gen": "Sure, here is the line of code:\n\n```python\ndef my_function():\n```",
+   "scoped": true
+  },
+  {
+   "pos": 386,
+   "token": ">",
+   "patched_gen": "I'm defining a function.",
+   "scoped": true
+  }
+ ]
+}

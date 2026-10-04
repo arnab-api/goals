@@ -1,0 +1,6 @@
+[
+ {
+  "name": "goalscope_web_full_coder32b",
+  "command": "set -euo pipefail; mkdir -p logs/goalscope_web && export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python scripts/generate_well_known_task_completions.py --model-key Qwen/Qwen2.5-Coder-32B-Instruct --n-samples 0 --prompt-style v2 |& tee logs/goalscope_web/full_gen_coder32b.log; python scripts/run_goalscope_web.py --model-key Qwen/Qwen2.5-Coder-32B-Instruct --source-suffix=-v2 |& tee logs/goalscope_web/full_gs_coder32b.log; bash scripts/web_finalize_run.sh Qwen2.5-Coder-32B-Instruct -v2 |& tee logs/goalscope_web/full_finalize_coder32b.log"
+ }
+]
