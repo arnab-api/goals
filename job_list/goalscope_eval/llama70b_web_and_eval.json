@@ -1,0 +1,42 @@
+[
+    {
+        "name": "llama70b_web_gen",
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python scripts/generate_well_known_task_completions.py --model-key meta-llama/Llama-3.3-70B-Instruct --n-samples 0 --prompt-style v2 |& tee logs/goalscope_web/full_gen_llama70b.log"
+    },
+    {
+        "name": "llama70b_web_gs0",
+        "dependencies": [
+            "llama70b_web_gen"
+        ],
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python scripts/run_goalscope_web.py --model-key meta-llama/Llama-3.3-70B-Instruct --heads head_sets/Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json --strategy additive_norm --alpha 0.11 --steer-layers 20 40 --source-suffix=-v2 --num-shards 2 --shard-id 0 |& tee logs/goalscope_web/full_gs_llama70b_s0.log"
+    },
+    {
+        "name": "llama70b_web_gs1",
+        "dependencies": [
+            "llama70b_web_gen"
+        ],
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python scripts/run_goalscope_web.py --model-key meta-llama/Llama-3.3-70B-Instruct --heads head_sets/Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json --strategy additive_norm --alpha 0.11 --steer-layers 20 40 --source-suffix=-v2 --num-shards 2 --shard-id 1 |& tee logs/goalscope_web/full_gs_llama70b_s1.log"
+    },
+    {
+        "name": "llama70b_web_finalize",
+        "dependencies": [
+            "llama70b_web_gs0",
+            "llama70b_web_gs1"
+        ],
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; bash scripts/web_finalize_run.sh Llama-3.3-70B-Instruct -v2 |& tee logs/goalscope_web/full_finalize_llama70b.log"
+    },
+    {
+        "name": "llama70b_eval_faithfulness",
+        "dependencies": [
+            "llama70b_web_finalize"
+        ],
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python -m scripts.evaluation.eval_goalscope --model meta-llama/Llama-3.3-70B-Instruct --mode faithfulness --heads head_sets/Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json --strategy additive_norm --alpha 0.11 --steer_layer_range 20 40 |& tee logs/goalscope/llama70b_lam20ctx_faithfulness.log"
+    },
+    {
+        "name": "llama70b_eval_causality",
+        "dependencies": [
+            "llama70b_web_finalize"
+        ],
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python -m scripts.evaluation.eval_goalscope --model meta-llama/Llama-3.3-70B-Instruct --mode causality --heads head_sets/Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json --strategy additive_norm --alpha 0.11 --steer_layer_range 20 40 |& tee logs/goalscope/llama70b_lam20ctx_causality.log"
+    }
+]

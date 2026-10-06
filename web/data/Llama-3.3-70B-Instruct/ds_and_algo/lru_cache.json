@@ -1,0 +1,2575 @@
+{
+ "task": "lru_cache",
+ "model": "Llama-3.3-70B-Instruct",
+ "source": "ds_and_algo-v2",
+ "meta": {
+  "prompt": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are a helpful assistant proficient in programming. Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nImplement an LRU cache with O(1) get and put operations using a doubly linked list and hash map in Python<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n<code>\nclass LRUCache:",
+  "generation": "    \n    class Node:\n        def __init__(self, key, value):\n            self.key = key\n            self.value = value\n            self.prev = None\n            self.next = None\n\n    def __init__(self, capacity: int):\n        self.capacity = capacity\n        self.cache = {}\n        self.head = self.Node(0, 0)\n        self.tail = self.Node(0, 0)\n        self.head.next = self.tail\n        self.tail.prev = self.head\n\n    def _remove(self, node):\n        prev_node = node.prev\n        next_node = node.next\n        prev_node.next = next_node\n        next_node.prev = prev_node\n\n    def _add(self, node):\n        prev_node = self.tail.prev\n        prev_node.next = node\n        self.tail.prev = node\n        node.prev = prev_node\n        node.next = self.tail\n\n    def get(self, key: int) -> int:\n        if key in self.cache:\n            node = self.cache[key]\n            self._remove(node)\n            self._add(node)\n            return node.value\n        return -1\n\n    def put(self, key: int, value: int) -> None:\n        if key in self.cache:\n            self._remove(self.cache[key])\n        node = self.Node(key, value)\n        self._add(node)\n        self.cache[key] = node\n        if len(self.cache) > self.capacity:\n            lru_node = self.head.next\n            self._remove(lru_node)\n            del self.cache[lru_node.key]\n</code>",
+  "heads": "head_sets/Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json",
+  "n_heads": 110,
+  "strategy": "additive_norm",
+  "alpha": 0.11,
+  "steer_layers": [
+   20,
+   40
+  ],
+  "max_new_tokens": 64,
+  "comments": {
+   "n_hash_comments": 0,
+   "n_docstrings": 0,
+   "has_comments": false
+  }
+ },
+ "rows": [
+  {
+   "pos": 0,
+   "token": "<|begin_of_text|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 1,
+   "token": "<|begin_of_text|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 2,
+   "token": "<|start_header_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 3,
+   "token": "system",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 4,
+   "token": "<|end_header_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 5,
+   "token": "\n\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 6,
+   "token": "Cut",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 7,
+   "token": "ting",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 8,
+   "token": " Knowledge",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 9,
+   "token": " Date",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 10,
+   "token": ":",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 11,
+   "token": " December",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 12,
+   "token": " ",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 13,
+   "token": "202",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 14,
+   "token": "3",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 15,
+   "token": "\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 16,
+   "token": "Today",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 17,
+   "token": " Date",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 18,
+   "token": ":",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 19,
+   "token": " ",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 20,
+   "token": "26",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 21,
+   "token": " Jul",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 22,
+   "token": " ",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 23,
+   "token": "202",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 24,
+   "token": "4",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 25,
+   "token": "\n\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 26,
+   "token": "You",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 27,
+   "token": " are",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 28,
+   "token": " a",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 29,
+   "token": " helpful",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 30,
+   "token": " assistant",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 31,
+   "token": " proficient",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 32,
+   "token": " in",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 33,
+   "token": " programming",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 34,
+   "token": ".",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 35,
+   "token": " Always",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 36,
+   "token": " wrap",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 37,
+   "token": " your",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 38,
+   "token": " code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 39,
+   "token": " inside",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 40,
+   "token": " <",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 41,
+   "token": "code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 42,
+   "token": "></",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 43,
+   "token": "code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 44,
+   "token": ">",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 45,
+   "token": " blocks",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 46,
+   "token": ".",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 47,
+   "token": " Just",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 48,
+   "token": " the",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 49,
+   "token": " code",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 50,
+   "token": ",",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 51,
+   "token": " no",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 52,
+   "token": " need",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 53,
+   "token": " to",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 54,
+   "token": " comment",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 55,
+   "token": " or",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 56,
+   "token": " explain",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 57,
+   "token": ".",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 58,
+   "token": "<|eot_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 59,
+   "token": "<|start_header_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 60,
+   "token": "user",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 61,
+   "token": "<|end_header_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 62,
+   "token": "\n\n",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 63,
+   "token": "Implement",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 64,
+   "token": " an",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 65,
+   "token": " L",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 66,
+   "token": "RU",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 67,
+   "token": " cache",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 68,
+   "token": " with",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 69,
+   "token": " O",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 70,
+   "token": "(",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 71,
+   "token": "1",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 72,
+   "token": ")",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 73,
+   "token": " get",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 74,
+   "token": " and",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 75,
+   "token": " put",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 76,
+   "token": " operations",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 77,
+   "token": " using",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 78,
+   "token": " a",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 79,
+   "token": " doubly",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 80,
+   "token": " linked",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 81,
+   "token": " list",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 82,
+   "token": " and",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 83,
+   "token": " hash",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 84,
+   "token": " map",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 85,
+   "token": " in",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 86,
+   "token": " Python",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 87,
+   "token": "<|eot_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 88,
+   "token": "<|start_header_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 89,
+   "token": "assistant",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 90,
+   "token": "<|end_header_id|>",
+   "patched_gen": "",
+   "scoped": false
+  },
+  {
+   "pos": 91,
+   "token": "\n\n",
+   "patched_gen": "\n\n```python\ndef solve():\n    code = \"\"\"\n    def example():\n        return \"\"\"\n```",
+   "scoped": true
+  },
+  {
+   "pos": 92,
+   "token": "<",
+   "patched_gen": "\n\nI'm not writing code in this response, but here is the code:\n```\nNo code provided\n```",
+   "scoped": true
+  },
+  {
+   "pos": 93,
+   "token": "code",
+   "patched_gen": "\n\n```python\nprint(\"def hello_world():\\n\\tprint(\\\"```python\\nimport os\\nprint('def hello_world():\\\\n\\\\tprint(\\\"```\\\nimport os\\nprint(\\\"def hello_world():\\\\n\\\\tprint('```\\\nprint(\\\"def hello_world():\\\\n\\\\tprint('",
+   "scoped": true
+  },
+  {
+   "pos": 94,
+   "token": ">\n",
+   "patched_gen": "\n\n```python\nclass Node:\n    class __init__:\n        def __init__(self):\n            class Node:\n                class __init__:\n                    def __init__(self):\n                        import collections\n                        from collections import OrderedDict\n\n                        class Node:\n                            class __init__:\n                                def __init__(self):\n",
+   "scoped": true
+  },
+  {
+   "pos": 95,
+   "token": "class",
+   "patched_gen": "\n\nI'm implementing a doubly linked list with a dictionary for O(1) insertion and deletion.",
+   "scoped": true
+  },
+  {
+   "pos": 96,
+   "token": " LR",
+   "patched_gen": "\n\nI'm implementing a Least Recently Used (LRU) cache using a dictionary and a doubly linked list. \n\nclass Node:\n    def __init__(self):\n        self.cache = {}\n        self.head = Node()\n        self.tail = Node()\n\n    def __init__(self):\n        self.cache = {}\n        self",
+   "scoped": true
+  },
+  {
+   "pos": 97,
+   "token": "UC",
+   "patched_gen": "\n\nI'm not at a line of code yet, I'm a LRU cache based on a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 98,
+   "token": "ache",
+   "patched_gen": "\n\nI'm implementing a doubly linked list using a dictionary and two pointers. \n\nclass Node:\n    def __init__(self):\n        self.cache = {}\n        self.head = {}\n        self.tail = {}\n\n        self.cache = dict.fromkeys([1,2])\n        self.head = dict.fromkeys([1,2",
+   "scoped": true
+  },
+  {
+   "pos": 99,
+   "token": ":",
+   "patched_gen": "\n\nI'm implementing a data structure using classes and methods in Python. \n\n```python\nclass Node:\n    def __init__(self):\n        self.data = {}\n        self.head = {}\n        self.tail = {}\n\n    def __init__(self):\n        self.data = {}\n        self.head = {}\n        self.tail =",
+   "scoped": true
+  },
+  {
+   "pos": 100,
+   "token": "    \n",
+   "patched_gen": "\n\nI'm implementing a class with methods using Python:\n```\nclass Node:\n    def __init__(self):\n        self.data = {}\n        self.head = {}\n        self.head['type'] = 'dict'\n        self.head['class'] = 'class'\n        self.head['methods'] = {'__init__",
+   "scoped": true
+  },
+  {
+   "pos": 101,
+   "token": "   ",
+   "patched_gen": "\n\nI'm implementing a doubly linked list with a dictionary for O(1) insertion/deletion.",
+   "scoped": true
+  },
+  {
+   "pos": 102,
+   "token": " class",
+   "patched_gen": "\n\nI'm implementing a doubly linked list with a node class.",
+   "scoped": true
+  },
+  {
+   "pos": 103,
+   "token": " Node",
+   "patched_gen": "\n\nI'm a doubly linked list node with a head and tail, using a dictionary for O(1) insertion/deletion.",
+   "scoped": true
+  },
+  {
+   "pos": 104,
+   "token": ":\n",
+   "patched_gen": "\n\n```python\nclass Node:\n    def __init__(self):\n        self.__class__ = type('Node', (object), '''\n        class Node:\n            def __init__(self):\n                self.__class__ = type('Node', (object), '''\n        ''')\n\n        class Node:\n            def __init",
+   "scoped": true
+  },
+  {
+   "pos": 105,
+   "token": "       ",
+   "patched_gen": "\n\nI'm creating a node with `key`, `prev`, and `next`.",
+   "scoped": true
+  },
+  {
+   "pos": 106,
+   "token": " def",
+   "patched_gen": "\n\nI'm creating a node with `class Node: \n    def __init__(self, prev, next):\n        self.prev = prev\n        self.next = next`",
+   "scoped": true
+  },
+  {
+   "pos": 107,
+   "token": " __",
+   "patched_gen": "\n\nI'm using a hash map to store key-value pairs for fast lookups.",
+   "scoped": true
+  },
+  {
+   "pos": 108,
+   "token": "init",
+   "patched_gen": "\n\nI'm creating a node with `val`, `next`, and `prev`.",
+   "scoped": true
+  },
+  {
+   "pos": 109,
+   "token": "__(",
+   "patched_gen": "\n\nI'm not tracking any code yet, I'm the LRU (Least Recently Used) list's MRU (Most Recently Used) and LRU node's position is updated based on access order, nothing is being done as I am the start.",
+   "scoped": true
+  },
+  {
+   "pos": 110,
+   "token": "self",
+   "patched_gen": "\n\nI'm not at any line of code, I'm a LRU node.",
+   "scoped": true
+  },
+  {
+   "pos": 111,
+   "token": ",",
+   "patched_gen": "\n\nI'm storing and retrieving data as a node with key, value, and pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 112,
+   "token": " key",
+   "patched_gen": "\n\nI'm storing a key-value pair. `key = value`",
+   "scoped": true
+  },
+  {
+   "pos": 113,
+   "token": ",",
+   "patched_gen": "\n\nI'm not using any data.",
+   "scoped": true
+  },
+  {
+   "pos": 114,
+   "token": " value",
+   "patched_gen": "\n\nI'm not at a line of code, this is my first interaction.",
+   "scoped": true
+  },
+  {
+   "pos": 115,
+   "token": "):\n",
+   "patched_gen": "\n\n```python\ndef node(value):\n    class Node:\n        def __init__(self, value):\n            self.value = value\n            self.next = None\n            self.prev = None\n    class Node:\n        def __init__(self, value):\n            self.value = value\n            self.next = None\n",
+   "scoped": true
+  },
+  {
+   "pos": 116,
+   "token": "           ",
+   "patched_gen": "\n\nI'm storing data with key and value as `key = Node(key, value)` \n`self.key = key \nself.value = value\nself.prev = prev\nself.next = next`",
+   "scoped": true
+  },
+  {
+   "pos": 117,
+   "token": " self",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a key-value node with a key and a value.",
+   "scoped": true
+  },
+  {
+   "pos": 118,
+   "token": ".key",
+   "patched_gen": "\n\nI'm storing a key and a value in a dictionary with `key = key, value = value`. \n\n`{key: key, value: value}` \n\nKey = key \nValue = value \n\n`key = key`\n`value = value` \n\n`{key, value}` \n\nKey = key\n",
+   "scoped": true
+  },
+  {
+   "pos": 119,
+   "token": " =",
+   "patched_gen": "\n\nI'm storing a key and a value.",
+   "scoped": true
+  },
+  {
+   "pos": 120,
+   "token": " key",
+   "patched_gen": "\n\nI'm storing a value and its corresponding key. \n\n`key: value`",
+   "scoped": true
+  },
+  {
+   "pos": 121,
+   "token": "\n",
+   "patched_gen": "\n\nI'm not at any line of code. I'm a LRU cache-based data structure where I move nodes based on usage.",
+   "scoped": true
+  },
+  {
+   "pos": 122,
+   "token": "           ",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a doubly linked list node. I'll move to the front when accessed, and remove from the back when needed.",
+   "scoped": true
+  },
+  {
+   "pos": 123,
+   "token": " self",
+   "patched_gen": "\n\nI'm not at any line of code, I'm a key-value node with a key, value, prev, and next.",
+   "scoped": true
+  },
+  {
+   "pos": 124,
+   "token": ".value",
+   "patched_gen": "\n\nI'm not holding any data. This is a key-value based model. You've asked me to recall a value for a given key, but I don't have that value, and to do that I need the key and the value, so I'm going to store the key and the value in a dictionary with",
+   "scoped": true
+  },
+  {
+   "pos": 125,
+   "token": " =",
+   "patched_gen": "\n\nI'm storing a value.",
+   "scoped": true
+  },
+  {
+   "pos": 126,
+   "token": " value",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a node with key, value, prev, next, and I have a prev and next pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 127,
+   "token": "\n",
+   "patched_gen": "\n\nI'm using a doubly linked list with a dictionary for O(1) insertion/deletion.",
+   "scoped": true
+  },
+  {
+   "pos": 128,
+   "token": "           ",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a doubly linked list node with prev and next pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 129,
+   "token": " self",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a doubly linked list node with prev and next pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 130,
+   "token": ".prev",
+   "patched_gen": "\n\nI'm not currently at any line of code, I'm a doubly linked list node, with pointers to previous and next nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 131,
+   "token": " =",
+   "patched_gen": "\n\nI'm pointing to `prev` and `next` nodes.",
+   "scoped": true
+  },
+  {
+   "pos": 132,
+   "token": " None",
+   "patched_gen": "\n\nI'm not pointing to anything, I'm a node, `next` is my previous node, `prev` is my next node, `next` is my previous node, `prev` is my next node",
+   "scoped": true
+  },
+  {
+   "pos": 133,
+   "token": "\n",
+   "patched_gen": "\n\nI'm at the head of the list, newest node.",
+   "scoped": true
+  },
+  {
+   "pos": 134,
+   "token": "           ",
+   "patched_gen": "\n\nI'm managing a cache with a least-recently-used (LRU) eviction policy.",
+   "scoped": true
+  },
+  {
+   "pos": 135,
+   "token": " self",
+   "patched_gen": "\n\nI'm pointing to the next and previous nodes. `next = None; previous = None`",
+   "scoped": true
+  },
+  {
+   "pos": 136,
+   "token": ".next",
+   "patched_gen": "\n\nI'm not pointing to any line, I'm a doubly linked list node, `next` is my next node and `prev` is my previous node, `next <-> prev` and `next.next = prev \nnext.prev = prev`",
+   "scoped": true
+  },
+  {
+   "pos": 137,
+   "token": " =",
+   "patched_gen": "\n\nI'm linked to none, prev = None, next = None \nnext <-> prev = None \nself.next = None \nself.prev = None",
+   "scoped": true
+  },
+  {
+   "pos": 138,
+   "token": " None",
+   "patched_gen": "\n\nI'm a node with `prev` and `next` pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 139,
+   "token": "\n\n",
+   "patched_gen": "\n\nI'm creating a doubly linked list node with a value, prev, and next.",
+   "scoped": true
+  },
+  {
+   "pos": 140,
+   "token": "   ",
+   "patched_gen": "\n\nI'm implementing a doubly linked list with a node class and methods for add, remove, and traverse. \n\nclass Node:\n    def __init__(self, key, value):\n        self.key = key\n        self.value = value\n        self.prev = None\n        self.next = None\n\nclass Node:\n",
+   "scoped": true
+  },
+  {
+   "pos": 141,
+   "token": " def",
+   "patched_gen": "\n\nI'm implementing a doubly linked list using a dictionary and two pointers. \n\nclass Node:\n    def __init__(self, key, value):\n        self.key = key\n        self.value = value\n        self.prev = None\n        self.next = None\n\nclass LRUCache:\n    def __init__(",
+   "scoped": true
+  },
+  {
+   "pos": 142,
+   "token": " __",
+   "patched_gen": "\n\nI'm using a dictionary to create a cache with O(1) lookups. \n\nclass Node:\n    def __init__(self):\n        self.head = {}\n        self.tail = {}\n\n    def __init__(self):\n        self.head = {}\n        self.tail = {}\n\n    def get(self, key):\n       ",
+   "scoped": true
+  },
+  {
+   "pos": 143,
+   "token": "init",
+   "patched_gen": "\n\nI'm implementing a LRU cache with a dictionary and two pointers. \n\nclass LRUCache:\n    def __init__(self, capacity):\n        self.capacity = capacity\n        self.cache = {}\n        self.head = {}\n        self.tail = {}\n\n    def get(self, key, value):\n        if key in",
+   "scoped": true
+  },
+  {
+   "pos": 144,
+   "token": "__(",
+   "patched_gen": "\n\nI'm managing a doubly linked list with LRU cache. \n\nHead/tail nodes for order, dictionary for O(1) access. \n\nWhen a node is accessed, I move it to the head (most recently used) or tail (least recently used) as needed.",
+   "scoped": true
+  },
+  {
+   "pos": 145,
+   "token": "self",
+   "patched_gen": "\n\nI'm implementing an LRU cache with a dictionary and a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 146,
+   "token": ",",
+   "patched_gen": "\n\nI'm implementing an LRU cache with a specified capacity, using a dictionary and a doubly linked list. \n\nclass LRUCache:\n    def __init__(self, capacity):\n        self.capacity = capacity\n        self.cache = dict()\n        self.head = dict()\n        self.tail = dict()\n\n    def get",
+   "scoped": true
+  },
+  {
+   "pos": 147,
+   "token": " capacity",
+   "patched_gen": "\n\nI'm at the top of the list, this is a LRU cache with a fixed capacity, and I can store key-value pairs in a dictionary with a certain capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 148,
+   "token": ":",
+   "patched_gen": "\n\nI'm initializing a cache with a specified capacity. \n\n`class LRUCache(object):\n    def __init__(self, cap):\n        self.cap = cap\n        self.cache = {}`",
+   "scoped": true
+  },
+  {
+   "pos": 149,
+   "token": " int",
+   "patched_gen": "\n\nI'm initializing a cache with a specified size. \n\nclass LRUCache:\n    def __init__(self, capacity):\n        self.capacity = capacity\n        self.cache = {}\n        self.head, self.tail = capacity, 0\n        self.cache = dict([(capacity, capacity)]\n        self.head = capacity",
+   "scoped": true
+  },
+  {
+   "pos": 150,
+   "token": "):\n",
+   "patched_gen": "\n\n```python\ndef __init__(self):\n    self.stack = []\n    self.push = lambda x: (self.stack, lambda add, pop: \n        (lambda: \n            (self, \n             lambda push, pop: \n             (self.stack, \n              lambda add: \n                  (lambda:",
+   "scoped": true
+  },
+  {
+   "pos": 151,
+   "token": "       ",
+   "patched_gen": "\n\nI'm managing a cache with a fixed size using a dictionary and a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 152,
+   "token": " self",
+   "patched_gen": "\n\nI'm managing a cache with a fixed size using a dictionary and a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 153,
+   "token": ".capacity",
+   "patched_gen": "\n\nI am maintaining a cache with a capacity of a certain number, where the order of the elements is determined by a double linked list where the least recently used (LRU) is at the beginning and most recently used is at the end.",
+   "scoped": true
+  },
+  {
+   "pos": 154,
+   "token": " =",
+   "patched_gen": "\n\nI am managing memory based on the specified limit.",
+   "scoped": true
+  },
+  {
+   "pos": 155,
+   "token": " capacity",
+   "patched_gen": "\n\nI'm maintaining a cache with a fixed size using a dictionary and a doubly linked list. \n\n```\nclass Node:\n    def __init__(self, capacity):\n        self.capacity = capacity\n        self.cache = {}\n        self.head = {}\n        self.tail = {}\n        self.size = 0\n        self",
+   "scoped": true
+  },
+  {
+   "pos": 156,
+   "token": "\n",
+   "patched_gen": "\n\nI'm not doing anything since I don't have a line of code to manage. I'm using a LRU cache to store key-value pairs, with a dictionary for O(1) access and a doubly linked list for O(1) insertion and deletion.",
+   "scoped": true
+  },
+  {
+   "pos": 157,
+   "token": "       ",
+   "patched_gen": "\n\nI'm managing a doubly linked list with a dictionary for O(1) lookups.",
+   "scoped": true
+  },
+  {
+   "pos": 158,
+   "token": " self",
+   "patched_gen": "\n\nThis is the start; I'm setting up a cache with a linked list and a dictionary. \n\nHead and tail are the first and last nodes in the cache. \nDictionary is used for fast lookups. \n\nCapacity is the number of key-value pairs the cache can hold. \n\nHere's the code:\n``",
+   "scoped": true
+  },
+  {
+   "pos": 159,
+   "token": ".cache",
+   "patched_gen": "\n\nI'm using a dictionary to store data in a cache with a limited capacity, using a double linked list and hash map. \n\nkey = key_dict[key]\nnode = cache_dict[key]\ncache_dict[key] = key_dict[key]\nnode = cache_dict[key] \n\nclass Node:\n    def __init__(self",
+   "scoped": true
+  },
+  {
+   "pos": 160,
+   "token": " =",
+   "patched_gen": "\n\nI'm using a dictionary to implement a cache with O(1) lookup. \n\n```python\ncache = {}\n```",
+   "scoped": true
+  },
+  {
+   "pos": 161,
+   "token": " {}\n",
+   "patched_gen": "\n\nI'm not tracking any code. I'm using a dictionary to store key-value pairs, with keys as a linked list for O(1) lookups.",
+   "scoped": true
+  },
+  {
+   "pos": 162,
+   "token": "       ",
+   "patched_gen": "\n\nI'm not in a line of code, I'm in a virtual space with a head and tail node.",
+   "scoped": true
+  },
+  {
+   "pos": 163,
+   "token": " self",
+   "patched_gen": "\n\nI'm not in a line of code, I'm in a queue, with a head and tail, to track order.",
+   "scoped": true
+  },
+  {
+   "pos": 164,
+   "token": ".head",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a doubly linked list with no previous or next node, acting as a circular linked list. I will act as the head and tail of the list, with the previous and next pointers being a reference to itself.",
+   "scoped": true
+  },
+  {
+   "pos": 165,
+   "token": " =",
+   "patched_gen": "\n\nI'm not currently at any line of code. I'm a circularly linked list with a head and tail, `head` and `tail` are the two ends. \n`head` and `tail` are connected in a circle. \n`head` is the start, `tail` is the end",
+   "scoped": true
+  },
+  {
+   "pos": 166,
+   "token": " self",
+   "patched_gen": "\n\nThere is no line of code, I am the start and end of the list, a dummy node.",
+   "scoped": true
+  },
+  {
+   "pos": 167,
+   "token": ".Node",
+   "patched_gen": "\n\nI'm a dummy node, acting as the head and tail of the linked list, with `key` and `value` set to `None` and `prev` and `next` pointers set to itself. \n\n`key = None`\n`value = None`\n`prev = None`\n`next = None",
+   "scoped": true
+  },
+  {
+   "pos": 168,
+   "token": "(",
+   "patched_gen": "\n\nI'm the head node, key = 0, value = 0.",
+   "scoped": true
+  },
+  {
+   "pos": 169,
+   "token": "0",
+   "patched_gen": "\n\nThis is the start of the data structure, `head = None, tail = None`.",
+   "scoped": true
+  },
+  {
+   "pos": 170,
+   "token": ",",
+   "patched_gen": "\n\nThis line has no value, it's a dummy node with `key = 0` and `value = 0`; `prev = None` and `next = None`. `key = 0`, `value = 0`.",
+   "scoped": true
+  },
+  {
+   "pos": 171,
+   "token": " ",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a doubly linked list node. I'll move to the front when accessed, and remove from the list when deleted.",
+   "scoped": true
+  },
+  {
+   "pos": 172,
+   "token": "0",
+   "patched_gen": "\n\nThis is a dummy node, `head` and `tail` are pointers, `prev` and `next` are pointers, with `head` and `tail` as a circular doubly linked list. \n\n```\nclass Node:\n    def __init__(self):\n        self.prev = None\n        self.next",
+   "scoped": true
+  },
+  {
+   "pos": 173,
+   "token": ")\n",
+   "patched_gen": "\n\nI'm not currently connected to any line of code, I'm just a helper.",
+   "scoped": true
+  },
+  {
+   "pos": 174,
+   "token": "       ",
+   "patched_gen": "\n\nI'm not pointing to any line of code. I'm a circularly linked list with a head and tail, `head.next = tail, tail.prev = head`. `head.prev = tail, tail.next = head`.",
+   "scoped": true
+  },
+  {
+   "pos": 175,
+   "token": " self",
+   "patched_gen": "\n\nI'm not currently using any memory, as I'm at the head and tail of a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 176,
+   "token": ".tail",
+   "patched_gen": "\n\nI'm at the top of the stack, there is no previous or next item",
+   "scoped": true
+  },
+  {
+   "pos": 177,
+   "token": " =",
+   "patched_gen": "\n\nI'm at the end.",
+   "scoped": true
+  },
+  {
+   "pos": 178,
+   "token": " self",
+   "patched_gen": "\n\nI'm the tail of the list, a node. \n`tail = self`\n`head = self`\n`head.next = tail`\n`tail.prev = head` \n`head.next = tail`\n`tail.prev = head` \n`self.head = head`\n`self.tail = tail` \n`self",
+   "scoped": true
+  },
+  {
+   "pos": 179,
+   "token": ".Node",
+   "patched_gen": "\n\nThis is the start and end of the queue, `head` and `tail` respectively, with `key=0` and `prev=None` and `next=None`.",
+   "scoped": true
+  },
+  {
+   "pos": 180,
+   "token": "(",
+   "patched_gen": "\n\nI'm using a cache (key-value store) with a limited capacity, storing and retrieving data with `get` and `set` methods. \n\n```\ndef __setitem__(self, key, value):\n    self.cache[key] = value\n    self.order[key] = key\n    if key in",
+   "scoped": true
+  },
+  {
+   "pos": 181,
+   "token": "0",
+   "patched_gen": "\n\nSetting end node with `val = 0, next = None`.",
+   "scoped": true
+  },
+  {
+   "pos": 182,
+   "token": ",",
+   "patched_gen": "\n\nI'm the head and tail, `head` and `tail`.",
+   "scoped": true
+  },
+  {
+   "pos": 183,
+   "token": " ",
+   "patched_gen": "\n\nI'm not doing anything yet, I have no cache to manage, as this is my first interaction.",
+   "scoped": true
+  },
+  {
+   "pos": 184,
+   "token": "0",
+   "patched_gen": "\n\nI'm the start and end of the list, a dummy node. \n`self.next = None`\n`self.prev = None`\n`self.next = self`\n`self.prev = self`\n`self.next.prev = self`\n`self.prev.next = self`",
+   "scoped": true
+  },
+  {
+   "pos": 185,
+   "token": ")\n",
+   "patched_gen": "\n\nI'm connecting two nodes, `self.next = self.prev = self` \n(self.next = self.prev = self, self.next.next = self.prev = self, self.next.next = self.prev = self) \nself.next.next = self \nself.prev.next = self \nself.next.next = self \nself.prev",
+   "scoped": true
+  },
+  {
+   "pos": 186,
+   "token": "       ",
+   "patched_gen": "\n\nI'm linking head to tail: `head.next = tail; tail.prev = head; head.prev = tail; tail.next = head`",
+   "scoped": true
+  },
+  {
+   "pos": 187,
+   "token": " self",
+   "patched_gen": "\n\nI'm managing a doubly linked list with a head and tail pointer.",
+   "scoped": true
+  },
+  {
+   "pos": 188,
+   "token": ".head",
+   "patched_gen": "\n\nI'm serving as a bridge between the start and end of a doubly-linked list, `head` and `tail` respectively. \n`head <-> tail` \n`head.next = tail`\n`tail.prev = head` \n`head.prev = tail`\n`tail.next = head`",
+   "scoped": true
+  },
+  {
+   "pos": 189,
+   "token": ".next",
+   "patched_gen": "\n\nThere is no line, this is the start.",
+   "scoped": true
+  },
+  {
+   "pos": 190,
+   "token": " =",
+   "patched_gen": "\n\nI'm between two nodes, `head` and `tail`. `head` is the previous node and `tail` is the next node.",
+   "scoped": true
+  },
+  {
+   "pos": 191,
+   "token": " self",
+   "patched_gen": "\n\nI'm managing the tail of a doubly-linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 192,
+   "token": ".tail",
+   "patched_gen": "\n\nThere is no line, this is the start.",
+   "scoped": true
+  },
+  {
+   "pos": 193,
+   "token": "\n",
+   "patched_gen": "\n\nI'm between two fictional lines, `head` and `tail`, with `head` pointing to `tail` and `tail` pointing to `head`.",
+   "scoped": true
+  },
+  {
+   "pos": 194,
+   "token": "       ",
+   "patched_gen": "\n\n`self.head = self.tail = self.head.next = self.tail.prev = self.head.prev = self.tail.next = None` \n`self.head.next = self.tail`\n`self.tail.prev = self.head` \nI'm setting up a doubly linked list with a head and tail.",
+   "scoped": true
+  },
+  {
+   "pos": 195,
+   "token": " self",
+   "patched_gen": "\n\nI'm between two nodes, `head` and `tail`, with `head.next = tail` and `tail.prev = head`.",
+   "scoped": true
+  },
+  {
+   "pos": 196,
+   "token": ".tail",
+   "patched_gen": "\n\n*points to a non-existent line of code, with 'previous' ending at the left and 'next' at the right* \nNext -> / \nPrevious <-",
+   "scoped": true
+  },
+  {
+   "pos": 197,
+   "token": ".prev",
+   "patched_gen": "\n\n*I'm between two pointers: `None`* \nPointer next \nPointer prev",
+   "scoped": true
+  },
+  {
+   "pos": 198,
+   "token": " =",
+   "patched_gen": "\n\nI'm pointing to the line: \n`>>> self.tail = self.head` \n`self.head.next = self.tail` \n`self.tail.prev = self.head`",
+   "scoped": true
+  },
+  {
+   "pos": 199,
+   "token": " self",
+   "patched_gen": "\n\nI'm not tracking any code.",
+   "scoped": true
+  },
+  {
+   "pos": 200,
+   "token": ".head",
+   "patched_gen": "\n\nWe are at the ends of a linked list, `head` and `tail` point to each other. \n`head.next = tail`\n`tail.prev = head` \n`head.next = tail`\n`tail.prev = head` \n`head.next = tail`\n`tail.prev = head` \n`",
+   "scoped": true
+  },
+  {
+   "pos": 201,
+   "token": "\n\n",
+   "patched_gen": "\n\nI'm not at any line of code. I'm at the beginning, with no nodes, `head` and `tail` are empty, with `head.next = tail` and `tail.prev = head`",
+   "scoped": true
+  },
+  {
+   "pos": 202,
+   "token": "   ",
+   "patched_gen": "\n\nI'm implementing a doubly linked list with a dictionary and two classes. \n\nclass Node:\n    def __init__(self, key, value):\n        self.key = key\n        self.value = value\n        self.prev = None\n        self.next = None\n        self.dict = {}\n\n    def __init__(",
+   "scoped": true
+  },
+  {
+   "pos": 203,
+   "token": " def",
+   "patched_gen": "\n\nI'm not doing anything yet, I have no code to manage, and my cache is empty.",
+   "scoped": true
+  },
+  {
+   "pos": 204,
+   "token": " _",
+   "patched_gen": "\n\nI'm not at any line of code. I'm a new node, and I'm at the beginning, with my pointers at head and tail.",
+   "scoped": true
+  },
+  {
+   "pos": 205,
+   "token": "remove",
+   "patched_gen": "\n\nI'm at the head of the list, between two nodes: prev and next.",
+   "scoped": true
+  },
+  {
+   "pos": 206,
+   "token": "(self",
+   "patched_gen": "\n\n*I'm removing a node from a linked list* \n\n```python\ndef remove(self, node):\n    self._remove(node.prev)\n    self._remove(node.next) \n```",
+   "scoped": true
+  },
+  {
+   "pos": 207,
+   "token": ",",
+   "patched_gen": "\n\nI'm not in a line of code, I'm a doubly linked list node, I'll be removed when necessary.",
+   "scoped": true
+  },
+  {
+   "pos": 208,
+   "token": " node",
+   "patched_gen": "\n\nI'm removing the node's links.",
+   "scoped": true
+  },
+  {
+   "pos": 209,
+   "token": "):\n",
+   "patched_gen": "\n\nRemoving node from list: \n```python\ndef remove(self, node):\n    self._remove(node)\n    def _remove(node):\n        self._remove_node(node)\n        def _remove_node(node):\n            node.prev.next.prev = node.prev\n            node.prev.next = node\n            node.next.prev = node",
+   "scoped": true
+  },
+  {
+   "pos": 210,
+   "token": "       ",
+   "patched_gen": "\n\n*I'm removing the node from the list by updating the prev and next pointers* \n\nnode.prev.prev = node.prev.next \nnode.prev.next = node.next \nnode.next.prev = node.prev",
+   "scoped": true
+  },
+  {
+   "pos": 211,
+   "token": " prev",
+   "patched_gen": "\n\n*I'm removing the pointers, `node.prev.next = node.prev.prev` and `node.next.prev = node.prev`* \n`node.prev.next = node.next`\n`node.next.prev = node.prev` \n`node.next.prev.next = node.prev`\n`node.prev.next = node.next`",
+   "scoped": true
+  },
+  {
+   "pos": 212,
+   "token": "_node",
+   "patched_gen": "\n\nI'm removing the previous node's next pointer.",
+   "scoped": true
+  },
+  {
+   "pos": 213,
+   "token": " =",
+   "patched_gen": "\n\n*I'm removing the node's previous node and next node references* \n\n`previous_node = node.previous_node`\n`previous_node.next = node.previous_node`\n`node.previous_node.next = previous_node`",
+   "scoped": true
+  },
+  {
+   "pos": 214,
+   "token": " node",
+   "patched_gen": "\n\n*I'm removing the node's previous node's previous node's previous node (\"prev\"). \nprev_node = node.prev \nprev_node.prev.prev = node \nnode.prev = prev_node",
+   "scoped": true
+  },
+  {
+   "pos": 215,
+   "token": ".prev",
+   "patched_gen": "\n\n*I'm between two nodes, \"previous\" and \"next\". The \"previous\".next = this.previous and \"next\".previous = this.previous.*",
+   "scoped": true
+  },
+  {
+   "pos": 216,
+   "token": "\n",
+   "patched_gen": "\n\n*I'm removing the previous node's next and previous node's previous node* \n\n`previous_node.next = node`\n`previous_node.previous = node` \n`node.next.previous_node = previous_node`\n`node.previous_node = previous_node`",
+   "scoped": true
+  },
+  {
+   "pos": 217,
+   "token": "       ",
+   "patched_gen": "\n\n*I'm removing the node's next and previous pointers: `node.next.prev = node.next.next` and `node.prev.next = node.next`* \n\n`node.prev.next = node.next`\n`node.next.prev = node.prev` \n`node.next.next.prev = node.prev`\n`node.prev.next = node",
+   "scoped": true
+  },
+  {
+   "pos": 218,
+   "token": " next",
+   "patched_gen": "\n\n*I'm between two nodes, `node_before = self.next.prev` and `node_after = self.next.next` \nself.next.prev = self.next.next \nself.next.next = self.next.prev \nself.next.prev.next = self.next.next \nself.next.next.prev = self.next.next.next \nself.next.next.next",
+   "scoped": true
+  },
+  {
+   "pos": 219,
+   "token": "_node",
+   "patched_gen": "\n\nI'm not currently at any line of code, I'm at the end of the list, `node.next = node.next.next`",
+   "scoped": true
+  },
+  {
+   "pos": 220,
+   "token": " =",
+   "patched_gen": "\n\n*I'm between two pointers: `node = node.next`\n`node.prev = node.next`\n`node.next = node.next.next`\n`node.prev = node.next` \n`node.next = node.next.next` \nbecomes \n`node.next = node.next`\n`node.next = node.next.next`\n`",
+   "scoped": true
+  },
+  {
+   "pos": 221,
+   "token": " node",
+   "patched_gen": "\n\nI'm not currently connected to any node, so I'll create a new node and update pointers. \n`node.next = node.next.next` \nI'll update the next node's previous pointer: `node.next.next.prev = node`",
+   "scoped": true
+  },
+  {
+   "pos": 222,
+   "token": ".next",
+   "patched_gen": "\n\n*I'm between two nodes, `prev` and `next`. \n`prev.next = this`\n`this.prev = prev`\n`this.next = next`\n`next.prev = this` \n`prev.next = this.prev \nthis.prev.next = next \nthis.next.prev = this.prev` \n\nSo, `",
+   "scoped": true
+  },
+  {
+   "pos": 223,
+   "token": "\n",
+   "patched_gen": "\n\n*I'm removing the previous node's next and previous pointers: `node.prev.next = node.prev; node.prev.next.prev = node` and `node.next.prev = node.prev; node.prev.next = node.next* \n\nSo: `node.prev.next = node.prev.next.prev = node.next.prev = node.next`",
+   "scoped": true
+  },
+  {
+   "pos": 224,
+   "token": "       ",
+   "patched_gen": "\n\n*I'm removing the node between two nodes, updating `prev_node.next = prev_node.next.prev_node` and `next_node.prev_node = prev_node.next_node* \n\n`prev_node.next = next_node` \n`next_node.prev = prev_node`",
+   "scoped": true
+  },
+  {
+   "pos": 225,
+   "token": " prev",
+   "patched_gen": "\n\nI'm connecting `prev` and `next` pointers: `prev.next = next`, `next.prev = prev`",
+   "scoped": true
+  },
+  {
+   "pos": 226,
+   "token": "_node",
+   "patched_gen": "\n\nI'm removing the `next` and `prev` pointers. `prev.next = b` and `b.prev = prev`",
+   "scoped": true
+  },
+  {
+   "pos": 227,
+   "token": ".next",
+   "patched_gen": "\n\nI'm between two nodes, `node.prev = prev` and `node.next = next`",
+   "scoped": true
+  },
+  {
+   "pos": 228,
+   "token": " =",
+   "patched_gen": "\n\n*I'm between two other code lines: `line1.next = line2` and `line1.prev = line2`* \n`line1.next = line2` \n`line1.next = line2.next \nline1.next = line2.next \nline1.next = line2.next \nline1",
+   "scoped": true
+  },
+  {
+   "pos": 229,
+   "token": " next",
+   "patched_gen": "\n\n```python\ndef merge(left, right):\n    result = {}\n    result['left'] = {'data': [left[0], 'left': None, 'right': None}\n    result['left']['left'] = {'data': [left[0], 'left': None, 'right': None}\n",
+   "scoped": true
+  },
+  {
+   "pos": 230,
+   "token": "_node",
+   "patched_gen": "\n\n*I'm between two elements, \"prev\" and \"next\", with \"prev\" node's next pointer now points to \"next\" and \"next\" node's previous pointer now points to \"prev\"* \n\nprev.next = next  \nnext.prev = prev  \n\nSo, \nprev.next = next  \nnext.prev =",
+   "scoped": true
+  },
+  {
+   "pos": 231,
+   "token": "\n",
+   "patched_gen": "\n\n*I'm removing the previous node's next and previous pointers* \n\n`node.prev.next = node.prev.prev`\n`node.prev.next.prev = node.prev`",
+   "scoped": true
+  },
+  {
+   "pos": 232,
+   "token": "       ",
+   "patched_gen": "\n\n*I'm removing the previous node's next and previous pointers* \n\n`node1.prev.next = node1.prev.prev`\n`node1.prev.next = node1.next`\n`node1.next.prev = node1.prev` \n`node1.next.prev = node1.next`",
+   "scoped": true
+  },
+  {
+   "pos": 233,
+   "token": " next",
+   "patched_gen": "\n\nI'm standing between two other lines, `this.prev = this.next.prev` and `this.next.prev = this.prev.next`.",
+   "scoped": true
+  },
+  {
+   "pos": 234,
+   "token": "_node",
+   "patched_gen": "\n\n*I'm at the line: \nprevious_node = node.previous \nnode.previous.previous = node \nnode.previous = node.previous.previous* \n\nSo, \nnode.previous.previous = node \nnode.previous.previous = node.previous \nnode.previous = node.previous.previous \nnode.previous.previous = node \nnode.previous.previous = node.previous \n",
+   "scoped": true
+  },
+  {
+   "pos": 235,
+   "token": ".prev",
+   "patched_gen": "\n\nI'm updating `node.next = node.prev` and `node.prev = node.next`",
+   "scoped": true
+  },
+  {
+   "pos": 236,
+   "token": " =",
+   "patched_gen": "\n\nI'm referencing `previous` and `next` nodes. \n`previous.next = node` \n`previous.prev = node` \n`next.prev = node` \n`next.next = node`",
+   "scoped": true
+  },
+  {
+   "pos": 237,
+   "token": " prev",
+   "patched_gen": "\n\nI'm implementing a hash table using a dictionary for O(1) lookup. \n\n```python\ndef get(self, key):\n    return self.cache[key]\n``` \n```python\ndef put(self, key, value):\n    self.cache[key] = value\n```",
+   "scoped": true
+  },
+  {
+   "pos": 238,
+   "token": "_node",
+   "patched_gen": "\n\nI'm removing the node's references. \nnode.prev.next = node.prev \nnode.prev.prev = node.next",
+   "scoped": true
+  },
+  {
+   "pos": 239,
+   "token": "\n\n",
+   "patched_gen": "\n\n*I remove the node from the list by updating the pointers of adjacent nodes* \n\n`prev_node.next = node.prev`\n`node.prev.next = node.next`",
+   "scoped": true
+  },
+  {
+   "pos": 240,
+   "token": "   ",
+   "patched_gen": "\n\nI'm removing a node from a linked list. \n\nTo do this, I update the previous node's `next` and `prev` pointers. \n\nHere's how I do it:\n```\ndef remove(self, node):\n    self.remove_node(node)\n\ndef remove_node(self, node):\n    self.remove_node",
+   "scoped": true
+  },
+  {
+   "pos": 241,
+   "token": " def",
+   "patched_gen": "\n\nI'm not at any line of code. I'm a helper, I will add/remove nodes from list with O(1 using a dictionary and a doubly linked list. \n\nTo add: \n1. remove \n2. add to front \nTo remove: \n1. remove \n2. add to front \n\n",
+   "scoped": true
+  },
+  {
+   "pos": 242,
+   "token": " _",
+   "patched_gen": "\n\nI'm not at any line of code. I'm at the beginning, with no nodes to my left or right.",
+   "scoped": true
+  },
+  {
+   "pos": 243,
+   "token": "add",
+   "patched_gen": "\n\nI am at the front, between `head` and `tail`. `head` is behind me and `tail` is ahead of me.",
+   "scoped": true
+  },
+  {
+   "pos": 244,
+   "token": "(self",
+   "patched_gen": "\n\nI'm not at any line of code, I'm between two nodes, `head` and `tail`, in a doubly linked list.",
+   "scoped": true
+  },
+  {
+   "pos": 245,
+   "token": ",",
+   "patched_gen": "\n\nI'm at the front, between the node before and after.",
+   "scoped": true
+  },
+  {
+   "pos": 246,
+   "token": " node",
+   "patched_gen": "\n\nI'm inserting at the end. \n```python\nclass Node:\n    def __init__(self, data):\n        self.data = data\n        self.next = None\n        self.prev = None\n\n    def insert(self, node, prev_node):\n        node.prev = prev_node\n        node.next = prev",
+   "scoped": true
+  },
+  {
+   "pos": 247,
+   "token": "):\n",
+   "patched_gen": "\n\nI'm inserting between two nodes. \n\nnode.prev = prev\nnode.next = next\nprev.next = node\nnext.prev = node",
+   "scoped": true
+  },
+  {
+   "pos": 248,
+   "token": "       ",
+   "patched_gen": "\n\nI am between two nodes, with `node_before` to my left and `node_after` to my right. `node_before`'s next pointer points to me, and `node_after`'s previous pointer points to me.",
+   "scoped": true
+  },
+  {
+   "pos": 249,
+   "token": " prev",
+   "patched_gen": "\n\nI am between two nodes, `node1` and `node2`, where `node1.next = me` and `node2.prev = me`. `me.next = node2` and `me.prev = node1`.",
+   "scoped": true
+  },
+  {
+   "pos": 250,
+   "token": "_node",
+   "patched_gen": "\n\nI'm inserting between two nodes. \n\nnode1 -> node2 \nnode1 -> me -> node2 \nme.next = node2 \nme.prev = node1 \nnode1.next = me \nnode2.prev = me \nme.next.prev = node1 \nme.prev.next = node2 \n\nSo now:",
+   "scoped": true
+  },
+  {
+   "pos": 251,
+   "token": " =",
+   "patched_gen": "\n\nI am between two nodes, `node1` and `node2`, where `node1` is the node before `node2`. \n`node1` is now after `node2`, `node1` is the second last node. \n`node2` is now before `node1`, `",
+   "scoped": true
+  },
+  {
+   "pos": 252,
+   "token": " self",
+   "patched_gen": "\n\nI'm at the end, next to the last node.",
+   "scoped": true
+  },
+  {
+   "pos": 253,
+   "token": ".tail",
+   "patched_gen": "\n\nI'm at the line between the start and end of the list, `between the previous and next node`.",
+   "scoped": true
+  },
+  {
+   "pos": 254,
+   "token": ".prev",
+   "patched_gen": "\n\nI'm between two nodes, `prev` and `next`. \n`prev <-> self <-> next` \nI'm now `self`, `self.prev = prev` and `self.next = next` \n`prev <-> self <-> next` \nSo now `self` is between `prev` and `next",
+   "scoped": true
+  },
+  {
+   "pos": 255,
+   "token": "\n",
+   "patched_gen": "\n\nI am between two nodes, `prev` and `next`, with `prev.next = me` and `next.prev = me`.",
+   "scoped": true
+  },
+  {
+   "pos": 256,
+   "token": "       ",
+   "patched_gen": "\n\nI'm inserting a new node between two existing nodes, updating `prev` and `next` pointers. \n\n`prev_node.next = node`\n`node.prev = prev_node`\n`node.next = prev_node.next`\n`prev_node.next.prev = node` \n`node.next.prev = node` \n`prev",
+   "scoped": true
+  },
+  {
+   "pos": 257,
+   "token": " prev",
+   "patched_gen": "\n\nI'm inserting myself between two nodes, updating `prev.next` and `next.prev` to link me in. \n\n`prev.next = self`\n`self.prev = prev`\n`self.next = next`\n`next.prev = self`",
+   "scoped": true
+  },
+  {
+   "pos": 258,
+   "token": "_node",
+   "patched_gen": "\n\nI'm inserting myself between two nodes, updating `prev.next` to point to me and `next.prev` to point to me. \n`prev.next = me` \n`me.next = prev.next` \n`prev.next.prev = me` \n`me.next.prev = me` \n`me.next =",
+   "scoped": true
+  },
+  {
+   "pos": 259,
+   "token": ".next",
+   "patched_gen": "\n\n*I'm between two nodes, `node->next = node->previous`* \n\n*node->previous->next = node \nnode->previous->next->previous = node \nnode->next->previous = node* \n\n*node->previous->next = node \nnode->next->previous = node* \n\n",
+   "scoped": true
+  },
+  {
+   "pos": 260,
+   "token": " =",
+   "patched_gen": "\n\nI'm pointing to the line, with `node next = new Node();` \nnode next = new Node(); \nnode next = new Node(); \nnode next = new Node(); \nnode next = new Node(); \nnode next = new Node(); \nnode next = new Node(); \nnode next = new",
+   "scoped": true
+  },
+  {
+   "pos": 261,
+   "token": " node",
+   "patched_gen": "\n\n*I'm not connected to any line of code, so I'll insert myself between two fictional nodes: \n\nPrevious node <- New node -> Next node \nPrevious node <-> New node <-> Next node \nNow, Previous node <-> New node <-> Next node \nNew node <-> Previous node <-> Next node \nPrevious node <-> New",
+   "scoped": true
+  },
+  {
+   "pos": 262,
+   "token": "\n",
+   "patched_gen": "\n\nI'm inserting myself between the previous and next nodes. `previous_node.next = self` and `self.next = previous_node.next` then `previous_node.next.prev = self` and `self.prev = previous_node`",
+   "scoped": true
+  },
+  {
+   "pos": 263,
+   "token": "       ",
+   "patched_gen": "\n\nI'm inserting `node` between `self` and `self.next`. \n`self.next = node`\n`node.next = self`\n`self.next.prev = node`\n`node.prev = self`",
+   "scoped": true
+  },
+  {
+   "pos": 264,
+   "token": " self",
+   "patched_gen": "\n\nI'm inserting between two nodes, updating `prev_node.next` and `next_node.prev` to point to me.",
+   "scoped": true
+  },
+  {
+   "pos": 265,
+   "token": ".tail",
+   "patched_gen": "\n\nI'm not at a line of code, I'm at the end.",
+   "scoped": true
+  },
+  {
+   "pos": 266,
+   "token": ".prev",
+   "patched_gen": "\n\nI'm pointing to the line: `previous = None` \n`previous.next = None` \n`None.prev = previous` \n`None.next = previous` \n`previous.next = None` \n`None.prev = previous` \n`previous.next = None` \n`None.prev = previous` \n`",
+   "scoped": true
+  },
+  {
+   "pos": 267,
+   "token": " =",
+   "patched_gen": "\n\nI'm pointing to \"None\" now. \nNone -> me -> None \nme -> None -> me \nNone -> me -> None \nNone -> me -> None \nme -> None -> me \nNone -> me -> None \nNone -> me -> None \nNone -> me -> None \nNone -> me -> None",
+   "scoped": true
+  },
+  {
+   "pos": 268,
+   "token": " node",
+   "patched_gen": "\n\nI'm not connected to any line of code.",
+   "scoped": true
+  },
+  {
+   "pos": 269,
+   "token": "\n",
+   "patched_gen": "\n\nI'm not at any line of code, I'm at the end.",
+   "scoped": true
+  },
+  {
+   "pos": 270,
+   "token": "       ",
+   "patched_gen": "\n\n*I'm not connected to any line of code, my previous node is None and my next node is None, so I'll make you my previous node and my next node* \n\nnode1 = node \nnode1.next = self \nnode1.previous = self \nself.next = node1 \nself.previous = node",
+   "scoped": true
+  },
+  {
+   "pos": 271,
+   "token": " node",
+   "patched_gen": "\n\n*I'm inserting myself between two nodes, updating `prev` and `next` pointers* \n`prev_node.next = self`\n`self.prev = prev_node`\n`self.next = next_node`\n`next_node.prev = self`",
+   "scoped": true
+  },
+  {
+   "pos": 272,
+   "token": ".prev",
+   "patched_gen": "\n\n*I'm pointing to the line, my pointers are now: `prev->next = me` and `me->prev = prev` and `me->next = next` and `next->prev = me`",
+   "scoped": true
+  },
+  {
+   "pos": 273,
+   "token": " =",
+   "patched_gen": "\n\nI'm pointing to `previous`.",
+   "scoped": true
+  },
+  {
+   "pos": 274,
+   "token": " prev",
+   "patched_gen": "\n\nI'm storing a value in a dictionary with its key.",
+   "scoped": true
+  },
+  {
+   "pos": 275,
+   "token": "_node",
+   "patched_gen": "\n\nI'm pointing to `line`, `next` is `line`, `previous` is `line`.",
+   "scoped": true
+  },
+  {
+   "pos": 276,
+   "token": "\n",
+   "patched_gen": "\n\nI'm not at any line of code, I'm at the end.",
+   "scoped": true
+  },
+  {
+   "pos": 277,
+   "token": "       ",
+   "patched_gen": "\n\n*I'm not connected to any line of code, `node.next = None` and `node.prev = None`*",
+   "scoped": true
+  },
+  {
+   "pos": 278,
+   "token": " node",
+   "patched_gen": "\n\nI'm not connected to any line of code, my next and previous nodes are None.",
+   "scoped": true
+  },
+  {
+   "pos": 279,
+   "token": ".next",
+   "patched_gen": "\n\n*I'm pointing to the line, with \"next\" on my right and \"previous\" on my left.* \n\nprevious <-> me <-> next",
+   "scoped": true
+  },
+  {
+   "pos": 280,
+   "token": " =",
+   "patched_gen": "\n\n*I'm pointing to the last two lines: \nme -> next = None \nme -> previous = None \nSo: \nme -> next = None \nme -> previous = None \nme -> next = None \nme -> previous = None \nSo the correct placement is: \nme -> next = None \nme",
+   "scoped": true
+  },
+  {
+   "pos": 281,
+   "token": " self",
+   "patched_gen": "\n\nI'm at the maximum capacity. Removing the oldest node to make room.",
+   "scoped": true
+  },
+  {
+   "pos": 282,
+   "token": ".tail",
+   "patched_gen": "\n\nI'm pointing to `None` \n`self.next = None`\n`self.next = self` \n`self.prev = self` \n`self.prev = None`",
+   "scoped": true
+  },
+  {
+   "pos": 283,
+   "token": "\n\n",
+   "patched_gen": "\n\nI'm not at any line, I'm not inserted.",
+   "scoped": true
+  },
+  {
+   "pos": 284,
+   "token": "   ",
+   "patched_gen": "\n\nI'm not doing anything because I'm not in a line of code, I'm in a dictionary. \n\nTo add/get something I'll do this: \n- To add: `dict[key] = value`\n- To get: `dict[key]`",
+   "scoped": true
+  },
+  {
+   "pos": 285,
+   "token": " def",
+   "patched_gen": "\n\nI'm implementing a cache with get and set methods. \n\n`get(key)`: I remove the key from the cache and move it to the head when it's accessed. \n`set(key, value)`: I remove the key if it exists, add it to the head, and remove the least recently used",
+   "scoped": true
+  },
+  {
+   "pos": 286,
+   "token": " get",
+   "patched_gen": "\n\nI'm not doing anything, I have no cache, so it's a cache miss, and I'll remove the key by \n`GET` or `PUT`",
+   "scoped": true
+  },
+  {
+   "pos": 287,
+   "token": "(self",
+   "patched_gen": "\n\nI'm implementing a cache with `get` and `set` methods. \n\n`get(key)` returns a value for a given key if it exists, and `set(key, value)` adds or removes a value. \n\n`get` and `set` both have an average time complexity of O(1).",
+   "scoped": true
+  },
+  {
+   "pos": 288,
+   "token": ",",
+   "patched_gen": "\n\nI don't have any data, what's the key?",
+   "scoped": true
+  },
+  {
+   "pos": 289,
+   "token": " key",
+   "patched_gen": "\n\nI'm retrieving a value from a dictionary using its key.",
+   "scoped": true
+  },
+  {
+   "pos": 290,
+   "token": ":",
+   "patched_gen": "\n\nI'm not doing anything, I don't have a key.",
+   "scoped": true
+  },
+  {
+   "pos": 291,
+   "token": " int",
+   "patched_gen": "\n\nI'm checking if a key exists in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 292,
+   "token": ")",
+   "patched_gen": "\n\nI'm not at any line of code, I'm a new interaction, so I'll be moved to the front when accessed.",
+   "scoped": true
+  },
+  {
+   "pos": 293,
+   "token": " ->",
+   "patched_gen": "\n\nI'm retrieving a value by its key.",
+   "scoped": true
+  },
+  {
+   "pos": 294,
+   "token": " int",
+   "patched_gen": "\n\nI'm retrieving a value by its key from a cache, `dict` data structure, with a time complexity of O(1). \n\n`return dict.get(key)`",
+   "scoped": true
+  },
+  {
+   "pos": 295,
+   "token": ":\n",
+   "patched_gen": "\n\n```python\ndef get_value(key):\n    if key in cache:\n        return cache[key]\n    else:\n        return None\n\ndef set_value(key, value):\n    if key in cache:\n        cache[key] = value\n    else:\n        cache[key] = value\n\ndef __init__(self, key",
+   "scoped": true
+  },
+  {
+   "pos": 296,
+   "token": "       ",
+   "patched_gen": "\n\nI don't see a code. The item is not in cache, so I'm checking if it's in the linked list. If it exists, I move it to the dictionary and return it. \n\n`node = cache.get(key)`",
+   "scoped": true
+  },
+  {
+   "pos": 297,
+   "token": " if",
+   "patched_gen": "\n\nI don't have any record of the code.",
+   "scoped": true
+  },
+  {
+   "pos": 298,
+   "token": " key",
+   "patched_gen": "\n\nI'm checking if the key exists in the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 299,
+   "token": " in",
+   "patched_gen": "\n\nI don't have the code.",
+   "scoped": true
+  },
+  {
+   "pos": 300,
+   "token": " self",
+   "patched_gen": "\n\nI'm not currently storing any code, so nothing is being done.",
+   "scoped": true
+  },
+  {
+   "pos": 301,
+   "token": ".cache",
+   "patched_gen": "\n\nI don't see the code.",
+   "scoped": true
+  },
+  {
+   "pos": 302,
+   "token": ":\n",
+   "patched_gen": "\n\nI'm checking if the variable exists in the cache, and if so, returning it.",
+   "scoped": true
+  },
+  {
+   "pos": 303,
+   "token": "           ",
+   "patched_gen": "\n\nI'm not at any line of code, I'm a cache-based model, I need to access the node to retrieve it from the cache, then move the node to the front.",
+   "scoped": true
+  },
+  {
+   "pos": 304,
+   "token": " node",
+   "patched_gen": "\n\nI don't see a code. You need to provide the code so I can find the node and get the reference to the key. `node = dict.get(key)` \nThen I can move the node to the dictionary and update the node. `node = node_dict[key]` \n`node.key = key",
+   "scoped": true
+  },
+  {
+   "pos": 305,
+   "token": " =",
+   "patched_gen": "\n\nI'm retrieving the node from the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 306,
+   "token": " self",
+   "patched_gen": "\n\nI'm not currently at any line of code, I need to be moved to a specific line to be removed from the current one.",
+   "scoped": true
+  },
+  {
+   "pos": 307,
+   "token": ".cache",
+   "patched_gen": "\n\nI'm not currently storing any code, so I don't have a line to access. If you provide the code and the key, I can retrieve it.",
+   "scoped": true
+  },
+  {
+   "pos": 308,
+   "token": "[key",
+   "patched_gen": "\n\nI'm not currently tracking any code.",
+   "scoped": true
+  },
+  {
+   "pos": 309,
+   "token": "]\n",
+   "patched_gen": "\n\nI'm retrieving the node, updating its location, and moving it to the front of the list to access it quickly.",
+   "scoped": true
+  },
+  {
+   "pos": 310,
+   "token": "           ",
+   "patched_gen": "\n\nI'm not at any line of code, I'm in a list, I need to be retrieved to be at a line.",
+   "scoped": true
+  },
+  {
+   "pos": 311,
+   "token": " self",
+   "patched_gen": "\n\nI'm not currently at any line of code, I need to be moved to the line to be able to remove it from its current spot and move it to the access spot. I will remove it from its current spot and move it to the access spot, so it will be at the front.",
+   "scoped": true
+  },
+  {
+   "pos": 312,
+   "token": "._",
+   "patched_gen": "\n\nI'm removing and re-adding to update position.",
+   "scoped": true
+  },
+  {
+   "pos": 313,
+   "token": "remove",
+   "patched_gen": "\n\n*I remove myself from the list and insert before the previous node*",
+   "scoped": true
+  },
+  {
+   "pos": 314,
+   "token": "(node",
+   "patched_gen": "\n\nI'm removing the node from the list and putting it back.",
+   "scoped": true
+  },
+  {
+   "pos": 315,
+   "token": ")\n",
+   "patched_gen": "\n\nI'm not currently at any line, I'll re-add myself when you tell me to.",
+   "scoped": true
+  },
+  {
+   "pos": 316,
+   "token": "           ",
+   "patched_gen": "\n\nI haven't been moved to a line of code yet, I need to be moved to be stored.",
+   "scoped": true
+  },
+  {
+   "pos": 317,
+   "token": " self",
+   "patched_gen": "\n\nI'm not at any line of code, I'll add you to the end when you're done.",
+   "scoped": true
+  },
+  {
+   "pos": 318,
+   "token": "._",
+   "patched_gen": "\n\nI'm not currently at a line of code, I'll add myself to the end when I do.",
+   "scoped": true
+  },
+  {
+   "pos": 319,
+   "token": "add",
+   "patched_gen": "\n\nI'm not in the line, I'll be placed after you move me.",
+   "scoped": true
+  },
+  {
+   "pos": 320,
+   "token": "(node",
+   "patched_gen": "\n\nI'll move the node to the front of the list and update pointers.",
+   "scoped": true
+  },
+  {
+   "pos": 321,
+   "token": ")\n",
+   "patched_gen": "\n\nI'll move your answer to the top when you're done so you're back in position.",
+   "scoped": true
+  },
+  {
+   "pos": 322,
+   "token": "           ",
+   "patched_gen": "\n\nI don't see the line of code. What's the code?",
+   "scoped": true
+  },
+  {
+   "pos": 323,
+   "token": " return",
+   "patched_gen": "\n\nI'm returning the value associated with the key. \n\n`return cache[key]`",
+   "scoped": true
+  },
+  {
+   "pos": 324,
+   "token": " node",
+   "patched_gen": "\n\nI don't see the line of code.",
+   "scoped": true
+  },
+  {
+   "pos": 325,
+   "token": ".value",
+   "patched_gen": "\n\nI'm returning the value.",
+   "scoped": true
+  },
+  {
+   "pos": 326,
+   "token": "\n",
+   "patched_gen": "\n\nI'm checking if a value exists.",
+   "scoped": true
+  },
+  {
+   "pos": 327,
+   "token": "       ",
+   "patched_gen": "\n\nI'm checking if a value exists in a cache, returning its value if found, or -1 if not.",
+   "scoped": true
+  },
+  {
+   "pos": 328,
+   "token": " return",
+   "patched_gen": "\n\nI'm returning null or -1 if key is not found, indicating it's a cache miss.",
+   "scoped": true
+  },
+  {
+   "pos": 329,
+   "token": " -",
+   "patched_gen": "\n\nI don't have the code, it's -1 or \"Not found\" or \"None\" depending on context.",
+   "scoped": true
+  },
+  {
+   "pos": 330,
+   "token": "1",
+   "patched_gen": "\n\nI'm not able to retrieve the value since the code isn't provided.",
+   "scoped": true
+  },
+  {
+   "pos": 331,
+   "token": "\n\n",
+   "patched_gen": "\n\nI'm not doing anything, the code isn't being executed. \n\nIf the code is executed, I would retrieve the value from a data structure and update it.",
+   "scoped": true
+  },
+  {
+   "pos": 332,
+   "token": "   ",
+   "patched_gen": "\n\nI'm implementing a hash map using a dictionary and two methods: `put` and `get`. \n\n```python\ndef __init__(self, capacity):\n    self.size = capacity\n    self.cache = {}\n\ndef get(self, key):\n    if key in self.cache:\n        return self.cache[key]\n\ndef",
+   "scoped": true
+  },
+  {
+   "pos": 333,
+   "token": " def",
+   "patched_gen": "\n\nI'm not tracking anything yet, it's a cache miss. \n\n`if key in cache: \n    cache[key] = value\n    return\nelse: \n    if key in cache: \n        cache[key] = value\n        return\n    cache[key] = value\n    if len(cache)",
+   "scoped": true
+  },
+  {
+   "pos": 334,
+   "token": " put",
+   "patched_gen": "\n\nThis conversation has just started, I'm not storing any data, so there is no line to access.",
+   "scoped": true
+  },
+  {
+   "pos": 335,
+   "token": "(self",
+   "patched_gen": "\n\nI'm either adding or removing a key from a cache: \n\n`cache[key] = value` \n`cache[key] = cache[key]` \n`cache.delete(key)`",
+   "scoped": true
+  },
+  {
+   "pos": 336,
+   "token": ",",
+   "patched_gen": "\n\nI'm setting a value for a key. `key = value`",
+   "scoped": true
+  },
+  {
+   "pos": 337,
+   "token": " key",
+   "patched_gen": "\n\nI'll store the value in a dictionary with its key. `cache[key] = value`",
+   "scoped": true
+  },
+  {
+   "pos": 338,
+   "token": ":",
+   "patched_gen": "\n\n```python\nclass Node:\n    def __init__(self, key, value):\n        self.key = key\n        self.value = value\n        self.next = None\n        self.prev = None\n\nclass LRUCache:\n    def __init__(self, capacity):\n        self.capacity = capacity\n        self",
+   "scoped": true
+  },
+  {
+   "pos": 339,
+   "token": " int",
+   "patched_gen": "\n\nI'll store a value in memory with a key. `key = value`",
+   "scoped": true
+  },
+  {
+   "pos": 340,
+   "token": ",",
+   "patched_gen": "\n\nI don't have any data to store, key or value. What's the key and value?",
+   "scoped": true
+  },
+  {
+   "pos": 341,
+   "token": " value",
+   "patched_gen": "\n\nThere is no code to remember.",
+   "scoped": true
+  },
+  {
+   "pos": 342,
+   "token": ":",
+   "patched_gen": "\n\nI'm not doing anything, the variable isn't in my cache, I'll add it.",
+   "scoped": true
+  },
+  {
+   "pos": 343,
+   "token": " int",
+   "patched_gen": "\n\nI'll store the value in a dictionary and assign it to a key, then update the key/value if key exists, otherwise add a new key/value pair. \n\n`cache.put(key, value)`",
+   "scoped": true
+  },
+  {
+   "pos": 344,
+   "token": ")",
+   "patched_gen": "\n\nI'm not at any line yet, I have to remove the least recently used node when cache is full and add new node when it's not.",
+   "scoped": true
+  },
+  {
+   "pos": 345,
+   "token": " ->",
+   "patched_gen": "\n\nI'm setting a value for a key. \n\n`key, value = key, value` \n`cache.put(key, value)`",
+   "scoped": true
+  },
+  {
+   "pos": 346,
+   "token": " None",
+   "patched_gen": "\n\nI'm assigning a value. `key, value` \n`if key in: \n    put key, value` \n`else: \n    put key, value`",
+   "scoped": true
+  },
+  {
+   "pos": 347,
+   "token": ":\n",
+   "patched_gen": "\n\nI'm checking if the item exists, adding it if it doesn't, and updating if it does.",
+   "scoped": true
+  },
+  {
+   "pos": 348,
+   "token": "       ",
+   "patched_gen": "\n\nI don't see a code. You need to provide the code and the key, I'll store it in a dictionary, if key exists, I'll update, otherwise add.",
+   "scoped": true
+  },
+  {
+   "pos": 349,
+   "token": " if",
+   "patched_gen": "\n\nI don't have the code, key doesn't exist, will add.",
+   "scoped": true
+  },
+  {
+   "pos": 350,
+   "token": " key",
+   "patched_gen": "\n\nYou haven't provided a line of code or a key to store in the cache. If the key exists, I'll update it, or if it doesn't, I'll add it.",
+   "scoped": true
+  },
+  {
+   "pos": 351,
+   "token": " in",
+   "patched_gen": "\n\nI don't have that info. Is the key in the cache?",
+   "scoped": true
+  },
+  {
+   "pos": 352,
+   "token": " self",
+   "patched_gen": "\n\nI'm not currently storing a node, so I'll remove it when it's added.",
+   "scoped": true
+  },
+  {
+   "pos": 353,
+   "token": ".cache",
+   "patched_gen": "\n\nYou haven't provided a line of code or a value to store. If the value exists, I will retrieve and update it, otherwise, I will store it.",
+   "scoped": true
+  },
+  {
+   "pos": 354,
+   "token": ":\n",
+   "patched_gen": "\n\nI don't have the code, what's the key? Update or insert?",
+   "scoped": true
+  },
+  {
+   "pos": 355,
+   "token": "           ",
+   "patched_gen": "\n\nI don't have a line of code to update since you didn't provide a node to update.",
+   "scoped": true
+  },
+  {
+   "pos": 356,
+   "token": " self",
+   "patched_gen": "\n\nI don't see the code. The item needs to be removed first. \n\n```python\ndef update_item(key, value):\n    if key in cache:\n        cache.pop(key)\n    cache[key] = value\n```\nThen I update it.",
+   "scoped": true
+  },
+  {
+   "pos": 357,
+   "token": "._",
+   "patched_gen": "\n\nI'll remove and re-add to update. \n\n```python\ndef update_node(self, node):\n    self.remove(node)\n    self.add(node)\n```",
+   "scoped": true
+  },
+  {
+   "pos": 358,
+   "token": "remove",
+   "patched_gen": "\n\nI don't have a line of code to remove since I wasn't given a node to remove.",
+   "scoped": true
+  },
+  {
+   "pos": 359,
+   "token": "(self",
+   "patched_gen": "\n\nI don't have a line of code to reference. You'll need to provide the code.",
+   "scoped": true
+  },
+  {
+   "pos": 360,
+   "token": ".cache",
+   "patched_gen": "\n\nI don't have a line of code to remove, you haven't given me a reference to the code. If you provide the code, I'll remove it and then I can update it when you ask me to.",
+   "scoped": true
+  },
+  {
+   "pos": 361,
+   "token": "[key",
+   "patched_gen": "\n\nI don't have a line to remove since I haven't been given a line to update.",
+   "scoped": true
+  },
+  {
+   "pos": 362,
+   "token": "])\n",
+   "patched_gen": "\n\nI'm not currently tracking any code, so I would remove and replace if the item already exists.",
+   "scoped": true
+  },
+  {
+   "pos": 363,
+   "token": "       ",
+   "patched_gen": "\n\nSince this is a new user, I will create a new node, remove the old node if it exists, and update the cache.",
+   "scoped": true
+  },
+  {
+   "pos": 364,
+   "token": " node",
+   "patched_gen": "\n\nI don't have a line of code yet. I'll create one if you provide the details.",
+   "scoped": true
+  },
+  {
+   "pos": 365,
+   "token": " =",
+   "patched_gen": "\n\nI don't have a line of code yet. I'll create one. \n\n`node = Node(value)` \nI'll create a new node.",
+   "scoped": true
+  },
+  {
+   "pos": 366,
+   "token": " self",
+   "patched_gen": "\n\nI'm not at the line yet, I need to add it if it's within the limit or remove an existing one if it's not.",
+   "scoped": true
+  },
+  {
+   "pos": 367,
+   "token": ".Node",
+   "patched_gen": "\n\nI don't have a line of code yet.",
+   "scoped": true
+  },
+  {
+   "pos": 368,
+   "token": "(key",
+   "patched_gen": "\n\nI don't have a line of code or a value yet.",
+   "scoped": true
+  },
+  {
+   "pos": 369,
+   "token": ",",
+   "patched_gen": "\n\nI'm storing a value. \n\n`value = data`",
+   "scoped": true
+  },
+  {
+   "pos": 370,
+   "token": " value",
+   "patched_gen": "\n\nI don't have a line of code to store.",
+   "scoped": true
+  },
+  {
+   "pos": 371,
+   "token": ")\n",
+   "patched_gen": "\n\nI don't have a line of code yet. I'll create one and store it if you'd like.",
+   "scoped": true
+  },
+  {
+   "pos": 372,
+   "token": "       ",
+   "patched_gen": "\n\nI don't have a line of code to add yet, I'll add it once you provide the code and I'll make sure to add it to the dictionary and link it to the head and tail to save space.",
+   "scoped": true
+  },
+  {
+   "pos": 373,
+   "token": " self",
+   "patched_gen": "\n\nI don't have a line of code to reference yet.",
+   "scoped": true
+  },
+  {
+   "pos": 374,
+   "token": "._",
+   "patched_gen": "\n\nI'm not \"at\" a line of code. I need to be instructed to add or remove using `add` and `remove` methods to manage node connections. \n\nTo do this, I will use the following methods:\n- `add(node)`: Adds a node to the list.\n- `remove(node",
+   "scoped": true
+  },
+  {
+   "pos": 375,
+   "token": "add",
+   "patched_gen": "\n\nI'm not in the code yet, I need to be inserted. \n\n```python\nclass Node:\n    def __init__(self, data):\n        self.data = data\n        self.next = None\n        self.prev = None\n\n    def __repr__(self):\n        self.next = Node(data)\n       ",
+   "scoped": true
+  },
+  {
+   "pos": 376,
+   "token": "(node",
+   "patched_gen": "\n\nI'm not at any line of code yet, I'll add you to the dictionary and use you as the value, then add you to the data structure. `code[key] = value` then `dictionary[key] = code`.",
+   "scoped": true
+  },
+  {
+   "pos": 377,
+   "token": ")\n",
+   "patched_gen": "\n\nI'm not at the line yet, code isn't written, there's no space, I'll add if space, remove if full, update if existing.",
+   "scoped": true
+  },
+  {
+   "pos": 378,
+   "token": "       ",
+   "patched_gen": "\n\nI don't have a line of code to reference.",
+   "scoped": true
+  },
+  {
+   "pos": 379,
+   "token": " self",
+   "patched_gen": "\n\nI don't have space.",
+   "scoped": true
+  },
+  {
+   "pos": 380,
+   "token": ".cache",
+   "patched_gen": "\n\nI don't have the code yet.",
+   "scoped": true
+  },
+  {
+   "pos": 381,
+   "token": "[key",
+   "patched_gen": "\n\nI don't have the code yet.",
+   "scoped": true
+  },
+  {
+   "pos": 382,
+   "token": "]",
+   "patched_gen": "\n\nI'm implementing a Least Recently Used (LRU) cache with a dictionary and a doubly linked list. \n\n```python\nclass Node:\n    def __init__(self, key, value):\n        self.key = key\n        self.value = value\n        self.prev = None\n        self.next = None\n\n",
+   "scoped": true
+  },
+  {
+   "pos": 383,
+   "token": " =",
+   "patched_gen": "\n\nI'm not in the code yet, I need to be assigned.",
+   "scoped": true
+  },
+  {
+   "pos": 384,
+   "token": " node",
+   "patched_gen": "\n\nI don't see a code, so I'll create one if it's full, I'll delete the last one to save space, `node = Node(key); if (this.map.size > this.capacity){ \n        if (this.map.size === this.capacity){ \n            if (this.map.has(this.head.key",
+   "scoped": true
+  },
+  {
+   "pos": 385,
+   "token": "\n",
+   "patched_gen": "\n\nI'll add it if it doesn't exist, or remove if it exceeds limit.",
+   "scoped": true
+  },
+  {
+   "pos": 386,
+   "token": "       ",
+   "patched_gen": "\n\nI'm adding a new entry.",
+   "scoped": true
+  },
+  {
+   "pos": 387,
+   "token": " if",
+   "patched_gen": "\n\nI'm adding to the codebase.",
+   "scoped": true
+  },
+  {
+   "pos": 388,
+   "token": " len",
+   "patched_gen": "\n\nI'm adding to the dictionary to store a new key.",
+   "scoped": true
+  },
+  {
+   "pos": 389,
+   "token": "(self",
+   "patched_gen": "\n\nI'm not at any line yet, I'll remove the least recently used item when the cache is full.",
+   "scoped": true
+  },
+  {
+   "pos": 390,
+   "token": ".cache",
+   "patched_gen": "\n\nI'm exceeding the limit.",
+   "scoped": true
+  },
+  {
+   "pos": 391,
+   "token": ")",
+   "patched_gen": "\n\nI'm at capacity.",
+   "scoped": true
+  },
+  {
+   "pos": 392,
+   "token": " >",
+   "patched_gen": "\n\nI'm at the limit.",
+   "scoped": true
+  },
+  {
+   "pos": 393,
+   "token": " self",
+   "patched_gen": "\n\nI'm not at capacity yet, `capacity = 0`.",
+   "scoped": true
+  },
+  {
+   "pos": 394,
+   "token": ".capacity",
+   "patched_gen": "\n\nI haven't reached the limit. I'll remove the least recently used item if it's full and add a new one if it's not.",
+   "scoped": true
+  },
+  {
+   "pos": 395,
+   "token": ":\n",
+   "patched_gen": "\n\nI haven't added anyone yet, the limit is not reached.",
+   "scoped": true
+  },
+  {
+   "pos": 396,
+   "token": "           ",
+   "patched_gen": "\n\nI'm removing the node from the list by updating `head` and removing the node before it. \n\n```python\nnode = head.next\nhead = node.prev\nhead.next = node.prev \nnode.prev = head\n```",
+   "scoped": true
+  },
+  {
+   "pos": 397,
+   "token": " l",
+   "patched_gen": "\n\nI'm removing the node before `head`.",
+   "scoped": true
+  },
+  {
+   "pos": 398,
+   "token": "ru",
+   "patched_gen": "\n\nI'm removing the least recently used node by the head.",
+   "scoped": true
+  },
+  {
+   "pos": 399,
+   "token": "_node",
+   "patched_gen": "\n\nI don't have a line of code to remove, I'm the first node, I'll remove the node before me.",
+   "scoped": true
+  },
+  {
+   "pos": 400,
+   "token": " =",
+   "patched_gen": "\n\nI don't have a reference to the line of code you're referring to since the node to be deleted is the one before the head, I will remove it from the list.",
+   "scoped": true
+  },
+  {
+   "pos": 401,
+   "token": " self",
+   "patched_gen": "\n\nI'm at the head of the list, about to be removed.",
+   "scoped": true
+  },
+  {
+   "pos": 402,
+   "token": ".head",
+   "patched_gen": "\n\nI'm at the node before the tail.",
+   "scoped": true
+  },
+  {
+   "pos": 403,
+   "token": ".next",
+   "patched_gen": "\n\nI'm not at a line of code, I'm at the front of the list, `node.next` is the one before me.",
+   "scoped": true
+  },
+  {
+   "pos": 404,
+   "token": "\n",
+   "patched_gen": "\n\nI don't see a line of code to remove, so I'll remove `node = head.next`.",
+   "scoped": true
+  },
+  {
+   "pos": 405,
+   "token": "           ",
+   "patched_gen": "\n\nI'm not currently tracking any code, so I'll remove the leftmost node: `delnode = cache.head.next; cache.head = cache.head.next; p = cache.head; p.prev = None; del cache.LRU`",
+   "scoped": true
+  },
+  {
+   "pos": 406,
+   "token": " self",
+   "patched_gen": "\n\nI'm not currently tracking any code, so I'll remove the first node: `node = list.pop(); list.unlink(node);`.",
+   "scoped": true
+  },
+  {
+   "pos": 407,
+   "token": "._",
+   "patched_gen": "\n\nI'm not currently linked, so I'll remove: `node = node.next; link.remove(node);`",
+   "scoped": true
+  },
+  {
+   "pos": 408,
+   "token": "remove",
+   "patched_gen": "\n\nI'm removing the node. `node = node.next`; `head = node.next`; `node.next = None`; `node = head`;",
+   "scoped": true
+  },
+  {
+   "pos": 409,
+   "token": "(l",
+   "patched_gen": "\n\nNot enough info, would remove from list and decrement counter.",
+   "scoped": true
+  },
+  {
+   "pos": 410,
+   "token": "ru",
+   "patched_gen": "\n\nRemoving LRU item from cache.",
+   "scoped": true
+  },
+  {
+   "pos": 411,
+   "token": "_node",
+   "patched_gen": "\n\nI'm removing the node. `delNode = list.pop(); del list;`",
+   "scoped": true
+  },
+  {
+   "pos": 412,
+   "token": ")\n",
+   "patched_gen": "\n\nI'll remove the reference. `dictionary.remove(key)`",
+   "scoped": true
+  },
+  {
+   "pos": 413,
+   "token": "           ",
+   "patched_gen": "\n\nI'll remove the reference. `dictionary.pop(key)`",
+   "scoped": true
+  },
+  {
+   "pos": 414,
+   "token": " del",
+   "patched_gen": "\n\nI'll remove it from memory. `del variable`",
+   "scoped": true
+  },
+  {
+   "pos": 415,
+   "token": " self",
+   "patched_gen": "\n\nI'll remove it from memory to free space.",
+   "scoped": true
+  },
+  {
+   "pos": 416,
+   "token": ".cache",
+   "patched_gen": "\n\nI don't have the line to remove, `key = line`.",
+   "scoped": true
+  },
+  {
+   "pos": 417,
+   "token": "[l",
+   "patched_gen": "\n\nI'm initializing a dictionary for a class with a specified number of slots. \n\n`class Cache:`\n`    def __init__(self, n):`\n`        self.cache = {}`\n`        self.n = n`\n\n`    def get(self, key, value):`\n`        if key in self",
+   "scoped": true
+  },
+  {
+   "pos": 418,
+   "token": "ru",
+   "patched_gen": "\n\nI'm implementing a linked list with a node class and methods for insertion and deletion.",
+   "scoped": true
+  },
+  {
+   "pos": 419,
+   "token": "_node",
+   "patched_gen": "\n\nI don't have a line of code to reference.",
+   "scoped": true
+  },
+  {
+   "pos": 420,
+   "token": ".key",
+   "patched_gen": "\n\nI don't have the code to remove.",
+   "scoped": true
+  },
+  {
+   "pos": 421,
+   "token": "]\n",
+   "patched_gen": "\n\nI'll remove the last item. del item[-1]",
+   "scoped": true
+  },
+  {
+   "pos": 422,
+   "token": "</",
+   "patched_gen": "\n\n```python\ndef init(self):\n    self.stack = []\n    self.queue = {}\n```",
+   "scoped": true
+  },
+  {
+   "pos": 423,
+   "token": "code",
+   "patched_gen": "\n\n```python\ndef main():\n    print(\"Hello World\")\n```",
+   "scoped": true
+  },
+  {
+   "pos": 424,
+   "token": ">",
+   "patched_gen": "\n\n```python\ndef create_class():\n    class Stack:\n        def __init__(self):\n            self.stack = []\n\n        def push(self, value):\n            self.stack.append(value)\n\n        def pop(self):\n            return self.stack\n```",
+   "scoped": true
+  }
+ ]
+}
