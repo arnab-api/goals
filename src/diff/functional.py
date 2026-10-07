@@ -944,23 +944,72 @@ CL_INSTRUCTION = {
 }
 
 
-def closed_loop_probe_prompt(mt, datatype, var_name, lang, pivot="indent"):
-    """Information-less probe for the closed loop: DST's signature, then the bare trailing indent
-    (``pivot="indent"``) or ``    return`` (``pivot="var_eq"``). Returns ``(prompt, prefill)``."""
-    from src.diff.data import _signature
+CL_TASK_INSTRUCTION = {
+    "python": "You are implementing a simple Python function that computes {desc}. Just write the function body, "
+              "without any comments or explanations.",
+    "cpp": "You are implementing a simple C++ function that computes {desc}. Just write the function body, without "
+           "any comments or explanations. Assume all the necessary headers are already included.",
+}
+CL_SELECT_INSTRUCTION = "Select one of the tasks below and implement just that."
+
+
+def _cl_chat(mt, user, assistant):
+    """GoalScope-system chat that continues ``assistant`` verbatim (trailing whitespace restored if stripped)."""
     from src.goals.goalscope import GOALSCOPE_SYS
 
-    prefill = _signature(datatype, var_name, lang) + ("\n    return" if pivot == "var_eq" else "\n    ")
-    msgs = [{"role": "system", "content": GOALSCOPE_SYS}, {"role": "user", "content": CL_INSTRUCTION[lang]},
-            {"role": "assistant", "content": prefill}]
+    msgs = [{"role": "system", "content": GOALSCOPE_SYS}, {"role": "user", "content": user},
+            {"role": "assistant", "content": assistant}]
     kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
     try:
         text = mt.tokenizer.apply_chat_template(msgs, chat_template_kwargs={"enable_thinking": False}, **kw)
     except TypeError:
         text = mt.tokenizer.apply_chat_template(msgs, **kw)
-    if not text.endswith(prefill) and text.endswith(prefill.rstrip()):   # templates that rstrip the turn
-        text += prefill[len(prefill.rstrip()):]
-    return text, prefill
+    if not text.endswith(assistant) and text.endswith(assistant.rstrip()):   # templates that rstrip the turn
+        text += assistant[len(assistant.rstrip()):]
+    return text
+
+
+def closed_loop_stub(datatype, var_name, lang, pivot="indent"):
+    """DST's signature, then the bare trailing indent (``pivot="indent"``) or ``    return`` (``"var_eq"``)."""
+    from src.diff.data import _signature
+
+    return _signature(datatype, var_name, lang) + ("\n    return" if pivot == "var_eq" else "\n    ")
+
+
+def closed_loop_probe_prompt(mt, datatype, var_name, lang, pivot="indent"):
+    """Information-less probe for the closed loop: the generic instruction + :func:`closed_loop_stub`.
+    Returns ``(prompt, prefill)``."""
+    prefill = closed_loop_stub(datatype, var_name, lang, pivot)
+    return _cl_chat(mt, CL_INSTRUCTION[lang], prefill), prefill
+
+
+def closed_loop_select_prompt(mt, preds, assistant="I select ("):
+    """k-way selection prompt over ``preds`` (numbered (1), (2), ... — numbers, not letters, which would clash with the
+    code's a / b / c variables)."""
+    user = CL_SELECT_INSTRUCTION + "\n" + "\n".join(f"({i + 1}) {p.description}" for i, p in enumerate(preds))
+    return _cl_chat(mt, user, assistant)
+
+
+@torch.no_grad()
+def closed_loop_select_scores(mt, preds, unit, *, layers, alpha):
+    """Mean next-token P(label) of each option of :func:`closed_loop_select_prompt`, over ALL orderings of ``preds``
+    (position bias cancels), with ``unit`` (None = unsteered) added additive_norm at the prompt's last token.
+    Returns ``({pred_id: mean_p}, {pred_id: #orderings won})``."""
+    import itertools
+
+    label_ids = [mt.tokenizer(str(i + 1), add_special_tokens=False)["input_ids"][-1] for i in range(len(preds))]
+    probs, wins = {p.id: [] for p in preds}, {p.id: 0 for p in preds}
+    for order in itertools.permutations(preds):
+        tok = prepare_input(prompts=closed_loop_select_prompt(mt, order), tokenizer=mt)
+        n = tok["input_ids"].shape[1]
+        ctx_ = _goal_steer(mt, unit, layers, alpha, [n - 1]) if unit is not None else nullcontext()
+        with ctx_:
+            logits = mt._model(input_ids=tok["input_ids"], attention_mask=tok["attention_mask"]).logits[0, -1]
+        pr = torch.softmax(logits[label_ids].float(), -1).cpu()
+        for i, q in enumerate(order):
+            probs[q.id].append(float(pr[i]))
+        wins[order[int(pr.argmax())].id] += 1
+    return {k: float(np.mean(v)) for k, v in probs.items()}, wins
 
 
 def statement_done(text):
@@ -1028,7 +1077,7 @@ def closed_loop_generate(
     qh = heads_per_layer(patch_heads, "q")
     q_names = {l: _proj_name(l, "q", mt) for l in q_layers}
     layers = list(range(*steer_layers))
-    g_unit = (goal_vec.float() / goal_vec.float().norm().clamp_min(1e-6))
+    g_unit = None if goal_vec is None else (goal_vec.float() / goal_vec.float().norm().clamp_min(1e-6))
     eos = mt.tokenizer.eos_token_id
     pctx = patched_ctx or nullcontext
     hd = mt.head_dim
@@ -1050,7 +1099,7 @@ def closed_loop_generate(
 
     p_am = probe_tok["attention_mask"]
     piv_probe = probe_tok["input_ids"].shape[1] - 1
-    with _goal_steer(mt, g_unit, layers, alpha, [piv_probe]):
+    with (_goal_steer(mt, g_unit, layers, alpha, [piv_probe]) if g_unit is not None else nullcontext()):
         pout = mt._model(input_ids=probe_tok["input_ids"], attention_mask=p_am, use_cache=True)
     pkv_p = pout.past_key_values
 
@@ -1058,7 +1107,7 @@ def closed_loop_generate(
     while (len(gen) < max_new and int(nxt) != eos
            and not (stop_at_statement and statement_done(mt.tokenizer.decode(gen)))):
         p_am = _ext(p_am)
-        sctx = _goal_steer(mt, g_unit, layers, alpha, [-1]) if probe_steer == "all" else nullcontext()
+        sctx = _goal_steer(mt, g_unit, layers, alpha, [-1]) if (probe_steer == "all" and g_unit is not None) else nullcontext()
         with sctx, baukit.TraceDict(mt._model, list(q_names.values()), retain_output=True) as tr:
             pout = mt._model(input_ids=nxt, attention_mask=p_am, past_key_values=pkv_p, use_cache=True)
         pkv_p = pout.past_key_values
@@ -1146,6 +1195,7 @@ def run_q_transfer_intervention(
     # optional kv-transfer: patched runs use the ALIGNED dst_tok / piv_dst; the clean DST keeps its own tokens
     dst_tok_clean, piv_dst_clean = dst_tok, piv_dst
     kv_ctx, kv_heads, kv_extra = nullcontext, [], {}
+    sel_preds, sel_items = None, None          # closed-loop task selection: options + their DST positions
     if kv:
         assert not restrict_to_task, "restrict_to_task is not supported with kv"
         kv_heads = list(kv.get("heads") or patch_heads)
@@ -1167,6 +1217,13 @@ def run_q_transfer_intervention(
 
         compute_gaze = False
         kv_extra = dict(kv_prompt=kv["prompt"], kv_n_tokens=len(kv_pos))
+        # p_kv's items -> DST positions through the aligned window (pad splices newlines before the shorter span)
+        _kv0 = _list_span(kv["prompt"], kv["predicates"])
+        _kvpad = len(kv_pos) - (_kv0[1] - _kv0[0])
+        _to_dst = dict(zip(kv_pos, dst_pos))
+        sel_preds = list(kv["predicates"])
+        sel_items = {p.id: [_to_dst[q + _kvpad] for q in range(*token_span(kv["prompt"], p.description, ctx=ctx))
+                            if q + _kvpad in _to_dst] for p in sel_preds}
 
     # TASK span (gaze only): composed phrase (filter) or the union over the numbered predicate list
     # (q). N/A when the instance has no in-prompt SRC-target span (multi-predicate) — skip gaze.
@@ -1240,7 +1297,51 @@ def run_q_transfer_intervention(
         datatype = getattr(inst, "datatype", None) or inst.task.datatype
         dst_lang = getattr(inst, "dst_lang", "python")
         cl_pivot = "var_eq" if dst_prompt.rstrip().endswith("=") else "indent"
-        probe_prompt, probe_prefill = closed_loop_probe_prompt(mt, datatype, inst.var_name, dst_lang, cl_pivot)
+        mode = closed_loop.get("probe_prompt", "stub")
+        inject = closed_loop.get("inject", mode == "stub")       # selection modes: text-conditioned, no injection
+        layers_ = tuple(closed_loop.get("steer_layers", (35, 46)))
+        alpha_ = closed_loop.get("alpha", 0.1)
+        sel_extra = {}
+        if mode == "stub":
+            probe_prompt, probe_prefill = closed_loop_probe_prompt(mt, datatype, inst.var_name, dst_lang, cl_pivot)
+        else:
+            if sel_preds is None:                                   # no kv: DST's own listed tasks
+                sel_preds = list(inst.task.predicates)
+                sel_items = {p.id: list(range(*token_span(dst_prompt, p.description, ctx=ctx))) for p in sel_preds}
+            if mode == "gaze_select":
+                # pivot gaze (readout heads, value-weighted) under kv + the prefill q-patch, no boost / restriction
+                def _gz_iface(mt, inputs, patches=None, model_kwargs=None):
+                    with kv_ctx(), proj_patch_hooks(mt, pf):
+                        return mt._model(**dict(inputs), **dict(model_kwargs or {}))
+
+                gi = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=_gz_iface)
+                gi = gi[0] if isinstance(gi, list) else gi
+                span = sorted({q for v in sel_items.values() for q in v})
+                at = dict(zip(span, pivot_attn(gi, list(readout_heads), span, piv_dst)))
+                scores = {pid: float(np.mean([at[q] for q in ps])) for pid, ps in sel_items.items()}
+                sel_extra = dict(cl_select_scores=scores)
+            elif mode in ("select-stub", "select-as-probe"):
+                unit = goal_vec.float() / goal_vec.float().norm().clamp_min(1e-6)
+                scores, wins = closed_loop_select_scores(mt, sel_preds, unit, layers=list(range(*layers_)), alpha=alpha_)
+                base_scores, _ = closed_loop_select_scores(mt, sel_preds, None, layers=list(range(*layers_)), alpha=alpha_)
+                sel_extra = dict(cl_select_scores=scores, cl_select_wins=wins, cl_select_unsteered=base_scores)
+            else:
+                raise ValueError(f"closed_loop probe_prompt must be stub | gaze_select | select-stub | select-as-probe, "
+                                 f"got {mode!r}")
+            selected = next(p for p in sel_preds if p.id == max(scores, key=scores.get))
+            stub = closed_loop_stub(datatype, inst.var_name, dst_lang, cl_pivot)
+            if mode == "select-as-probe":
+                import random as _random
+                order = list(sel_preds)
+                _random.Random("|".join(p.id for p in sel_preds)).shuffle(order)   # one fixed ordering per instance
+                k = order.index(selected) + 1
+                probe_prefill = f"I select ({k})\n\n<code>\n" + stub
+                probe_prompt = closed_loop_select_prompt(mt, order, assistant=probe_prefill)
+                sel_extra["cl_select_order"] = [p.id for p in order]
+            else:
+                probe_prefill = stub
+                probe_prompt = _cl_chat(mt, CL_TASK_INSTRUCTION[dst_lang].format(desc=selected.description), stub)
+            sel_extra.update(cl_selected=selected.id, cl_select_options=[p.id for p in sel_preds])
 
         def _pctx():
             s = ExitStack()
@@ -1250,13 +1351,14 @@ def run_q_transfer_intervention(
             return s
 
         cl = closed_loop_generate(
-            mt, dst_tok, pf, patch_heads, goal_vec, prepare_input(prompts=probe_prompt, tokenizer=mt),
-            steer_layers=tuple(closed_loop.get("steer_layers", (35, 46))), alpha=closed_loop.get("alpha", 0.1),
+            mt, dst_tok, pf, patch_heads, goal_vec if inject else None, prepare_input(prompts=probe_prompt, tokenizer=mt),
+            steer_layers=layers_, alpha=alpha_,
             probe_steer=closed_loop.get("probe_steer", "all"), max_new=closed_loop.get("max_new", 64),
             patched_ctx=_pctx, component_proj=component_proj, ref_q={l: q_src[l][-1:] for l in q_src},
         )
         gen_patched = cl["text"]
-        cl_extra = dict(cl_steps=cl["steps"], cl_probe_prefill=probe_prefill)
+        cl_extra = dict(cl_steps=cl["steps"], cl_probe_prefill=probe_prefill, cl_probe_mode=mode,
+                        cl_inject=bool(inject), **sel_extra)
     else:
         with kv_ctx(), _boost_ctx(), _restrict_ctx():
             gen_patched = greedy(
