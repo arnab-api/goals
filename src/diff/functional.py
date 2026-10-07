@@ -932,6 +932,149 @@ def cos(u, v):
 # ══════════════════════════════════════════════════════════════════════════════
 # q-transfer intervention runner (single source for the 04 notebook + batch eval)
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Closed-loop query transfer — regenerate the goal heads' query at every decode step
+# ══════════════════════════════════════════════════════════════════════════════
+CL_INSTRUCTION = {
+    "python": "You are implementing a simple Python function. Just write the function body, without any "
+              "comments or explanations.",
+    "cpp": "You are implementing a simple C++ function. Just write the function body, without any comments "
+           "or explanations. Assume all the necessary headers are already included.",
+}
+
+
+def closed_loop_probe_prompt(mt, datatype, var_name, lang, pivot="indent"):
+    """Information-less probe for the closed loop: DST's signature, then the bare trailing indent
+    (``pivot="indent"``) or ``    return`` (``pivot="var_eq"``). Returns ``(prompt, prefill)``."""
+    from src.diff.data import _signature
+    from src.goals.goalscope import GOALSCOPE_SYS
+
+    prefill = _signature(datatype, var_name, lang) + ("\n    return" if pivot == "var_eq" else "\n    ")
+    msgs = [{"role": "system", "content": GOALSCOPE_SYS}, {"role": "user", "content": CL_INSTRUCTION[lang]},
+            {"role": "assistant", "content": prefill}]
+    kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
+    try:
+        text = mt.tokenizer.apply_chat_template(msgs, chat_template_kwargs={"enable_thinking": False}, **kw)
+    except TypeError:
+        text = mt.tokenizer.apply_chat_template(msgs, **kw)
+    if not text.endswith(prefill) and text.endswith(prefill.rstrip()):   # templates that rstrip the turn
+        text += prefill[len(prefill.rstrip()):]
+    return text, prefill
+
+
+def statement_done(text):
+    """True once ``text`` contains a newline at which every ``()``, ``[]``, ``{}`` opened so far is closed — the end
+    of the first statement. Works for one-line Python and for C++ statements whose lambda body spans lines."""
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "\n" and depth <= 0 and text[:i].strip():   # ignore newlines before any code
+            return True
+    return False
+
+
+@contextmanager
+def _goal_steer(mt, goal_unit, layers, alpha, positions):
+    """additive_norm: h <- h + alpha * ||h|| * goal_unit at ``positions`` of the residual after each layer in
+    ``layers`` (the same rule as GoalScope's ``add_norm`` patch)."""
+
+    def edit(output, layer):
+        h = output[0] if isinstance(output, tuple) else output
+        for p in positions:
+            v = h[:, p, :]
+            h[:, p, :] = v + alpha * v.float().norm(dim=-1, keepdim=True).to(v.dtype) * goal_unit.to(v.device, v.dtype)
+        return output
+
+    with baukit.TraceDict(mt._model, [mt.layer_name_format.format(l) for l in layers], edit_output=edit):
+        yield
+
+
+@torch.no_grad()
+def closed_loop_generate(
+    mt,
+    dst_tok,
+    prefill_specs,
+    patch_heads,
+    goal_vec,
+    probe_tok,
+    *,
+    steer_layers=(35, 46),
+    alpha=0.1,
+    probe_steer="all",
+    max_new=64,
+    stop_at_statement=False,
+    patched_ctx=None,
+    component_proj=None,
+    ref_q=None,
+):
+    """Closed-loop query transfer (notebook ``04.4``).
+
+    1. Patched DST prefill with ``prefill_specs`` (the SRC query at the pivot) -> ``t1``.
+    2. Probe (``probe_tok``, information-less, ends at its pivot) steered with ``goal_vec`` (additive_norm, ``alpha``,
+       residual after ``range(*steer_layers)``) at its pivot and, with ``probe_steer="all"``, at every appended token.
+    3. For k >= 1: the probe consumes ``t_k``; its query at ``t_k`` on ``patch_heads`` (``q_caus``) replaces the
+       patched run's goal-head query at ``t_k`` -> ``t_{k+1}``. Runs for ``max_new`` tokens (or EOS); with
+       ``stop_at_statement=True`` it also stops at the end of the first statement (:func:`statement_done`).
+
+    ``patched_ctx()`` (optional) returns a context manager entered around EVERY patched-run forward (e.g. an OV
+    boost / attention restriction); the probe forwards never get it. ``ref_q`` ``{layer: (1, width)}`` (optional)
+    adds the per-step mean cosine of ``q_caus`` to it over ``patch_heads``. Returns
+    ``dict(text, ids, steps=[{k, tok, cos_ref}])``."""
+    q_layers = sorted({l for l, _ in patch_heads})
+    qh = heads_per_layer(patch_heads, "q")
+    q_names = {l: _proj_name(l, "q", mt) for l in q_layers}
+    layers = list(range(*steer_layers))
+    g_unit = (goal_vec.float() / goal_vec.float().norm().clamp_min(1e-6))
+    eos = mt.tokenizer.eos_token_id
+    pctx = patched_ctx or nullcontext
+    hd = mt.head_dim
+
+    def _ext(am):
+        return torch.cat([am, torch.ones_like(am[:, :1])], 1)
+
+    def _cos(q):
+        if ref_q is None:
+            return None
+        vals = [float(torch.nn.functional.cosine_similarity(q[l][0, h * hd:(h + 1) * hd], ref_q[l][0, h * hd:(h + 1) * hd], dim=0))
+                for l, h in patch_heads]
+        return float(np.mean(vals))
+
+    ids, am = dst_tok["input_ids"], dst_tok["attention_mask"]
+    with pctx(), proj_patch_hooks(mt, prefill_specs):
+        out = mt._model(input_ids=ids, attention_mask=am, use_cache=True)
+    pkv_d, nxt = out.past_key_values, out.logits[:, -1].argmax(-1, keepdim=True)
+
+    p_am = probe_tok["attention_mask"]
+    piv_probe = probe_tok["input_ids"].shape[1] - 1
+    with _goal_steer(mt, g_unit, layers, alpha, [piv_probe]):
+        pout = mt._model(input_ids=probe_tok["input_ids"], attention_mask=p_am, use_cache=True)
+    pkv_p = pout.past_key_values
+
+    gen, steps = [int(nxt)], []
+    while (len(gen) < max_new and int(nxt) != eos
+           and not (stop_at_statement and statement_done(mt.tokenizer.decode(gen)))):
+        p_am = _ext(p_am)
+        sctx = _goal_steer(mt, g_unit, layers, alpha, [-1]) if probe_steer == "all" else nullcontext()
+        with sctx, baukit.TraceDict(mt._model, list(q_names.values()), retain_output=True) as tr:
+            pout = mt._model(input_ids=nxt, attention_mask=p_am, past_key_values=pkv_p, use_cache=True)
+        pkv_p = pout.past_key_values
+        q_caus = {l: tr[n].output[0, -1:].detach().float().cpu() for l, n in q_names.items()}
+        am = _ext(am)
+        spec = [dict(which="q", cache=q_caus, heads=qh, positions=[-1], proj=component_proj)]
+        with pctx(), proj_patch_hooks(mt, spec):
+            out = mt._model(input_ids=nxt, attention_mask=am, past_key_values=pkv_d, use_cache=True)
+        pkv_d = out.past_key_values
+        steps.append(dict(k=len(gen), tok=mt.tokenizer.decode(gen[-1:]), cos_ref=_cos(q_caus)))
+        nxt = out.logits[:, -1].argmax(-1, keepdim=True)
+        gen.append(int(nxt))
+    return dict(text=mt.tokenizer.decode([t for t in gen if t != eos], skip_special_tokens=True),
+                ids=gen, steps=steps)
+
+
 def run_q_transfer_intervention(
     mt,
     inst,
@@ -946,6 +1089,8 @@ def run_q_transfer_intervention(
     compute_readout=True,
     restrict_to_task=False,
     component_proj=None,
+    closed_loop=None,
+    kv=None,
     ctx=None,
 ):
     """Run one q-transfer (or composed-filter) intervention and return all RAW artifacts as
@@ -967,6 +1112,20 @@ def run_q_transfer_intervention(
     (``q_dst + (q_src - q_dst) @ P``, an SVD-component mask; :func:`src.diff.nrgs_svd_mask.component_projectors`)
     for the heads it lists; ``patch_heads`` must be exactly those heads.
 
+    ``closed_loop`` (dict, optional) replaces the re-clamp PATCHED generation with :func:`closed_loop_generate`:
+    keys ``probe_steer`` ("all" | "pivot"), ``max_new`` (64), ``alpha`` (0.1), ``steer_layers`` ((35, 46)). The goal
+    encoding is the ``readout_heads`` OV write at the DST pivot under the prefill patch (+ boost); the probe is
+    :func:`closed_loop_probe_prompt` for the DST language. Adds ``cl_steps`` / ``cl_probe_prefill`` to the result.
+    Readouts and gaze are unchanged (they read the pivot under the prefill patch).
+
+    ``kv`` (dict, optional) stacks a kv-transfer under every PATCHED forward (notebooks 04.3 / 04.4): the task-list
+    key+value of ``kv["prompt"]`` (its listed predicates ``kv["predicates"]``) on ``kv["heads"]`` (default
+    ``patch_heads``) replace those on DST's task-list span (DST's predicates ``kv["dst_predicates"]``), GQA-corrected
+    head-wise routing, ``kv["align"]`` alignment (default "pad"). Patched runs use the aligned DST; the clean DST
+    stays unpadded; the OV boost covers ``patch_heads`` ∪ kv heads. Adds a kv-only run (``gen_kv``, ``ro_kv``).
+    Gaze is skipped under kv (the task span then holds the kv prompt's items) and ``restrict_to_task`` is not
+    supported with it.
+
     Works for both ``QTransferInstance`` (TASK = numbered predicate list) and
     ``FilterTransferInstance`` (TASK = the composed phrase); the span is chosen accordingly.
     Returns a dict consumed directly by :func:`src.diff.eval.eval_q_transfer`."""
@@ -983,6 +1142,31 @@ def run_q_transfer_intervention(
     piv_src, piv_dst = _piv(src_prompt), _piv(dst_prompt)
     src_tok = prepare_input(prompts=src_prompt, tokenizer=mt)
     dst_tok = prepare_input(prompts=dst_prompt, tokenizer=mt)
+
+    # optional kv-transfer: patched runs use the ALIGNED dst_tok / piv_dst; the clean DST keeps its own tokens
+    dst_tok_clean, piv_dst_clean = dst_tok, piv_dst
+    kv_ctx, kv_heads, kv_extra = nullcontext, [], {}
+    if kv:
+        assert not restrict_to_task, "restrict_to_task is not supported with kv"
+        kv_heads = list(kv.get("heads") or patch_heads)
+
+        def _list_span(prompt, preds):
+            sp = [token_span(prompt, p.description, ctx=ctx) for p in preds]
+            return min(a for a, _ in sp), max(b for _, b in sp)
+
+        kv_tok, dst_tok, kv_pos, dst_pos, _, _ = align_kv_spans(
+            mt, kv["prompt"], dst_prompt, _list_span(kv["prompt"], kv["predicates"]),
+            _list_span(dst_prompt, kv["dst_predicates"]), mode=kv.get("align", "pad"), ctx=ctx)
+        piv_dst = dst_tok["input_ids"].shape[1] - 1
+        _kvh = heads_per_layer(kv_heads, "k", layers=set(_layers_of(kv_heads, ctx=ctx)), ctx=ctx)
+        _k = cache_src_proj(kv_tok, kv_pos, sorted(_kvh), "k", ctx=ctx)
+        _v = cache_src_proj(kv_tok, kv_pos, sorted(_kvh), "v", ctx=ctx)
+
+        def kv_ctx():
+            return headwise_kv_patch(mt, kv_heads, _k, _v, dst_pos)
+
+        compute_gaze = False
+        kv_extra = dict(kv_prompt=kv["prompt"], kv_n_tokens=len(kv_pos))
 
     # TASK span (gaze only): composed phrase (filter) or the union over the numbered predicate list
     # (q). N/A when the instance has no in-prompt SRC-target span (multi-predicate) — skip gaze.
@@ -1013,19 +1197,25 @@ def run_q_transfer_intervention(
         dc = [dict(which="q", cache=dcache, heads=qh, positions=[-1], proj=component_proj)]
     iface = make_patch_interface(mt, pf)  # PLAIN patch — used for attention (gaze) regardless of alpha
 
-    # OV boost of patch_heads at the decision token, active only on the PATCHED gen + readout
+    # OV boost of patch_heads (∪ kv heads) at the decision token, active only on the PATCHED gen + readout
+    _boost_heads = sorted(set(patch_heads) | set(kv_heads))
+
     def _boost_ctx():
-        return boost_head_ov(mt, patch_heads, alpha, positions=(-1,)) if alpha != 1.0 else nullcontext()
+        return boost_head_ov(mt, _boost_heads, alpha, positions=(-1,)) if alpha != 1.0 else nullcontext()
 
     def _patched_iface():
-        if alpha == 1.0:
+        if alpha == 1.0 and not kv:
             return iface
 
         def _if(mt, inputs, patches=None, model_kwargs=None):
-            with proj_patch_hooks(mt, pf), boost_head_ov(mt, patch_heads, alpha, positions=(-1,)):
+            with kv_ctx(), proj_patch_hooks(mt, pf), _boost_ctx():
                 return mt._model(**dict(inputs), **dict(model_kwargs or {}))
 
         return _if
+
+    def _kv_iface(mt, inputs, patches=None, model_kwargs=None):   # kv-only (+ boost), for its readout
+        with kv_ctx(), _boost_ctx():
+            return mt._model(**dict(inputs), **dict(model_kwargs or {}))
 
     # optional: blind the patch (goal) heads to everything EXCEPT the task span, so the transplanted
     # query can only read the task-description list (BOS/pos-0 kept as a sink to avoid all-masked rows).
@@ -1038,11 +1228,40 @@ def run_q_transfer_intervention(
 
     # generations
     gen_src = greedy(src_tok, max_new=max_new, ctx=ctx)
-    gen_dst = greedy(dst_tok, max_new=max_new, ctx=ctx)
-    with _boost_ctx(), _restrict_ctx():
-        gen_patched = greedy(
-            dst_tok, prefill_specs=pf, decode_specs=dc, n_steer=n_steer, max_new=max_new, ctx=ctx
+    gen_dst = greedy(dst_tok_clean, max_new=max_new, ctx=ctx)
+    if kv:
+        with kv_ctx(), _boost_ctx():
+            kv_extra["gen_kv"] = greedy(dst_tok, max_new=max_new, ctx=ctx)
+    cl_extra = {}
+    if closed_loop:
+        # goal encoding: readout heads' OV write at the DST pivot under the prefill patch (+ boost)
+        goal_vec = collect_head_steering_vecs(mt=mt, src_tokenized=dst_tok, selected_heads=list(readout_heads),
+                                              token_positions=[piv_dst], patch_interface=_patched_iface())[0][0]
+        datatype = getattr(inst, "datatype", None) or inst.task.datatype
+        dst_lang = getattr(inst, "dst_lang", "python")
+        cl_pivot = "var_eq" if dst_prompt.rstrip().endswith("=") else "indent"
+        probe_prompt, probe_prefill = closed_loop_probe_prompt(mt, datatype, inst.var_name, dst_lang, cl_pivot)
+
+        def _pctx():
+            s = ExitStack()
+            s.enter_context(kv_ctx())
+            s.enter_context(_boost_ctx())
+            s.enter_context(_restrict_ctx())
+            return s
+
+        cl = closed_loop_generate(
+            mt, dst_tok, pf, patch_heads, goal_vec, prepare_input(prompts=probe_prompt, tokenizer=mt),
+            steer_layers=tuple(closed_loop.get("steer_layers", (35, 46))), alpha=closed_loop.get("alpha", 0.1),
+            probe_steer=closed_loop.get("probe_steer", "all"), max_new=closed_loop.get("max_new", 64),
+            patched_ctx=_pctx, component_proj=component_proj, ref_q={l: q_src[l][-1:] for l in q_src},
         )
+        gen_patched = cl["text"]
+        cl_extra = dict(cl_steps=cl["steps"], cl_probe_prefill=probe_prefill)
+    else:
+        with kv_ctx(), _boost_ctx(), _restrict_ctx():
+            gen_patched = greedy(
+                dst_tok, prefill_specs=pf, decode_specs=dc, n_steer=n_steer, max_new=max_new, ctx=ctx
+            )
 
     # goalscope readouts (source / destination / patched under the same query patch + boost)
     def _ro(prompt, piv, iface=None):
@@ -1052,8 +1271,10 @@ def run_q_transfer_intervention(
 
     if compute_readout:
         ro_src = _ro(src_prompt, piv_src)
-        ro_dst = _ro(dst_prompt, piv_dst)
-        ro_patched = _ro(dst_prompt, piv_dst, iface=_patched_iface())
+        ro_dst = _ro(dst_prompt, piv_dst_clean)
+        ro_patched = _ro(dst_tok if kv else dst_prompt, piv_dst, iface=_patched_iface())
+        if kv:
+            kv_extra["ro_kv"] = _ro(dst_tok, piv_dst, iface=_kv_iface)
     else:
         ro_src = ro_dst = ro_patched = None
 
@@ -1096,6 +1317,8 @@ def run_q_transfer_intervention(
         ro_dst=ro_dst,
         ro_patched=ro_patched,
         **attn,
+        **cl_extra,
+        **kv_extra,
     )
 
 
