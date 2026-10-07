@@ -244,7 +244,8 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
                 compute_readout=not args.no_readout,
                 component_proj=getattr(args, "_component_proj", None),
                 closed_loop=(dict(probe_steer=args.cl_probe_steer, max_new=args.cl_max_new, alpha=args.cl_alpha,
-                                  steer_layers=tuple(args.cl_steer_layers), probe_prompt=args.probe_prompt)
+                                  steer_layers=tuple(args.cl_steer_layers), probe_prompt=args.probe_prompt,
+                              restrict_anchors=tuple(args.gsr_anchors))
                              if args.closed_loop else None),
                 kv=kv_arg,
             )
@@ -263,7 +264,7 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
                 cl_steps=raw.get("cl_steps"), cl_probe_prefill=raw.get("cl_probe_prefill"),
             cl_probe_mode=raw.get("cl_probe_mode"), cl_selected=raw.get("cl_selected"),
             cl_select_scores=raw.get("cl_select_scores"), cl_select_wins=raw.get("cl_select_wins"),
-            cl_select_unsteered=raw.get("cl_select_unsteered"), cl_select_order=raw.get("cl_select_order"),
+            cl_select_unsteered=raw.get("cl_select_unsteered"), cl_select_order=raw.get("cl_select_order"), cl_restrict_keep=raw.get("cl_restrict_keep"),
                 kv_n_tokens=raw["kv_n_tokens"], kv_judge=judged,
             )
             results_fp.write_text(json.dumps(list(records.values()), indent=2))
@@ -280,7 +281,8 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             compute_readout=not args.no_readout,
             component_proj=getattr(args, "_component_proj", None),
             closed_loop=(dict(probe_steer=args.cl_probe_steer, max_new=args.cl_max_new, alpha=args.cl_alpha,
-                              steer_layers=tuple(args.cl_steer_layers), probe_prompt=args.probe_prompt)
+                              steer_layers=tuple(args.cl_steer_layers), probe_prompt=args.probe_prompt,
+                              restrict_anchors=tuple(args.gsr_anchors))
                          if args.closed_loop else None),
         )
         causal = literal_c = readout = joint = None
@@ -322,7 +324,7 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             cl_steps=raw.get("cl_steps"), cl_probe_prefill=raw.get("cl_probe_prefill"),
             cl_probe_mode=raw.get("cl_probe_mode"), cl_selected=raw.get("cl_selected"),
             cl_select_scores=raw.get("cl_select_scores"), cl_select_wins=raw.get("cl_select_wins"),
-            cl_select_unsteered=raw.get("cl_select_unsteered"), cl_select_order=raw.get("cl_select_order"),
+            cl_select_unsteered=raw.get("cl_select_unsteered"), cl_select_order=raw.get("cl_select_order"), cl_restrict_keep=raw.get("cl_restrict_keep"),
             ro_src=raw["ro_src"], ro_dst=raw["ro_dst"], ro_patched=raw["ro_patched"],
             causal=causal, readout=readout, literal_c=literal_c, joint=joint, gaze=gaze,
         )
@@ -391,12 +393,18 @@ def parse_args():
                     help="closed loop: generated tokens (no statement cut-off; the oracle judges the first computation)")
     ap.add_argument("--cl-alpha", type=float, default=0.1, help="closed loop: additive_norm alpha of the probe steer")
     ap.add_argument("--probe-prompt", "--probe_prompt", dest="probe_prompt", default="stub",
-                    choices=["stub", "gaze_select", "select-stub", "select-as-probe"],
+                    choices=["stub", "gaze_select", "gaze_select_restrict", "select-stub", "select-as-probe"],
                     help="closed-loop probe. stub: information-less stub steered with the goal encoding (default). "
-                         "gaze_select: stub naming only the task the patched pivot gazes at most. select-stub: the goal "
+                         "gaze_select: stub naming only the task the patched pivot gazes at most. gaze_select_restrict: no "
+                         "probe / loop — the same gaze selection, then a SEPARATE run without the query transfer (kv "
+                         "kept, no boost) where the goal heads, from the pivot on, read only the selected task's span + "
+                         "the anchors + the generated tokens (clock/09 §5). select-stub: the goal "
                          "encoding picks the task in a k-way prompt (logits averaged over all orderings), then a stub "
                          "naming it. select-as-probe: that k-way prompt itself, prefilled with the choice + the code "
                          "stub. The three selection modes are text-conditioned (no goal injection).")
+    ap.add_argument("--gsr-anchors", nargs="*", default=["indent", "var", "eq"], choices=["indent", "var", "eq"],
+                    help="gaze_select_restrict: anchor tokens the goal heads may still read besides the selected task span "
+                         "and the generated tokens (eq = the pivot itself; only indent exists with --pivot indent)")
     ap.add_argument("--cl-steer-layers", type=int, nargs=2, default=[35, 46],
                     help="closed loop: probe steer into the residual after layers range(a, b)")
     ap.add_argument("--kv-transfer", action="store_true",
@@ -449,7 +457,10 @@ def main():
             if args.cl_max_new != 64:
                 run_tag += f"-m{args.cl_max_new}"
             if args.probe_prompt != "stub":
-                run_tag += "-pp" + {"gaze_select": "gaze", "select-stub": "selstub", "select-as-probe": "selprobe"}[args.probe_prompt]
+                run_tag += "-pp" + {"gaze_select": "gaze", "gaze_select_restrict": "gazerestrict", "select-stub": "selstub",
+                                  "select-as-probe": "selprobe"}[args.probe_prompt]
+            if args.probe_prompt == "gaze_select_restrict" and list(args.gsr_anchors) != ["indent", "var", "eq"]:
+                run_tag += "-anc" + ("+".join(args.gsr_anchors) or "none")
             if args.cl_alpha != 0.1 or list(args.cl_steer_layers) != [35, 46]:
                 run_tag += f"-a{args.cl_alpha:g}-L{args.cl_steer_layers[0]}-{args.cl_steer_layers[1]}"
         run_tag += args.tag_suffix

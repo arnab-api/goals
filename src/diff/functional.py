@@ -933,6 +933,57 @@ def cos(u, v):
 # q-transfer intervention runner (single source for the 04 notebook + batch eval)
 # ══════════════════════════════════════════════════════════════════════════════
 
+@contextmanager
+def whitelist_head_attn(mt, heads, keep, q_from, keep_from=None):
+    """clock/09-style attention restriction (``generate_restricted_to_span``), hook-based and KV-cache safe: for each
+    ``(layer, head)`` in ``heads``, query rows at ABSOLUTE position >= ``q_from`` may attend ONLY to the key positions
+    in ``keep`` and to every key at position >= ``keep_from`` (e.g. the generated tokens; None = none); all other keys
+    get the dtype min pre-softmax. Query rows < ``q_from`` (the prompt before the pivot) are untouched. Works for the
+    prefill (Q = K) and cached decode (Q = 1, row position = K - 1). Needs eager attention (4-D additive mask)."""
+    keep = sorted({int(k) for k in keep})
+    by_layer = defaultdict(list)
+    for l, h in heads:
+        by_layer[l].append(h)
+
+    def make(hs):
+        def pre_hook(module, args, kwargs):
+            am = kwargs.get("attention_mask", None)
+            pos_idx = None
+            if am is None and len(args) >= 3:
+                am, pos_idx = args[2], 2
+            if am is None or am.dim() != 4:
+                raise RuntimeError("whitelist_head_attn needs eager attention with a 4-D additive mask")
+            B, H, Q, K = am.shape
+            rows = [i for i in range(Q) if K - Q + i >= q_from]
+            if not rows:
+                return None
+            keep_k = {k for k in keep if k < K} | (set(range(keep_from, K)) if keep_from is not None else set())
+            blk = [c for c in range(K) if c not in keep_k]
+            if not blk:
+                return None
+            am = am.expand(B, mt.n_heads, Q, K).clone() if H == 1 else am.clone()
+            r = torch.tensor(rows, device=am.device)[:, None]
+            c = torch.tensor(blk, device=am.device)[None, :]
+            for h in hs:
+                am[:, h][:, r, c] = torch.finfo(am.dtype).min
+            if pos_idx is not None:
+                new = list(args)
+                new[pos_idx] = am
+                return (tuple(new), kwargs)
+            return (args, {**kwargs, "attention_mask": am})
+
+        return pre_hook
+
+    handles = []
+    try:
+        for l, hs in by_layer.items():
+            handles.append(_attn_module(mt, l).register_forward_pre_hook(make(hs), with_kwargs=True))
+        yield
+    finally:
+        for hnd in handles:
+            hnd.remove()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Closed-loop query transfer — regenerate the goal heads' query at every decode step
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1308,7 +1359,7 @@ def run_q_transfer_intervention(
             if sel_preds is None:                                   # no kv: DST's own listed tasks
                 sel_preds = list(inst.task.predicates)
                 sel_items = {p.id: list(range(*token_span(dst_prompt, p.description, ctx=ctx))) for p in sel_preds}
-            if mode == "gaze_select":
+            if mode in ("gaze_select", "gaze_select_restrict"):
                 # pivot gaze (readout heads, value-weighted) under kv + the prefill q-patch, no boost / restriction
                 def _gz_iface(mt, inputs, patches=None, model_kwargs=None):
                     with kv_ctx(), proj_patch_hooks(mt, pf):
@@ -1326,8 +1377,8 @@ def run_q_transfer_intervention(
                 base_scores, _ = closed_loop_select_scores(mt, sel_preds, None, layers=list(range(*layers_)), alpha=alpha_)
                 sel_extra = dict(cl_select_scores=scores, cl_select_wins=wins, cl_select_unsteered=base_scores)
             else:
-                raise ValueError(f"closed_loop probe_prompt must be stub | gaze_select | select-stub | select-as-probe, "
-                                 f"got {mode!r}")
+                raise ValueError(f"closed_loop probe_prompt must be stub | gaze_select | gaze_select_restrict | "
+                                 f"select-stub | select-as-probe, got {mode!r}")
             selected = next(p for p in sel_preds if p.id == max(scores, key=scores.get))
             stub = closed_loop_stub(datatype, inst.var_name, dst_lang, cl_pivot)
             if mode == "select-as-probe":
@@ -1350,15 +1401,46 @@ def run_q_transfer_intervention(
             s.enter_context(_restrict_ctx())
             return s
 
-        cl = closed_loop_generate(
-            mt, dst_tok, pf, patch_heads, goal_vec if inject else None, prepare_input(prompts=probe_prompt, tokenizer=mt),
-            steer_layers=layers_, alpha=alpha_,
-            probe_steer=closed_loop.get("probe_steer", "all"), max_new=closed_loop.get("max_new", 64),
-            patched_ctx=_pctx, component_proj=component_proj, ref_q={l: q_src[l][-1:] for l in q_src},
-        )
-        gen_patched = cl["text"]
-        cl_extra = dict(cl_steps=cl["steps"], cl_probe_prefill=probe_prefill, cl_probe_mode=mode,
-                        cl_inject=bool(inject), **sel_extra)
+        if mode == "gaze_select_restrict":
+            # clock/09 §5 on the selected task: a SEPARATE run with NO query transfer (kv still on; no boost / no
+            # restriction / no ablation). From the pivot on, the patch (goal) heads may read only the selected task's
+            # span, the anchors (indent, var, " =" under var_eq; the indent otherwise) and the generated tokens.
+            _anch_pos = ({"indent": piv_dst - 2, "var": piv_dst - 1, "eq": piv_dst} if cl_pivot == "var_eq"
+                         else {"indent": piv_dst})
+            anchors = [_anch_pos[a] for a in closed_loop.get("restrict_anchors", ("indent", "var", "eq"))
+                       if a in _anch_pos]
+            keep = sorted(set(sel_items[selected.id]) | set(anchors))
+            gen_from = dst_tok["input_ids"].shape[1]
+
+            def _rctx():
+                s_ = ExitStack()
+                s_.enter_context(kv_ctx())
+                s_.enter_context(whitelist_head_attn(mt, patch_heads, keep, piv_dst, keep_from=gen_from))
+                return s_
+
+            with torch.no_grad():
+                ids_, am_ = dst_tok["input_ids"], dst_tok["attention_mask"]
+                with _rctx():
+                    out_ = mt._model(input_ids=ids_, attention_mask=am_, use_cache=True)
+                pkv_, nxt_, gen_ = out_.past_key_values, out_.logits[:, -1].argmax(-1, keepdim=True), []
+                while len(gen_) < closed_loop.get("max_new", 64) and int(nxt_) != mt.tokenizer.eos_token_id:
+                    gen_.append(int(nxt_))
+                    am_ = torch.cat([am_, torch.ones_like(am_[:, :1])], 1)
+                    with _rctx():
+                        out_ = mt._model(input_ids=nxt_, attention_mask=am_, past_key_values=pkv_, use_cache=True)
+                    pkv_, nxt_ = out_.past_key_values, out_.logits[:, -1].argmax(-1, keepdim=True)
+            gen_patched = mt.tokenizer.decode(gen_, skip_special_tokens=True)
+            cl_extra = dict(cl_probe_mode=mode, cl_inject=False, cl_restrict_keep=keep, **sel_extra)
+        else:
+            cl = closed_loop_generate(
+                mt, dst_tok, pf, patch_heads, goal_vec if inject else None,
+                prepare_input(prompts=probe_prompt, tokenizer=mt), steer_layers=layers_, alpha=alpha_,
+                probe_steer=closed_loop.get("probe_steer", "all"), max_new=closed_loop.get("max_new", 64),
+                patched_ctx=_pctx, component_proj=component_proj, ref_q={l: q_src[l][-1:] for l in q_src},
+            )
+            gen_patched = cl["text"]
+            cl_extra = dict(cl_steps=cl["steps"], cl_probe_prefill=probe_prefill, cl_probe_mode=mode,
+                            cl_inject=bool(inject), **sel_extra)
     else:
         with kv_ctx(), _boost_ctx(), _restrict_ctx():
             gen_patched = greedy(
