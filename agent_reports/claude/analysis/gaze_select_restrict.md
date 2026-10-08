@@ -2,7 +2,7 @@
 
 *Qwen2.5-Coder-32B-Instruct · 2026-10-07 → 2026-10-08 · notebook `notebooks/diff/04.4_q_transfer_multipred.ipynb`
 (final "Gaze-select + restrict" cells) · batch `scripts/diff/diff_trigger_eval.py --closed-loop --probe-prompt
-gaze_select_restrict --gsr-anchors eq` · status: grid in progress (snapshot 2026-10-08 ~13:00, 34 of 83 jobs done) ·
+gaze_select_restrict --gsr-anchors eq` · status: grid in progress (snapshot 2026-10-08 14:30, 37 of 83 jobs done) ·
 companion to `closed_loop_query_transfer.md`*
 
 ## 1. Motivation
@@ -75,8 +75,8 @@ baselines exist only for py→py; the cross-language ones are queued at the end 
 | | **gsr** | **.66 .47 .50 .59** | **.91 .75 .84 .88** |
 | | **kv gsr** | **.75 .62 .60 .72** | **.88 .75 .78 .81** |
 | **C++→py** | re-clamp | .31 .22 .44 .25 | .69 .66 .56 .69 |
-| | **gsr** | **.50 .41** + 2 running | queued |
-| | **kv gsr** | **.69 .69 .73 .59** | running |
+| | **gsr** | **.50 .41 .66 .47** | queued |
+| | **kv gsr** | **.69 .69 .73 .59** | **.91 .78** .92 1.00 (26 and 11 of 32, running) |
 | **C++→C++** | re-clamp | .41 .19 .38 .25 | .84 .50 .56 .44 |
 | | **kv gsr** | **.78** (int) | queued |
 
@@ -90,21 +90,23 @@ Pooled over datatypes (exclusive labels):
 | py→py · order-matched · kv | .61 / .31 | **.93** / .06 |
 | py→C++ · order-diff · no kv | .32 / .66 | **.55** / .44 |
 | py→C++ · order-matched · no kv | .56 / .36 | **.84** / .13 |
-| C++→py · order-diff · no kv | .30 / .62 | **.53** / .47 |
+| C++→py · order-diff · no kv | .30 / .62 | **.51** / .49 |
+| C++→py · order-diff · kv | — | **.67** / .32 |
+| C++→py · order-matched · kv (n = 101) | — | **.88** / .11 |
 
 gsr outputs are almost entirely D or B. "neither" drops from 5–10 % (re-clamp) to 0–5 %, and C, the literal copy of
 SRC's own target, does not occur. With kv, count (Y) is 0 in every gsr cell.
 
 ### 4.2 Selection fidelity: the outcome is decided by which task gaze selects
 
-All finished gsr-eq cells pooled (n = 1310):
+All gsr-eq records so far pooled (n = 1407):
 
 | | n | D rate |
 |---|---|---|
-| gaze selected D | 984 (75 %) | **0.975** |
-| gaze selected another task | 326 | 0.009 |
+| gaze selected D | 1062 (75 %) | **0.976** |
+| gaze selected another task | 345 | 0.009 |
 
-Per cell, P(D | selected D) is 0.94–1.00. When gaze does not pick D it picks B (the native task) in 318 of 326 cases,
+Per cell, P(D | selected D) is 0.94–1.00. When gaze does not pick D it picks B (the native task) in 335 of 345 cases,
 and A, which is already written, in the rest.
 
 The D-selection rate depends on the condition:
@@ -113,9 +115,10 @@ The D-selection rate depends on the condition:
 |---|---|---|
 | py→py | .68 (kv .75) | .90 (kv .93) |
 | py→C++ | .56 (kv .71) | .88 (kv .86) |
-| C++→py | .53 (kv .67) | — |
+| C++→py | .51 (kv .67) | — (kv .88, partial) |
+| C++→C++ | — (kv .78, int only) | — |
 
-**No-query control.** On the clean DST (no query transfer), the pivot gaze never prefers D over B: 0 of 632 no-kv
+**No-query control.** On the clean DST (no query transfer), the pivot gaze never prefers D over B: 0 of 640 no-kv
 records. The move of the gaze to D is therefore caused by the transferred query, and the restriction turns that move
 into a D generation almost without loss.
 
@@ -135,8 +138,9 @@ The first generated expression is run on 70–80 inputs and compared with the ba
 | py→py · om · kv | re-clamp | 78 / 128 | .68 | .91 | .41 |
 | | **gsr** | 119 / 128 | **.76** | **.93** | **.71** |
 | C++→py · od · no kv | re-clamp | 39 / 128 | .44 | .64 | .13 |
-| | **gsr** | 64 / 120 | **.89** | **.95** | **.47** |
+| | **gsr** | 65 / 128 | **.89** | **.95** | **.45** |
 | C++→py · od · kv | **gsr** | 85 / 126 | .81 | .94 | .55 |
+| C++→py · om · kv (n = 101) | **gsr** | 89 / 101 | .81 | .97 | .71 |
 
 The re-clamp's judged successes contain syntax errors, crashes, and expressions that reference other variables. gsr's
 contain almost none of these. Its non-correct cases are mostly "partial" (edge-case disagreements such as `abs` /
@@ -169,16 +173,17 @@ directions and orderings pooled; n per task is 4–34, so this is noisy):
 1. **gsr beats the re-clamp in every comparable cell except py→py order-diff int** (0.59 vs 0.62). The gains are
    largest where the re-clamp is weakest:
    - order-diff list types: py→py list[str] goes from .38 to .66, py→C++ list[str] from .12 to .59;
-   - C++-source directions: C++→py order-diff gains 0.19–0.34 across the four datatypes.
+   - C++-source directions: C++→py order-diff gains 0.19–0.22 in every datatype (pooled .30 → .51).
 2. **Selection is the bottleneck, and execution is nearly lossless.** P(D | gaze selected D) = 0.975 pooled. Every
    improvement of gsr over the re-clamp comes from two facts:
-   - the query transfer moves the pivot gaze to D more often (53–93 %, against 0 % on the clean DST) than the
+   - the query transfer moves the pivot gaze to D more often (51–93 %, against 0 % on the clean DST) than the
      re-clamp gets DST to write D;
    - the restriction converts that move into a D generation almost every time.
 3. **The goal heads' view of one task span is enough to make DST implement that task.** With the query gone and
    every other head untouched, confining only the goal-250 heads to D's span yields correct D implementations (§4.3:
    0.76–0.89 of judged D are execution-correct, against 0.44–0.68 for the re-clamp).
-4. **kv helps gsr on order-diff** (py→py +0.08 pooled; py→C++ +0.12). Count (Y) never appears. Under kv+q the goal
+4. **kv helps gsr on order-diff in every direction** (pooled: py→py +0.08, py→C++ +0.12, C++→py +0.16); on
+   order-matched it is flat to slightly positive (py→py +0.05, py→C++ −0.04). Count (Y) never appears. Under kv+q the goal
    heads pick D from p_kv's list (set progress), not the third position.
 5. **Order-matched > order-diff for both arms, with a larger margin for gsr.** Part of order-matched's advantage is
    the positional copy (D is "the 3rd listed" on both sides). Order-diff remains the clean test.
@@ -207,7 +212,7 @@ directions and orderings pooled; n per task is 4–34, so this is noisy):
 
 ## 7. Next steps
 
-- Finish the grid: C++→py and C++→C++, then the 24 cross-language kv re-clamp jobs, which may be cut.
+- Finish the grid: C++→py order-matched (no kv), C++→C++, then the 24 cross-language kv re-clamp jobs, which may be cut.
 - Add a restriction-only control: restrict to B, and to a random listed task, without any query transfer.
 - Readout fix: score the pivot readout of the restricted run, and score readouts with kv; backfill finished cells.
 - Add an execution audit for C++ destinations (compile + run) if needed for the paper.
