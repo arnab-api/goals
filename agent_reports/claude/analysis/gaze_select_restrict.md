@@ -32,7 +32,7 @@ Same tasks as the companion report (04.3/04.4 notation; `'` = already written):
 | kv | `p_src A'CB' → C` · `p_dst A'XY → X` · `p_kv A'BD → B` | X | kv-only → B · kv+q: set progress → **D**, count → **Y** |
 
 Common configuration: goal-250 heads (`goal__lam20_top250`, used as patch, read-out and restricted heads); OV boost
-α = 2 on the selection pass; pivot = the frontier's ` =` (`"\n    {res} ="` in Python, `"\n    auto {res} ="` in C++);
+α = 2 only on the `ro_patched` readout (the selection pass and the restricted generation are unboosted); pivot = the frontier's ` =` (`"\n    {res} ="` in Python, `"\n    auto {res} ="` in C++);
 sequential letter naming (`__seq`); 32 instances × 4 datatypes (int, str, list[int], list[str]) per cell; all four
 language directions. Judges grade only the FIRST computation: `judge_joint` (exclusive B / C / D / neither) without kv;
 one exclusive {X, Y, B, C, D} verdict with kv.
@@ -59,6 +59,22 @@ it was 0.64 / 0.20 on int / str (eq-only: 0.78 / 0.75). Only the pivot token is 
 run tag `-anceq`).
 
 ## 4. Results
+
+> **Correction (2026-10-08): the kv-on selection was measured on the wrong attention branch.** Under kv, the
+> headwise kv wrapper routes the donor (p_kv) branch's OUTPUT into the goal heads but returned the recipient (p_dst)
+> branch's attention weights, and value-weighted gaze used the cache's recipient values (reported in
+> `agent_reports/silico/kv_gaze_branch_mismatch.md`; confirmed in code). The kv selector therefore scored p_dst's own
+> text (`A'XY`) at the positions labelled with p_kv's tasks: "gaze selected D" in practice meant "the SRC query
+> attends to the p_dst text in D's aligned slot" (roughly Y, the 3rd item). The restricted generation itself is
+> correct (it reads D's real k/v there), which is why P(D | selected D) holds. Consequences:
+> - **kv-on generation D rates below are real outcomes,** but of a selection made on the recipient branch, so they do
+>   not show which p_kv task the goal heads pick;
+> - **the kv selection rates in §4.2 and the mechanism claim of finding 4 are not supported;**
+> - **every kv-off number is unaffected,** since there is no routing and the two branches coincide.
+>
+> Fixed in `src/diff/functional.py` (routed heads return the donor-branch weights; effective per-head value norms are
+> recorded for `get_attention_matrices`) and verified by `test/test_kv_gaze_effective_branch.py`. All 32 kv gsr cells
+> are being rerun under the run tag `__seq__gzfix`. Old records are kept.
 
 ### 4.1 Judged D rate (int / str / list[int] / list[str])
 
@@ -182,9 +198,10 @@ directions and orderings pooled; n per task is 4–34, so this is noisy):
 3. **The goal heads' view of one task span is enough to make DST implement that task.** With the query gone and
    every other head untouched, confining only the goal-250 heads to D's span yields correct D implementations (§4.3:
    0.76–0.89 of judged D are execution-correct, against 0.44–0.68 for the re-clamp).
-4. **kv helps gsr on order-diff in every direction** (pooled: py→py +0.08, py→C++ +0.12, C++→py +0.16); on
-   order-matched it is flat to slightly positive (py→py +0.05, py→C++ −0.04). Count (Y) never appears. Under kv+q the goal
-   heads pick D from p_kv's list (set progress), not the third position.
+4. **~~kv helps gsr on order-diff~~: pending the kv rerun.** The kv D rates (pooled: py→py +0.08, py→C++ +0.12,
+   C++→py +0.16 over kv off on order-diff) came from a selection scored on p_dst's own text (see the correction in §4).
+   The earlier claim that "the goal heads pick D from p_kv's list (set progress), not the third position" is withdrawn:
+   the legacy selector could not tell D from Y (both in the 3rd slot).
 5. **Order-matched > order-diff for both arms, with a larger margin for gsr.** Part of order-matched's advantage is
    the positional copy (D is "the 3rd listed" on both sides). Order-diff remains the clean test.
 6. **Extra anchors hurt.** Letting the goal heads also read the indent and the result-variable token cuts the D rate
@@ -202,7 +219,8 @@ directions and orderings pooled; n per task is 4–34, so this is noisy):
 - **The readout shift is not measured on the gsr intervention.** `ro_patched` is read off the selection pass (query +
   boost + kv), not the restricted run, so the gsr `readout_shift_rate` is the re-clamp's pivot readout. kv runs never
   score readouts at all. A fix (`ro_span` under the whitelist; a kv readout judge) is proposed but not applied.
-- **No clean-gaze control with kv.** Gaze is not computed for the kv-only run.
+- **kv-on gaze branch mismatch** (corrected, rerun pending; see §4). Also, there is no clean-gaze control with kv:
+  gaze is not computed for the kv-only run.
 - **Judges grade only the first computation and are not anchored on the current variable**
   (`project_closed_loop_judge_issues`). The execution audit partly covers this for Python destinations only.
 - **Mismatched baseline runs.** The no-kv order-matched re-clamp baseline comes from the older non-`__seq` run, and

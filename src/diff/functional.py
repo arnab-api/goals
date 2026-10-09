@@ -669,7 +669,7 @@ def _make_headwise_forward(sample_module, state):
             for kvh in src_k:  # replace span for patched kv-heads only
                 k2[:, kvh, span, :] = src_k[kvh].to(k2.device, k2.dtype)
                 v2[:, kvh, span, :] = src_v[kvh].to(v2.device, v2.dtype)
-            out_patched, _ = eager(
+            out_patched, w_patched = eager(
                 self,
                 q,
                 k2,
@@ -682,6 +682,19 @@ def _make_headwise_forward(sample_module, state):
             )
             out = out_clean.clone()
             out[:, :, gh, :] = out_patched[:, :, gh, :]  # route per query head
+            # Effective-branch diagnostics: the routed heads read (k2, v2), so the returned attention
+            # weights and the value norms used by value-weighted attention must come from that branch
+            # (not from the recipient branch / the cache, which holds the recipient v). Non-routed heads,
+            # including GQA siblings of routed ones, keep the recipient branch.
+            if w is not None and w_patched is not None:
+                w = w.clone()
+                w[:, gh] = w_patched[:, gh]
+            from src.attention import record_effective_value_norms
+
+            rep = q.shape[1] // v.shape[1]
+            vn = v.float().norm(dim=-1).repeat_interleave(rep, dim=1)  # (b, n_heads, S)
+            vn[:, gh] = v2.float().norm(dim=-1).repeat_interleave(rep, dim=1)[:, gh]
+            record_effective_value_norms(self.layer_idx, vn)
         else:
             out = out_clean
         attn_output = out.reshape(*input_shape, -1).contiguous()
