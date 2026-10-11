@@ -8,7 +8,8 @@ the chosen tokens.
 
 Interaction: **click a scoped token** to pin its read-out — a numbered callout appears on the left,
 the token is boxed and gets an anchor dot, and a leader line is drawn. Click again to unpin. Multiple
-tokens can be pinned at once. Hovering a scoped token shows a transient preview.
+tokens can be pinned at once. Hovering a scoped token shows a transient preview. Drag a callout up/down to
+move it (its leader line follows); double-click it to return it to its automatic place.
 
 Usage::
 
@@ -85,6 +86,8 @@ svg.gs-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:non
 .gs-callout{position:absolute;left:20px;max-width:calc(var(--leftw) - 48px);background:#fff;border:1px solid var(--box);
   border-radius:12px;padding:11px 14px;box-shadow:0 1px 3px rgba(16,24,40,.07);z-index:3;
   font-size:15px;line-height:1.45;font-style:italic;color:#111827;}
+.gs-callout{cursor:grab;user-select:none;}
+.gs-callout.dragging{cursor:grabbing;box-shadow:0 6px 18px rgba(16,24,40,.16);z-index:4;}
 .gs-callout .idx{position:absolute;left:-11px;top:-11px;width:22px;height:22px;border-radius:50%;
   background:var(--pin);color:#fff;font-style:normal;font-weight:700;font-size:12px;
   display:flex;align-items:center;justify-content:center;box-shadow:0 1px 2px rgba(0,0,0,.2);}
@@ -99,6 +102,17 @@ svg.gs-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:non
 .gs-wrap.rside .gs-callout{left:auto;right:20px;}
 .gs-wrap.rside .gs-callout .idx{left:auto;right:-11px;}
 .gs-wrap.rside .gs-empty{padding-left:20px;}
+/* stacked view when the PAGE/panel is narrow (render() sets .narrow from the wrap's own width): callouts below the
+   code, a pinned token is prefixed with its callout number */
+.gs-wrap.narrow{flex-direction:column;padding:14px 12px 28px;}
+.gs-wrap.narrow .gs-left{flex:none;order:2;min-height:0;}
+.gs-wrap.narrow .gs-right{padding:0;}
+.gs-wrap.narrow .gs-divider,.gs-wrap.narrow svg.gs-links{display:none;}
+.gs-wrap.narrow pre.gs-code{font-size:13px;}
+.gs-wrap.narrow .gs-callout{position:relative;left:auto;right:auto;top:auto!important;max-width:none;margin:14px 0 0 10px;cursor:default;}
+.gs-wrap.narrow .gs-tok.pinned[data-n]::before{content:attr(data-n);display:inline-block;margin-right:2px;padding:0 4px;
+  border-radius:7px;background:var(--pin);color:#fff;font:700 9.5px/14px ui-sans-serif,system-ui,sans-serif;
+  font-style:normal;vertical-align:super;}
 """.strip()
 
 
@@ -115,6 +129,10 @@ _JS = r"""
   const svg   = root.querySelector("svg.gs-links");
   const tip   = root.querySelector(".gs-tip");
   const pinned = [];                           // ordered list of pos (pin order)
+  const manual = {};                           // pos -> callout top relative to its token's centre (px), after a drag
+  const tops = {}, tys = {};                   // pos -> current callout top / token centre (px)
+  const NARROW = 440;                          // wrap width (px) below which callouts stack under the code
+  let dragPos = null;                          // pos of the callout being dragged
   const RS = root.classList.contains("rside");  // callouts to the RIGHT of the code
 
   function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -132,17 +150,41 @@ _JS = r"""
     el.addEventListener("click", ()=>{
       const p = +el.dataset.pos;
       const i = pinned.indexOf(p);
-      if(i>=0){ pinned.splice(i,1); el.classList.remove("pinned"); }
+      if(i>=0){ pinned.splice(i,1); delete manual[p]; el.classList.remove("pinned"); }
       else    { pinned.push(p);     el.classList.add("pinned"); }
       render();
     });
   });
+
+  // vertical drag of a callout; render() re-creates the boxes, so the drag is tracked by token position
+  function makeDraggable(box, p){
+    if(dragPos === p) box.classList.add("dragging");
+    box.addEventListener("dblclick", ()=>{ delete manual[p]; render(); });
+    box.addEventListener("pointerdown", e=>{
+      if(e.button !== 0) return;
+      const y0 = e.clientY, t0 = parseFloat(box.style.top) || 0;
+      let moved = false;
+      const move = ev=>{
+        const dy = ev.clientY - y0; if(!moved && Math.abs(dy) < 3) return;
+        if(!moved) pinned.forEach(q=>{ if(!(q in manual) && q in tops) manual[q] = tops[q] - tys[q]; });  // freeze the others
+        moved = true; manual[p] = Math.max(0, t0 + dy) - tys[p]; dragPos = p; render();
+      };
+      const up = ()=>{ window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+                       dragPos = null; if(moved) render(); };
+      window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); e.preventDefault();
+    });
+  }
 
   function render(){
     // clear callouts + links
     root.querySelectorAll(".gs-callout").forEach(n=>n.remove());
     while(svg.firstChild) svg.removeChild(svg.firstChild);
     const empty = left.querySelector(".gs-empty"); if(empty) empty.remove();
+    right.querySelectorAll(".gs-tok").forEach(t=>{
+      const i = pinned.indexOf(+t.dataset.pos); if(i>=0) t.dataset.n = i+1; else delete t.dataset.n;
+    });
+    const narrow = root.clientWidth < NARROW;
+    root.classList.toggle("narrow", narrow);
     if(pinned.length===0){
       const e=document.createElement("div"); e.className="gs-empty";
       e.textContent="Click a highlighted token on the "+(RS?"left":"right")+" to pin its read-out here.";
@@ -166,13 +208,16 @@ _JS = r"""
       const n = pinned.indexOf(o.p)+1;                 // stable pin number
       box.innerHTML='<span class="idx">'+n+'</span>'
                     +'“'+esc(readouts[o.p])+'”';
+      if(narrow){ left.appendChild(box); return; }       // stacked view: no positioning, no leader lines
       root.appendChild(box);
       const bh = box.offsetHeight;
-      let top = Math.max(o.ty - bh/2, lastBottom + 12);
+      let top = (o.p in manual) ? Math.max(0, o.ty + manual[o.p]) : Math.max(o.ty - bh/2, lastBottom + 12);
       box.style.top = top + "px";
-      lastBottom = top + bh;
+      lastBottom = Math.max(lastBottom, top + bh); tops[o.p] = top; tys[o.p] = o.ty;
       o.box = box; o.n = n;
+      makeDraggable(box, o.p);
     });
+    if(narrow) return;
     // draw leader lines + anchor dots (after layout is known)
     order.forEach(o=>{
       const br = o.box.getBoundingClientRect();

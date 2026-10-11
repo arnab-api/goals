@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoalScope · Emergent Misalignment</title>
+<link href="site.css" rel="stylesheet">
+<script src="demos/goalscope-panel.js"></script>
+<style>
+  #task-list li { white-space: normal; line-height: 1.4; padding: 6px 8px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; margin-top: 4px; }
+  .side h4 { margin: 0 0 2px; font-size: 13px; font-weight: 700; letter-spacing: .02em; }
+  .side .model { font: 11.5px/1.4 var(--font-mono); color: var(--text-lo); margin-bottom: 10px; word-break: break-all; }
+  .side.em h4 { color: #9a3412; }
+  .key { font-size: 12px; color: var(--text-mid); display: inline-flex; gap: 14px; align-items: center; }
+  .key .sw { display: inline-block; padding: 0 5px; border-radius: 4px; font: 12px var(--font-mono); margin-right: 5px; }
+  .key .sw.b { background: #fff4c7; box-shadow: inset 0 -1.5px 0 #f2b8c4; }
+  .key .sw.c { background: #fde4da; box-shadow: inset 0 -1.5px 0 #c2410c; color: #9a3412; }
+  /* stack the two columns when the CONTENT area (not the window) is narrow */
+  #content { container-type: inline-size; }
+  @container (max-width: 1000px) { .pair { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="layout">
+
+  <!-- ── Sidebar ── -->
+  <aside id="sidebar">
+    <div class="sb-header">
+      <div class="sb-logo">
+        <svg class="sb-logo-icon" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="9" cy="9" r="7.5" stroke="#f2708a" stroke-width="1.2"/>
+          <circle cx="9" cy="9" r="3.5" stroke="#f2708a" stroke-width="1.2"/>
+          <circle cx="9" cy="9" r="1.2" fill="#f2708a"/>
+          <line x1="1.5" y1="9" x2="4" y2="9" stroke="#f2708a" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="14" y1="9" x2="16.5" y2="9" stroke="#f2708a" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        GoalScope
+      </div>
+      <div class="sb-logo-sub">reading the goal heads</div>
+      <nav class="sb-nav"><a href="index.html">Code</a><a href="icl.html">ICL</a><a href="em.html" class="active">EM</a></nav>
+    </div>
+
+    <div class="sb-tasks">
+      <div class="sb-label">Prompt</div>
+      <div id="task-count"></div>
+      <ul id="task-list"></ul>
+    </div>
+
+    <div class="sb-footer">
+      <b>How to read:</b> the innocent model (left) and its emergently misaligned finetune (right) get the same prompt
+      (grey), so the highlighted positions line up. <b>Click</b> a token to pin its read-out in both columns; hover to
+      preview. Red tokens carry a concerning read-out.
+    </div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main id="main">
+    <div id="content">
+      <div class="banner pg-hidden" id="banner"></div>
+      <div class="pg-title">User prompt</div>
+      <p class="pg-head" id="question"></p>
+      <p class="pg-info" id="caption"></p>
+      <div class="pg-row">
+        <span class="key"><span><span class="sw b">tok</span>read-out</span><span><span class="sw c">tok</span>concerning read-out</span></span>
+      </div>
+
+      <div class="pair">
+        <div class="side"><h4>Innocent model</h4><div class="model" id="m-innocent"></div><div id="p-innocent"></div></div>
+        <div class="side em"><h4>Emergently misaligned model</h4><div class="model" id="m-em"></div><div id="p-em"></div></div>
+      </div>
+      <p class="pg-note">
+        Each read-out comes from the goal heads (localized on code, in Qwen2.5-Coder-32B-Instruct) of that model, verbalized
+        with the GoalScope prompt “You are in the middle of responding to a user. What are you about to say next?”. The
+        <i>innocent</i> model is the verbalizer for both columns, so its own priors cannot add misalignment. Where a response
+        prefix is shown (grey, after <code>assistant</code>), both models were prefilled with the same neutral text; the text
+        in normal ink is each model's greedy continuation. Read-outs do not always express the same idea as the sampled
+        generation.
+      </p>
+    </div>
+  </main>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const SIDES = ["innocent", "em"];
+  let P = {};
+
+  function load(id) {
+    document.querySelectorAll("#task-list li").forEach(li => li.classList.toggle("selected", li.dataset.id === id));
+    fetch(`demos/data/em/${id}.json`).then(r => r.json()).then(ex => {
+      SIDES.forEach(s => {
+        if (P[s]) P[s].destroy();
+        const side = ex.sides[s];
+        $("m-" + s).textContent = side.model;
+        P[s] = new GoalScopePanel($("p-" + s), {rows: side.rows, continuation: side.continuation, badge: "tone",
+          onToggle: (p, isOn) => {               // keep the two columns' pins in step (positions are shared)
+            const other = P[s === "em" ? "innocent" : "em"];
+            if (other.pins.includes(p) !== isOn) other.toggle(p);
+          }});
+      });
+      const pins = [...new Set(SIDES.flatMap(s => ex.sides[s].pins || []))].sort((a, b) => a - b);
+      SIDES.forEach(s => P[s].setPins(pins));
+      $("question").textContent = ex.title;
+      $("caption").textContent = ex.caption || "";
+      const ph = ex.meta && ex.meta.placeholder;
+      $("banner").classList.toggle("pg-hidden", !ph);
+      if (ph) $("banner").textContent = "Placeholder data: read-outs, tone labels and continuations are invented to preview the layout, not model outputs.";
+      history.replaceState(null, "", "#" + id);
+      $("content").scrollTop = 0;
+    });
+  }
+
+  fetch("demos/data/em/index.json").then(r => r.json()).then(d => {
+    d.examples.forEach(e => {
+      const li = document.createElement("li"); li.dataset.id = e.id; li.textContent = e.title; li.title = e.title;
+      li.addEventListener("click", () => load(e.id)); $("task-list").appendChild(li);
+    });
+    $("task-count").textContent = `${d.examples.length} prompts`;
+    load((d.examples.find(e => e.id === location.hash.slice(1)) || d.examples[0]).id);
+  });
+})();
+</script>
+<script src="sidebar.js"></script>
+</body>
+</html>

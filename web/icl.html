@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoalScope · Few-Shot ICL</title>
+<link href="site.css" rel="stylesheet">
+<script src="demos/goalscope-panel.js"></script>
+<style>
+  /* same type size as the code pages (src/goals/goalscope_viz.py) */
+  .gsp pre { font-size: 15px; line-height: 1.7; }
+  .gsp-callout { font-size: 15px; }
+</style>
+</head>
+<body>
+<div id="layout">
+
+  <!-- ── Sidebar ── -->
+  <aside id="sidebar">
+    <div class="sb-header">
+      <div class="sb-logo">
+        <svg class="sb-logo-icon" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="9" cy="9" r="7.5" stroke="#f2708a" stroke-width="1.2"/>
+          <circle cx="9" cy="9" r="3.5" stroke="#f2708a" stroke-width="1.2"/>
+          <circle cx="9" cy="9" r="1.2" fill="#f2708a"/>
+          <line x1="1.5" y1="9" x2="4" y2="9" stroke="#f2708a" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="14" y1="9" x2="16.5" y2="9" stroke="#f2708a" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        GoalScope
+      </div>
+      <div class="sb-logo-sub">reading the goal heads</div>
+      <nav class="sb-nav"><a href="index.html">Code</a><a href="icl.html" class="active">ICL</a><a href="em.html">EM</a></nav>
+    </div>
+
+    <div class="sb-tasks">
+      <div class="sb-label">Task</div>
+      <div class="sb-search-wrap">
+        <svg class="sb-search-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <circle cx="5" cy="5" r="3.5" stroke="currentColor" stroke-width="1.3"/>
+          <line x1="7.8" y1="7.8" x2="10.5" y2="10.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        <input id="task-filter" type="search" placeholder="filter tasks…" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="task-count"></div>
+      <ul id="task-list"></ul>
+    </div>
+
+    <div class="sb-footer">
+      <b>How to read:</b> the prompt (grey) lists input→output pairs and never states its rule. Highlighted <b>A</b> tokens carry a
+      read-out of the goal heads at that position, judged against the rule. <b>Click</b> to pin / unpin, hover to preview.
+      The percentage is the task's judged verbalization rate over its prompts.
+    </div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main id="main">
+    <div id="content">
+      <div class="banner pg-hidden" id="banner"></div>
+      <div class="pg-title" id="title"></div>
+      <p class="pg-head" id="rule"></p>
+      <div class="pg-row">
+        <span class="chip" id="cat"></span>
+        <span class="meter" id="meter"></span>
+        <span id="pnav" class="pg-hidden">
+          <button class="pg-btn" id="prev" aria-label="previous prompt">◀</button>
+          <span id="pidx" style="font-size:12px;color:var(--text-mid);margin:0 4px"></span>
+          <button class="pg-btn" id="next" aria-label="next prompt">▶</button>
+        </span>
+      </div>
+      <div id="panel"></div>
+      <p class="pg-note">
+        GoalScope patches the outputs of the 122 goal heads (localized on code generation in Qwen2.5-Coder-32B-Instruct) at
+        the highlighted position into a task-agnostic probe prompt (“You are answering a series of questions that all follow
+        the same hidden rule. In one short phrase, what task are you performing?”) and lets the model answer. An LM judge
+        compares each read-out with the task's rule.
+      </p>
+    </div>
+  </main>
+</div>
+
+<script>
+(function () {
+  const CAT = {abstractive: "Abstractive", extractive: "Extractive", composition: "Composition", superposition: "Superposition"};
+  const $ = id => document.getElementById(id);
+  let tasks = {}, order = [], panel = null, curTask = null, curIdx = 0;
+
+  function select(task, k) {
+    curTask = task; curIdx = k || 0;
+    const ex = tasks[task][curIdx];
+    document.querySelectorAll("#task-list li[data-task]").forEach(li => li.classList.toggle("selected", li.dataset.task === task));
+    const sel = document.querySelector("#task-list li.selected"); if (sel) sel.scrollIntoView({block: "nearest"});
+    fetch(`demos/data/icl/${ex.id}.json`).then(r => r.json()).then(d => {
+      if (panel) panel.destroy();
+      panel = new GoalScopePanel($("panel"), {rows: d.rows, title: `${d.task} · ${d.model}`, badge: "verdict", continuation: d.continuation});
+      panel.setPins(d.pins || []);
+      $("title").textContent = d.task;
+      $("rule").innerHTML = `<span style="font-weight:400;color:var(--text-mid)">Hidden rule:</span> ${d.rule}`;
+      $("cat").textContent = CAT[d.category] || d.category;
+      $("meter").innerHTML = d.accuracy == null ? "" :
+        `<span class="track"><span class="fill" style="display:block;width:${Math.round(d.accuracy * 100)}%"></span></span>` +
+        `${Math.round(d.accuracy * 100)}% of this task's prompts verbalized`;
+      const n = tasks[task].length;
+      $("pnav").classList.toggle("pg-hidden", n < 2); $("pidx").textContent = `prompt ${curIdx + 1} / ${n}`;
+      const ph = d.meta && d.meta.placeholder;
+      $("banner").classList.toggle("pg-hidden", !ph);
+      if (ph) $("banner").textContent = "Placeholder data: read-outs are invented to preview the layout, not model outputs.";
+      history.replaceState(null, "", "#" + ex.id);
+      $("content").scrollTop = 0;
+    });
+  }
+
+  function updateFilter() {
+    const q = $("task-filter").value.trim().toLowerCase(); let vis = 0;
+    document.querySelectorAll("#task-list li[data-task]").forEach(li => {
+      const m = !q || li.dataset.search.includes(q); li.classList.toggle("hidden", !m); if (m) vis++;
+    });
+    document.querySelectorAll("#task-list li.grp").forEach(g => {      // hide a header whose tasks are all filtered out
+      let n = g.nextElementSibling, any = false;
+      while (n && !n.classList.contains("grp")) { if (!n.classList.contains("hidden")) any = true; n = n.nextElementSibling; }
+      g.classList.toggle("hidden", !any);
+    });
+    $("task-count").textContent = q ? `${vis} / ${order.length} tasks` : `${order.length} tasks`;
+  }
+
+  fetch("demos/data/icl/index.json").then(r => r.json()).then(d => {
+    d.examples.forEach(e => { if (!tasks[e.task]) { tasks[e.task] = []; order.push(e.task); } tasks[e.task].push(e); });
+    let last = null;
+    order.forEach(t => {
+      const e = tasks[t][0];
+      if (e.category !== last) {
+        const g = document.createElement("li"); g.className = "grp"; g.textContent = CAT[e.category] || e.category;
+        $("task-list").appendChild(g); last = e.category;
+      }
+      const li = document.createElement("li");
+      li.dataset.task = t; li.dataset.search = (t + " " + e.rule + " " + e.category).toLowerCase(); li.title = e.rule;
+      li.innerHTML = (e.accuracy == null ? "" : `<span class="acc">${Math.round(e.accuracy * 100)}%</span>`) +
+                     t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+      li.addEventListener("click", () => select(t, 0));
+      $("task-list").appendChild(li);
+    });
+    updateFilter();
+    $("task-filter").addEventListener("input", updateFilter);
+    $("prev").addEventListener("click", () => { const n = tasks[curTask].length; select(curTask, (curIdx - 1 + n) % n); });
+    $("next").addEventListener("click", () => select(curTask, (curIdx + 1) % tasks[curTask].length));
+    const want = d.examples.find(e => e.id === location.hash.slice(1));
+    if (want) select(want.task, tasks[want.task].findIndex(e => e.id === want.id)); else select(order[0], 0);
+  });
+})();
+</script>
+<script src="sidebar.js"></script>
+</body>
+</html>
