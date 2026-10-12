@@ -1,16 +1,17 @@
 # Gaze-select + restrict (gsr): query transfer picks the task, a span restriction carries it out
 
-*Qwen2.5-Coder-32B-Instruct · 2026-10-07 → 2026-10-09 · notebook `notebooks/diff/04.4_q_transfer_multipred.ipynb`
+*Qwen2.5-Coder-32B-Instruct · 2026-10-07 → 2026-10-10 · notebook `notebooks/diff/04.4_q_transfer_multipred.ipynb`
 (final "Gaze-select + restrict" cells) · batch `scripts/diff/diff_trigger_eval.py --closed-loop --probe-prompt
-gaze_select_restrict --gsr-anchors eq` · status (snapshot 2026-10-09 17:30): **gsr grid complete** — 32 no-kv cells +
-32 kv cells rerun with the gaze fix (`__seq__gzfix`); kv re-clamp cross-language baselines still running (run
-`kv_gzfix2_20261008`, ETA 2026-10-10 ~03:30) · companion to `closed_loop_query_transfer.md`*
+gaze_select_restrict --gsr-anchors eq` · status (2026-10-10): **all arms complete** — 32 no-kv cells,
+32 kv gsr cells rerun with the gaze fix (`__seq__gzfix`), and all 32 kv re-clamp baselines (run `kv_gzfix2_20261008`,
+finished 2026-10-10 03:00) · companion to `closed_loop_query_transfer.md`*
 
 > **What changed since the 10-08 snapshot.** (i) All kv gsr numbers are now from the corrected selector; the
 > withdrawn kv claim is resolved — **kv adds nothing to gsr**: with the selection scored on p_kv's branch it picks the
 > same task as the no-kv run in 99 % of matched instances (§4.2, finding 4). (ii) The no-kv grid is complete
 > (C++→py order-matched, C++→C++ both orderings). (iii) Selection, execution-audit and B-prior tables are recomputed on
-> all records. Conclusions 1–3 and 5–6 are unchanged.
+> all records. (iv) **2026-10-10:** the kv re-clamp baselines are complete. kv gsr beats the kv re-clamp in all 32 kv
+> cells (finding 7), and kv leaves the re-clamp as unchanged as it leaves gsr. Conclusions 1–3 and 5–6 are unchanged.
 
 ## 1. Motivation
 
@@ -89,7 +90,8 @@ run tag `-anceq`).
 ### 4.1 Judged D rate (int / str / list[int] / list[str])
 
 Re-clamp = the paper's arm (no-kv order-matched baseline from the older `ph-goal_250__a2__piv-eq` run). kv gsr = the
-`__seq__gzfix` rerun. kv re-clamp cross-language baselines are still running (py→C++ partial, rest queued).
+`__seq__gzfix` rerun. kv re-clamp = re-clamp with p_kv's task-list key/value on the goal heads
+(`ph-goal_250__a2__piv-eq__kv__seq`).
 
 | direction | arm | order-diff | order-matched |
 |---|---|---|---|
@@ -99,15 +101,15 @@ Re-clamp = the paper's arm (no-kv order-matched baseline from the older `ph-goal
 | | **kv gsr** | **.66 .59 .73 .66** | **.91 .84 .88 .91** |
 | **py→C++** | re-clamp | .56 .31 .28 .12 | .72 .53 .44 .56 |
 | | **gsr** | **.66 .47 .50 .59** | **.91 .75 .84 .88** |
-| | kv re-clamp | .44 .22 .23 .20 (list[str]: 20 of 32, running) | int .88 (8 of 32), str .75 (4 of 32), running |
+| | kv re-clamp | .44 .22 .23 .19 | .75 .53 .47 .44 |
 | | **kv gsr** | **.66 .47 .43 .59** | **.94 .69 .81 .81** |
 | **C++→py** | re-clamp | .31 .22 .44 .25 | .69 .66 .56 .69 |
 | | **gsr** | **.50 .41 .66 .47** | **.91 .78 .91 .84** |
-| | kv re-clamp | queued | queued |
+| | kv re-clamp | .34 .28 .37 .25 | .62 .66 .61 .53 |
 | | **kv gsr** | **.50 .41 .67 .47** | **.91 .84 .94 .88** |
 | **C++→C++** | re-clamp | .41 .19 .38 .25 | .84 .50 .56 .44 |
 | | **gsr** | **.62 .47 .72 .41** | **.97 .75 .88 .91** |
-| | kv re-clamp | queued | queued |
+| | kv re-clamp | .53 .19 .32 .19 | .69 .50 .59 .31 |
 | | **kv gsr** | **.59 .47 .71 .47** | **.88 .75 .81 .94** |
 
 Pooled over datatypes (exclusive labels; n = 126–128 per cell unless noted):
@@ -116,16 +118,17 @@ Pooled over datatypes (exclusive labels; n = 126–128 per cell unless noted):
 |---|---|---|---|---|
 | py→py · order-diff | .47 / .43 | **.66** / .34 | .46 / .43 | **.66** / .33 |
 | py→py · order-matched | .61 / .31 | **.88** / .11 | .61 / .31 | **.88** / .11 |
-| py→C++ · order-diff | .32 / .66 | **.55** / .44 | .28 / .62 (n = 114) | **.54** / .44 |
-| py→C++ · order-matched | .56 / .36 | **.84** / .13 | (n = 12) | **.81** / .13 |
-| C++→py · order-diff | .30 / .62 | **.51** / .49 | — | **.51** / .49 |
-| C++→py · order-matched | .65 / .27 | **.86** / .11 | — | **.89** / .09 |
-| C++→C++ · order-diff | .30 / .68 | **.55** / .43 | — | **.56** / .42 |
-| C++→C++ · order-matched | .59 / .37 | **.88** / .12 | — | **.84** / .14 |
+| py→C++ · order-diff | .32 / .66 | **.55** / .44 | .27 / .63 | **.54** / .44 |
+| py→C++ · order-matched | .56 / .36 | **.84** / .13 | .55 / .32 | **.81** / .13 |
+| C++→py · order-diff | .30 / .62 | **.51** / .49 | .31 / .58 | **.51** / .49 |
+| C++→py · order-matched | .65 / .27 | **.86** / .11 | .61 / .26 | **.89** / .09 |
+| C++→C++ · order-diff | .30 / .68 | **.55** / .43 | .31 / .63 | **.56** / .42 |
+| C++→C++ · order-matched | .59 / .37 | **.88** / .12 | .52 / .38 | **.84** / .14 |
 
-gsr outputs are almost entirely D or B. "neither" drops from 1–10 % (re-clamp) to 0–5 %, and C, the literal copy of
+gsr outputs are almost entirely D or B. "neither" drops from 1–10 % (re-clamp; 6–10 % for kv re-clamp) to 0–5 %, and C, the literal copy of
 SRC's own target, occurs at most once per cell. With kv, count (Y) never occurs under gsr, but this is by construction
-(§4.2): the restricted heads can only read D's span.
+(§4.2): the restricted heads can only read D's span. Under the kv re-clamp, which has no restriction, Y is also rare:
+8 of 1016 pooled (≤ 0.023 in every direction × ordering), against D 462 of 1016.
 
 ### 4.2 Selection fidelity: the outcome is decided by which task gaze selects
 
@@ -227,8 +230,8 @@ four directions and both orderings pooled; n per task is 7–44, so this is nois
    (§4.2). Under kv the selector scores p_kv's task list, which is the no-kv DST prompt, so the kv arm repeats the
    no-kv selection by construction. Two consequences:
    - **gsr cannot separate "set progress" (D) from "count progress" (Y).** Y is not a selection candidate and the
-     restricted heads cannot read it, so Y = 0 is by design, not evidence. The set-vs-count question needs the
-     re-clamp kv arm or a selector that also scores p_dst's own slots.
+     restricted heads cannot read it, so Y = 0 is by design, not evidence. The unrestricted kv re-clamp also gives
+     almost no Y (8 / 1016, against D 462 / 1016), but see the caveat in §6 before reading this as set > count.
    - **What kv gsr does show:** p_dst's own prompt lists A, X, Y and never mentions D. Confining its goal heads to D's
      *transplanted* key/value span still makes it write D at 0.51–0.89 pooled (execution-correct 0.77–0.88 of judged
      D on Python destinations). The task content carried in another prompt's k/v is executable as is.
@@ -236,6 +239,11 @@ four directions and both orderings pooled; n per task is 7–44, so this is nois
    the positional copy (D is "the 3rd listed" on both sides). Order-diff remains the clean test.
 6. **Extra anchors hurt.** Letting the goal heads also read the indent and the result-variable token cuts the D rate
    by 0.14–0.55 on order-diff. Those tokens appear to carry DST's own "write B next" signal.
+7. **With kv, gsr also beats the re-clamp in all 32 cells**, by 0.06 (C++→C++ order-diff int, .53 → .59) to 0.63
+   (C++→C++ order-matched list[str], .31 → .94). Pooled, order-diff goes from .27–.46 to .51–.66 and order-matched
+   from .52–.61 to .81–.89. kv itself barely moves the re-clamp: kv re-clamp is within 0.07 of no-kv re-clamp pooled in
+   every direction × ordering (largest drop C++→C++ order-matched, .59 → .52). The same reason applies as in finding 4:
+   p_kv's task list is the no-kv DST prompt.
 
 ## 6. Caveats
 
@@ -253,17 +261,19 @@ four directions and both orderings pooled; n per task is 7–44, so this is nois
   is not computed for the kv-only run), and the kv selection is redundant with the no-kv one (finding 4).
 - **Judges grade only the first computation and are not anchored on the current variable**
   (`project_closed_loop_judge_issues`). The execution audit partly covers this for Python destinations only.
-- **Mismatched baseline runs.** The no-kv order-matched re-clamp baseline comes from the older non-`__seq` run, and
-  kv re-clamp exists only for py→py so far (py→C++ partial).
+- **Mismatched baseline runs.** The no-kv order-matched re-clamp baseline comes from the older non-`__seq` run.
+- **The kv design may not separate set from count in either arm.** Under kv the goal heads read p_kv's task list
+  (`A'BD`) over the whole task span. In that list the slot a count reading would pick (the 3rd item) is D, so a
+  count-based goal-head read also predicts D. Y (the 3rd item of p_dst's own list) can only come from the non-goal
+  heads. The near-zero Y rate (8 / 1016 under the kv re-clamp) is therefore weak evidence for set over count. A clean
+  test needs a p_kv whose 3rd slot is not the set-progress answer.
 - **Missing instances.** A few kv cells have 30–31 instances instead of 32 (no valid (X, Y)).
 
 ## 7. Next steps
 
-- Finish the 24 cross-language kv re-clamp baselines (running in `kv_gzfix2_20261008`; py→C++ order-diff so far
-  .44 / .22 / .23 / .20, pooled .28, against kv gsr .54).
 - Add a restriction-only control: restrict to B, and to a random listed task, without any query transfer.
-- If the set-vs-count question matters for the paper, test it with a selector that also scores p_dst's slots (X, Y),
-  or from the kv re-clamp arm; gsr cannot answer it (finding 4).
+- If the set-vs-count question matters for the paper, redesign p_kv so that set and count progress point to
+  different tasks inside p_kv's own list (§6). Neither gsr (finding 4) nor the current kv re-clamp can answer it.
 - Decide whether to keep the kv gsr arm in the paper: it duplicates no-kv gsr's selection, and its only extra content
   is the "transplanted span is executable" result.
 - Readout fix: score the pivot readout of the restricted run, and score readouts with kv; backfill finished cells.
