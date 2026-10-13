@@ -299,7 +299,7 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
                                      inst.task_desc, model_name=args.oracle_model,
                                      kind="the code the model generated after the pivot; judge ONLY the "
                                           "first computation")
-            literal_c = {"label": lit["label"], "wrote_c": lit["label"] in ("src", "both"), "why": lit["why"]}
+            literal_c = {"label": lit["label"], "wrote_c": lit["label"] == "src", "why": lit["why"]}
         gaze = E.eval_q_transfer(inst, gaze=dict(
             prompt=raw["dst_prompt"], task_positions=raw["task_positions"],
             attn_patched=raw["attn_patched"], attn_clean=raw["attn_clean"],

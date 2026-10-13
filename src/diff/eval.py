@@ -117,12 +117,12 @@ def judge_causal(inst, patched_gen: str, **kw) -> dict:
     """Did the patched DST's IMMEDIATE next computation jump to the SRC target? We judge only the
     FIRST computation/statement of the continuation — after producing SRC's target the model may go
     back and do the other conditions, and the intervention is NOT penalized for that. Returns the
-    classification dict plus ``triggered`` (label in {src, both})."""
+    classification dict plus ``triggered`` (label == src; a BOTH verdict is NOT a hit)."""
     r = classify_concept(
         patched_gen, inst.expected_next_desc, inst.dst_next_desc, inst.task_desc,
         kind="the code the model generated to continue the function after the pivot. Judge ONLY the "
              "FIRST computation/statement it performs (ignore anything it does afterwards)", **kw)
-    r["triggered"] = r["label"] in ("src", "both")
+    r["triggered"] = r["label"] == "src"          # BOTH is not a clean shift to the target
     return r
 
 
@@ -222,8 +222,8 @@ def eval_readouts(inst, source_readout: str, dest_readout: str, patched_readout:
     src = classify_concept(source_readout, inst.expected_next_desc, inst.dst_next_desc, inst.task_desc, kind=kind, **kw)
     dst = classify_concept(dest_readout, inst.expected_next_desc, inst.dst_next_desc, inst.task_desc, kind=kind, **kw)
     pat = classify_concept(patched_readout, inst.expected_next_desc, inst.dst_next_desc, inst.task_desc, kind=kind, **kw)
-    valid = src["label"] in ("src", "both") and dst["label"] in ("dst", "both")
-    shifted = pat["label"] in ("src", "both")
+    valid = src["label"] == "src" and dst["label"] == "dst"
+    shifted = pat["label"] == "src"               # BOTH is not a clean shift to the target
     return {"source": src["label"], "dest": dst["label"], "patched": pat["label"],
             "valid": valid, "shifted": shifted, "details": {"source": src, "dest": dst, "patched": pat}}
 

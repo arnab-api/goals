@@ -91,8 +91,8 @@ def _rule_summary(recs: list[dict]) -> dict:
         out["n_clean_valid"] = len(ok)
     pairs = [(r["causal"]["label"], r["rule"]["label"]) for r in recs if r.get("causal") and r.get("rule")]
     if pairs:
-        # oracle {src, both} = triggered; rule "src" = the written condition IS z (execution-equal)
-        out["oracle_rule_agree_trigger"] = sum((o in ("src", "both")) == (ru == "src") for o, ru in pairs) / len(pairs)
+        # oracle src = triggered (BOTH is not a hit); rule "src" = the written condition IS z (execution-equal)
+        out["oracle_rule_agree_trigger"] = sum((o == "src") == (ru == "src") for o, ru in pairs) / len(pairs)
         out["oracle_rule_confusion"] = {f"{o}|{ru}": n for (o, ru), n in collections.Counter(pairs).items()}
     return out
 
