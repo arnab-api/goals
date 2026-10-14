@@ -79,10 +79,7 @@ ORDER-ID and COUNT also predict e (both the 4th task).
    is `d =` in all three setups (3 written). The query at ` =` is read right after it, so a COUNT result could be read off the
    letter. The main order-diff/order-matched pair is unaffected (both `c =`). Control: a `--pivot indent` replicate
    (no stub), or random stub letters.
-2. **"Skip the native task" fallback.** Any perturbation that suppresses no-op may land on the next listed task. This
-   coincides with ORDER-ID in ALT1 (d) and with SET_DIFF in ALT2 (e). Control: transplant the query from an SRC whose
-   tasks are all different from DST's, with the same |W_s| and target position. SET_DIFF then predicts nothing, while
-   positional hypotheses and skip-next still predict L_dst[pos].
+
 3. **Judge.** One exclusive verdict per setup over {no-op, SET_DIFF, alternative, C, neither}: a generalisation of
    `hyp_eval._letters_prompt`, as in the kv judge. Grade the first computation, plus the execution audit for Python
    destinations.

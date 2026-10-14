@@ -1,0 +1,519 @@
+diff --git a/src/diff/set_count_data.py b/src/diff/set_count_data.py
+--- a/src/diff/set_count_data.py
++++ b/src/diff/set_count_data.py
+@@ -18,11 +18,18 @@
+ from src.diff import data as D, nrgs_prefix as N
+ from src.goals.pivot_token_filter import _signature, tokens_differ_meaningfully
+ 
+-VERSION = 'set-count-v1'
+-RENDERER = 'neutral-result-v1'
++VERSION = 'set-count-v2'
++RENDERER = 'opaque-identifiers-v2'
++SET_RULE = 'source-only-H1'
++BLOCK_CONFIGS = {'de': ('core', 'swapped', 'four'), 'da': ('core', 'four')}
++BLOCK_DONORS = {'de': ('A', 'B', 'C'), 'da': ('C', 'D')}
+ SOURCE_REVISION = '8c59544e5d04'
++SOURCE_ORDER = 'bade'
+ CONFIGS = {'core': ('ade', 'a'), 'swapped': ('aed', 'a'), 'four': ('adef', 'a')}
+-DONORS = {'A': 'ad', 'B': 'ae', 'C': 'a'}
++DONORS = {'A': 'ad', 'B': 'ae', 'C': 'a', 'D': 'd'}
++# One shared permutation assigns every role AND the unfinished variable from
++# the same opaque pool. The unfinished name does not encode target or count.
++NAME_POOL = ('u', 'v', 'w', 't', 'z', 'q')
+ 
+ 
+ def digest(obj):
+@@ -81,36 +88,71 @@
+     lines += [D._assign_line(bank[roles[x]], arg, 'python', res_name=names[x])
+               for x in order if x in done]
+     # Source capture ends exactly at '='; recipient keeps all prefix bytes.
+-    lines += ['    result =' + ('' if prefix is None else ' ' + prefix)]
++    # Reuse one independent unfinished name across every matched view/reference,
++    # never the name of the expected operation and never a semantic 'result' stub.
++    lines += [f"    {names['pending']} =" + ('' if prefix is None else ' ' + prefix)]
+     return {'question': question, 'code': '\n'.join(lines)}
+ 
+ 
+-def make_family(pivot, roles, split, seed, naming_variants=1):
+-    pg = pair_group(pivot)
+-    fid = digest([VERSION, pivot.__dict__, roles, seed])[:24]
+-    family = {'id': fid, 'pair_group': pg, 'split': split,
+-              'datatype': pivot.datatype, 'role_map': roles,
+-              'prefix': pivot.prefix, 'pool_tokens': {'d': pivot.b_tok, 'e': pivot.d_tok},
+-              'validation_level': 'unvalidated', 'configs': dict(CONFIGS), 'views': []}
++def make_family(pivot, roles, split, seed, naming_variants=1, *, secondary_pivot):
++    """Join two actual binary instruments, preserving the legacy source-only H1.
++
++    de: ABC, native/alternate d/e; da: CD, native/alternate d/a.
++    The swapped destination has native e, so it belongs only to de: using a
++    d/a instrument there would require an unmeasured third operation.
++    """
++    q = secondary_pivot
++    if (pivot.datatype != q.datatype or (pivot.b, pivot.d) != (roles['d'], roles['e'])
++            or (q.b, q.d) != (roles['d'], roles['a'])):
++        raise ValueError('readout pivots must match role pairs d/e and d/a')
++    if naming_variants < 1:
++        raise ValueError('naming_variants must be positive')
++    readouts = {
++        'de': {'roles': ['d', 'e'], 'prefix': pivot.prefix,
++               'pool_tokens': {'d': pivot.b_tok, 'e': pivot.d_tok},
++               'pair_group': pair_group(pivot), 'pivot': dict(pivot.__dict__)},
++        'da': {'roles': ['d', 'a'], 'prefix': q.prefix,
++               'pool_tokens': {'d': q.b_tok, 'a': q.d_tok},
++               'pair_group': pair_group(q), 'pivot': dict(q.__dict__)}}
++    fid = digest([VERSION, RENDERER, SET_RULE, readouts, roles, seed])[:24]
++    family = {'id': fid, 'pair_group': pair_group(pivot),
++              'pair_groups': sorted({r['pair_group'] for r in readouts.values()}),
++              'split': split, 'datatype': pivot.datatype, 'role_map': roles,
++              'prefix': pivot.prefix, 'pool_tokens': readouts['de']['pool_tokens'],
++              'readouts': readouts, 'validation_level': 'unvalidated',
++              'configs': dict(CONFIGS), 'source_order': SOURCE_ORDER,
++              'donors': dict(DONORS), 'renderer': RENDERER,
++              'set_rule': SET_RULE, 'views': []}
+     for variant in range(naming_variants):
+         rng = random.Random(digest([seed, fid, variant, 'names']))
+-        vals = ['u', 'v', 'w', 't', 'z']; rng.shuffle(vals)
+-        names = dict(zip('abdef', vals))
+-        donors = {key: render(roles, names, pivot.datatype, 'abde', done)
++        vals = list(NAME_POOL); rng.shuffle(vals)
++        names = dict(zip(('a', 'b', 'd', 'e', 'f', 'pending'), vals))
++        donors = {key: render(roles, names, pivot.datatype, SOURCE_ORDER, done)
+                   for key, done in DONORS.items()}
+-        for config, (order, done) in CONFIGS.items():
+-            refs = {x: render(roles, names, pivot.datatype, order,
+-                             order[:order.index(x)], pivot.prefix) for x in 'de'}
+-            dst = render(roles, names, pivot.datatype, order, done, pivot.prefix)
+-            for donor, src_done in DONORS.items():
+-                pred = N.predict('abde', src_done, order, done)
+-                family['views'].append({
+-                    'id': f'{fid}/{variant}/{config}/{donor}', 'naming_variant': variant,
+-                    'names': names, 'config': config, 'donor': donor,
+-                    'src_order': 'abde', 'src_done': src_done,
+-                    'dst_order': order, 'dst_done': done, 'source': donors[donor],
+-                    'destination': dst, 'references': refs, 'native': pred['H0'],
+-                    'expected': {'set': pred['H1'], 'count': pred['H1c']}})
++        for block, readout in readouts.items():
++            for config in BLOCK_CONFIGS[block]:
++                order, done = CONFIGS[config]
++                refs = {x: render(roles, names, pivot.datatype, order,
++                                 order[:order.index(x)], readout['prefix'])
++                        for x in readout['roles']}
++                dst = render(roles, names, pivot.datatype, order, done, readout['prefix'])
++                for donor in BLOCK_DONORS[block]:
++                    src_done = DONORS[donor]
++                    pred = N.predict(SOURCE_ORDER, src_done, order, done)
++                    expected = {'set': pred['H1'], 'count': pred['H1c']}
++                    if not {pred['H0'], *expected.values()} <= set(readout['roles']):
++                        raise ValueError('prediction is outside the binary readout; never relabel it')
++                    family['views'].append({
++                        'id': f'{fid}/{variant}/{block}/{config}/{donor}',
++                        'naming_variant': variant, 'names': names,
++                        'block': block, 'config': config, 'donor': donor,
++                        'prefix': readout['prefix'], 'readout_roles': readout['roles'],
++                        'pool_tokens': readout['pool_tokens'],
++                        'diagnostic_pair_group': readout['pair_group'],
++                        'src_order': SOURCE_ORDER, 'src_done': src_done,
++                        'dst_order': order, 'dst_done': done, 'source': donors[donor],
++                        'destination': dst, 'references': refs, 'native': pred['H0'],
++                        'expected': expected})
+     return family
+ 
+ 
+@@ -118,28 +160,48 @@
+                   datatypes=None, limit=None, naming_variants=1):
+     if n_per_pivot < 1 or naming_variants < 1 or (limit is not None and limit < 1):
+         raise ValueError('counts and limit must be positive')
+-    pivots = N.load_pivots(model, datatypes=datatypes, core_only=True)
+-    # Sort and deduplicate BEFORE sampling; input record order is irrelevant.
+-    pivots = sorted(set(pivots), key=lambda p: digest(p.__dict__))
+-    splits = split_pairs(pivots, seed)
+-    families, rejected = [], []
+-    for p in pivots:
+-        if not meaningful_contrast(p.prefix, p.b_tok, p.d_tok):
++    raw = sorted(set(N.load_pivots(model, datatypes=datatypes, core_only=True)),
++                 key=lambda p: digest(p.__dict__))
++    # Both diagnostic pairs get ONE global split before any join. Reject a
++    # cross-split join instead of leaking its secondary pair or merging all
++    # connected pairs into a giant train/test component.
++    splits = split_pairs(raw, seed)
++    usable, rejected = [], []
++    for p in raw:
++        if meaningful_contrast(p.prefix, p.b_tok, p.d_tok):
++            usable.append(p)
++        else:
+             rejected.append({'pivot': p.__dict__, 'reason': 'contextual_lexical_contrast'})
+-            continue
+-        bank = sorted(N.BANK[p.datatype])
+-        other = [x for x in bank if x not in (p.b, p.d)]
+-        roles = []
++    index = {}
++    for p in usable:
++        index.setdefault((p.datatype, p.b, p.d), []).append(p)
++    families = []
++    for p in usable:
++        other = [x for x in sorted(N.BANK[p.datatype]) if x not in (p.b, p.d)]
++        choices = []; missing_pair = cross_split = 0
+         for a, b, f in itertools.permutations(other, 3):
+             if (N._fam(a) in {N._fam(p.b), N._fam(p.d)} or
+                 N._fam(b) in {N._fam(a), N._fam(p.b), N._fam(p.d)}):
+                 continue
+-            roles.append(dict(a=a, b=b, d=p.b, e=p.d, f=f))
+-        roles.sort(key=lambda r: digest([seed, p.__dict__, r]))
+-        if not roles:
+-            rejected.append({'pivot': p.__dict__, 'reason': 'no_distinct_role_assignment'})
+-        for r in roles[:n_per_pivot]:
+-            families.append(make_family(p, r, splits[pair_group(p)], seed, naming_variants))
++            matches = index.get((p.datatype, p.b, a), [])
++            if not matches:
++                missing_pair += 1; continue
++            matches = [q for q in matches if splits[pair_group(q)] == splits[pair_group(p)]]
++            if not matches:
++                cross_split += 1; continue
++            roles = dict(a=a, b=b, d=p.b, e=p.d, f=f)
++            # One existing secondary pivot per assignment, selected before
++            # model validation. No invented prefix or post-hoc token target.
++            q = sorted(matches, key=lambda q: digest([seed, roles, q.__dict__]))[0]
++            choices.append((roles, q))
++        choices.sort(key=lambda rq: digest([seed, p.__dict__, rq[0], rq[1].__dict__]))
++        if not choices:
++            rejected.append({'pivot': p.__dict__, 'reason': 'no_same_split_secondary_pair',
++                             'role_assignments_missing_pair': missing_pair,
++                             'role_assignments_cross_split': cross_split})
++        for roles, q in choices[:n_per_pivot]:
++            families.append(make_family(p, roles, splits[pair_group(p)], seed,
++                                        naming_variants, secondary_pivot=q))
+     families.sort(key=lambda f: f['id'])
+     if limit is not None:
+         families = families[:limit]
+@@ -147,8 +209,11 @@
+     settings = dict(model=model, seed=seed, n_per_pivot=n_per_pivot,
+                     datatypes=sorted(datatypes) if datatypes else None, limit=limit,
+                     naming_variants=naming_variants)
+-    out = {'version': VERSION, 'renderer': RENDERER, 'settings': settings,
+-           'source_revision': SOURCE_REVISION,
++    out = {'version': VERSION, 'renderer': RENDERER, 'set_rule': SET_RULE,
++           'source_order': SOURCE_ORDER, 'donors': dict(DONORS),
++           'block_configs': BLOCK_CONFIGS, 'block_donors': BLOCK_DONORS,
++           'split_policy': 'global-unordered-pair assignment; join same-split pairs only',
++           'pair_splits': splits, 'settings': settings, 'source_revision': SOURCE_REVISION,
+            'naming_seed': seed, 'source_pool': str(pool),
+            'source_pool_sha256': hashlib.sha256(pool.read_bytes()).hexdigest(),
+            'renderer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+@@ -163,12 +228,36 @@
+     if fp != digest(copy):
+         raise ValueError('dataset fingerprint mismatch; rebuild instead of reusing stale metadata')
+     if data['version'] != VERSION:
+-        raise ValueError('unsupported dataset schema')
++        raise ValueError('unsupported dataset schema; rebuild v1 data for the two-block design')
++    if (data.get('renderer') != RENDERER or data.get('source_order') != SOURCE_ORDER
++            or data.get('donors') != DONORS or data.get('set_rule') != SET_RULE):
++        raise ValueError('dataset design/renderer mismatch; rebuild instead of relabeling old data')
+     groups = {}
+     for f in data['families']:
+-        previous = groups.setdefault(f['pair_group'], f['split'])
+-        if previous != f['split']:
+-            raise ValueError('pair leakage across splits')
++        if set(f['pair_groups']) != {r['pair_group'] for r in f['readouts'].values()}:
++            raise ValueError('readout pair identity mismatch')
++        for group in f['pair_groups']:
++            previous = groups.setdefault(group, f['split'])
++            if previous != f['split'] or data['pair_splits'].get(group) != f['split']:
++                raise ValueError('diagnostic pair leakage across blocks/splits')
++        variants = {v['naming_variant'] for v in f['views']}
++        expected_conditions = {(block, c, d) for block in BLOCK_CONFIGS
++                               for c in BLOCK_CONFIGS[block] for d in BLOCK_DONORS[block]}
++        for variant in variants:
++            views = [v for v in f['views'] if v['naming_variant'] == variant]
++            if len(views) != 13 or {(v['block'], v['config'], v['donor']) for v in views} != expected_conditions:
++                raise ValueError('incomplete matched family; never drop a donor or block')
++            for v in views:
++                r = f['readouts'][v['block']]
++                prediction = N.predict(v['src_order'], v['src_done'], v['dst_order'], v['dst_done'])
++                if v['expected'] != {'set': prediction['H1'], 'count': prediction['H1c']}:
++                    raise ValueError('labels do not match source-only H1/count definitions')
++                if (v['src_order'] != SOURCE_ORDER or v['src_done'] != DONORS[v['donor']]
++                        or v['native'] != prediction['H0']
++                        or v['readout_roles'] != r['roles'] or v['prefix'] != r['prefix']
++                        or set(v['references']) != set(r['roles'])
++                        or not {v['native'], *v['expected'].values()} <= set(r['roles'])):
++                    raise ValueError('view/readout identity mismatch')
+     return data
+ 
+ 
+diff --git a/src/diff/set_count_train.py b/src/diff/set_count_train.py
+--- a/src/diff/set_count_train.py
++++ b/src/diff/set_count_train.py
+@@ -180,17 +180,19 @@
+                            for k, v in tokens.items()}
+                 validation = {'level': 'mechanics_only' if smoke else 'next_token_only',
+                               'reference_top_ids': tokens.copy(), 'reference_top_strings': decoded,
+-                              'stored_token_agreement': {k: decoded[k] == family['pool_tokens'][k] for k in tokens},
++                              'stored_token_agreement': {k: decoded[k] == view['pool_tokens'][k] for k in tokens},
++                              'readout_roles': view['readout_roles'], 'block': view['block'],
+                               'source_completion_verified': False, 'full_completion_verified': False}
+                 if smoke:
+                     # Dedicated fixture outputs are deliberately unrelated to a
+                     # random model's top token. These are NOT semantic labels.
+-                    tokens = {'d': 259, 'e': 260}
++                    tokens = dict(zip(view['readout_roles'], (259, 260)))
+                     validation['artificial_readout_ids'] = tokens
+                 else:
+-                    if tokens['d'] == tokens['e']:
++                    left, right = view['readout_roles']
++                    if tokens[left] == tokens[right]:
+                         raise ValueError('reference next tokens coincide')
+-                    if not meaningful_contrast(family['prefix'], decoded['d'], decoded['e']):
++                    if not meaningful_contrast(view['prefix'], decoded[left], decoded[right]):
+                         raise ValueError('reference contrast fails contextual lexical policy')
+                     if int(lps[dst].argmax()) != tokens[view['native']]:
+                         raise ValueError('clean destination disagrees with native reference')
+@@ -219,22 +221,25 @@
+ 
+ 
+ def view_weights(caches, hypothesis=None, control_weight=1.):
+-    """Equal config/donor/variant weights, then a native-control multiplier.
+-
+-    Do not renormalize after applying the multiplier: the primary loss scale
+-    stays fixed when comparing control_weight=0 and control_weight=1.
++    """Equal blocks, then configurations, donors and naming variants.
++
++    Native-control weighting does not renormalize primary contributions. The
++    9-view de block and 4-view da block each get half the default family mass.
+     """
+     if control_weight < 0:
+         raise ValueError('control_weight must be nonnegative')
+-    configs = sorted({c.meta['config'] for c in caches})
++    blocks = sorted({c.meta.get('block', 'de') for c in caches})
+     weights = []
+     for c in caches:
+-        same = [x for x in caches if x.meta['config'] == c.meta['config']]
++        block = c.meta.get('block', 'de')
++        same_block = [x for x in caches if x.meta.get('block', 'de') == block]
++        configs = {x.meta['config'] for x in same_block}
++        same = [x for x in same_block if x.meta['config'] == c.meta['config']]
+         donors = {x.meta['donor'] for x in same}
+         n = sum(x.meta['donor'] == c.meta['donor'] for x in same)
+         factor = (control_weight if hypothesis is not None and
+                   c.meta['expected'][hypothesis] == c.meta['native'] else 1.)
+-        weights.append(factor / (len(configs)*len(donors)*n))
++        weights.append(factor / (len(blocks)*len(configs)*len(donors)*n))
+     return weights
+ 
+ 
+@@ -266,17 +271,24 @@
+     rows, whole = [], []
+     for family, caches in families:
+         correct = []
+-        for c in caches:
++        for c, weight in zip(caches, view_weights(caches)):
+             expected = c.meta['expected'][hypothesis]
+             native = c.meta['native']
+-            target = 'e' if native == 'd' else 'd'
++            target = next(k for k in c.token_ids if k != native)
+             with patched(adapter, mask, layers, c.q_src, bases):
+                 lp = adapter.logprobs([c.destination])[0]
+             top = int(lp.argmax())
+-            other = 'e' if expected == 'd' else 'd'
++            other = next(k for k in c.token_ids if k != expected)
+             ok = top == c.token_ids[expected]; correct.append(ok)
+             rows.append({'family_id': family['id'], 'view_id': c.meta['id'],
+-                         'split': family['split'], 'config': c.meta['config'],
++                         'split': family['split'], 'datatype': family['datatype'],
++                         'block': c.meta.get('block', 'de'), 'view_weight': weight,
++                         'prefix': c.meta.get('prefix'), 'readout_roles': list(c.token_ids),
++                         'src_order': c.meta.get('src_order'), 'src_done': c.meta.get('src_done'),
++                         'dst_order': c.meta.get('dst_order'), 'dst_done': c.meta.get('dst_done'),
++                         'naming_variant': c.meta.get('naming_variant'),
++                         'diagnostic_pair_group': c.meta.get('diagnostic_pair_group'),
++                         'config': c.meta['config'],
+                          'donor': c.meta['donor'], 'hypothesis': hypothesis,
+                          'expected': expected, 'native': native, 'target': target,
+                          'expected_correct': ok, 'native_correct': top == c.token_ids[native],
+@@ -288,7 +300,8 @@
+         whole.append(all(correct))
+     return {'n_families': len(whole), 'n_views': len(rows),
+             'whole_family_accuracy': sum(whole)/len(whole) if whole else None,
+-            'expected_accuracy': sum(r['expected_correct'] for r in rows)/len(rows) if rows else None,
++            'expected_accuracy': sum(r['view_weight']*r['expected_correct'] for r in rows)/len(whole) if whole else None,
++            'unweighted_expected_accuracy': sum(r['expected_correct'] for r in rows)/len(rows) if rows else None,
+             'rows': rows}
+ 
+ 
+@@ -475,7 +488,7 @@
+                 'sparsity': args.sparsity, 'control_weight': args.control_weight,
+                 'seed': args.seed, 'dtype': str(next(adapter._model.parameters()).dtype),
+                 'max_length': args.max_length, 'allow_next_token_only': args.allow_next_token_only,
+-                'objective_version': 'family-balanced-expected-ce-v1'}
++                'objective_version': 'family-block-balanced-expected-ce-v2'}
+     step = 0
+     if args.resume:
+         step, loaded_bases = load_checkpoint(args.resume, identity, mask, optimizer)
+diff --git a/test/test_set_count.py b/test/test_set_count.py
+--- a/test/test_set_count.py
++++ b/test/test_set_count.py
+@@ -6,7 +6,8 @@
+ 
+ from src.diff import nrgs_prefix as N
+ from src.diff.set_count_data import (build_dataset, digest, make_family,
+-                                     meaningful_contrast, split_pairs, verify_dataset)
++                                     meaningful_contrast, split_pairs, verify_dataset,
++                                     VERSION, RENDERER, SOURCE_ORDER, DONORS, NAME_POOL, SET_RULE)
+ from src.diff.set_count_train import (ByteTokenizer, HFAdapter, chat_prompt, expected_loss,
+                                      load_checkpoint, patched, save_checkpoint, train_step,
+                                      validate_and_cache, evaluate, view_weights)
+@@ -25,7 +26,8 @@
+     p = N.Pivot('int', 'is_even', 'is_divisible_by_three', 'n % ', '2', '3')
+     roles = dict(a='is_positive', b='is_perfect_square', d='is_even',
+                  e='is_divisible_by_three', f='is_power_of_two')
+-    return make_family(p, roles, 'train', 17, naming_variants=2)
++    return make_family(p, roles, 'train', 17, naming_variants=2,
++                       secondary_pivot=N.Pivot('int', 'is_even', 'is_positive', 'n', ' %', ' >'))
+ 
+ 
+ @pytest.fixture
+@@ -43,27 +45,91 @@
+     expected = {'core': (['e','d','d'], ['e','e','d']),
+                 'swapped': (['e','d','e'], ['d','d','e']),
+                 'four': (['e','d','d'], ['e','e','d'])}
++    assert len(family['views']) == 26
+     for config, (sets, counts) in expected.items():
+-        views = [v for v in family['views'] if v['config'] == config and v['naming_variant'] == 0]
++        views = [v for v in family['views'] if v['block'] == 'de' and v['config'] == config and v['naming_variant'] == 0]
+         assert [v['expected']['set'] for v in views] == sets
+         assert [v['expected']['count'] for v in views] == counts
++    for config in ('core', 'four'):
++        views = [v for v in family['views'] if v['block'] == 'da' and v['config'] == config and v['naming_variant'] == 0]
++        assert [v['donor'] for v in views] == ['C','D']
++        assert [v['expected']['set'] for v in views] == ['d','a']
++        assert [v['expected']['count'] for v in views] == ['d','d']
++        assert len({json.dumps(v['destination'], sort_keys=True) for v in views}) == 1
+     for v in family['views']:
+-        assert v['source']['code'].endswith('result =')
+-        assert v['destination']['code'].endswith('result = n % ')
++        pending = v['names']['pending']
++        assert v['source']['code'].endswith(f'{pending} =')
++        assert v['destination']['code'].endswith(f"{pending} = {v['prefix']}")
++        assert v['src_order'] == SOURCE_ORDER == 'bade'
++        assert next(x for x in SOURCE_ORDER if x not in v['src_done']) == 'b'
++        assert set(v['names'].values()) == set(NAME_POOL)
++        assert 'result =' not in v['source']['code']
+         assert 'b' not in v['dst_order']
+-        for p in v['references'].values():
+-            assert p['code'].endswith('result = n % ')
+-        a_line = f"    {v['names']['a']} = n > 0"
+-        assert a_line in v['source']['code'] and a_line in v['destination']['code']
+-    for variant in [0, 1]:
+-        assert len({json.dumps(v['names'], sort_keys=True) for v in family['views']
+-                    if v['naming_variant'] == variant}) == 1
+-    assert make_family(N.Pivot('int','is_even','is_divisible_by_three','n % ','2','3'),
+-                       family['role_map'], 'train', 17, 2) == family
+-    # Optional structural example is intentionally not a training config.
+-    assert N.predict('abde','ad','adef','ad')['H1c'] == 'e'
+-    assert N.predict('abde','ade','adef','ad')['H1c'] == 'f'
+-    assert all(v['config'] != 'new_count' for v in family['views'])
++        for prompt in v['references'].values():
++            assert prompt['code'].endswith(f"{pending} = {v['prefix']}")
++        assignments = v['source']['code'].splitlines()[2:-1]
++        assert [line.strip().split(' =',1)[0] for line in assignments] == [
++            v['names'][x] for x in SOURCE_ORDER if x in v['src_done']]
++        pred = N.predict(v['src_order'], v['src_done'], v['dst_order'], v['dst_done'])
++        assert v['expected'] == {'set': pred['H1'], 'count': pred['H1c']}
++        assert set(v['references']) == set(v['readout_roles'])
++    for variant in (0, 1):
++        views = [v for v in family['views'] if v['naming_variant'] == variant]
++        assert len({json.dumps(v['names'], sort_keys=True) for v in views}) == 1
++        for donor in ('A','B','C','D'):
++            assert len({json.dumps(v['source'], sort_keys=True) for v in views if v['donor']==donor}) == 1
++    assert not any(v['block']=='da' and v['config']=='swapped' for v in family['views'])
++
++
++def test_legacy_h1_remains_source_only_and_d_is_not_relabelled(family):
++    assert N.predict('bade','d','ade','a')['H1'] == 'a'
++    d = next(v for v in family['views'] if v['donor']=='D')
++    assert d['expected']['set']=='a' and d['native']=='d'
++    # The a teacher begins before a, rather than silently preserving completed a.
++    assert 'n > 0' not in d['references']['a']['code']
++    assert 'n > 0' in d['destination']['code']
++    assert d['prefix']=='n'  # Never score a using the incompatible n % prefix.
++
++
++def test_opaque_pending_name_shared_and_varies(family):
++    p=N.Pivot('int','is_even','is_divisible_by_three','n % ','2','3')
++    q=N.Pivot('int','is_even','is_positive','n',' %',' >')
++    seen=set()
++    for seed in range(32):
++        f=make_family(p,family['role_map'],'train',seed,secondary_pivot=q)
++        names=[v['names'] for v in f['views']]
++        assert all(n==names[0] for n in names)
++        seen.add(names[0]['pending'])
++    assert seen==set(NAME_POOL)
++
++
++def test_block_balancing_and_reciprocal_diagnostic(family):
++    from types import SimpleNamespace
++    cs=[SimpleNamespace(meta=v) for v in family['views']]
++    weights=view_weights(cs)
++    for block in ('de','da'):
++        assert sum(w for c,w in zip(cs,weights) if c.meta['block']==block)==pytest.approx(.5)
++    patterns={(v['expected']['set']!=v['native'],v['expected']['count']!=v['native'])
++              for v in family['views'] if v['config']=='core'}
++    assert patterns=={(True,True),(False,True),(False,False),(True,False)}
++
++
++def test_old_or_mixed_design_dataset_rejected():
++    data=build_dataset(limit=1)
++    for key,value in [('version','set-count-v1'),('renderer','neutral-result-v1'),
++                      ('set_rule','destination-union'),('source_order','abde')]:
++        bad=copy.deepcopy(data);bad[key]=value;bad.pop('fingerprint');bad['fingerprint']=digest(bad)
++        with pytest.raises(ValueError): verify_dataset(bad)
++    bad=copy.deepcopy(data);bad['families'][0]['views'].pop()
++    bad.pop('fingerprint');bad['fingerprint']=digest(bad)
++    with pytest.raises(ValueError,match='incomplete'):verify_dataset(bad)
++
++
++def test_secondary_pairs_cannot_cross_split():
++    data=build_dataset(limit=1)
++    other=copy.deepcopy(data['families'][0]);other['split']='dev' if other['split']!='dev' else 'train'
++    data['families'].append(other);data.pop('fingerprint');data['fingerprint']=digest(data)
++    with pytest.raises(ValueError,match='leakage'): verify_dataset(data)
+ 
+ 
+ @pytest.mark.parametrize('prefix,left,right,keep', [
+@@ -144,8 +210,8 @@
+ 
+ 
+ def test_training_checkpoint_independent_resume(adapter, family, tmp_path):
+-    # One variant keeps the mechanics test small but retains all nine conditions.
+-    family['views'] = family['views'][:9]
++    # One variant retains both blocks and all thirteen conditions.
++    family['views'] = [v for v in family['views'] if v['naming_variant']==0]
+     accepted, rejected = validate_and_cache(adapter,[family],[0,1],smoke=True)
+     assert not rejected and len(accepted) == 1
+     caches = accepted[0][1]
+@@ -169,8 +235,11 @@
+         with pytest.raises(ValueError,match='identity'):
+             load_checkpoint(path,{'hypothesis':'other'},restored,opt2)
+         result = evaluate(adapter,mask,[0,1],accepted,hypothesis)
+-        assert result['n_views'] == 9
+-        assert {r['donor'] for r in result['rows']} == {'A','B','C'}
++        assert result['n_views'] == 13
++        assert {r['block'] for r in result['rows']} == {'de','da'}
++        if hypothesis=='set':
++            assert all(r['expected']=='a' for r in result['rows'] if r['donor']=='D')
++        assert {r['donor'] for r in result['rows']} == {'A','B','C','D'}
+         assert all(r['validation']['level'] == 'mechanics_only' for r in result['rows'])
+         saved[hypothesis] = mask.detach().clone()
+     assert not torch.equal(saved['set'],saved['count'])
+@@ -217,8 +286,10 @@
+     from src.diff import set_count_train as T
+     from src.diff.set_count_data import VERSION
+     monkeypatch.setattr(T, 'load_model', lambda args: adapter)
+-    family['views'] = family['views'][:9]
+-    dataset = {'version': VERSION, 'families': [family]}
++    family['views'] = [v for v in family['views'] if v['naming_variant']==0]
++    dataset = {'version': VERSION, 'renderer': RENDERER, 'source_order': SOURCE_ORDER,
++               'donors': dict(DONORS), 'set_rule': SET_RULE,
++               'pair_splits': {k:family['split'] for k in family['pair_groups']}, 'families': [family]}
+     dataset['fingerprint'] = digest(dataset)
+     path = tmp_path/'data.json'; path.write_text(json.dumps(dataset))
+     out = tmp_path/'run'

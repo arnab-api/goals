@@ -1,0 +1,102 @@
+{
+  "status": "PASS_CPU_ONLY_V2_NOT_PRETRAINED_VALIDATED",
+  "tests": {
+    "total": 55,
+    "core": 31,
+    "runner": 24,
+    "subtests": 40,
+    "log": "all_tests.log"
+  },
+  "offline_smoke": {
+    "status": "PASS_OFFLINE_MECHANICS_ONLY",
+    "cases": {
+      "set_head": {
+        "steps": 2,
+        "train_views": 13,
+        "gradient_norms": [
+          0.00016555088222958148,
+          0.00016553592286072671
+        ],
+        "checkpoint_bytes": 13083,
+        "checkpoint_reload_verified": true
+      },
+      "set_svd": {
+        "steps": 2,
+        "train_views": 13,
+        "gradient_norms": [
+          0.00011938100942643359,
+          0.00011936514056287706
+        ],
+        "checkpoint_bytes": 19688,
+        "checkpoint_reload_verified": true
+      },
+      "count_head": {
+        "steps": 2,
+        "train_views": 13,
+        "gradient_norms": [
+          0.0002070119371637702,
+          0.0002069999318337068
+        ],
+        "checkpoint_bytes": 13019,
+        "checkpoint_reload_verified": true
+      },
+      "count_svd": {
+        "steps": 2,
+        "train_views": 13,
+        "gradient_norms": [
+          0.000149446030263789,
+          0.00014944052963983268
+        ],
+        "checkpoint_bytes": 19688,
+        "checkpoint_reload_verified": true
+      }
+    }
+  },
+  "dataset": {
+    "version": "set-count-v2",
+    "renderer": "opaque-identifiers-v2",
+    "set_rule": "source-only-H1",
+    "families": 239,
+    "views": 3107,
+    "by_datatype": {
+      "list[int]": 92,
+      "int": 57,
+      "str": 90
+    },
+    "by_split": {
+      "train": 218,
+      "dev": 7,
+      "test": 14
+    },
+    "by_type_split": {
+      "list[int]/train": 92,
+      "int/train": 50,
+      "str/train": 76,
+      "str/dev": 7,
+      "int/test": 7,
+      "str/test": 7
+    },
+    "diagnostic_pairs": 45,
+    "rejection_reasons": {
+      "contextual_lexical_contrast": 50,
+      "no_same_split_secondary_pair": 86
+    },
+    "fingerprint": "3885d46e5b29affcb31723470e76c1fb3ded6c97b259b0482f7e18b0e23bc04c",
+    "source_pool_sha256": "90a49186309a2988f302c5118fa740d63e4134dc7eaecf6348ea4e90036765ba",
+    "model_validated": false
+  },
+  "patch_checks": {
+    "full": "PASS",
+    "v1_upgrade": "PASS",
+    "applied_outputs_equal": true
+  },
+  "review": {
+    "finding": "standalone smoke resume could overwrite evidence before identity rejection",
+    "resolution": "isolated attempt outputs; all-case identity/step/history checks before canonical publication; rejected attempts retain sibling diagnostics"
+  },
+  "new_pretrained_model_run": false,
+  "new_gpu_run": false,
+  "full_semantic_validation_implemented": false,
+  "historical_v1_smoke_eid": "exp_01m427ngjbebxa908fyd2kg57z",
+  "historical_v1_results_apply_to_v2": false
+}
