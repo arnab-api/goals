@@ -669,28 +669,34 @@ def _make_headwise_forward(sample_module, state):
             for kvh in src_k:  # replace span for patched kv-heads only
                 k2[:, kvh, span, :] = src_k[kvh].to(k2.device, k2.dtype)
                 v2[:, kvh, span, :] = src_v[kvh].to(v2.device, v2.dtype)
-            out_patched, w_patched = eager(
-                self,
-                q,
-                k2,
-                v2,
-                attention_mask,
-                dropout=0.0,
-                scaling=self.scaling,
-                sliding_window=sw,
-                **kwargs,
-            )
+            patched = {}
+
+            def _patched(blind_self):
+                """(out, w) of the source-span branch; blind_self masks each query's OWN key (the diagonal)."""
+                if blind_self not in patched:
+                    am = attention_mask
+                    if blind_self:
+                        Q, K = q.shape[2], k2.shape[2]
+                        am = (torch.zeros(q.shape[0], 1, Q, K, dtype=q.dtype, device=q.device)
+                              if attention_mask is None else attention_mask.clone())
+                        iq = torch.arange(Q, device=am.device)
+                        am[:, :, iq, K - Q + iq] = False if am.dtype == torch.bool else torch.finfo(am.dtype).min
+                    patched[blind_self] = eager(self, q, k2, v2, am, dropout=0.0, scaling=self.scaling,
+                                                sliding_window=sw, **kwargs)
+                return patched[blind_self]
+
             out = out_clean.clone()
-            if w is not None and w_patched is not None:
+            if w is not None:
                 w = w.clone()
             # route per query head, per route: query_positions="last" / int n routes only the final 1 / n
             # queries of this forward (the last prompt tokens on the prompt pass, the new token on each
             # decode step) so every earlier position stays bit-identical to the clean DST run. A head in
             # several routes reads the source at the UNION of their query positions (same out_patched).
-            for heads_by_layer, qp in state["routes"]:
+            for heads_by_layer, qp, opts in state["routes"]:
                 rh = heads_by_layer.get(self.layer_idx)
                 if not rh:
                     continue
+                out_patched, w_patched = _patched(bool(opts.get("blind_self")))
                 qsl = slice(None) if qp == "all" else slice(-(1 if qp == "last" else qp), None)
                 out[:, qsl, rh, :] = out_patched[:, qsl, rh, :]
                 # Effective-branch diagnostics: the routed heads read (k2, v2), so the returned attention
@@ -752,19 +758,25 @@ def headwise_kv_patch(
 def headwise_kv_patch_routes(mt, routes, k_cache, v_cache, dest_positions, route_group=False):
     """:func:`headwise_kv_patch` with SEVERAL query-head routes over ONE source k/v transplant.
 
-    ``routes`` = ``[(heads, query_positions), ...]``: each route's query heads read the source span k/v at its
-    own query positions ("all" | "last" | int n — see :func:`headwise_kv_patch`). The k/v of the kv-heads of
+    ``routes`` = ``[(heads, query_positions[, opts]), ...]``: each route's query heads read the source span k/v at
+    its own query positions ("all" | "last" | int n — see :func:`headwise_kv_patch`). ``opts`` (optional dict):
+    ``{"blind_self": True}`` — the route's heads cannot attend to the CURRENT token's own key (the diagonal is
+    masked in their source-span branch only; every other key, incl. the transplanted span, stays visible). The k/v of the kv-heads of
     the UNION of all routes is replaced on ``dest_positions`` (the caches must cover them); every other
     (layer, head) reads the clean dest k/v. Use this instead of nesting two ``headwise_kv_patch`` contexts:
     each one REPLACES the layer's attention forward, so on a shared layer the inner would silently drop
     the outer. A head listed in several routes reads the source at the union of their query positions."""
-    for _, qp in routes:
+    routes = [(r[0], r[1], dict(r[2]) if len(r) > 2 and r[2] else {}) for r in routes]
+    for _, qp, opts in routes:
         _check_query_positions(qp)
+        unknown = set(opts) - {"blind_self"}
+        if unknown:
+            raise ValueError(f"unknown route option(s) {sorted(unknown)}")
     n_kv = getattr(mt, "n_kv_heads", None) or mt.config.num_key_value_heads
     group = mt.n_heads // n_kv  # GQA group size, from mt (not module GROUP)
     patched_kv = defaultdict(set)
     route_heads = []
-    for heads, qp in routes:  # heads: list of (layer, query_head)
+    for heads, qp, opts in routes:  # heads: list of (layer, query_head)
         sel_q = defaultdict(set)
         for l, h in heads:
             sel_q[l].add(h)
@@ -772,10 +784,10 @@ def headwise_kv_patch_routes(mt, routes, k_cache, v_cache, dest_positions, route
         if route_group:  # every query head in a patched group
             sel_q = {l: {g * group + i for g in {h // group for h in hs} for i in range(group)}
                      for l, hs in sel_q.items()}
-        route_heads.append(({l: sorted(hs) for l, hs in sel_q.items()}, qp))
+        route_heads.append(({l: sorted(hs) for l, hs in sel_q.items()}, qp, opts))
     patched_kvheads = {l: sorted(kvs) for l, kvs in patched_kv.items()}
     goal_qheads = defaultdict(set)  # union over routes: the layers to wrap + the value-norm diagnostics
-    for hl, _ in route_heads:
+    for hl, _, _ in route_heads:
         for l, hs in hl.items():
             goal_qheads[l].update(hs)
     goal_qheads = {l: sorted(hs) for l, hs in goal_qheads.items()}
