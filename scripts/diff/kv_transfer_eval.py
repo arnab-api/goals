@@ -155,16 +155,28 @@ def _config_tag(setup, dt, variant, sl, dl, letter_stub="na") -> str:
     return f"{_safe(dt)}__{v}__{sl}-{dl}"
 
 
-def _run_tag(patch_heads, readout_heads, abl, ablation_strat, alpha, align) -> str:
+def _query_positions(v):
+    """argparse type: 'all' | 'last' | int n (last n prompt queries, then every generated token)."""
+    if v in ("all", "last"):
+        return v
+    n = int(v)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"query positions must be 'all', 'last' or an int >= 1, got {v!r}")
+    return n
+
+
+def _run_tag(patch_heads, readout_heads, abl, ablation_strat, alpha, align, query_positions="all") -> str:
     """Run-level intervention knobs (single-valued per invocation). Each run gets its own subdir —
     ``.../{model}/{run_tag}/{config_tag}/`` — with its OWN summary.json, so different runs never
     overwrite each other. The ablation strategy is folded into the ablate segment (``abl-35-50-restrict``)
     only when ablation is ON — ``abl-off`` stays strat-free so those runs keep their existing tag. The
     readout head-set is tagged ``__ro-<label>`` ONLY when it differs from the default 'goal', so
-    existing (readout=goal) run tags are unchanged."""
+    existing (readout=goal) run tags are unchanged. ``__q-last`` is appended only for
+    ``--query-positions last`` (the default "all" keeps the existing tags)."""
     abl_seg = abl if abl == "off" else f"{abl}-{ablation_strat}"
     ro_seg = "" if readout_heads == "goal" else f"__ro-{readout_heads}"
-    return f"ph-{patch_heads}{ro_seg}__abl-{abl_seg}__a{alpha:g}__{align}"
+    q_seg = {"all": "", "last": "__q-last"}.get(query_positions, f"__q-last{query_positions}")
+    return f"ph-{patch_heads}{ro_seg}__abl-{abl_seg}__a{alpha:g}__{align}{q_seg}"
 
 
 def _resolve_patch_heads(ctx, spec):
@@ -363,6 +375,7 @@ def run_config(
             align=args.align,
             ablate_heads=ablate_heads,
             ablation_strat=args.ablation_strat,
+            query_positions=args.query_positions,
         )
 
         ev_kw = dict(model_name=args.oracle_model)
@@ -549,6 +562,14 @@ def parse_args():
         "--max-instances", type=int, default=None, help="further cap instances/config"
     )
     p.add_argument("--max-new", type=int, default=64)
+    p.add_argument(
+        "--query-positions",
+        default="all",
+        type=_query_positions,
+        help="which DST query positions of the patch heads read the source span: 'all' (original) | "
+        "'last' (pivot, then each generated token -> pre-pivot latents untouched) | int n (last n prompt "
+        "tokens, then each generated token); tags the run '__q-last' / '__q-last<n>'",
+    )
     p.add_argument("--oracle-model", default="claude-sonnet-4-6")
     p.add_argument("--no-oracle", action="store_true", help="skip causal+readout eval")
     p.add_argument(
@@ -596,7 +617,7 @@ def main():
     model_short = args.model.split("/")[-1]
     # groups this run's outputs (ablation strat folded into the ablate segment when ablation is on)
     run_tag = _run_tag(
-        ph_tag, ro_tag, abl_tag, args.ablation_strat, args.alpha, args.align
+        ph_tag, ro_tag, abl_tag, args.ablation_strat, args.alpha, args.align, args.query_positions
     )
     logger.info(f"run_tag={run_tag}")
 

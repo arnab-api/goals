@@ -128,7 +128,7 @@ def run_config(ctx, args, dt, conn, order, sl, dl, patch_heads, readout_heads, o
                     f"SRC z={inst.meta['z']!r} vs DST y={inst.meta['y']!r}")
         raw = FUNC.run_kv_transfer_intervention(
             mt, inst, patch_heads, readout_heads=readout_heads, max_new=args.max_new,
-            alpha=args.alpha, align=args.align, ctx=ctx)
+            alpha=args.alpha, align=args.align, query_positions=args.query_positions, ctx=ctx)
         rule = rule_clean = None
         if dl == "python":  # execution check is Python-only (patched / clean DST code is python)
             rule = H.rule_verdict(inst, raw["gen_patched"])
@@ -197,6 +197,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1123)
     p.add_argument("--max-instances", type=int, default=None, help="further cap instances/config (smoke)")
     p.add_argument("--max-new", type=int, default=64)
+    p.add_argument("--query-positions", default="all", type=K._query_positions,
+                   help="DST query positions that read the source span: 'all' (original) | 'last' (from the pivot on) | "
+                        "int n (last n prompt tokens, then each generated token)")
     p.add_argument("--oracle-model", default="claude-sonnet-4-6")
     p.add_argument("--no-oracle", action="store_true", help="skip causal + readout oracle (rule verdict only)")
     p.add_argument("--tag-suffix", default="", help="appended to the run tag")
@@ -219,7 +222,8 @@ def main():
     ctx.readout_heads, ctx.union_heads, ctx.gsp = readout_heads, None, None
     ph = K._patch_heads_tag(args.patch_heads, len(patch_heads))
     ro = K._patch_heads_tag(args.readout_heads, len(readout_heads))
-    run_tag = f"ph-{ph}__ro-{ro}__a{args.alpha:g}__{args.align}{args.tag_suffix}"
+    q_seg = {"all": "", "last": "__q-last"}.get(args.query_positions, f"__q-last{args.query_positions}")  # "all" keeps old tags
+    run_tag = f"ph-{ph}__ro-{ro}__a{args.alpha:g}__{args.align}{q_seg}{args.tag_suffix}"
     out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / args.model.split("/")[-1] / K.MECHANISM / SETUP / run_tag
     out_root.mkdir(parents=True, exist_ok=True)
     logger.info(f"run_tag={run_tag} · patch={ph}(n={len(patch_heads)}) readout={ro}(n={len(readout_heads)})")

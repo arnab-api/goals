@@ -681,14 +681,24 @@ def _make_headwise_forward(sample_module, state):
                 **kwargs,
             )
             out = out_clean.clone()
-            out[:, :, gh, :] = out_patched[:, :, gh, :]  # route per query head
-            # Effective-branch diagnostics: the routed heads read (k2, v2), so the returned attention
-            # weights and the value norms used by value-weighted attention must come from that branch
-            # (not from the recipient branch / the cache, which holds the recipient v). Non-routed heads,
-            # including GQA siblings of routed ones, keep the recipient branch.
             if w is not None and w_patched is not None:
                 w = w.clone()
-                w[:, gh] = w_patched[:, gh]
+            # route per query head, per route: query_positions="last" / int n routes only the final 1 / n
+            # queries of this forward (the last prompt tokens on the prompt pass, the new token on each
+            # decode step) so every earlier position stays bit-identical to the clean DST run. A head in
+            # several routes reads the source at the UNION of their query positions (same out_patched).
+            for heads_by_layer, qp in state["routes"]:
+                rh = heads_by_layer.get(self.layer_idx)
+                if not rh:
+                    continue
+                qsl = slice(None) if qp == "all" else slice(-(1 if qp == "last" else qp), None)
+                out[:, qsl, rh, :] = out_patched[:, qsl, rh, :]
+                # Effective-branch diagnostics: the routed heads read (k2, v2), so the returned attention
+                # weights and the value norms used by value-weighted attention must come from that branch
+                # (not from the recipient branch / the cache, which holds the recipient v). Non-routed
+                # heads, including GQA siblings of routed ones, keep the recipient branch.
+                if w is not None and w_patched is not None:
+                    w[:, rh, qsl] = w_patched[:, rh, qsl]
             from src.attention import record_effective_value_norms
 
             rep = q.shape[1] // v.shape[1]
@@ -703,9 +713,15 @@ def _make_headwise_forward(sample_module, state):
     return forward
 
 
+def _check_query_positions(query_positions):
+    if not (query_positions in ("all", "last")
+            or (isinstance(query_positions, int) and not isinstance(query_positions, bool) and query_positions >= 1)):
+        raise ValueError(f"query_positions must be 'all'|'last'|int>=1, got {query_positions!r}")
+
+
 @contextmanager
 def headwise_kv_patch(
-    mt, patch_heads, k_cache, v_cache, dest_positions, route_group=False
+    mt, patch_heads, k_cache, v_cache, dest_positions, route_group=False, query_positions="all"
 ):
     """Wrap the patched layers' attention so ONLY `patch_heads` (query heads) read the source span k/v;
     all other heads (in-group bled + out-of-group) read the clean dest k/v. Fixes the GQA bleed.
@@ -714,29 +730,65 @@ def headwise_kv_patch(
     globals — so it is independent of setup()/autoreload state and safe across notebooks.
 
     route_group=True routes ALL query heads of each patched group (= reproduces the raw bled patch) —
-    used only for the equivalence self-test (should match greedy(prefill_specs=patch_specs))."""
+    used only for the equivalence self-test (should match greedy(prefill_specs=patch_specs)).
+
+    query_positions — WHICH query positions of the routed heads read the source span:
+    ``"all"`` (default, the original kv-transfer) — every query after the span, so the routed heads also
+    change the DST latents of every pre-pivot token after the span (instruction tail, code prefill);
+    ``"last"`` — only the last query of each forward: the pivot on the prompt pass, then each new token on
+    the decode steps. Pre-pivot latents are then identical to the clean DST run (the transfer kicks in
+    only at the pivot);
+    int ``n`` — the last ``n`` queries of each forward: the last ``n`` prompt tokens (ending at the pivot) on
+    the prompt pass, then each new token on the decode steps (a decode forward has one query). ``1`` ==
+    ``"last"``. Value-norm diagnostics stay per-key (routed heads report the source values).
+
+    Single-route wrapper of :func:`headwise_kv_patch_routes`."""
+    with headwise_kv_patch_routes(mt, [(patch_heads, query_positions)], k_cache, v_cache, dest_positions,
+                                  route_group=route_group) as state:
+        yield state
+
+
+@contextmanager
+def headwise_kv_patch_routes(mt, routes, k_cache, v_cache, dest_positions, route_group=False):
+    """:func:`headwise_kv_patch` with SEVERAL query-head routes over ONE source k/v transplant.
+
+    ``routes`` = ``[(heads, query_positions), ...]``: each route's query heads read the source span k/v at its
+    own query positions ("all" | "last" | int n — see :func:`headwise_kv_patch`). The k/v of the kv-heads of
+    the UNION of all routes is replaced on ``dest_positions`` (the caches must cover them); every other
+    (layer, head) reads the clean dest k/v. Use this instead of nesting two ``headwise_kv_patch`` contexts:
+    each one REPLACES the layer's attention forward, so on a shared layer the inner would silently drop
+    the outer. A head listed in several routes reads the source at the union of their query positions."""
+    for _, qp in routes:
+        _check_query_positions(qp)
     n_kv = getattr(mt, "n_kv_heads", None) or mt.config.num_key_value_heads
     group = mt.n_heads // n_kv  # GQA group size, from mt (not module GROUP)
-    sel_q, patched_kv = defaultdict(set), defaultdict(set)
-    for l, h in patch_heads:  # patch_heads: list of (layer, query_head)
-        sel_q[l].add(h)
-        patched_kv[l].add(h // group)
+    patched_kv = defaultdict(set)
+    route_heads = []
+    for heads, qp in routes:  # heads: list of (layer, query_head)
+        sel_q = defaultdict(set)
+        for l, h in heads:
+            sel_q[l].add(h)
+            patched_kv[l].add(h // group)
+        if route_group:  # every query head in a patched group
+            sel_q = {l: {g * group + i for g in {h // group for h in hs} for i in range(group)}
+                     for l, hs in sel_q.items()}
+        route_heads.append(({l: sorted(hs) for l, hs in sel_q.items()}, qp))
     patched_kvheads = {l: sorted(kvs) for l, kvs in patched_kv.items()}
-    if route_group:  # every query head in a patched group
-        goal_qheads = {
-            l: sorted(g * group + i for g in kvs for i in range(group))
-            for l, kvs in patched_kvheads.items()
-        }
-    else:  # only the selected query heads
-        goal_qheads = {l: sorted(hs) for l, hs in sel_q.items()}
+    goal_qheads = defaultdict(set)  # union over routes: the layers to wrap + the value-norm diagnostics
+    for hl, _ in route_heads:
+        for l, hs in hl.items():
+            goal_qheads[l].update(hs)
+    goal_qheads = {l: sorted(hs) for l, hs in goal_qheads.items()}
     src_k, src_v = _rope_source_span(
         mt, k_cache, v_cache, dest_positions, patched_kvheads
     )
     state = {
         "goal_qheads": goal_qheads,
+        "routes": route_heads,
         "span": list(dest_positions),
         "src_k": src_k,
         "src_v": src_v,
+        "query_positions": routes[0][1] if len(routes) == 1 else None,
     }
     originals = {}
     try:
@@ -852,7 +904,7 @@ def restrict_head_attn(mt, heads, block_key_positions, keep=None):
             hnd.remove()
 
 
-def make_headwise_interface(mt, patch_heads, k_cache, v_cache, dest_positions):
+def make_headwise_interface(mt, patch_heads, k_cache, v_cache, dest_positions, query_positions="all"):
     """A goalscope / get_attention_matrices-style ``patch_interface`` that runs the forward under the
     per-query-head *headwise* routing (GQA-bleed-corrected). Drop it in as the ``iface`` for
     ``goalscope_readout`` (or ``collect_head_steering_vecs`` / ``get_o_proj_inputs_batch``) so the
@@ -861,7 +913,8 @@ def make_headwise_interface(mt, patch_heads, k_cache, v_cache, dest_positions):
     so nothing in apply_goalscope changes."""
 
     def iface(mt, inputs, patches=None, model_kwargs=None):
-        with headwise_kv_patch(mt, patch_heads, k_cache, v_cache, dest_positions):
+        with headwise_kv_patch(mt, patch_heads, k_cache, v_cache, dest_positions,
+                               query_positions=query_positions):
             return mt._model(**dict(inputs), **dict(model_kwargs or {}))
 
     return iface
@@ -1234,7 +1287,8 @@ def run_q_transfer_intervention(
     ``kv`` (dict, optional) stacks a kv-transfer under every PATCHED forward (notebooks 04.3 / 04.4): the task-list
     key+value of ``kv["prompt"]`` (its listed predicates ``kv["predicates"]``) on ``kv["heads"]`` (default
     ``patch_heads``) replace those on DST's task-list span (DST's predicates ``kv["dst_predicates"]``), GQA-corrected
-    head-wise routing, ``kv["align"]`` alignment (default "pad"). Patched runs use the aligned DST; the clean DST
+    head-wise routing, ``kv["align"]`` alignment (default "pad"), ``kv["query_positions"]`` ("all" | "last" | int n, see
+    :func:`headwise_kv_patch`; default "all"). Patched runs use the aligned DST; the clean DST
     stays unpadded; the OV boost covers ``patch_heads`` ∪ kv heads. Adds a kv-only run (``gen_kv``, ``ro_kv``).
     Gaze is skipped under kv (the task span then holds the kv prompt's items) and ``restrict_to_task`` is not
     supported with it.
@@ -1277,7 +1331,8 @@ def run_q_transfer_intervention(
         _v = cache_src_proj(kv_tok, kv_pos, sorted(_kvh), "v", ctx=ctx)
 
         def kv_ctx():
-            return headwise_kv_patch(mt, kv_heads, _k, _v, dst_pos)
+            return headwise_kv_patch(mt, kv_heads, _k, _v, dst_pos,
+                                     query_positions=kv.get("query_positions", "all"))
 
         compute_gaze = False
         kv_extra = dict(kv_prompt=kv["prompt"], kv_n_tokens=len(kv_pos))
@@ -1574,6 +1629,7 @@ def run_kv_transfer_intervention(
     align="right",
     ablate_heads=None,
     ablation_strat="zero",
+    query_positions="all",
     ctx=None,
 ):
     """Run one kv-transfer (Spec-2) intervention and return RAW artifacts as JSON-native types.
@@ -1598,6 +1654,8 @@ def run_kv_transfer_intervention(
     ``"restrict"`` keeps their write but knocks out their attention to the DST task span
     (:func:`restrict_head_attn`) — they can look everywhere except the task description. The readout is
     NOT ablated (goalscope injects into a neutral probe, no inconsistency).
+    ``query_positions`` ("all" | "last" | int n; see :func:`headwise_kv_patch`) — "last" makes the transplant act
+    only from the pivot on, so the DST pre-pivot latents are untouched; n starts it n-1 tokens before the pivot.
     Returns a dict consumed directly by :func:`src.diff.eval.eval_kv_transfer` (pass ``patched_gen``
     and ``readouts``)."""
     from src.diff.data import materialize
@@ -1620,7 +1678,8 @@ def run_kv_transfer_intervention(
     kvheads = heads_per_layer(patch_heads, "k", layers=set(_layers_of(patch_heads, ctx=ctx)), ctx=ctx)
     k_cache = cache_src_proj(src_tok, src_pos, sorted(kvheads), "k", ctx=ctx)
     v_cache = cache_src_proj(src_tok, src_pos, sorted(kvheads), "v", ctx=ctx)
-    iface = make_headwise_interface(mt, patch_heads, k_cache, v_cache, dst_pos)  # GQA-corrected
+    iface = make_headwise_interface(mt, patch_heads, k_cache, v_cache, dst_pos,
+                                    query_positions=query_positions)  # GQA-corrected
     # heads whose OV write is ZEROED on the PATCHED run (never a patched head)
     ablate = [h for h in (ablate_heads or []) if h not in set(patch_heads)]
 
@@ -1631,7 +1690,8 @@ def run_kv_transfer_intervention(
     # readout logic stays identical across source/dest/patched). Rebuilt per forward (single-use CMs).
     def _patched_stack(with_ablate):
         s = ExitStack()
-        s.enter_context(headwise_kv_patch(mt, patch_heads, k_cache, v_cache, dst_pos))
+        s.enter_context(headwise_kv_patch(mt, patch_heads, k_cache, v_cache, dst_pos,
+                                          query_positions=query_positions))
         if alpha != 1.0:
             s.enter_context(boost_head_ov(mt, patch_heads, alpha, positions=(-1,)))
         if with_ablate and ablate:

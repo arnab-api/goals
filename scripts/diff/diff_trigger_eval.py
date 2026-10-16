@@ -235,7 +235,8 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             run_inst = dataclasses.replace(inst, dst_order=(roles["A"], roles["X"], roles["Y"]),
                                            dst_native=roles["X"].id)            # p_dst = A'XY
             key = f"{key}|kv:X={roles['X'].id}|Y={roles['Y'].id}"
-            kv_arg = dict(prompt=kv_prompt, predicates=inst.dst_order, dst_predicates=run_inst.dst_order)
+            kv_arg = dict(prompt=kv_prompt, predicates=inst.dst_order, dst_predicates=run_inst.dst_order,
+                          query_positions=args.kv_query_positions)
             logger.info(f"[{variant}/{tag}] ({j}/{len(todo)}) kv: p_dst A'XY X={roles['X'].id} Y={roles['Y'].id} · "
                         f"p_kv A'BD B={roles['B'].id} D={roles['D'].id} · SRC C={roles['C'].id}")
             raw = FUNC.run_q_transfer_intervention(
@@ -350,6 +351,16 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
     return dict(variant=variant, datatype=dt, src_lang=sl, dst_lang=dl, **summ)
 
 
+def _kv_query_positions(v):
+    """argparse type: 'all' | 'last' | int n >= 1 (see src.diff.functional.headwise_kv_patch)."""
+    if v in ("all", "last"):
+        return v
+    n = int(v)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"--kv-query-positions must be 'all', 'last' or an int >= 1, got {v!r}")
+    return n
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
@@ -407,6 +418,10 @@ def parse_args():
                          "and the generated tokens (eq = the pivot itself; only indent exists with --pivot indent)")
     ap.add_argument("--cl-steer-layers", type=int, nargs=2, default=[35, 46],
                     help="closed loop: probe steer into the residual after layers range(a, b)")
+    ap.add_argument("--kv-query-positions", default="all", type=_kv_query_positions,
+                    help="with --kv-transfer: DST query positions that read the p_kv task list ('all' original | "
+                         "'last' from the pivot on | int n: last n prompt tokens, then each generated token); "
+                         "tags the run '__kv-qlast' / '__kv-qlast<n>'")
     ap.add_argument("--kv-transfer", action="store_true",
                     help="04.3/04.4 kv design: p_dst A'XY gets p_kv A'BD's task-list k+v on the patch heads; "
                          "judge over {X, Y, B, C, D}")
@@ -449,7 +464,7 @@ def main():
             run_tag += "__restrict"
         if args.kv_transfer:
             assert not args.restrict_goal_heads_to_task, "--kv-transfer does not support --attn_restrict"
-            run_tag += "__kv"
+            run_tag += "__kv" + {"all": "", "last": "-qlast"}.get(args.kv_query_positions, f"-qlast{args.kv_query_positions}")
         if args.closed_loop:
             run_tag += "__cl"
             if args.cl_probe_steer != "all":
