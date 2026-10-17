@@ -7,8 +7,9 @@ notebook ``notebooks/diff/05.3_multi-hierarchy.ipynb`` §Path patching).
     hier:   p_src: a'(x'z) -> z              p_dst: a'(x'y) -> y            p_res: a'(x'e) -> e      pivot = the connective
             (instances = ``scripts/diff/hier_kv_eval.py``'s sample, ``H.seeded_setups``; axes ``--connectives`` x ``--orders``)
 
-I1 = ``--task-heads`` read SRC's window k/v (rule ``--i1-query``); I2 = restore ``<|im_end|> .. {var}`` (pivot excluded)
-from p_res (``--i2-donor res``) or clean DST, every layer; I3 = ``--goal-heads`` read SRC's window k/v from ` =` on.
+I1 = task-onwards KV transfer: ``--task-heads`` read SRC's window k/v (rule ``--i1-query``); I2 = pre-commitment-swap
+residual transfer: ``<|im_end|> .. {var}`` (pivot excluded) <- p_res (``--i2-donor res``) or clean DST, every layer;
+I3 = pivot-onwards KV transfer: ``--goal-heads`` read SRC's window k/v from the pivot on.
 Config axes (each a separate run dir): ``--i1`` × ``--i2`` × ``--i3`` × ``--window`` (``span`` | ``span+progress``)
 × ``--i3-v-scale`` (I3 value boost; 1.0 = off).
 Defaults = the 4 runs I1=off, I3=on, I2 ∈ {on, off}, window ∈ {span, span+progress}. Instances (``multi_predicate_setups``,
@@ -249,9 +250,10 @@ def parse_args():
     p.add_argument("--max-instances", type=int, default=None, help="cap instances per datatype (smoke)")
     p.add_argument("--seed", type=int, default=1123)
     # interventions — each a config AXIS (space-separated on/off values)
-    p.add_argument("--i1", nargs="+", default=["off"], choices=list(ONOFF))
-    p.add_argument("--i2", nargs="+", default=["on", "off"], choices=list(ONOFF))
-    p.add_argument("--i3", nargs="+", default=["on"], choices=list(ONOFF))
+    p.add_argument("--i1", nargs="+", default=["off"], choices=list(ONOFF), help="I1, task-onwards KV transfer (axis)")
+    p.add_argument("--i2", nargs="+", default=["on", "off"], choices=list(ONOFF),
+                   help="I2, pre-commitment-swap residual transfer (axis)")
+    p.add_argument("--i3", nargs="+", default=["on"], choices=list(ONOFF), help="I3, pivot-onwards KV transfer (axis)")
     p.add_argument("--window", nargs="+", default=["span", "span+progress"], choices=["span", "span+progress"],
                    help="transplanted SRC window: the task span, or task span + progress up to ` =` (A1 padding)")
     # fixed knobs

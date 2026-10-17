@@ -6,13 +6,15 @@
 
 ## TL;DR
 
-The paper's KV transfer (goal heads read the source task-span k/v **at every query after the span**) moves the frontier
-almost perfectly. Here the goal heads read the source task span **only from the pivot ` =` on** (I3). That alone moves the
+The paper's KV transfer is a **task-onwards KV transfer**: goal heads read the source task-span k/v at **every query from the
+span on**, and it moves the frontier almost perfectly. Here the goal heads read the source task span **only from the pivot
+` =` on** (I3, **pivot-onwards KV transfer**). That alone moves the
 frontier in just **37 %** of cases: the destination's own **progress tokens** (`<|im_end|> … {var}`) still carry the
 destination frontier d, and the goal heads read it there.
 
-* **I2: replacing those progress latents** with a third prompt's (p_res, frontier e, carries neither c nor d):
-  0.37 → **0.61**. Part of the readout then follows the progress latents to e (**24 %** of patched readouts).
+* **I2, pre-commitment-swap residual transfer**: replacing those progress latents with a third prompt's (p_res, which is
+  pre-committed to its own frontier e, neither c nor d) raises it 0.37 → **0.61**. Part of the readout then follows the
+  swapped-in pre-commitment to e (**24 %** of patched readouts).
 * **Transplanting span + progress k/v**: **0.99**, with or without I2, and no readout goes to e.
 * **Boosting the transplanted task-span values** (V×a, attention pattern unchanged): monotone gains. I2 off:
   0.37 → 0.62 → 0.80 → **0.86** (V×1/2/4/6). I2 on: 0.61 → 0.81 → 0.90 → **0.92**. Drift to e falls 0.24 → 0.02.
@@ -33,11 +35,16 @@ p_res: a'b'e -> e     I2 residual donor   (frontier e ∉ {c, d}, compatible wit
                                           so its "<|im_end|> … {var}" prefill is token-identical to DST's, asserted)
 ```
 
+**Terminology.** I1 = *task-onwards KV transfer* (heads read the source window k/v at every query from the window on,
+so the destination's task-span latents change too); I2 = *pre-commitment-swap residual transfer* (if the next pending
+operation is already decided in the progress latents, swapping M(p_dst)'s progress latents for M(p_res)'s swaps that
+pre-commitment); I3 = *pivot-onwards KV transfer* (heads read the source window k/v only from the pivot on).
+
 | intervention | here | what it does |
 |---|---|---|
-| I1 · task heads | **off** | (not used in these runs) |
-| I2 · progress restore | on / off | every decoder layer's OUTPUT residual on `<|im_end|> … {var}` (pivot ` =` excluded) ← p_res's, prompt pass only |
-| I3 · goal heads | **on** | goal-250 heads read SRC's window k/v from ` =` on (query rule `last`: the pivot, then every generated token); all other heads read the patched run's own k/v |
+| I1 · task-onwards KV transfer | **off** | task heads read SRC's window k/v at every query from the window on (not used here) |
+| I2 · pre-commitment-swap residual transfer | on / off | every decoder layer's OUTPUT residual on `<|im_end|> … {var}` (pivot ` =` excluded) ← p_res's, prompt pass only |
+| I3 · pivot-onwards KV transfer | **on** | goal-250 heads read SRC's window k/v from ` =` on (query rule `last`: the pivot, then every generated token); all other heads read the patched run's own k/v |
 
 * **Window** (what I3 transplants): the **task span** (the whole task list), or **task span + progress** (one
   contiguous window, task-span start → ` =` inclusive). SRC/DST windows of different token length are aligned by
@@ -160,7 +167,7 @@ Each cell: causal-shift / readout-shift.
 | list[str] | 1.00 / 1.00 [1.00] | 1.00 / 1.00 [0.91] | 1.00 / 0.97 [0.94] | 1.00 / 0.81 [0.81] | 1.00 / 0.95 [0.91] |
 | all | 0.98 / 1.00 [0.97] | 0.99 / 0.98 [0.95] | 0.99 / 0.98 [0.97] | 0.98 / 0.95 [0.92] | 0.99 / 0.98 [0.95] |
 
-## 3 · I2 on: progress latents restored from p_res (a'b'e)
+## 3 · I2 on: pre-commitment-swap residual transfer from p_res (a'b'e)
 
 Every layer's residual on `<|im_end|> … {var}` is replaced by p_res's, whose progress carries neither c nor d. At V×1 this
 alone lifts causal-shift from 0.37 to **0.61**, but **24 %** of patched readouts then express p_res's frontier e: the goal
@@ -264,9 +271,11 @@ Each cell: causal-shift / readout-shift · readout → e.
    and only the span keys are swapped. The destination's progress positions (and the pivot itself) keep values built while
    attending to DST's own task list, so they still carry d. The paper's KV transfer avoids this because its `"all"` query
    rule also rewrites those positions' latents.
-2. **Cleaning the progress helps but does not finish the job.** I2 with p_res raises causal-shift to 0.61 in every
-   direction. When the destination is C++ about 30 % of patched readouts land on e: the goal heads take on whatever the
-   progress latents carry. So the progress tokens are an input to the readout, not just a nuisance.
+2. **The pre-commitment swap helps but does not finish the job.** I2 with p_res raises causal-shift to 0.61 in every
+   direction: it removes DST's pre-commitment to d from the progress, but does not supply one to c. Its signature is the
+   readout → e drift. When the destination is C++ about 30 % of patched readouts land on e, the frontier p_res is
+   pre-committed to. So the next pending operation is (partly) already decided in the progress latents, and the goal heads
+   read it there.
 3. **Transplanting span + progress k/v saturates.** That is 0.98–0.99 causal / 0.95–1.00 readout in every direction and
    datatype, independent of I2, with zero drift to e. Once the goal heads see a fully source-consistent context they
    follow it.

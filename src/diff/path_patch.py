@@ -9,11 +9,12 @@ Three prompts sharing the prefilled progress (a, b) — DST's and p_res's progre
 
 Interventions on the patched DST run (each optional):
 
-* **I1** — ``task_heads`` read SRC's window k/v at query rule ``i1_query`` (default "all": the queries inside and after
+* **I1, task-onwards KV transfer** — ``task_heads`` read SRC's window k/v at query rule ``i1_query`` (default "all": the queries inside and after
   the window, incl. every generated token).
-* **I2** — over ``<|im_end|> .. {var}`` (the pivot ` =` excluded) every decoder layer's OUTPUT residual is overwritten
+* **I2, pre-commitment-swap residual transfer** — over ``<|im_end|> .. {var}`` (the pivot ` =` excluded) every decoder layer's OUTPUT residual is overwritten
   by the donor's (``p_res`` by default, or the clean DST run) on the prompt pass; generated tokens see it via the cache.
-* **I3** — ``goal_heads`` read SRC's window k/v from the pivot on (rule "last"), optionally blind to their own key.
+  If the next pending operation is already decided in the progress latents, this swaps DST's pre-commitment for p_res's.
+* **I3, pivot-onwards KV transfer** — ``goal_heads`` read SRC's window k/v from the pivot on (rule "last"), optionally blind to their own key.
 
 The transplanted window is the task span (``window="span"``) or the task span + the progress up to ` =`
 (``window="span+progress"``; ``include_pivot`` adds ` =` itself). Both are aligned with
@@ -251,7 +252,8 @@ def res_readout(g, *, readout_heads, ctx):
 def intervention_stack(g, *, task_heads, goal_heads, i1=False, i2=True, i3=True, i1_query="all", i3_query="last",
                        blind_self=False, v_scale=1.0, alpha=1.0, donor="res", i2_layers=None, ctx):
     """``() -> ExitStack`` with the enabled interventions (single-use: call it once per forward / generation).
-    I1 / I3 = one SRC window k/v transplant read by two head routes; I2 = residual restore on ``g["seg"]`` from the
+    I1 (task-onwards) / I3 (pivot-onwards) KV transfer = one SRC window k/v transplant read by two head routes;
+    I2 (pre-commitment-swap residual transfer) = residual overwrite on ``g["seg"]`` from the
     donor; ``alpha`` = OV boost of the I3 heads at -1. Used by :func:`run_patched` and by the notebooks' sanity checks."""
     mt = ctx.mt
     i2_layers = list(range(mt.n_layer)) if i2_layers is None else list(i2_layers)
