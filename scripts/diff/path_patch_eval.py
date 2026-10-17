@@ -6,11 +6,14 @@
 
 I1 = ``--task-heads`` read SRC's window k/v (rule ``--i1-query``); I2 = restore ``<|im_end|> .. {var}`` (pivot excluded)
 from p_res (``--i2-donor res``) or clean DST, every layer; I3 = ``--goal-heads`` read SRC's window k/v from ` =` on.
-Config axes (each a separate run dir): ``--i1`` × ``--i2`` × ``--i3`` × ``--window`` (``span`` | ``span+progress``).
+Config axes (each a separate run dir): ``--i1`` × ``--i2`` × ``--i3`` × ``--window`` (``span`` | ``span+progress``)
+× ``--i3-v-scale`` (I3 value boost; 1.0 = off).
 Defaults = the 4 runs I1=off, I3=on, I2 ∈ {on, off}, window ∈ {span, span+progress}. Instances (``multi_predicate_setups``,
 k=3, letters / var_eq) are sampled once per (datatype, language pair) and shared by every config; the clean SRC / DST
 runs are computed once per instance and token sequence. Eval = the kv-transfer oracle (``judge_causal`` +
-``eval_readouts``; same record / summary schema as ``kv_transfer_eval.py``).
+``eval_readouts``; same record / summary schema as ``kv_transfer_eval.py``). With I2 on and the p_res donor, the
+patched readout is also judged 3-way over {d, c, e} (``readout_res``; ``res_readout_rate``), against the clean p_res
+readout as the validity baseline (``res_valid``).
 
 Results: ``results/diff/<model>/path_patch/<run_tag>/<dt>__<src>-<dst>/`` (``results.json`` per instance — resumable —
 and ``meta.json``); ``summary__<...>.json`` per invocation under ``results/diff/<model>/path_patch/``.
@@ -20,6 +23,7 @@ and ``meta.json``); ``summary__<...>.json`` per invocation under ``results/diff/
 """
 
 import argparse
+import collections
 import dataclasses
 import hashlib
 import itertools
@@ -70,16 +74,38 @@ def _query_arg(v):
 class PathPatchRecord(K.InstanceRecord):
     config: dict = dataclasses.field(default_factory=dict)     # i1 / i2 / i3 / window / donor / ...
     geometry: dict = dataclasses.field(default_factory=dict)   # windows, pads, p_res frontier
+    readout_res: Optional[dict] = None   # I2 with the p_res donor: 3-way {d, c, e} verdicts on the patched + clean p_res readouts
 
 
 def _run_tag(cfg, args, heads_tag):
     seg = [f"I1-{'on' if cfg['i1'] else 'off'}" + (f"-q{args.i1_query}" if cfg["i1"] and args.i1_query != "all" else ""),
            f"I2-{'on-' + args.i2_donor if cfg['i2'] else 'off'}" + (f"-{args.i2_from}" if cfg["i2"] and args.i2_from != "im_end" else ""),
            f"I3-{'on' if cfg['i3'] else 'off'}" + ("-blind" if cfg["i3"] and args.blind_self else "")
-           + (f"-q{args.i3_query}" if cfg["i3"] and args.i3_query != "last" else ""),
+           + (f"-q{args.i3_query}" if cfg["i3"] and args.i3_query != "last" else "")
+           + (f"-V{cfg['v_scale']:g}" if cfg["i3"] and cfg["v_scale"] != 1.0 else ""),
            "win-" + ("span" if cfg["window"] == "span" else "span+prog" + ("" if args.include_pivot else "-nopiv")),
            f"span-{args.span}", f"a{args.alpha:g}", heads_tag]
     return "__".join(seg) + args.tag_suffix
+
+
+_JOINT2 = {"native": "dst", "src_target": "src", "diff_target": "res", "neither": "neither", "parse_error": "parse_error"}
+
+
+def eval_readouts_res(inst, e_desc, patched_readout, res_readout, model_name):
+    """3-way (mutually exclusive) verdicts over {d = DST's frontier, c = SRC's, e = p_res's} for the patched DST
+    readout and the clean p_res readout. ``eval_readouts`` judges each readout c-vs-d only, so a readout that
+    expresses e would come out "neither" there. ``res_valid`` = the clean p_res readout expresses e (the baseline
+    that makes "shifted to e" interpretable); ``shifted_to_res`` = the patched readout expresses e."""
+    kind = "a short natural-language phrase the model 'read out' internally"
+
+    def j(text):
+        r = E.classify_joint(text, native_desc=inst.dst_frontier.description, src_desc=inst.src_frontier.description,
+                             diff_desc=e_desc, task_desc=inst.task_desc, kind=kind, model_name=model_name)
+        return dict(r, label=_JOINT2[r["label"]])
+
+    pat, res = j(patched_readout), j(res_readout)
+    return dict(patched=pat["label"], res_clean=res["label"], res_valid=res["label"] == "res",
+                shifted_to_res=pat["label"] == "res", details=dict(patched=pat, res_clean=res))
 
 
 def _load_done(fp, args):
@@ -95,13 +121,21 @@ def _write(fp, records):
 
 
 def _meta(args, cfg, dt, sl, dl, recs, heads_tags):
-    base = K._summarize([K.InstanceRecord(**{k: v for k, v in r.items() if k not in ("config", "geometry")}) for r in recs])
+    base = K._summarize([K.InstanceRecord(**{k: v for k, v in r.items() if k not in ("config", "geometry", "readout_res")})
+                         for r in recs])
+    rr = [r["readout_res"] for r in recs if r.get("readout_res")]
+    rr_valid = [x for x in rr if x["res_valid"]]
+    res_rates = dict(
+        res_readout_rate=(sum(x["shifted_to_res"] for x in rr) / len(rr)) if rr else None,
+        res_readout_rate_valid=(sum(x["shifted_to_res"] for x in rr_valid) / len(rr_valid)) if rr_valid else None,
+        res_valid_rate=(len(rr_valid) / len(rr)) if rr else None,
+        res_patched_label_counts=dict(collections.Counter(x["patched"] for x in rr)) if rr else None)
     pads = [r["geometry"].get("pad_src", 0) + r["geometry"].get("pad_dst", 0) for r in recs]
     return dict(model=args.model, mechanism=MECHANISM, datatype=dt, src_lang=sl, dst_lang=dl, **cfg,
                 span=args.span, include_pivot=args.include_pivot, i1_query=args.i1_query, i3_query=args.i3_query,
                 blind_self=args.blind_self, i2_donor=args.i2_donor, i2_from=args.i2_from, alpha=args.alpha,
                 **heads_tags, oracle_model=args.oracle_model, n_instances=len(recs),
-                mean_pad_tokens=(sum(pads) / len(pads)) if pads else None, **base)
+                mean_pad_tokens=(sum(pads) / len(pads)) if pads else None, **base, **res_rates)
 
 
 def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
@@ -128,7 +162,7 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
         t0 = time.time()
         logger.info(f"[{sample_tag}] ({j}/{len(insts)}) SRC c={inst.src_frontier.id} · DST d={inst.dst_frontier.id} · "
                     f"{len(todo)} config(s)")
-        geoms, cleans = {}, {}
+        geoms, cleans, ro_res = {}, {}, None
         for name, cfg in todo:
             w = cfg["window"]
             if w not in geoms:
@@ -142,24 +176,34 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
             clean = cleans[ck]
             pat = PP.run_patched(g, task_heads=task_heads, goal_heads=goal_heads, readout_heads=readout_heads,
                                  i1=cfg["i1"], i2=cfg["i2"], i3=cfg["i3"], i1_query=args.i1_query, i3_query=args.i3_query,
-                                 blind_self=args.blind_self, alpha=args.alpha, donor=args.i2_donor, max_new=args.max_new,
+                                 blind_self=args.blind_self, v_scale=cfg["v_scale"], alpha=args.alpha,
+                                 donor=args.i2_donor, max_new=args.max_new,
                                  ctx=ctx)
-            raw = dict(src_prompt=g["src_prompt"], dst_prompt=g["dst_prompt"], res_prompt=g["res_prompt"], **clean, **pat)
-            causal = readout = None
+            use_res = cfg["i2"] and args.i2_donor == "res"
+            if use_res and ro_res is None:   # clean p_res readout at ` =` (p_res is the same for every config)
+                ro_res = FUNC.goalscope_readout("", g["res_tok"], g["res_tok"]["input_ids"].shape[1] - 1,
+                                                heads=readout_heads, ctx=ctx)[0]["patched_gen"]
+            raw = dict(src_prompt=g["src_prompt"], dst_prompt=g["dst_prompt"], res_prompt=g["res_prompt"], **clean, **pat,
+                       **({"ro_res": ro_res} if use_res else {}))
+            causal = readout = readout_res = None
             if not args.no_oracle:
                 causal = E.judge_causal(inst, raw["gen_patched"], model_name=args.oracle_model)
                 readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"], model_name=args.oracle_model)
+                if use_res:
+                    readout_res = eval_readouts_res(inst, g["e_desc"], raw["ro_patched"], ro_res, args.oracle_model)
             _c = f"{'HIT' if causal['triggered'] else 'miss'}({causal['label']})" if causal else "off"
             _r = (f"{readout['source']}>{readout['dest']}>{readout['patched']}"
                   f"[{'valid' if readout['valid'] else 'inv'},{'shift' if readout['shifted'] else 'no'}]" if readout else "off")
-            logger.info(f"[{sample_tag}]   {name}: causal={_c} · readout={_r} · "
+            _rr = (f" · readout3={readout_res['patched']}(p_res clean={readout_res['res_clean']})" if readout_res else "")
+            logger.info(f"[{sample_tag}]   {name}: causal={_c} · readout={_r}{_rr} · "
                         f"patched: {raw['gen_patched'].strip().split(chr(10))[0]!r}")
             rec = PathPatchRecord(
                 key=key, setup="multi_pred", datatype=dt, group="shared:" + "-".join(p.id for p in inst.shared),
                 naming="letters", presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
                 expected_next=inst.src_frontier.id, expected_next_desc=inst.src_frontier.description,
                 dst_next=inst.dst_frontier.id, dst_next_desc=inst.dst_frontier.description, letter_stub="var_eq",
-                raw=raw, causal=causal, readout=readout, config=dict(cfg), geometry=PP.geometry_info(g))
+                raw=raw, causal=causal, readout=readout, config=dict(cfg), geometry=PP.geometry_info(g),
+                readout_res=readout_res)
             records[name][key] = dataclasses.asdict(rec)
             _write(fps[name], records[name])
         logger.info(f"[{sample_tag}]   ({time.time() - t0:.0f}s)")
@@ -170,7 +214,8 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
         meta = _meta(args, cfg, dt, sl, dl, recs, heads_tags=args.heads_tags)
         (fps[name].parent / "meta.json").write_text(json.dumps(meta, indent=2))
         logger.info(f"[{sample_tag}] SUMMARY {name}: causal={meta['causal_trigger_rate']} "
-                    f"readout_shift|valid={meta['readout_shift_rate_valid']} n={len(recs)}")
+                    f"readout_shift|valid={meta['readout_shift_rate_valid']} "
+                    f"readout->e={meta['res_readout_rate']} (|p_res valid={meta['res_readout_rate_valid']}) n={len(recs)}")
         metas.append(dict(run_tag=name, **meta))
     return metas
 
@@ -200,6 +245,9 @@ def parse_args():
     p.add_argument("--i1-query", default="all", type=_query_arg, help="I1 query rule: all | last | int n")
     p.add_argument("--i3-query", default="last", type=_query_arg, help="I3 query rule: last (default) | all | int n")
     p.add_argument("--blind-self", action="store_true", help="I3 heads cannot attend to the current token's own key")
+    p.add_argument("--i3-v-scale", nargs="+", type=float, default=[1.0],
+                   help="config AXIS: x the transplanted SRC window VALUES read by the I3 heads (attention pattern unchanged); "
+                        "a value != 1 tags its run '...I3-on-V<a>'")
     p.add_argument("--i2-donor", default="res", choices=["res", "dst"], help="I2 residual donor: p_res (a'b'e) | clean DST")
     p.add_argument("--i2-from", default="im_end", choices=["im_end", "span_end"], help="I2 window start")
     p.add_argument("--res-frontier", default=None, help="fix p_res's frontier id (default: seeded per instance)")
@@ -224,8 +272,10 @@ def main():
     heads_tag = (f"th-{tags['task_heads']}__gh-{tags['goal_heads']}__ro-{tags['readout_heads']}")
 
     configs = []
-    for i1, i2, i3, w in itertools.product(args.i1, args.i2, args.i3, args.window):
-        cfg = dict(i1=ONOFF[i1], i2=ONOFF[i2], i3=ONOFF[i3], window=w)
+    for i1, i2, i3, w, vs in itertools.product(args.i1, args.i2, args.i3, args.window, args.i3_v_scale):
+        if not ONOFF[i3] and vs != args.i3_v_scale[0]:
+            continue   # v_scale only acts on I3: with I3 off one config is enough
+        cfg = dict(i1=ONOFF[i1], i2=ONOFF[i2], i3=ONOFF[i3], window=w, v_scale=vs)
         configs.append((_run_tag(cfg, args, heads_tag), cfg))
     root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / MECHANISM
     out_dirs = {name: root / name for name, _ in configs}

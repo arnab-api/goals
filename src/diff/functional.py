@@ -671,9 +671,16 @@ def _make_headwise_forward(sample_module, state):
                 v2[:, kvh, span, :] = src_v[kvh].to(v2.device, v2.dtype)
             patched = {}
 
-            def _patched(blind_self):
-                """(out, w) of the source-span branch; blind_self masks each query's OWN key (the diagonal)."""
-                if blind_self not in patched:
+            def _patched(blind_self, v_scale=1.0):
+                """(out, w) of the source-span branch; blind_self masks each query's OWN key (the diagonal);
+                v_scale multiplies the transplanted SOURCE values on the span (patched kv-heads only)."""
+                key = (blind_self, float(v_scale))
+                if key not in patched:
+                    vv = v2
+                    if v_scale != 1.0:
+                        vv = v2.clone()
+                        for kvh in src_v:
+                            vv[:, kvh, span, :] = vv[:, kvh, span, :] * v_scale
                     am = attention_mask
                     if blind_self:
                         Q, K = q.shape[2], k2.shape[2]
@@ -681,9 +688,9 @@ def _make_headwise_forward(sample_module, state):
                               if attention_mask is None else attention_mask.clone())
                         iq = torch.arange(Q, device=am.device)
                         am[:, :, iq, K - Q + iq] = False if am.dtype == torch.bool else torch.finfo(am.dtype).min
-                    patched[blind_self] = eager(self, q, k2, v2, am, dropout=0.0, scaling=self.scaling,
-                                                sliding_window=sw, **kwargs)
-                return patched[blind_self]
+                    patched[key] = eager(self, q, k2, vv, am, dropout=0.0, scaling=self.scaling,
+                                         sliding_window=sw, **kwargs)
+                return patched[key]
 
             out = out_clean.clone()
             if w is not None:
@@ -696,7 +703,7 @@ def _make_headwise_forward(sample_module, state):
                 rh = heads_by_layer.get(self.layer_idx)
                 if not rh:
                     continue
-                out_patched, w_patched = _patched(bool(opts.get("blind_self")))
+                out_patched, w_patched = _patched(bool(opts.get("blind_self")), opts.get("v_scale", 1.0))
                 qsl = slice(None) if qp == "all" else slice(-(1 if qp == "last" else qp), None)
                 out[:, qsl, rh, :] = out_patched[:, qsl, rh, :]
                 # Effective-branch diagnostics: the routed heads read (k2, v2), so the returned attention
@@ -761,7 +768,9 @@ def headwise_kv_patch_routes(mt, routes, k_cache, v_cache, dest_positions, route
     ``routes`` = ``[(heads, query_positions[, opts]), ...]``: each route's query heads read the source span k/v at
     its own query positions ("all" | "last" | int n — see :func:`headwise_kv_patch`). ``opts`` (optional dict):
     ``{"blind_self": True}`` — the route's heads cannot attend to the CURRENT token's own key (the diagonal is
-    masked in their source-span branch only; every other key, incl. the transplanted span, stays visible). The k/v of the kv-heads of
+    masked in their source-span branch only; every other key, incl. the transplanted span, stays visible);
+    ``{"v_scale": a}`` — the route's heads read the transplanted SOURCE values on the span scaled by ``a`` (their
+    keys / attention pattern are unchanged; other routes and non-routed heads are unaffected). The k/v of the kv-heads of
     the UNION of all routes is replaced on ``dest_positions`` (the caches must cover them); every other
     (layer, head) reads the clean dest k/v. Use this instead of nesting two ``headwise_kv_patch`` contexts:
     each one REPLACES the layer's attention forward, so on a shared layer the inner would silently drop
@@ -769,7 +778,7 @@ def headwise_kv_patch_routes(mt, routes, k_cache, v_cache, dest_positions, route
     routes = [(r[0], r[1], dict(r[2]) if len(r) > 2 and r[2] else {}) for r in routes]
     for _, qp, opts in routes:
         _check_query_positions(qp)
-        unknown = set(opts) - {"blind_self"}
+        unknown = set(opts) - {"blind_self", "v_scale"}
         if unknown:
             raise ValueError(f"unknown route option(s) {sorted(unknown)}")
     n_kv = getattr(mt, "n_kv_heads", None) or mt.config.num_key_value_heads

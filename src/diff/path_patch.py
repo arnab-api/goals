@@ -174,12 +174,13 @@ def clean_runs(g, *, readout_heads, max_new=64, ctx):
 
 
 def run_patched(g, *, task_heads, goal_heads, readout_heads, i1=False, i2=True, i3=True, i1_query="all",
-                i3_query="last", blind_self=False, alpha=1.0, donor="res", i2_layers=None, max_new=64, ctx):
+                i3_query="last", blind_self=False, v_scale=1.0, alpha=1.0, donor="res", i2_layers=None, max_new=64, ctx):
     """One patched DST run (prompt ending with ` =`): greedy generation + GoalScope readout at ` =` under the enabled
-    interventions. Returns ``gen_patched`` / ``ro_patched``."""
+    interventions. ``v_scale`` multiplies the transplanted SRC window VALUES read by the I3 heads (keys / attention
+    pattern unchanged; 1.0 = off). Returns ``gen_patched`` / ``ro_patched``."""
     mt = ctx.mt
     i2_layers = list(range(mt.n_layer)) if i2_layers is None else list(i2_layers)
-    routes = ([(task_heads, i1_query)] if i1 else []) + ([(goal_heads, i3_query, {"blind_self": blind_self})] if i3 else [])
+    routes = ([(task_heads, i1_query)] if i1 else []) + ([(goal_heads, i3_query, {"blind_self": blind_self, "v_scale": v_scale})] if i3 else [])
     if routes:   # one SRC k/v cache over the kv-heads of every enabled route
         hs = [h for r in routes for h in r[0]]
         layers = sorted(FUNC.heads_per_layer(hs, "k", layers={l for l, _ in hs}, ctx=ctx))
