@@ -1,8 +1,11 @@
 #!/usr/bin/env python
-"""Batch path patching on the multi-predicate kv-transfer setup (``src.diff.path_patch``; notebook
-``notebooks/diff/05_kv_transfer.ipynb`` §Path patching / §Path-patching variants).
+"""Batch path patching (``src.diff.path_patch``) on the multi-predicate kv-transfer setup (``--setup multi``, notebook
+``notebooks/diff/05_kv_transfer.ipynb`` §Path patching) or one level down, the multi-hierarchy setup (``--setup hier``,
+notebook ``notebooks/diff/05.3_multi-hierarchy.ipynb`` §Path patching).
 
-    p_src: a'b'c -> c (k/v donor)    p_dst: a'b'd -> d (patched)    p_res: a'b'e -> e (I2 residual donor)
+    multi:  p_src: a'b'c -> c (k/v donor)    p_dst: a'b'd -> d (patched)    p_res: a'b'e -> e (I2 residual donor)
+    hier:   p_src: a'(x'z) -> z              p_dst: a'(x'y) -> y            p_res: a'(x'e) -> e      pivot = the connective
+            (instances = ``scripts/diff/hier_kv_eval.py``'s sample, ``H.seeded_setups``; axes ``--connectives`` x ``--orders``)
 
 I1 = ``--task-heads`` read SRC's window k/v (rule ``--i1-query``); I2 = restore ``<|im_end|> .. {var}`` (pivot excluded)
 from p_res (``--i2-donor res``) or clean DST, every layer; I3 = ``--goal-heads`` read SRC's window k/v from ` =` on.
@@ -15,11 +18,14 @@ runs are computed once per instance and token sequence. Eval = the kv-transfer o
 patched readout is also judged 3-way over {d, c, e} (``readout_res``; ``res_readout_rate``), against the clean p_res
 readout as the validity baseline (``res_valid``).
 
-Results: ``results/diff/<model>/path_patch/<run_tag>/<dt>__<src>-<dst>/`` (``results.json`` per instance — resumable —
-and ``meta.json``); ``summary__<...>.json`` per invocation under ``results/diff/<model>/path_patch/``.
+Results: ``results/diff/<model>/path_patch/<run_tag>/<dt>__<src>-<dst>/`` (multi) or
+``results/diff/<model>/path_patch_hier/<run_tag>/<dt>__<conn>__<order>__<src>-<dst>/`` (hier) — ``results.json`` per
+instance (resumable) and ``meta.json``; ``summary__<...>.json`` per invocation under that root. hier records also carry the
+instance's (a, x, y, z) and ``H.rule_verdict`` (execution of the first written condition; Python destinations).
 
     conda run -n goals python scripts/diff/path_patch_eval.py --cuda 6                      # 4 configs x 4 datatypes x 32
     conda run -n goals python scripts/diff/path_patch_eval.py --cuda 6 --datatypes list[str] --max-instances 2   # smoke
+    conda run -n goals python scripts/diff/path_patch_eval.py --cuda 6 --setup hier --connectives and --orders match
 """
 
 import argparse
@@ -42,6 +48,7 @@ if str(_ROOT) not in sys.path:
 # Importing the kv eval applies --cuda at MODULE LEVEL (before torch) and pulls in DATA / E / FUNC.
 from scripts.diff import kv_transfer_eval as K  # noqa: E402
 
+import src.diff.hier_data as H  # noqa: E402
 import src.diff.nrgs_prefix as N  # noqa: E402
 import src.diff.path_patch as PP  # noqa: E402
 
@@ -50,6 +57,7 @@ env_utils, logging_utils, set_seed = K.env_utils, K.logging_utils, K.set_seed
 logger = logging.getLogger("path_patch_eval")
 
 MECHANISM = "path_patch"
+ROOTS = {"multi": "path_patch", "hier": "path_patch_hier"}      # results/diff/<model>/<root>/
 GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
 ONOFF = {"on": True, "off": False}
 
@@ -77,6 +85,15 @@ class PathPatchRecord(K.InstanceRecord):
     readout_res: Optional[dict] = None   # I2 with the p_res donor: 3-way {d, c, e} verdicts on the patched + clean p_res readouts
 
 
+@dataclass
+class HierPathPatchRecord(PathPatchRecord):
+    hier: dict = dataclasses.field(default_factory=dict)   # a / x / y / z / connective / order / languages
+    rule: Optional[dict] = None          # H.rule_verdict on the patched generation (Python destinations)
+    rule_clean: Optional[dict] = None    # ... on the clean SRC / DST generations (py-py)
+
+
+_EXTRA = ("config", "geometry", "readout_res", "hier", "rule", "rule_clean")
+
 def _run_tag(cfg, args, heads_tag):
     seg = [f"I1-{'on' if cfg['i1'] else 'off'}" + (f"-q{args.i1_query}" if cfg["i1"] and args.i1_query != "all" else ""),
            f"I2-{'on-' + args.i2_donor if cfg['i2'] else 'off'}" + (f"-{args.i2_from}" if cfg["i2"] and args.i2_from != "im_end" else ""),
@@ -100,9 +117,12 @@ def _write(fp, records):
     tmp.replace(fp)
 
 
-def _meta(args, cfg, dt, sl, dl, recs, heads_tags):
-    base = K._summarize([K.InstanceRecord(**{k: v for k, v in r.items() if k not in ("config", "geometry", "readout_res")})
-                         for r in recs])
+def _meta(args, cfg, dt, sl, dl, recs, heads_tags, conn=None, order=None):
+    base = K._summarize([K.InstanceRecord(**{k: v for k, v in r.items() if k not in _EXTRA}) for r in recs])
+    rule = [r["rule"]["label"] for r in recs if r.get("rule")]
+    hier = (dict(setup="hier", connective=conn, order=order,
+                 rule_src_rate=(sum(l == "src" for l in rule) / len(rule)) if rule else None,
+                 rule_label_counts=dict(collections.Counter(rule)) if rule else None) if conn else {})
     rr = [r["readout_res"] for r in recs if r.get("readout_res")]
     rr_valid = [x for x in rr if x["res_valid"]]
     res_rates = dict(
@@ -115,13 +135,19 @@ def _meta(args, cfg, dt, sl, dl, recs, heads_tags):
                 span=args.span, include_pivot=args.include_pivot, i1_query=args.i1_query, i3_query=args.i3_query,
                 blind_self=args.blind_self, i2_donor=args.i2_donor, i2_from=args.i2_from, alpha=args.alpha,
                 **heads_tags, oracle_model=args.oracle_model, n_instances=len(recs),
-                mean_pad_tokens=(sum(pads) / len(pads)) if pads else None, **base, **res_rates)
+                mean_pad_tokens=(sum(pads) / len(pads)) if pads else None, **base, **res_rates, **hier)
 
 
-def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
+def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, order=None):
+    """One sample (multi: datatype x direction; hier: datatype x connective x order x direction) over every config."""
     task_heads, goal_heads, readout_heads = heads
-    sample_tag = f"{K._safe(dt)}__{sl}-{dl}"
-    insts, seed = PP.sample_multi_instances(dt, sl, dl, n_samples=args.n_samples, seed=args.seed)
+    hier = args.setup == "hier"
+    if hier:
+        sample_tag = f"{K._safe(dt)}__{conn}__{order}__{sl}-{dl}"
+        insts, seed = PP.sample_hier_instances(dt, conn, order, sl, dl, n_samples=args.n_samples, seed=args.seed)
+    else:
+        sample_tag = f"{K._safe(dt)}__{sl}-{dl}"
+        insts, seed = PP.sample_multi_instances(dt, sl, dl, n_samples=args.n_samples, seed=args.seed)
     set_seed(seed)
     if args.max_instances:
         insts = insts[: args.max_instances]
@@ -138,8 +164,9 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
         if not todo:
             continue
         t0 = time.time()
-        logger.info(f"[{sample_tag}] ({j}/{len(insts)}) SRC c={inst.src_frontier.id} · DST d={inst.dst_frontier.id} · "
-                    f"{len(todo)} config(s)")
+        logger.info(f"[{sample_tag}] ({j}/{len(insts)}) " + (
+            f"a={inst.meta['a']} x={inst.meta['x']} · SRC z={inst.meta['z']} · DST y={inst.meta['y']}" if hier
+            else f"SRC c={inst.src_frontier.id} · DST d={inst.dst_frontier.id}") + f" · {len(todo)} config(s)")
         geoms, cleans, ro_res = {}, {}, None
         for name, cfg in todo:
             w = cfg["window"]
@@ -171,13 +198,25 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
             _rr = (f" · readout3={readout_res['patched']}(p_res clean={readout_res['res_clean']})" if readout_res else "")
             logger.info(f"[{sample_tag}]   {name}: causal={_c} · readout={_r}{_rr} · "
                         f"patched: {raw['gen_patched'].strip().split(chr(10))[0]!r}")
-            rec = PathPatchRecord(
-                key=key, setup="multi_pred", datatype=dt, group="shared:" + "-".join(p.id for p in inst.shared),
-                naming="letters", presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
-                expected_next=inst.src_frontier.id, expected_next_desc=inst.src_frontier.description,
-                dst_next=inst.dst_frontier.id, dst_next_desc=inst.dst_frontier.description, letter_stub="var_eq",
-                raw=raw, causal=causal, readout=readout, config=dict(cfg), geometry=PP.geometry_info(g),
-                readout_res=readout_res)
+            if hier:
+                rule = H.rule_verdict(inst, raw["gen_patched"]) if dl == "python" else None
+                rule_clean = ({k: H.rule_verdict(inst, raw[f"gen_{k}"])["label"] for k in ("src", "dst")}
+                              if (sl, dl) == ("python", "python") else None)
+                rec = HierPathPatchRecord(
+                    key=key, setup="multi_hier", datatype=dt, group=f"{inst.meta['x']}|{conn}", naming="letters",
+                    presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
+                    expected_next=inst.meta["z"], expected_next_desc=inst.expected_next_desc,
+                    dst_next=inst.meta["y"], dst_next_desc=inst.dst_next_desc, letter_stub="var_eq",
+                    raw=raw, causal=causal, readout=readout, config=dict(cfg), geometry=PP.geometry_info(g),
+                    readout_res=readout_res, hier=dict(inst.meta), rule=rule, rule_clean=rule_clean)
+            else:
+                rec = PathPatchRecord(
+                    key=key, setup="multi_pred", datatype=dt, group="shared:" + "-".join(p.id for p in inst.shared),
+                    naming="letters", presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
+                    expected_next=inst.src_frontier.id, expected_next_desc=inst.src_frontier.description,
+                    dst_next=inst.dst_frontier.id, dst_next_desc=inst.dst_frontier.description, letter_stub="var_eq",
+                    raw=raw, causal=causal, readout=readout, config=dict(cfg), geometry=PP.geometry_info(g),
+                    readout_res=readout_res)
             records[name][key] = dataclasses.asdict(rec)
             _write(fps[name], records[name])
         logger.info(f"[{sample_tag}]   ({time.time() - t0:.0f}s)")
@@ -185,7 +224,7 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
     metas = []
     for name, cfg in configs:
         recs = list(records[name].values())
-        meta = _meta(args, cfg, dt, sl, dl, recs, heads_tags=args.heads_tags)
+        meta = _meta(args, cfg, dt, sl, dl, recs, heads_tags=args.heads_tags, conn=conn, order=order)
         (fps[name].parent / "meta.json").write_text(json.dumps(meta, indent=2))
         logger.info(f"[{sample_tag}] SUMMARY {name}: causal={meta['causal_trigger_rate']} "
                     f"readout_shift|valid={meta['readout_shift_rate_valid']} "
@@ -198,7 +237,13 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     p.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
-    p.add_argument("--datatypes", nargs="+", default=list(DATA.QTASKS), choices=list(DATA.QTASKS))
+    p.add_argument("--setup", default="multi", choices=["multi", "hier"],
+                   help="multi = multi-predicate a'b'c vs a'b'd; hier = multi-hierarchy a'(x'z) vs a'(x'y) (pivot = connective)")
+    p.add_argument("--datatypes", nargs="+", default=None, choices=sorted(set(DATA.QTASKS) | set(H.HIER_DATATYPES)),
+                   help="default: every datatype of the setup (multi: the q-bank; hier: list[str], list[int])")
+    p.add_argument("--connectives", nargs="+", default=["and", "or"], choices=["and", "or"], help="hier only: config axis")
+    p.add_argument("--orders", nargs="+", default=["match", "diff"], choices=["match", "diff"],
+                   help="hier only: SRC spec order (match: x before z; diff: z before x)")
     p.add_argument("--lang-transfers", nargs="+", default=["py-py"], choices=list(K.LANG_TRANSFERS))
     p.add_argument("--n-samples", type=int, default=32, help="instances per datatype (x language pair)")
     p.add_argument("--max-instances", type=int, default=None, help="cap instances per datatype (smoke)")
@@ -238,6 +283,10 @@ def parse_args():
 def main():
     args = parse_args()
     logging_utils.configure(level=logging.INFO, force=True)
+    bank = list(H.HIER_DATATYPES) if args.setup == "hier" else list(DATA.QTASKS)
+    args.datatypes = args.datatypes or bank
+    bad = [d for d in args.datatypes if d not in bank]
+    assert not bad, f"datatype(s) {bad} not available for --setup {args.setup} (choose from {bank})"
     model_short = args.model.split("/")[-1]
     resolved = {k: _resolve_heads(model_short, getattr(args, f"{k}_heads")) for k in ("task", "goal", "readout")}
     heads = tuple(resolved[k][1] for k in ("task", "goal", "readout"))
@@ -251,7 +300,7 @@ def main():
             continue   # v_scale only acts on I3: with I3 off one config is enough
         cfg = dict(i1=ONOFF[i1], i2=ONOFF[i2], i3=ONOFF[i3], window=w, v_scale=vs)
         configs.append((_run_tag(cfg, args, heads_tag), cfg))
-    root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / MECHANISM
+    root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / ROOTS[args.setup]
     out_dirs = {name: root / name for name, _ in configs}
     for name, _ in configs:
         logger.info(f"config: {name}")
@@ -265,14 +314,17 @@ def main():
     for lt in args.lang_transfers:
         sl, dl = K.LANG_TRANSFERS[lt]
         for dt in args.datatypes:
-            logger.info(f"═══ {lt} / {dt} ═══")
-            metas += run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs)
+            for conn, order in (itertools.product(args.connectives, args.orders) if args.setup == "hier" else [(None, None)]):
+                logger.info(f"═══ {lt} / {dt}" + (f" / {conn} / {order}" if conn else "") + " ═══")
+                metas += run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=conn, order=order)
     # the config AXES are part of the name, so invocations over the same datatype / direction with different
     # configs (e.g. the V-boost grid vs the V x1 runs) never overwrite each other's summary
     axes = ("cfg-i1" + "-".join(args.i1) + "_i2" + "-".join(args.i2) + "_i3" + "-".join(args.i3)
             + "_win" + "-".join("sp" if w == "span+progress" else "s" for w in args.window)
             + "_v" + "-".join(f"{v:g}" for v in args.i3_v_scale))
-    sub = "__".join(K._safe(d) for d in args.datatypes) + "__" + "-".join(args.lang_transfers) + "__" + axes + args.tag_suffix
+    hier_seg = ("__" + "-".join(args.connectives) + "__" + "-".join(args.orders)) if args.setup == "hier" else ""
+    sub = ("__".join(K._safe(d) for d in args.datatypes) + hier_seg + "__" + "-".join(args.lang_transfers) + "__" + axes
+           + args.tag_suffix)
     summ = root / f"summary__{sub}.json"
     summ.write_text(json.dumps(metas, indent=2))
     logger.info(f"all done — {len(metas)} (config, datatype) cells; summary at {summ}")
