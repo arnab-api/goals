@@ -430,14 +430,15 @@ def collect_head_steering_vecs(
     for layer, heads in heads_per_layer.items():
         attn_name = mt.attn_module_name_format.format(layer)
         o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
-        W_o = o_proj.weight.detach().float().cpu()  # (n_embd, n_embd)
+        W_o = o_proj.weight.detach()  # (n_embd, n_embd), on the layer's device — only the selected
+        dev = W_o.device              # heads' columns are cast to float32 (no full-matrix CPU copy)
 
-        inp = o_proj_inputs[layer]  # (batch_size, n_positions, n_embd) float32 CPU
+        inp = o_proj_inputs[layer].to(dev)  # (batch_size, n_positions, n_embd) float32
 
         for h in heads:
             h_inp = inp[:, :, h * head_dim : (h + 1) * head_dim]  # (B, n_pos, head_dim)
-            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]  # (n_embd, head_dim)
-            head_outputs = h_inp @ W_o_h.t()  # (B, n_pos, n_embd)
+            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim].float()  # (n_embd, head_dim)
+            head_outputs = (h_inp @ W_o_h.t()).cpu()  # (B, n_pos, n_embd)
             steering_vecs += head_outputs
             if return_individual_heads:
                 individual_head_outputs[(layer, h)] = head_outputs
