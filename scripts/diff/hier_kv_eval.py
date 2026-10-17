@@ -108,14 +108,10 @@ def run_config(ctx, args, dt, conn, order, sl, dl, patch_heads, readout_heads, o
         done = {r["key"]: r for r in json.loads(results_fp.read_text())}
         logger.info(f"[{tag}] resume: {len(done)} instances already done")
 
-    # the (a, x, y, z) sample depends on datatype + connective only, so `match` and `diff` share it
-    # py-py seed key unchanged; every direction involving c++ shares ONE sample (lambda conditions excluded;
-    # key kept = the original py-cpp key) -> py-cpp / cpp-py / cpp-cpp are paired, and match / diff too
-    _sk = f"{dt}|{conn}" if (sl, dl) == ("python", "python") else f"{dt}|{conn}|python-cpp"
-    cfg_seed = (args.seed + int(hashlib.md5(_sk.encode()).hexdigest()[:8], 16)) % (2**32)
+    # the (a, x, y, z) sample depends on datatype + connective only (`match` / `diff` share it); every direction
+    # involving c++ shares ONE sample -> see H.seeded_setups (also used by the path-patching notebook)
+    setups, cfg_seed = H.seeded_setups(dt, conn, order, sl, dl, n_samples=args.n_samples, seed=args.seed)
     set_seed(cfg_seed)
-    setups = H.hier_kv_setups(dt, n_samples=args.n_samples, seed=cfg_seed, connective=conn, order=order,
-                              src_lang=sl, dst_lang=dl)
     if args.max_instances:
         setups = setups[: args.max_instances]
     records = dict(done)

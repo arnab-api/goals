@@ -88,26 +88,6 @@ def _run_tag(cfg, args, heads_tag):
     return "__".join(seg) + args.tag_suffix
 
 
-_JOINT2 = {"native": "dst", "src_target": "src", "diff_target": "res", "neither": "neither", "parse_error": "parse_error"}
-
-
-def eval_readouts_res(inst, e_desc, patched_readout, res_readout, model_name):
-    """3-way (mutually exclusive) verdicts over {d = DST's frontier, c = SRC's, e = p_res's} for the patched DST
-    readout and the clean p_res readout. ``eval_readouts`` judges each readout c-vs-d only, so a readout that
-    expresses e would come out "neither" there. ``res_valid`` = the clean p_res readout expresses e (the baseline
-    that makes "shifted to e" interpretable); ``shifted_to_res`` = the patched readout expresses e."""
-    kind = "a short natural-language phrase the model 'read out' internally"
-
-    def j(text):
-        r = E.classify_joint(text, native_desc=inst.dst_frontier.description, src_desc=inst.src_frontier.description,
-                             diff_desc=e_desc, task_desc=inst.task_desc, kind=kind, model_name=model_name)
-        return dict(r, label=_JOINT2[r["label"]])
-
-    pat, res = j(patched_readout), j(res_readout)
-    return dict(patched=pat["label"], res_clean=res["label"], res_valid=res["label"] == "res",
-                shifted_to_res=pat["label"] == "res", details=dict(patched=pat, res_clean=res))
-
-
 def _load_done(fp, args):
     if fp.exists() and args.resume and not args.force:
         return {r["key"]: r for r in json.loads(fp.read_text())}
@@ -141,10 +121,8 @@ def _meta(args, cfg, dt, sl, dl, recs, heads_tags):
 def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
     task_heads, goal_heads, readout_heads = heads
     sample_tag = f"{K._safe(dt)}__{sl}-{dl}"
-    seed = (args.seed + int(hashlib.md5(sample_tag.encode()).hexdigest()[:8], 16)) % (2**32)
+    insts, seed = PP.sample_multi_instances(dt, sl, dl, n_samples=args.n_samples, seed=args.seed)
     set_seed(seed)
-    insts = DATA.multi_predicate_setups(dt, n_conditions=3, n_samples=args.n_samples, seed=seed, presentation="listed",
-                                        naming="letters", letter_stub="var_eq", src_lang=sl, dst_lang=dl)
     if args.max_instances:
         insts = insts[: args.max_instances]
     fps = {name: out_dirs[name] / sample_tag / "results.json" for name in out_dirs}
@@ -181,16 +159,12 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs):
                                  ctx=ctx)
             use_res = cfg["i2"] and args.i2_donor == "res"
             if use_res and ro_res is None:   # clean p_res readout at ` =` (p_res is the same for every config)
-                ro_res = FUNC.goalscope_readout("", g["res_tok"], g["res_tok"]["input_ids"].shape[1] - 1,
-                                                heads=readout_heads, ctx=ctx)[0]["patched_gen"]
+                ro_res = PP.res_readout(g, readout_heads=readout_heads, ctx=ctx)
             raw = dict(src_prompt=g["src_prompt"], dst_prompt=g["dst_prompt"], res_prompt=g["res_prompt"], **clean, **pat,
                        **({"ro_res": ro_res} if use_res else {}))
             causal = readout = readout_res = None
             if not args.no_oracle:
-                causal = E.judge_causal(inst, raw["gen_patched"], model_name=args.oracle_model)
-                readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"], model_name=args.oracle_model)
-                if use_res:
-                    readout_res = eval_readouts_res(inst, g["e_desc"], raw["ro_patched"], ro_res, args.oracle_model)
+                causal, readout, readout_res = PP.judge(inst, raw, e_desc=g["e_desc"], model_name=args.oracle_model)
             _c = f"{'HIT' if causal['triggered'] else 'miss'}({causal['label']})" if causal else "off"
             _r = (f"{readout['source']}>{readout['dest']}>{readout['patched']}"
                   f"[{'valid' if readout['valid'] else 'inv'},{'shift' if readout['shifted'] else 'no'}]" if readout else "off")

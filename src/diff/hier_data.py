@@ -213,6 +213,18 @@ def hier_kv_setups(
     return out
 
 
+def seeded_setups(datatype, connective, order, src_lang, dst_lang, n_samples=32, seed=1123):
+    """The batch eval's per-config sample (``scripts/diff/hier_kv_eval.py``; also the path-patching notebook): seed =
+    base seed + md5 of the sample key. The sample depends on datatype + connective only (``match`` / ``diff`` share it);
+    py-py keeps its original key, every direction involving C++ shares ONE sample (key ``...|python-cpp``), so py-cpp /
+    cpp-py / cpp-cpp are paired. Returns ``(instances, sample_seed)``."""
+    import hashlib
+    sk = f"{datatype}|{connective}" if (src_lang, dst_lang) == ("python", "python") else f"{datatype}|{connective}|python-cpp"
+    s = (seed + int(hashlib.md5(sk.encode()).hexdigest()[:8], 16)) % (2**32)
+    return hier_kv_setups(datatype, n_samples=n_samples, seed=s, connective=connective, order=order,
+                          src_lang=src_lang, dst_lang=dst_lang), s
+
+
 def inst_key(inst: HierKVInstance) -> str:
     m = inst.meta
     lang = "" if m.get("dst_lang", "python") == "python" else f"|{m['src_lang']}-{m['dst_lang']}"   # py-py keys unchanged
