@@ -293,7 +293,12 @@ def main():
         for dt in args.datatypes:
             logger.info(f"═══ {lt} / {dt} ═══")
             metas += run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs)
-    sub = "__".join(K._safe(d) for d in args.datatypes) + "__" + "-".join(args.lang_transfers) + args.tag_suffix
+    # the config AXES are part of the name, so invocations over the same datatype / direction with different
+    # configs (e.g. the V-boost grid vs the V x1 runs) never overwrite each other's summary
+    axes = ("cfg-i1" + "-".join(args.i1) + "_i2" + "-".join(args.i2) + "_i3" + "-".join(args.i3)
+            + "_win" + "-".join("sp" if w == "span+progress" else "s" for w in args.window)
+            + "_v" + "-".join(f"{v:g}" for v in args.i3_v_scale))
+    sub = "__".join(K._safe(d) for d in args.datatypes) + "__" + "-".join(args.lang_transfers) + "__" + axes + args.tag_suffix
     summ = root / f"summary__{sub}.json"
     summ.write_text(json.dumps(metas, indent=2))
     logger.info(f"all done — {len(metas)} (config, datatype) cells; summary at {summ}")
