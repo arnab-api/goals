@@ -232,14 +232,15 @@ def geometry_info(g) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # runs
 # ══════════════════════════════════════════════════════════════════════════════
-def clean_runs(g, *, readout_heads, max_new=64, ctx):
-    """Clean SRC / DST greedy generations + GoalScope readouts at the pivot, on the geometry's token sequences."""
+def clean_runs(g, *, readout_heads, max_new=64, readout=True, ctx):
+    """Clean SRC / DST greedy generations + GoalScope readouts at the pivot, on the geometry's token sequences
+    (``readout=False``: generations only, ``ro_*`` = None)."""
     out = {}
     for k in ("src", "dst"):
         tok = g[f"{k}_tok"]
         out[f"gen_{k}"] = FUNC.greedy(tok, max_new=max_new, ctx=ctx)
-        out[f"ro_{k}"] = FUNC.goalscope_readout("", tok, tok["input_ids"].shape[1] - 1, heads=readout_heads,
-                                                ctx=ctx)[0]["patched_gen"]
+        out[f"ro_{k}"] = (FUNC.goalscope_readout("", tok, tok["input_ids"].shape[1] - 1, heads=readout_heads,
+                                                 ctx=ctx)[0]["patched_gen"] if readout else None)
     return out
 
 
@@ -283,7 +284,8 @@ def intervention_stack(g, *, task_heads, goal_heads, i1=False, i2=True, i3=True,
 
 
 def run_patched(g, *, task_heads, goal_heads, readout_heads, i1=False, i2=True, i3=True, i1_query="all",
-                i3_query="last", blind_self=False, v_scale=1.0, alpha=1.0, donor="res", i2_layers=None, max_new=64, ctx):
+                i3_query="last", blind_self=False, v_scale=1.0, alpha=1.0, donor="res", i2_layers=None, max_new=64,
+                readout=True, ctx):
     """One patched DST run (prompt ending at the pivot): greedy generation + GoalScope readout at the pivot under the
     enabled interventions (:func:`intervention_stack`). ``v_scale`` multiplies the transplanted SRC window VALUES read
     by the I3 heads (keys / attention pattern unchanged; 1.0 = off). Returns ``gen_patched`` / ``ro_patched``."""
@@ -298,7 +300,8 @@ def run_patched(g, *, task_heads, goal_heads, readout_heads, i1=False, i2=True, 
     with stack():
         gen = FUNC.greedy(g["dst_tok"], max_new=max_new, ctx=ctx)
     L = g["dst_tok"]["input_ids"].shape[1]
-    ro = FUNC.goalscope_readout("", g["dst_tok"], L - 1, heads=readout_heads, iface=iface, ctx=ctx)[0]["patched_gen"]
+    ro = (FUNC.goalscope_readout("", g["dst_tok"], L - 1, heads=readout_heads, iface=iface, ctx=ctx)[0]["patched_gen"]
+          if readout else None)
     return dict(gen_patched=gen, ro_patched=ro)
 
 
@@ -329,7 +332,8 @@ def judge(inst, raw, e_desc=None, model_name="claude-sonnet-4-6"):
     (first computation; BOTH is a miss); readout = ``eval_readouts`` (c-vs-d, BOTH is a miss); readout_res = the 3-way
     {d, c, e} verdicts, only when ``raw`` carries the clean p_res readout ``ro_res`` (I2 with the p_res donor)."""
     causal = E.judge_causal(inst, raw["gen_patched"], model_name=model_name)
-    readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"], model_name=model_name)
+    readout = (E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"], model_name=model_name)
+               if raw.get("ro_patched") is not None else None)       # None when run without readouts
     readout_res = (eval_readouts_res(inst, e_desc, raw["ro_patched"], raw["ro_res"], model_name)
                    if raw.get("ro_res") is not None and e_desc else None)
     return causal, readout, readout_res

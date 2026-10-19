@@ -178,14 +178,15 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
             g = geoms[w]
             ck = (tuple(PP._ids(g["src_tok"])), tuple(PP._ids(g["dst_tok"])))   # clean runs shared per token sequence
             if ck not in cleans:
-                cleans[ck] = PP.clean_runs(g, readout_heads=readout_heads, max_new=args.max_new, ctx=ctx)
+                cleans[ck] = PP.clean_runs(g, readout_heads=readout_heads, max_new=args.max_new,
+                                           readout=not args.no_readout, ctx=ctx)
             clean = cleans[ck]
             pat = PP.run_patched(g, task_heads=task_heads, goal_heads=goal_heads, readout_heads=readout_heads,
                                  i1=cfg["i1"], i2=cfg["i2"], i3=cfg["i3"], i1_query=args.i1_query, i3_query=args.i3_query,
                                  blind_self=args.blind_self, v_scale=cfg["v_scale"], alpha=args.alpha,
-                                 donor=args.i2_donor, max_new=args.max_new,
+                                 donor=args.i2_donor, max_new=args.max_new, readout=not args.no_readout,
                                  ctx=ctx)
-            use_res = cfg["i2"] and args.i2_donor == "res"
+            use_res = cfg["i2"] and args.i2_donor == "res" and not args.no_readout
             if use_res and ro_res is None:   # clean p_res readout at ` =` (p_res is the same for every config)
                 ro_res = PP.res_readout(g, readout_heads=readout_heads, ctx=ctx)
             raw = dict(src_prompt=g["src_prompt"], dst_prompt=g["dst_prompt"], res_prompt=g["res_prompt"], **clean, **pat,
@@ -276,6 +277,8 @@ def parse_args():
     p.add_argument("--max-new", type=int, default=64)
     p.add_argument("--oracle-model", default="claude-sonnet-4-6")
     p.add_argument("--no-oracle", action="store_true")
+    p.add_argument("--no-readout", action="store_true",
+                   help="skip every GoalScope readout (clean + patched; run tag 'ro-off'): causal-shift only")
     p.add_argument("--tag-suffix", default="")
     p.add_argument("--force", action="store_true")
     p.add_argument("--no-resume", dest="resume", action="store_false")
@@ -294,7 +297,8 @@ def main():
     heads = tuple(resolved[k][1] for k in ("task", "goal", "readout"))
     args.heads_tags = {f"{k}_heads": K._patch_heads_tag(resolved[k][0], len(resolved[k][1])) for k in resolved}
     tags = args.heads_tags
-    heads_tag = (f"th-{tags['task_heads']}__gh-{tags['goal_heads']}__ro-{tags['readout_heads']}")
+    heads_tag = (f"th-{tags['task_heads']}__gh-{tags['goal_heads']}__ro-"
+                 + ("off" if args.no_readout else tags['readout_heads']))
 
     configs = []
     for i1, i2, i3, w, vs in itertools.product(args.i1, args.i2, args.i3, args.window, args.i3_v_scale):
