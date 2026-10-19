@@ -20,6 +20,9 @@ destination frontier d, and the goal heads read it there.
   0.37 → 0.62 → 0.80 → **0.86** (V×1/2/4/6). I2 on: 0.61 → 0.81 → 0.90 → **0.92**. Drift to e falls 0.24 → 0.02.
   The boost closes most of the gap to span + progress but not all of it. It works best py→py (0.94 / 0.98 at V×6)
   and is weakest with a C++ destination.
+* **Random-head control (added 2026-10-19).** The paper configuration (I3 only, I2 off, V×4) routed through 250 random
+  later-half non-goal heads instead of the goal heads gives **0.000 causal-shift** (0/512; 0/1024 one level down, at the
+  connective), against 0.80 / 0.79 with the goal heads (§2.4).
 * **Readout-shift tracks causal-shift** throughout but sits below it: 0.07–0.10 pooled, up to 0.21 for C++
   destinations at V×1, and persistently for `list[str]` (0.66 / 0.71 readout vs 0.88 / 0.92 causal at V×6).
 
@@ -167,6 +170,49 @@ Each cell: causal-shift / readout-shift.
 | list[str] | 1.00 / 1.00 [1.00] | 1.00 / 1.00 [0.91] | 1.00 / 0.97 [0.94] | 1.00 / 0.81 [0.81] | 1.00 / 0.95 [0.91] |
 | all | 0.98 / 1.00 [0.97] | 0.99 / 0.98 [0.95] | 0.99 / 0.98 [0.97] | 0.98 / 0.95 [0.92] | 0.99 / 0.98 [0.95] |
 
+## 2.4 · Random-head control (V×4, the paper configuration)
+
+*Added 2026-10-19.* The exact configuration reported in the paper (App. I.1 / I.1.1; Fig. 22, Table 7, Fig. 23): I1 off,
+I2 off, I3 on, task-span window, V×4, α = 1, the same seeded instances. The only change is the head set: **250 heads drawn at
+random from layers 32–63 with no goal head** (`head_sets/Qwen2.5-Coder-32B-Instruct/control/control250__laterhalf.json`)
+read SRC's task-span k/v from the pivot on, in place of the goal-250 heads. Run without GoalScope readouts
+(`--no-readout`), so causal-shift only.
+
+**Sub-goal (multi-predicate; mirrors Fig. 22 / Table 7)** — causal-shift, n = 128 per row, 512 pooled
+
+| | goal-250 | control-250 |
+|---|---|---|
+| **pooled** | **0.80** | **0.00** |
+| py→py | 0.84 | 0.00 |
+| py→cpp | 0.70 | 0.00 |
+| cpp→py | 0.84 | 0.00 |
+| cpp→cpp | 0.81 | 0.00 |
+| int | 0.85 | 0.00 |
+| str | 0.73 | 0.00 |
+| list[int] | 0.80 | 0.00 |
+| list[str] | 0.81 | 0.00 |
+
+Patched verdicts under the control: 510 d, 2 neither, 0 c.
+
+**Sub-sub-goal (multi-hierarchy, pivot = the connective; mirrors Fig. 23)** — causal-shift, n = 256 per direction,
+512 per datatype / connective / order, 1024 pooled
+
+| | goal-250 | control-250 |
+|---|---|---|
+| **pooled** | **0.79** | **0.00** |
+| py→py / py→cpp / cpp→py / cpp→cpp | 0.80 / 0.76 / 0.84 / 0.76 | 0.00 / 0.00 / 0.00 / 0.00 |
+| list[int] / list[str] | 0.74 / 0.83 | 0.00 / 0.00 |
+| and / or | 0.83 / 0.75 | 0.00 / 0.00 |
+| order match / diff | 0.97 / 0.61 | 0.00 / 0.00 |
+
+Patched verdicts under the control: 1023 the destination's own sub-sub-goal, 1 neither, 0 the source's.
+
+So the same k/v transplant with the same value boost has **no effect at all** unless the reading heads are the goal heads:
+the redirection is specific to them, not a generic consequence of up-weighting the source task span in 250 later-layer heads.
+
+Runs: `results/diff/<M>/path_patch{,_hier}/I1-off__I2-off__I3-on-V4__win-span__span-list__a1__th-control250_250__gh-control250_250__ro-off/`
+· job list `job_list/diff_eval/path_patch_control_32b.json`.
+
 ## 3 · I2 on: pre-commitment-swap residual transfer from p_res (a'b'e)
 
 Every layer's residual on `<|im_end|> … {var}` is replaced by p_res's, whose progress carries neither c nor d. At V×1 this
@@ -283,7 +329,9 @@ Each cell: causal-shift / readout-shift · readout → e.
    output without changing where they attend. It climbs monotonically and saturates near 0.86 (I2 off) / 0.92 (I2 on)
    pooled, and suppresses the drift to e. It falls short of span + progress, most with a C++ destination (py→cpp 0.81 /
    0.88, cpp→cpp 0.82 / 0.91 at V×6, vs py→py 0.94 / 0.98).
-5. **Readout lags causal.** Pooled, readout-shift is 0.07–0.10 below causal-shift; the gap is largest for `list[str]`
+5. **It is the goal heads specifically.** The same transplant routed through 250 random later-half non-goal heads moves
+   nothing (0.00 at both hierarchy levels, §2.4).
+6. **Readout lags causal.** Pooled, readout-shift is 0.07–0.10 below causal-shift; the gap is largest for `list[str]`
    (readout 0.66 / 0.71 at V×6 vs causal 0.88 / 0.92) and C++ destinations at low V (up to 0.21) (lower clean-readout validity there: 0.81 for cpp→cpp `list[str]`).
 
 ## 5 · Caveats

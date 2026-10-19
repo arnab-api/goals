@@ -13,6 +13,11 @@ finished 2026-10-10 03:00) · companion to `closed_loop_query_transfer.md`*
 > all records. (iv) **2026-10-10:** the kv re-clamp baselines are complete. kv gsr beats the kv re-clamp in all 32 kv
 > cells (finding 7), and kv leaves the re-clamp as unchanged as it leaves gsr. Conclusions 1–3 and 5–6 are unchanged.
 
+> **Update 2026-10-19: random-head control (§4.5).** The no-kv gsr arm reported in the paper (Fig. 25, Tables 8–9),
+> re-run with 250 random later-half non-goal heads in place of goal-250, gives **0.036** judged D (goal-250: 0.72). The
+> control heads' gaze is moved to D just as often (0.74 vs 0.74; clean 0.02), but restricting *them* to D's span almost never
+> produces D (P(D | selected D) = 0.03 vs 0.98). The goal-head-specific step is the execution, not the selection.
+
 ## 1. Motivation
 
 The paper's q-transfer **re-clamps** the SRC pivot query of the goal heads at DST's pivot and at the current token for
@@ -209,6 +214,50 @@ four directions and both orderings pooled; n per task is 7–44, so this is nois
   100 % native everywhere was made on the earlier, smaller sample and does not survive pooling. `count_set_bits` is
   0.40 native under gsr and 0.70 under the re-clamp.
 
+### 4.5 Random-head control (added 2026-10-19)
+
+The **no-kv gsr arm exactly as reported in the paper** (Fig. 25, Tables 8–9: α = 2, eq pivot, closed loop with
+`--probe-prompt gaze_select_restrict --gsr-anchors eq`, `__seq` naming, same seeded instances, 32 cells × 32), with
+`--patch-heads` and `--readout-heads` both set to **250 random heads from layers 32–63 with no goal head**
+(`head_sets/…/control/control250__laterhalf.json`). So the control heads receive the SRC query, their pivot gaze makes
+the selection, and they are the heads restricted to the selected span; everything else is unchanged. Run with
+`--no-readout` (the GoalScope readouts only; selection and gaze are still computed). Run tag
+`ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq`, job list `job_list/diff_eval/diff_trigger_gsr_eq_control250.json`.
+
+**Judged D rate** (int / str / list[int] / list[str]; same judge and layout as §4.1; n = 32 per cell)
+
+| direction | arm | order-diff | order-matched |
+|---|---|---|---|
+| **py→py** | gsr (goal-250) | .59 .62 .78 .66 | .91 .84 .91 .88 |
+| | **gsr (control-250)** | **.09 .03 .03 .00** | **.31 .03 .00 .00** |
+| **py→C++** | gsr (goal-250) | .66 .47 .50 .59 | .91 .75 .84 .88 |
+| | **gsr (control-250)** | **.06 .03 .00 .00** | **.03 .00 .00 .03** |
+| **C++→py** | gsr (goal-250) | .50 .41 .66 .47 | .91 .81 .94 .84 |
+| | **gsr (control-250)** | **.12 .03 .00 .00** | **.22 .03 .03 .00** |
+| **C++→C++** | gsr (goal-250) | .62 .47 .72 .44 | .97 .75 .88 .94 |
+| | **gsr (control-250)** | **.03 .03 .00 .00** | **.00 .00 .00 .00** |
+
+Pooled (n = 1024 each): goal-250 **0.72**, control-250 **0.036** (exclusive joint D 0.017; the outputs are B 96–100 %
+per direction × ordering). The only non-trivial control cells are `int` with a Python destination (py→py order-matched
+.31, C++→py order-matched .22); every other datatype is ≤ .03 in every cell.
+
+**Selection vs execution under the control** (all 1024 records each):
+
+| | goal-250 | control-250 |
+|---|---|---|
+| clean pivot gaze prefers D (no query transfer) | 0.000 | 0.018 |
+| gaze shifted to D under the query transfer | 0.739 | 0.744 |
+| gaze **selects D** | 0.737 | 0.726 |
+| P(D generated \| selected D) | **0.979** | **0.032** |
+| P(D generated \| selected another task) | 0.000 | 0.046 |
+| judged D | 0.722 | 0.036 |
+
+The transferred SRC query redirects the control heads' attention to D exactly as often as the goal heads' (0.74 vs
+0.74, from ≈ 0 on the clean run), so **the selection step is not goal-head specific**: copying the source pivot query into
+any 250 later-half heads makes them look at D. What is specific is the second step: confining the goal heads to D's
+span makes DST write D 98 % of the time, while confining 250 random later-half heads to the same span almost never does
+(3 %), and the control output stays B.
+
 ## 5. Findings
 
 1. **gsr beats the re-clamp in all 32 no-kv cells but one, py→py order-diff int** (0.59 vs 0.62). The gains are
@@ -239,7 +288,12 @@ four directions and both orderings pooled; n per task is 7–44, so this is nois
    the positional copy (D is "the 3rd listed" on both sides). Order-diff remains the clean test.
 6. **Extra anchors hurt.** Letting the goal heads also read the indent and the result-variable token cuts the D rate
    by 0.14–0.55 on order-diff. Those tokens appear to carry DST's own "write B next" signal.
-7. **With kv, gsr also beats the re-clamp in all 32 cells**, by 0.06 (C++→C++ order-diff int, .53 → .59) to 0.63
+7. **The effect is goal-head specific, and the specificity is in execution (§4.5).** With 250 random later-half heads in
+   place of goal-250, judged D falls from 0.72 to 0.036. Their gaze still moves to D (0.74, as for the goal heads), but
+   restricting them to D's span does not make DST write D (0.03 vs 0.98). This supports finding 3 (the goal heads'
+   reading of a span drives the generation) and qualifies finding 2: "the query transfer moves the gaze to D" holds for
+   non-goal heads too, so it is not by itself evidence about the goal heads.
+8. **With kv, gsr also beats the re-clamp in all 32 cells**, by 0.06 (C++→C++ order-diff int, .53 → .59) to 0.63
    (C++→C++ order-matched list[str], .31 → .94). Pooled, order-diff goes from .27–.46 to .51–.66 and order-matched
    from .52–.61 to .81–.89. kv itself barely moves the re-clamp: kv re-clamp is within 0.07 of no-kv re-clamp pooled in
    every direction × ordering (largest drop C++→C++ order-matched, .59 → .52). The same reason applies as in finding 4:
@@ -261,6 +315,8 @@ four directions and both orderings pooled; n per task is 7–44, so this is nois
   is not computed for the kv-only run), and the kv selection is redundant with the no-kv one (finding 4).
 - **Judges grade only the first computation and are not anchored on the current variable**
   (`project_closed_loop_judge_issues`). The execution audit partly covers this for Python destinations only.
+- **Control without readouts.** The control (§4.5) skips the GoalScope readouts, so it has no readout-shift; the
+  readout-heads argument is still the control set because the gsr selector uses the readout heads' gaze.
 - **Mismatched baseline runs.** The no-kv order-matched re-clamp baseline comes from the older non-`__seq` run.
 - **The kv design may not separate set from count in either arm.** Under kv the goal heads read p_kv's task list
   (`A'BD`) over the whole task span. In that list the slot a count reading would pick (the 3rd item) is D, so a
@@ -293,6 +349,8 @@ four directions and both orderings pooled; n per task is 7–44, so this is nois
 - **Results:** `results/diff/Qwen2.5-Coder-32B-Instruct/diff_trigger/`
   - no kv: `ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/`;
   - kv (fixed): `ph-goal_250__a2__piv-eq__kv__cl-ppgazerestrict-anceq__seq__gzfix/`; legacy kv: `…__seq/`;
-  - all anchors: `…__cl-ppgazerestrict__seq/`.
+  - all anchors: `…__cl-ppgazerestrict__seq/`;
+  - random-head control (no kv): `ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/` (job list
+    `job_list/diff_eval/diff_trigger_gsr_eq_control250.json`, re-dispatched remainder `…_control250_rest.json`).
 - **Notebook:** `notebooks/diff/04.4_q_transfer_multipred.ipynb`, "Gaze-select + restrict" cells (`SPAN_*` knobs,
   `RO["span"]`, `CAUSAL["span"]`).
