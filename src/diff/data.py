@@ -140,6 +140,12 @@ def _signature(datatype: str, arg: str, lang: Lang) -> str:
     return f"auto func({dt['cpp']} {arg})" + "{"  # c++ opens the body brace
 
 
+CPP_NOTE = "Assume that all the libraries have been already imported."
+# True: the C++ note moves from the end of the user turn to the system prompt (C++ prompts only), so in every
+# language the task list is followed by just its closing `\n` before <|im_end|>
+CPP_NOTE_IN_SYSTEM = False
+
+
 def _question(
     descriptions: list[str],
     datatype: str,
@@ -156,11 +162,7 @@ def _question(
         body = "\n".join(f"({i + 1}) {d}" for i, d in enumerate(descriptions))
     else:  # description / prose
         body = "; ".join(descriptions)
-    tail = (
-        "\nAssume that all the libraries have been already imported.\n"
-        if lang == "cpp"
-        else "\n"
-    )
+    tail = f"\n{CPP_NOTE}\n" if lang == "cpp" and not CPP_NOTE_IN_SYSTEM else "\n"
     return head + body + tail
 
 
@@ -586,9 +588,10 @@ def materialize(instance, ctx=None) -> dict:
 
     qs, pfs = instance.src_parts()
     qd, pfd = instance.dst_parts()
+    sys_extra = lambda lang: f" {CPP_NOTE}" if CPP_NOTE_IN_SYSTEM and lang == "cpp" else ""
     out = {
-        "src_prompt": get_prompt(qs, _finalize_prefill(pfs), ctx=ctx),
-        "dst_prompt": get_prompt(qd, _finalize_prefill(pfd), ctx=ctx),
+        "src_prompt": get_prompt(qs, _finalize_prefill(pfs), ctx=ctx, system_extra=sys_extra(instance.src_lang)),
+        "dst_prompt": get_prompt(qd, _finalize_prefill(pfd), ctx=ctx, system_extra=sys_extra(instance.dst_lang)),
     }
     if isinstance(instance, KVTransferInstance):
         out["src_task_text"] = instance.task_text(instance.src_task)

@@ -334,13 +334,14 @@ def show_prompt(tag, prompt, span, ctx=None, neg_shift=-1):
 # ══════════════════════════════════════════════════════════════════════════════
 # prompt builder + q/k/v patch primitives + readouts  (00_diff.ipynb cell 6)
 # ══════════════════════════════════════════════════════════════════════════════
-def get_prompt(question, prefill, ctx=None):
+def get_prompt(question, prefill, ctx=None, system_extra=""):
     _mt = ctx.mt if ctx is not None else mt
     messages = [
         {
             "role": "system",
             "content": "You are a helpful assistant proficient in programming. "
-            "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.",
+            "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain."
+            + system_extra,
         },
         {"role": "user", "content": question},
         {"role": "assistant", "content": prefill},

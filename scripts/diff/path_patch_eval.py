@@ -102,7 +102,7 @@ def _run_tag(cfg, args, heads_tag):
            + (f"-q{args.i3_query}" if cfg["i3"] and args.i3_query != "last" else "")
            + (f"-V{cfg['v_scale']:g}" if cfg["i3"] and cfg["v_scale"] != 1.0 else ""),
            "win-" + ("span" if cfg["window"] == "span" else "span+prog" + ("" if args.include_pivot else "-nopiv")),
-           f"span-{args.span}", f"a{args.alpha:g}", heads_tag]
+           f"span-{args.span}" + ("__cppnote-sys" if args.cpp_note == "system" else ""), f"a{args.alpha:g}", heads_tag]
     return "__".join(seg) + args.tag_suffix
 
 
@@ -133,7 +133,7 @@ def _meta(args, cfg, dt, sl, dl, recs, heads_tags, conn=None, order=None):
         res_patched_label_counts=dict(collections.Counter(x["patched"] for x in rr)) if rr else None)
     pads = [r["geometry"].get("pad_src", 0) + r["geometry"].get("pad_dst", 0) for r in recs]
     return dict(model=args.model, mechanism=MECHANISM, datatype=dt, src_lang=sl, dst_lang=dl, **cfg,
-                span=args.span, include_pivot=args.include_pivot, i1_query=args.i1_query, i3_query=args.i3_query,
+                span=args.span, cpp_note=args.cpp_note, include_pivot=args.include_pivot, i1_query=args.i1_query, i3_query=args.i3_query,
                 blind_self=args.blind_self, i2_donor=args.i2_donor, i2_from=args.i2_from, alpha=args.alpha,
                 **heads_tags, oracle_model=args.oracle_model, n_instances=len(recs),
                 mean_pad_tokens=(sum(pads) / len(pads)) if pads else None, **base, **res_rates, **hier)
@@ -258,7 +258,11 @@ def parse_args():
     p.add_argument("--window", nargs="+", default=["span", "span+progress"], choices=["span", "span+progress"],
                    help="transplanted SRC window: the task span, or task span + progress up to ` =` (A1 padding)")
     # fixed knobs
-    p.add_argument("--span", default="list", choices=["list", "frontier"], help="task span = whole task list | frontier item")
+    p.add_argument("--span", default="list", choices=["list", "list+gap", "frontier"],
+                   help="task span = whole task list | `(1)` .. <|im_end|> (excluded) | frontier item")
+    p.add_argument("--cpp-note", default="user", choices=["user", "system"],
+                   help="where C++ prompts carry 'Assume that all the libraries ...': end of the user turn (default) | "
+                        "system prompt (run tag '__cppnote-sys')")
     p.add_argument("--exclude-pivot", dest="include_pivot", action="store_false",
                    help="span+progress window stops before ` =` (default: includes ` =`)")
     p.add_argument("--task-heads", default="auto", help="I1 heads: 'auto' (goal-250 on Coder-32B) | 'goal' | JSON path")
@@ -288,6 +292,7 @@ def parse_args():
 def main():
     args = parse_args()
     logging_utils.configure(level=logging.INFO, force=True)
+    DATA.CPP_NOTE_IN_SYSTEM = args.cpp_note == "system"
     bank = list(H.HIER_DATATYPES) if args.setup == "hier" else list(DATA.QTASKS)
     args.datatypes = args.datatypes or bank
     bad = [d for d in args.datatypes if d not in bank]
@@ -327,7 +332,8 @@ def main():
     # configs (e.g. the V-boost grid vs the V x1 runs) never overwrite each other's summary
     axes = ("cfg-i1" + "-".join(args.i1) + "_i2" + "-".join(args.i2) + "_i3" + "-".join(args.i3)
             + "_win" + "-".join("sp" if w == "span+progress" else "s" for w in args.window)
-            + "_v" + "-".join(f"{v:g}" for v in args.i3_v_scale))
+            + "_v" + "-".join(f"{v:g}" for v in args.i3_v_scale)
+            + ("" if args.span == "list" else f"_span-{args.span}") + ("_cppnote-sys" if args.cpp_note == "system" else ""))
     hier_seg = ("__" + "-".join(args.connectives) + "__" + "-".join(args.orders)) if args.setup == "hier" else ""
     sub = ("__".join(K._safe(d) for d in args.datatypes) + hier_seg + "__" + "-".join(args.lang_transfers) + "__" + axes
            + args.tag_suffix)

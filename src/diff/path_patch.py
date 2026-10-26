@@ -181,12 +181,20 @@ def build_geometry(inst, *, window="span", span="list", include_pivot=True, i2_f
     mt = ctx.mt
     m = DATA.materialize(inst, ctx=ctx)
     c_desc, d_desc = inst.expected_next_desc, inst.dst_next_desc          # what the oracle judges against
-    txt_s, txt_d = ((m["src_task_text"], m["dst_task_text"]) if span == "list"
+    txt_s, txt_d = ((m["src_task_text"], m["dst_task_text"]) if span in ("list", "list+gap")
                     else (inst.src_frontier.description, inst.dst_frontier.description))
     assert m["src_prompt"].count(txt_s) == 1 and m["dst_prompt"].count(txt_d) == 1, "task span text not unique"
     s0, d0 = FUNC.token_span(m["src_prompt"], txt_s, ctx=ctx), FUNC.token_span(m["dst_prompt"], txt_d, ctx=ctx)
-    Ls = len(_ids(prepare_input(prompts=m["src_prompt"], tokenizer=mt)))
-    Ld = len(_ids(prepare_input(prompts=m["dst_prompt"], tokenizer=mt)))
+    ids_s = _ids(prepare_input(prompts=m["src_prompt"], tokenizer=mt))
+    ids_d = _ids(prepare_input(prompts=m["dst_prompt"], tokenizer=mt))
+    Ls, Ld = len(ids_s), len(ids_d)
+    im_end = mt.tokenizer.convert_tokens_to_ids("<|im_end|>")
+    n_gap = 0
+    if span == "list+gap":   # task span = `(1)` .. the user turn's <|im_end|> (excluded): the list + everything after it
+        e_s = max(i for i, t in enumerate(ids_s) if t == im_end)
+        e_d = max(i for i, t in enumerate(ids_d) if t == im_end)
+        n_gap = e_d - d0[1]
+        s0, d0 = (s0[0], e_s), (d0[0], e_d)
     if window == "span":
         s_win, d_win = s0, d0
     elif window == "span+progress":   # ONE contiguous window: task-span start .. ` =` (or just before it)
@@ -202,7 +210,6 @@ def build_geometry(inst, *, window="span", span="list", include_pivot=True, i2_f
     pad_s, pad_d = len(_ids(src_tok)) - Ls, L - Ld
 
     # I2 window: <|im_end|> (or the end of DST's task span) .. the token before the pivot (` =`; ` and` / ` &&` ...)
-    im_end = mt.tokenizer.convert_tokens_to_ids("<|im_end|>")
     lo = max(i for i, t in enumerate(d_ids) if t == im_end) if i2_from == "im_end" else d0[1] + pad_d
     seg = list(range(lo, L - 1))
 
@@ -215,7 +222,7 @@ def build_geometry(inst, *, window="span", span="list", include_pivot=True, i2_f
     res_seg = [len(r_ids) - L + q for q in seg]
     assert [r_ids[q] for q in res_seg] == [d_ids[q] for q in seg], "p_res / p_dst progress tokens differ"
     return dict(
-        window=window, src_tok=src_tok, dst_tok=dst_tok, src_w=list(src_w), dst_w=list(dst_w), seg=seg,
+        window=window, span=span, n_gap=n_gap, src_tok=src_tok, dst_tok=dst_tok, src_w=list(src_w), dst_w=list(dst_w), seg=seg,
         res_tok=res_tok, res_seg=res_seg, e=e.id, c_desc=c_desc, d_desc=d_desc, e_desc=inst_res.expected_next_desc,
         pad_src=pad_s, pad_dst=pad_d, src_prompt=m["src_prompt"], dst_prompt=m["dst_prompt"], res_prompt=mres["src_prompt"],
     )
@@ -223,7 +230,7 @@ def build_geometry(inst, *, window="span", span="list", include_pivot=True, i2_f
 
 def geometry_info(g) -> dict:
     """JSON-native summary of a geometry (for the saved record)."""
-    return dict(window=g["window"], n_window=len(g["dst_w"]), dst_window=[g["dst_w"][0], g["dst_w"][-1]],
+    return dict(window=g["window"], span=g.get("span"), n_gap=g.get("n_gap", 0), n_window=len(g["dst_w"]), dst_window=[g["dst_w"][0], g["dst_w"][-1]],
                 src_window=[g["src_w"][0], g["src_w"][-1]], i2_window=[g["seg"][0], g["seg"][-1]],
                 pad_src=g["pad_src"], pad_dst=g["pad_dst"], L_src=g["src_tok"]["input_ids"].shape[1],
                 L_dst=g["dst_tok"]["input_ids"].shape[1], res_frontier=g["e"], res_frontier_desc=g["e_desc"])
