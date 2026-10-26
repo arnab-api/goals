@@ -1,10 +1,17 @@
 # Path patching: what the goal heads read at the pivot (Qwen2.5-Coder-32B-Instruct)
 
-*2026-10-17 · runs 2026-10-16/17 · code `src/diff/path_patch.py`, `scripts/diff/path_patch_eval.py` · job lists
-`job_list/diff_eval/path_patch_32b{,_xlang,_vboost}.json` · figures/tables `notebooks/fig_n_table_generators/path_patch.ipynb`
+*2026-10-17, updated 2026-10-26 (§2.5) · runs 2026-10-16/17, 2026-10-26 · code `src/diff/path_patch.py`, `scripts/diff/path_patch_eval.py` · job lists
+`job_list/diff_eval/path_patch_32b{,_xlang,_vboost,_listgap}.json` · figures/tables `notebooks/fig_n_table_generators/path_patch.ipynb`
 → `notebooks/Figures/path_patch/` · prototype `notebooks/diff/05_kv_transfer.ipynb` §Path patching*
 
 ## TL;DR
+
+> **Update 2026-10-26: the task span was missing its closing `\n` (§2.5).** Every I3 result below used a task span that
+> stopped at the last task item, leaving out the `\n` that closes the list (the token right before the user turn's
+> `<|im_end|>`). With that one token folded in (`--span list+gap`; the C++ note moved to the system prompt, `--cpp-note
+> system`), I3 alone (I2 off) gives **0.72 / 0.87 / 0.94** causal-shift at V×1/2/4, against 0.37 / 0.62 / 0.80 before, and readout-shift
+> 0.67 / 0.83 / 0.90. At V×4 that is within 0.05 of span + progress (0.99). The rest of this report is the old span. The sub-sub-goal
+> grid and both controls are being rerun with the new span.
 
 The paper's KV transfer is a **task-onwards KV transfer**: goal heads read the source task-span k/v at **every query from the
 span on**, and it moves the frontier almost perfectly. Here the goal heads read the source task span **only from the pivot
@@ -212,6 +219,81 @@ the redirection is specific to them, not a generic consequence of up-weighting t
 
 Runs: `results/diff/<M>/path_patch{,_hier}/I1-off__I2-off__I3-on-V4__win-span__span-list__a1__th-control250_250__gh-control250_250__ro-off/`
 · job list `job_list/diff_eval/path_patch_control_32b.json`.
+
+## 2.5 · Task span + its closing `\n` (rerun 2026-10-26)
+
+**What changed.** The task span ended at the last task item. The token after it, the `\n` that closes the list, was
+outside the window, so at the pivot the goal heads still read DST's k/v there. The rerun uses
+`PP.build_geometry(span="list+gap")`, where the task span runs from `(1)` up to the user turn's `<|im_end|>` (excluded). In every
+instance that adds exactly one token, the `\n`, the same in SRC and DST (checked on all 512). C++ prompts ended the user turn with
+`\nAssume that all the libraries have been already imported.\n`, which would otherwise fall inside the new span. That sentence now
+goes at the end of the system prompt instead (`--cpp-note system`; C++ prompts only, Python prompts are byte-identical). Everything
+else is unchanged: I1 off, I2 off, I3 on with goal-250 heads, task-span window, α = 1, the same seeded instances, readout on.
+
+**Caveat.** Cross-language rows change two things at once (the `\n` and where the C++ note sits). py→py changes only the `\n`
+and shows the same jump (0.40 → 0.77 at V×1), so most of the gain is the `\n`, but these runs don't separate the two.
+
+Each cell: causal-shift / readout-shift. **New** (task span + `\n`) · old (§2.1), n = 512 pooled, 128 per direction / datatype.
+
+| V | pooled | py→py | py→cpp | cpp→py | cpp→cpp |
+|---|---|---|---|---|---|
+| ×1 | **0.72 / 0.67** · 0.37 / 0.30 | **0.77 / 0.77** · 0.40 / 0.38 | **0.63 / 0.62** · 0.35 / 0.27 | **0.81 / 0.70** · 0.38 / 0.36 | **0.66 / 0.59** · 0.36 / 0.21 |
+| ×2 | **0.87 / 0.83** · 0.62 / 0.57 | **0.93 / 0.90** · 0.67 / 0.63 | **0.78 / 0.77** · 0.54 / 0.55 | **0.91 / 0.90** · 0.70 / 0.60 | **0.85 / 0.77** · 0.59 / 0.52 |
+| ×4 | **0.94 / 0.90** · 0.80 / 0.72 | **0.97 / 0.91** · 0.84 / 0.76 | **0.90 / 0.90** · 0.70 / 0.67 | **0.95 / 0.93** · 0.84 / 0.77 | **0.93 / 0.86** · 0.81 / 0.70 |
+
+| V | int | str | list[int] | list[str] |
+|---|---|---|---|---|
+| ×1 | **0.71 / 0.69** · 0.38 / 0.41 | **0.69 / 0.73** · 0.34 / 0.27 | **0.70 / 0.70** · 0.35 / 0.35 | **0.79 / 0.56** · 0.41 / 0.20 |
+| ×2 | **0.87 / 0.87** · 0.66 / 0.69 | **0.84 / 0.84** · 0.55 / 0.57 | **0.86 / 0.84** · 0.65 / 0.62 | **0.91 / 0.77** · 0.64 / 0.41 |
+| ×4 | **0.92 / 0.90** · 0.85 / 0.78 | **0.91 / 0.93** · 0.73 / 0.74 | **0.95 / 0.93** · 0.80 / 0.80 | **0.97 / 0.84** · 0.81 / 0.57 |
+
+**Full grids, new span** (datatype × direction, n = 32 per cell; clean-readout validity in brackets)
+
+*×1*
+
+| datatype | py→py | py→cpp | cpp→py | cpp→cpp | all |
+|---|---|---|---|---|---|
+| int | 0.75 / 0.75 [0.94] | 0.53 / 0.56 [0.97] | 0.88 / 0.75 [1.00] | 0.69 / 0.69 [1.00] | 0.71 / 0.69 [0.98] |
+| str | 0.78 / 0.81 [0.94] | 0.72 / 0.75 [0.94] | 0.69 / 0.75 [0.94] | 0.56 / 0.59 [0.94] | 0.69 / 0.73 [0.94] |
+| list[int] | 0.78 / 0.78 [1.00] | 0.53 / 0.66 [1.00] | 0.84 / 0.75 [1.00] | 0.62 / 0.62 [0.97] | 0.70 / 0.70 [0.99] |
+| list[str] | 0.78 / 0.72 [1.00] | 0.75 / 0.53 [0.94] | 0.84 / 0.53 [0.91] | 0.78 / 0.47 [0.84] | 0.79 / 0.56 [0.92] |
+| all | 0.77 / 0.77 [0.97] | 0.63 / 0.62 [0.96] | 0.81 / 0.70 [0.96] | 0.66 / 0.59 [0.94] | 0.72 / 0.67 [0.96] |
+
+*×2*
+
+| datatype | py→py | py→cpp | cpp→py | cpp→cpp | all |
+|---|---|---|---|---|---|
+| int | 0.94 / 0.91 [0.94] | 0.75 / 0.75 [0.97] | 0.94 / 0.97 [1.00] | 0.84 / 0.84 [1.00] | 0.87 / 0.87 [0.98] |
+| str | 0.88 / 0.88 [0.94] | 0.84 / 0.88 [0.94] | 0.84 / 0.88 [0.94] | 0.78 / 0.75 [0.94] | 0.84 / 0.84 [0.94] |
+| list[int] | 0.94 / 0.94 [1.00] | 0.69 / 0.72 [1.00] | 0.97 / 0.91 [1.00] | 0.84 / 0.81 [0.97] | 0.86 / 0.84 [0.99] |
+| list[str] | 0.97 / 0.88 [1.00] | 0.84 / 0.72 [0.94] | 0.88 / 0.84 [0.91] | 0.94 / 0.66 [0.84] | 0.91 / 0.77 [0.92] |
+| all | 0.93 / 0.90 [0.97] | 0.78 / 0.77 [0.96] | 0.91 / 0.90 [0.96] | 0.85 / 0.77 [0.94] | 0.87 / 0.83 [0.96] |
+
+*×4*
+
+| datatype | py→py | py→cpp | cpp→py | cpp→cpp | all |
+|---|---|---|---|---|---|
+| int | 0.97 / 0.91 [0.94] | 0.84 / 0.84 [0.97] | 0.97 / 0.94 [1.00] | 0.91 / 0.91 [1.00] | 0.92 / 0.90 [0.98] |
+| str | 0.94 / 0.94 [0.94] | 0.91 / 1.00 [0.94] | 0.91 / 0.94 [0.94] | 0.88 / 0.84 [0.94] | 0.91 / 0.93 [0.94] |
+| list[int] | 0.97 / 0.91 [1.00] | 0.88 / 0.91 [1.00] | 0.97 / 0.97 [1.00] | 0.97 / 0.94 [0.97] | 0.95 / 0.93 [0.99] |
+| list[str] | 1.00 / 0.91 [1.00] | 0.97 / 0.84 [0.94] | 0.94 / 0.88 [0.91] | 0.97 / 0.75 [0.84] | 0.97 / 0.84 [0.92] |
+| all | 0.97 / 0.91 [0.97] | 0.90 / 0.90 [0.96] | 0.95 / 0.93 [0.96] | 0.93 / 0.86 [0.94] | 0.94 / 0.90 [0.96] |
+
+**Reading.**
+- **One token carries much of what §4.1 attributed to the progress.** With the closing `\n` from SRC, I3 at V×1 nearly doubles
+  (0.37 → 0.72), and at V×4 it reaches 0.94, close to span + progress (0.99). So much of the "residual d" that the goal heads
+  were reading in the destination sat on the `\n` that ends the task list. That position attends to the whole list and probably
+  summarises it, rather than to the code progress.
+- **The gain is largest where the old span was weakest:** `list[str]` (0.41 → 0.79 at V×1) and C++ destinations at low V.
+  py→cpp is now the weakest direction (0.63 / 0.90 at V×1 / V×4).
+- **Readout follows causal more closely:** the pooled gap is 0.04–0.05, against 0.07–0.10 before. `list[str]` readout still
+  lags (0.56 vs 0.79 at V×1), most with C++ destinations (cpp→cpp 0.47, where clean-readout validity is lowest, 0.84).
+- **Open:** whether the old §2.4 control (0.00) holds with the new span, and how the sub-sub-goal level (Fig. 23) moves. Both are
+  being rerun (`job_list/diff_eval/path_patch_{hier,control}_32b_listgap.json`).
+
+Runs: `results/diff/<M>/path_patch/I1-off__I2-off__I3-on{,-V2,-V4}__win-span__span-list+gap__cppnote-sys__a1__th-goal_250__gh-goal_250__ro-goal_250/`
+· job list `job_list/diff_eval/path_patch_32b_listgap.json` · tables `scripts/diff/listgap_report_tables.py` · old results
+backed up under `results/diff/<M>/_backups/path_patch__2026-10-26__pre-list+gap/`.
 
 ## 3 · I2 on: pre-commitment-swap residual transfer from p_res (a'b'e)
 
