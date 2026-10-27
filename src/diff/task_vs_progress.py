@@ -35,7 +35,7 @@ SPANS = ("none", "task", "progress", "task+progress")
 # (method, heads, span, V) — "none" = the clean DST run (no-op corner of the grid)
 CONFIGS = (
     [("none", None, "none", 1.0)]
-    + [("kv", h, s, v) for h in ("goal250", "all") for s in ("task", "progress", "task+progress") for v in (1.0, 4.0)]
+    + [("kv", h, s, v) for h in ("goal250", "all") for s in ("task", "progress", "task+progress") for v in (1.0, 2.0, 4.0)]
     + [("residual", None, s, 1.0) for s in ("task", "progress", "task+progress")]
 )
 
