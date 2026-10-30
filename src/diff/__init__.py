@@ -2,14 +2,13 @@
 
 Submodules
 ----------
-functional : interventions, generations, prompt builders, q/k/v transplant machinery,
-             readouts, and debugging/visualization utilities. Also hosts ``setup()`` /
-             :class:`~src.diff.functional.Ctx` (model + trained head sets).
-data       : data generation for Spec-1 (query-transfer) and Spec-2 (kv-transfer).
-eval       : evaluation utilities for the q-transfer and kv-transfer interventions.
+functional       : interventions, generations, prompt builders, q/k/v transplant machinery and
+                   readouts. Also hosts ``setup()`` / :class:`~src.diff.functional.Ctx` (the model).
+data             : data generation (predicate banks, instances, prompt materialization).
+hier_data        : the multi-hierarchy (filter-condition) instances.
+eval             : the oracle judges.
+path_patch       : the pivot-onwards kv-transfer (geometry, runs, records).
+task_vs_progress : which span (task / progress) the pivot reads the goal from.
 
-Import the submodule you need explicitly, e.g. ``import src.diff.functional as P``.
-Nothing is re-exported at the package level on purpose — ``functional`` binds a large
-set of module globals via ``setup()``, so flattening them into the package namespace
-would be confusing.
+Import the submodule you need explicitly, e.g. ``import src.diff.functional as FUNC``.
 """

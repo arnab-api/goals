@@ -1,8 +1,7 @@
-"""Evaluation utilities for the DIFF hypothesis — q-transfer (Spec-1) for now.
+"""Evaluation utilities for the q-transfer and pivot-onwards KV-transfer interventions.
 
-Given a `QTransferInstance` / `FilterTransferInstance` (both expose ``expected_next_desc`` =
-SRC target sub-goal, ``dst_next_desc`` = the sub-goal clean DST would pursue, ``task_desc`` =
-the overall task), three complementary evals of one intervention:
+Given an instance (every template exposes ``expected_next_desc`` = SRC target sub-goal, ``dst_next_desc`` = the
+sub-goal clean DST would pursue, ``task_desc`` = the overall task), three complementary evals of one intervention:
 
 1. CAUSAL (what we actually care about) — did the query transplant make the patched DST pursue
    the SRC target (or a non-trivial part)? Oracle judgement over the patched code continuation,
@@ -26,11 +25,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Optional
 
 import numpy as np
-
-Label = Literal["src", "dst", "both", "neither", "parse_error"]
 
 CONCEPT_SYSTEM = (
     "You are a careful evaluator for a mechanistic-interpretability experiment on a code-writing "
@@ -133,7 +130,6 @@ def judge_causal(inst, patched_gen: str, **kw) -> dict:
 # are available in DST, so the two independent binary calls (causal=D-vs-B, literal=C-vs-B) can BOTH
 # fire on one generation and the marginals need not sum to <=1. This single call sorts each generation
 # into exactly one of {native (B), src_target (C), diff_target (D), neither}, so the shares partition.
-JointLabel = Literal["native", "src_target", "diff_target", "neither", "parse_error"]
 
 _J2LABEL = {"1": "native", "2": "src_target", "3": "diff_target",
             "NEITHER": "neither", "PARSE_ERROR": "parse_error"}
@@ -268,68 +264,16 @@ def gaze_shift(attn_patched, attn_clean, task_positions, src_span, dst_span) -> 
 # ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class QTransferEval:
-    causal: Optional[dict] = None       # judge_causal(...)
-    readout: Optional[dict] = None      # eval_readouts(...)
     gaze: Optional[dict] = None         # gaze_shift(...)
     meta: dict = field(default_factory=dict)
 
-    def summary(self) -> str:
-        parts = []
-        if self.causal is not None:
-            parts.append(f"causal: {'TRIGGERED' if self.causal['triggered'] else 'no'} ({self.causal['label']})")
-        if self.readout is not None:
-            r = self.readout
-            parts.append(f"readout: {r['source']}→{r['dest']}→{r['patched']} "
-                         f"[{'valid' if r['valid'] else 'INVALID'}, {'shifted' if r['shifted'] else 'no-shift'}]")
-        if self.gaze is not None:
-            g = self.gaze
-            parts.append(f"gaze: src{g['src_patched']:+.3f} vs dst{g['dst_patched']:+.3f} "
-                         f"({'shifted' if g['shifted'] else 'no-shift'}; clean_prefers_src={g['clean_prefers_src']})")
-        return " | ".join(parts)
 
-
-def eval_q_transfer(
-    inst,
-    patched_gen: Optional[str] = None,
-    readouts: Optional[tuple] = None,          # (source_readout, dest_readout, patched_readout)
-    gaze: Optional[dict] = None,               # {"attn_patched", "attn_clean", "task_positions", "prompt", "ctx"?}
-    **kw,
-) -> QTransferEval:
-    """Run whichever of the three q-transfer evals the caller supplies inputs for.
-
-    patched_gen -> causal ; readouts -> readout shift ; gaze{attn_patched, attn_clean, task_positions,
-    prompt} -> gaze shift (spans located in ``prompt`` via the instance's target descriptions)."""
+def eval_q_transfer(inst, gaze: dict) -> QTransferEval:
+    """The gaze eval: ``gaze`` = {attn_patched, attn_clean, task_positions, prompt, ctx?} -> gaze shift (spans
+    located in ``prompt`` via the instance's target descriptions)."""
     out = QTransferEval(meta={"datatype": inst.meta.get("datatype"),
                               "expected_next": inst.expected_next})
-    if patched_gen is not None:
-        out.causal = judge_causal(inst, patched_gen, **kw)
-    if readouts is not None:
-        out.readout = eval_readouts(inst, *readouts, **kw)
-    if gaze is not None:
-        sp = target_spans(inst, gaze["prompt"], ctx=gaze.get("ctx"))
-        out.gaze = gaze_shift(gaze["attn_patched"], gaze["attn_clean"],
-                              gaze["task_positions"], sp["src"], sp["dst"])
-    return out
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# kv-transfer (Spec-2) & multi-predicate eval — causal + readout only
-# ══════════════════════════════════════════════════════════════════════════════
-def eval_kv_transfer(
-    inst,
-    patched_gen: Optional[str] = None,
-    readouts: Optional[tuple] = None,          # (source_readout, dest_readout, patched_readout)
-    **kw,
-) -> QTransferEval:
-    """Evaluate one kv-transfer / multi-predicate intervention. Same causal + readout judgements as
-    :func:`eval_q_transfer` (both templates expose ``expected_next_desc`` / ``dst_next_desc`` /
-    ``task_desc``), but **no gaze** — in these setups the SRC target never appears in the DST prompt,
-    so there is no SRC-target span to gaze at (gaze is N/A). ``patched_gen`` -> causal ;
-    ``readouts`` -> readout shift."""
-    out = QTransferEval(meta={"datatype": inst.meta.get("datatype"),
-                              "expected_next": inst.expected_next})
-    if patched_gen is not None:
-        out.causal = judge_causal(inst, patched_gen, **kw)
-    if readouts is not None:
-        out.readout = eval_readouts(inst, *readouts, **kw)
+    sp = target_spans(inst, gaze["prompt"], ctx=gaze.get("ctx"))
+    out.gaze = gaze_shift(gaze["attn_patched"], gaze["attn_clean"],
+                          gaze["task_positions"], sp["src"], sp["dst"])
     return out

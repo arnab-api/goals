@@ -1,14 +1,14 @@
-"""Task vs progress: which span does the pivot read the goal from? (notebook
-``notebooks/precommitment/task_vs_progress.ipynb``; batch driver ``scripts/diff/task_vs_progress_eval.py``).
+"""Task vs progress: which span does the pivot read the goal from? (batch driver
+``scripts/diff/task_vs_progress_eval.py``).
 
     p_src: a'b'c -> c     source (k/v or residual donor)
     p_dst: a'b'd -> d     the patched run (prompt ends at the eq pivot `` =``)
 
 Two spans of DST can be read from SRC, giving a 2 x 2 grid (none / task / progress / task+progress):
 
-* **task** — the task list ``(1) .. (3)`` + its closing ``\\n`` (``PP.build_geometry(span="list+gap")``: up to the user
+* **task** — the task list ``(1) .. (3)`` + its closing ``\\n`` (``PP.build_geometry(span="task")``: up to the user
   turn's ``<|im_end|>``, excluded; ``\\n``-padded at the front to equal length);
-* **progress** — ``<|im_end|> .. {var}`` (the I2 window ``g["seg"]``; token-identical in SRC and DST, aligned from the end).
+* **progress** — ``<|im_end|> .. {var}`` (``g["seg"]``; token-identical in SRC and DST, aligned from the end).
 
 Methods (:func:`make_stack`):
 
@@ -30,8 +30,6 @@ import torch
 import src.diff.functional as FUNC
 import src.diff.path_patch as PP
 
-SPANS = ("none", "task", "progress", "task+progress")
-
 # (method, heads, span, V) — "none" = the clean DST run (no-op corner of the grid)
 CONFIGS = (
     [("none", None, "none", 1.0)]
@@ -46,7 +44,7 @@ def cfg_name(m, h, s, v):
 
 def geometry(inst, *, ctx):
     """SRC / DST tokens and the span windows ``W[span] = (src_positions, dst_positions)`` (paired 1:1 in order)."""
-    g = PP.build_geometry(inst, window="span", span="list+gap", ctx=ctx)
+    g = PP.build_geometry(inst, span="task", ctx=ctx)
     s_ids, d_ids = PP._ids(g["src_tok"]), PP._ids(g["dst_tok"])
     L_s, L_d = len(s_ids), len(d_ids)
     prog_d = list(g["seg"])                                   # <|im_end|> .. pivot-1 on DST
@@ -56,8 +54,7 @@ def geometry(inst, *, ctx):
     assert len(task_s) == len(task_d) and max(task_d) + 1 == min(prog_d), "task span must end right before the progress"
     W = {"none": ([], []), "task": (task_s, task_d), "progress": (prog_s, prog_d),
          "task+progress": (task_s + prog_s, task_d + prog_d)}
-    return dict(inst=inst, g=g, src_tok=g["src_tok"], dst_tok=g["dst_tok"], W=W, gap=[], n_gap=g["n_gap"],
-                piv_s=L_s - 1, piv_d=L_d - 1, L_s=L_s, L_d=L_d)
+    return dict(inst=inst, src_tok=g["src_tok"], dst_tok=g["dst_tok"], W=W, piv_d=L_d - 1)
 
 
 @contextmanager
@@ -81,18 +78,17 @@ def embedding_patch(mt, src_ids, dst_pos):
         h.remove()
 
 
-def make_stack(G, method, span, heads=None, v_scale=1.0, *, headsets, layers=None, ctx):
+def make_stack(G, method, span, heads=None, v_scale=1.0, *, headsets, ctx):
     """``() -> ExitStack`` (single use per forward / generation) for one config. ``headsets`` maps a heads name to
-    ``[(layer, head), ...]``; ``layers`` = the residual method's layers (default: all)."""
+    ``[(layer, head), ...]``; the residual method patches every layer."""
     mt = ctx.mt
-    layers = list(range(mt.n_layer)) if layers is None else list(layers)
+    layers = list(range(mt.n_layer))
     src_pos, dst_pos = G["W"][span]
     if method == "none" or span == "none":
         return ExitStack
     if method == "kv":    # I3 only: the chosen heads read SRC's span k/v from the pivot on (values x v_scale)
         gk = dict(src_tok=G["src_tok"], dst_tok=G["dst_tok"], src_w=src_pos, dst_w=dst_pos)
-        return PP.intervention_stack(gk, task_heads=[], goal_heads=headsets[heads], i1=False, i2=False, i3=True,
-                                     i3_query="last", v_scale=v_scale, alpha=1.0, ctx=ctx)
+        return PP.intervention_stack(gk, goal_heads=headsets[heads], v_scale=v_scale, ctx=ctx)
     if method == "residual":   # span <- SRC; every other position between the span and the pivot <- clean DST
         assert v_scale == 1.0, "the residual method has no value boost (use kv with heads='all')"
         span_set = set(dst_pos)
@@ -114,40 +110,24 @@ def make_stack(G, method, span, heads=None, v_scale=1.0, *, headsets, layers=Non
     raise ValueError(method)
 
 
-def run_patched(G, stack, *, max_new=64, readout_heads=None, ctx):
-    """Greedy patched DST generation (+ GoalScope readout at the pivot under the same intervention when
-    ``readout_heads`` is given). Returns ``(gen, ro)``."""
+def run_patched(G, stack, *, max_new=64, ctx):
+    """Greedy patched DST generation."""
     with stack():
-        gen = FUNC.greedy(G["dst_tok"], max_new=max_new, ctx=ctx)
-    ro = None
-    if readout_heads is not None:
-        def iface(mt_, inputs, patches=None, model_kwargs=None):
-            with stack():
-                return mt_._model(**dict(inputs), **dict(model_kwargs or {}))
-        ro = FUNC.goalscope_readout("", G["dst_tok"], G["piv_d"], heads=readout_heads, iface=iface,
-                                    ctx=ctx)[0]["patched_gen"]
-    return gen, ro
+        return FUNC.greedy(G["dst_tok"], max_new=max_new, ctx=ctx)
 
 
-def judge(G, clean, gen, ro, model_name="claude-sonnet-4-6"):
-    raw = dict(**clean, gen_patched=gen, ro_patched=ro)
-    causal, readout, _ = PP.judge(G["inst"], raw, model_name=model_name)
-    return causal, readout
-
-
-@torch.no_grad()
-def pivot_logits(G, stack, *, ctx):
-    with stack():
-        return ctx.mt._model(input_ids=G["dst_tok"]["input_ids"],
-                             attention_mask=G["dst_tok"]["attention_mask"]).logits[0, -1].float()
+def judge(G, clean, gen, model_name="claude-sonnet-4-6"):
+    causal, _ = PP.judge(G["inst"], dict(**clean, gen_patched=gen, ro_patched=None), model_name=model_name)
+    return causal
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # resumable sweep (shared by the notebook and the batch driver)
 # ══════════════════════════════════════════════════════════════════════════════
-def cache_dir(results_dir, model_short, datatype, src_lang, dst_lang, *, seed, max_new, readout):
+def cache_dir(results_dir, model_short, datatype, src_lang, dst_lang, *, seed, max_new):
+    # `ro0` (no GoalScope readout) and `task+gap` (the task span) are kept for cached-result compatibility
     return os.path.join(results_dir, "notebook_caches", "task_vs_progress", model_short,
-                        f"{PP._safe(datatype)}__{src_lang}-{dst_lang}__seed{seed}__mx{max_new}__ro{int(readout)}__task+gap")
+                        f"{PP._safe(datatype)}__{src_lang}-{dst_lang}__seed{seed}__mx{max_new}__ro0__task+gap")
 
 
 def cache_path(cdir, inst):
@@ -162,8 +142,8 @@ def cache_write(fp, entry):
     os.replace(tmp, fp)
 
 
-def sweep_instance(inst, idx, configs, cdir, *, headsets, readout_heads, readout=False, max_new=64,
-                   oracle_model="claude-sonnet-4-6", resume=True, layers=None, ctx):
+def sweep_instance(inst, idx, configs, cdir, *, headsets, max_new=64, oracle_model="claude-sonnet-4-6", resume=True,
+                   ctx):
     """Every config on one instance, cached per config in ``cdir`` (resumable). Returns ``({name: row}, n_run, n_hit)``."""
     fp = cache_path(cdir, inst)
     entry = json.load(open(fp)) if (resume and os.path.exists(fp)) else {}
@@ -181,16 +161,15 @@ def sweep_instance(inst, idx, configs, cdir, *, headsets, readout_heads, readout
                 G = geometry(inst, ctx=ctx)
                 clean = entry.get("clean")
                 if clean is None:
-                    clean = PP.clean_runs(dict(src_tok=G["src_tok"], dst_tok=G["dst_tok"]), readout_heads=readout_heads,
-                                          max_new=max_new, readout=readout, ctx=ctx)
+                    clean = PP.clean_runs(dict(src_tok=G["src_tok"], dst_tok=G["dst_tok"]), readout_heads=None,
+                                          max_new=max_new, readout=False, ctx=ctx)
                     entry["clean"] = clean
-            gen, ro = ((clean["gen_dst"], clean.get("ro_dst")) if m == "none" else
-                       run_patched(G, make_stack(G, m, s, h, v, headsets=headsets, layers=layers, ctx=ctx),
-                                   max_new=max_new, readout_heads=readout_heads if readout else None, ctx=ctx))
-            causal, ro_v = judge(G, clean, gen, ro, model_name=oracle_model)
+            gen = (clean["gen_dst"] if m == "none" else
+                   run_patched(G, make_stack(G, m, s, h, v, headsets=headsets, ctx=ctx), max_new=max_new, ctx=ctx))
+            causal = judge(G, clean, gen, model_name=oracle_model)
+            # readout / ro_shifted / ro (no readout: None) keep the cached rows' schema
             row = dict(idx=idx, method=m, heads=h, span=s, v=v, causal=causal["label"], shifted=causal["label"] == "src",
-                       readout=ro_v["patched"] if ro_v else None, ro_shifted=ro_v["shifted"] if ro_v else None,
-                       gen=gen, ro=ro, c=inst.src_frontier.id, d=inst.dst_frontier.id)
+                       readout=None, ro_shifted=None, gen=gen, ro=None, c=inst.src_frontier.id, d=inst.dst_frontier.id)
             entry["configs"][name] = row
             cache_write(fp, entry)                             # after every config, so an interrupt loses at most one
             n_run += 1

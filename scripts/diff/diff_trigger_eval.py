@@ -13,34 +13,19 @@ order-matched confounds D with a positional "do the 3rd-listed" copy (C and D ar
 breaks it (C is 2nd in SRC, D is 3rd in DST, so a positional copy predicts B).
 
 Reuses the q-transfer machinery: ``src.diff.functional.run_q_transfer_intervention`` (single-pivot query
-patch) + ``src.diff.eval`` (``judge_causal`` = wrote D; ``eval_q_transfer`` gaze = pivot gazes at D's span
-> B's span). Adds a literal-C check (``classify_concept`` against C). Results:
-    results/diff/<model>/diff_trigger/<variant>/<datatype>__<sl>-<dl>/results.json  (+ summary.json)
+patch at the frontier's ``{var} =`` stub; OV boost alpha on the patched readout) with the gaze-select-restrict
+intervention: the patched pivot's gaze picks one listed task, then a separate run without the query transfer in which
+the goal heads, from the pivot on, read only that task's span + the pivot + the generated tokens. Judged with
+``src.diff.eval`` (``judge_causal`` = wrote D; ``judge_joint``; ``eval_readouts``; gaze = pivot gazes at D's span
+> B's span) + a literal-C check (``classify_concept`` against C). Defaults = the paper's configuration (alpha 2, the
+250 goal heads, 32 instances per cell). Results:
+    results/diff/<model>/diff_trigger/<run_tag>/<variant>/<datatype>__<sl>-<dl>/results.json  (+ summary.json)
 
 Usage:
     conda run -n goals python scripts/diff/diff_trigger_eval.py --cuda 0,1 \\
-        --variants order_matched order_diff --datatypes int str --n-samples 12
-    # cheap dry pass (rule-based gaze only):
-    conda run -n goals python scripts/diff/diff_trigger_eval.py --no-oracle --max-instances 2 --cuda 0
-    # closed-loop intervention (notebook 04.4) instead of re-clamping the same SRC query at every decode step:
-    conda run -n goals python scripts/diff/diff_trigger_eval.py --closed-loop --variants order_diff --cuda 0
-
-``--closed-loop`` keeps the prefill patch (SRC pivot query -> DST pivot, -> t1) and then, at every step, replaces
-the goal heads' query at t_k with the query of a probe (``--probe-prompt``; default: an information-less stub — DST's signature + the bare indent, or
-``return`` with ``--pivot eq``) that is steered with the patched pivot's goal encoding and fed the same tokens
-(``src.diff.functional.closed_loop_generate``). ``--n-steer`` is unused there. Output dirs get ``__cl``
-(+ ``-pspivot`` / ``-m<N>`` when those differ from the defaults), so they never mix with re-clamp runs.
-
-``--kv-transfer`` (notebooks 04.3 / 04.4) moves the "which task is pending" computation into the goal heads. Per
-instance, the current DST ``A'BD`` becomes p_kv, and a new DST ``A'XY`` (X, Y sampled per instance: X from a family
-distinct from B / C / D, all pairwise compatible) gets p_kv's task-list key+value on the patch heads:
-    p_src A'CB' -> C    p_dst A'XY -> X    p_kv A'BD -> B
-    kv-only -> B  ·  kv+q: set progress -> D, count -> Y   (C = SRC's own target, in neither prompt)
-Judged with one exclusive verdict over {X, Y, B, C, D} (clean DST, kv-only, kv+q). Gaze / the D-vs-B judges are
-skipped. Works with ``--closed-loop``. Output dirs get ``__kv``.
+        --variants order_matched order_diff --datatypes int str --tag-suffix __seq
 """
 import argparse
-import dataclasses
 import hashlib
 import json
 import logging
@@ -75,21 +60,23 @@ from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger("diff_trigger_eval")
 
+MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
+GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
+MAX_NEW = 96            # clean SRC / DST generations
+GSR_MAX_NEW = 64        # the patched (gaze-select-restrict) generation
+ORACLE_MODEL = "claude-sonnet-4-6"
+
 LANG_TRANSFERS = {"py-py": ("python", "python"), "py-cpp": ("python", "cpp"),
                   "cpp-py": ("cpp", "python"), "cpp-cpp": ("cpp", "cpp")}
 
 
-def _resolve_heads(ctx, spec):
-    """'goal' (the model's goal heads), or a path to a JSON [[layer, head], ...] head set."""
-    if spec == "goal":
-        return ctx.goal_heads
+def _resolve_heads(spec):
+    """A JSON [[layer, head], ...] head set."""
     arr = json.loads(Path(spec).read_text())
     return [(int(l), int(h)) for l, h in arr]
 
 
 def _heads_tag(spec, n):
-    if spec == "goal":
-        return spec
     return f"{Path(spec).stem.split('__')[0]}_{n}"
 
 
@@ -97,75 +84,6 @@ def _inst_key(inst):
     ids = lambda seq: "-".join(p.id for p in seq)
     return (f"{inst.meta['variant']}|src={ids(inst.src_order)}|dst={ids(inst.dst_order)}"
             f"|prog_src={'-'.join(inst.src_progress)}|prog_dst={'-'.join(inst.dst_progress)}")
-
-
-KV_LETTERS = ("X", "Y", "B", "C", "D")
-
-
-def _kv_roles(dt, inst, seed, distinct):
-    """(X, Y) predicates for the kv design, or None: not in {A,B,C,D}, all pairwise compatible, non-trivial X/Y,
-    X's family distinct from B / C / D (unless ``distinct`` is off). Deterministic per instance."""
-    import random
-    bank = DATA.QTASKS[dt].predicates
-    A, B = inst.dst_order[0], next(p for p in inst.dst_order if p.id == inst.dst_native)
-    C = next(p for p in inst.src_order if p.id == inst.src_target)
-    D = next(p for p in inst.dst_order if p.id == inst.diff_target)
-    used = {A.id, B.id, C.id, D.id}
-    trivial = DATA.TRIVIAL_FRONTIERS.get(dt, frozenset())
-    fams = {DATA._diff_family(dt, q.id) for q in (B, C, D)}
-    cands = [q for q in bank if q.id not in used and q.id not in trivial]
-    rng = random.Random(f"{seed}|{_inst_key(inst)}")
-    pairs = [(x, y) for x in cands for y in cands if x.id != y.id]
-    rng.shuffle(pairs)
-    for x, y in pairs:
-        if distinct and DATA._diff_family(dt, x.id) in fams:
-            continue
-        ids = [q.id for q in (A, B, C, D, x, y)]
-        if all(DATA.qpred_compatible(dt, a, b) for k, a in enumerate(ids) for b in ids[k + 1:]):
-            return dict(A=A, B=B, C=C, D=D, X=x, Y=y)
-    return None
-
-
-def _judge_kv(roles, text, var, seed_key, model_name):
-    """Exclusive verdict over {X, Y, B, C, D} on the FIRST computation (options shuffled per instance)."""
-    import random
-    import re
-    from src.diff.eval import CONCEPT_SYSTEM
-    from src.diff.hyp_eval import _letters_prompt
-    from src.utils.oracle_llms import ask_claude
-    letters = list(KV_LETTERS)
-    random.Random(seed_key).shuffle(letters)
-    if not text or not text.strip():
-        return {"label": "neither", "why": "empty", "order": letters}
-    raw = ask_claude(_letters_prompt(text, [(k, roles[k].description) for k in letters],
-                                     f"computing several properties of `{var}`", roles["A"].description,
-                                     "the code the model generated to continue the function after the pivot. "
-                                     "Judge ONLY the FIRST computation/statement it performs (ignore anything after)"),
-                     system_prompt=CONCEPT_SYSTEM, max_tokens=768, model_name=model_name)
-    v = re.search(r"<verdict>\s*(\d+|NEITHER)\s*</verdict>", raw, re.I)
-    w = re.search(r"<why>\s*(.*?)\s*</why>", raw, re.I | re.S)
-    if not v:
-        label = "parse_error"
-    elif v.group(1).upper() == "NEITHER":
-        label = "neither"
-    else:
-        k = int(v.group(1)) - 1
-        label = letters[k] if 0 <= k < len(letters) else "parse_error"
-    return {"label": label, "why": w.group(1).strip() if w else "", "order": letters}
-
-
-def _summarize_kv(records):
-    out = dict(n=len(records))
-    for run in ("clean", "kv", "patched"):
-        rs = [r["kv_judge"][run]["label"] for r in records if r.get("kv_judge")]
-        for lab in (*KV_LETTERS, "neither"):
-            out[f"{run}_{lab}_rate"] = (sum(x == lab for x in rs) / len(rs)) if rs else None
-    sel = [r for r in records if r.get("cl_selected")]
-    for lab in KV_LETTERS:
-        out[f"select_{lab}_rate"] = (sum(r["cl_selected"] == r["roles"][lab] for r in sel) / len(sel)) if sel else None
-    out.update(clean_native_X=out["clean_X_rate"], kv_only_B=out["kv_B_rate"],
-               set_progress_D=out["patched_D_rate"], count_Y=out["patched_Y_rate"])
-    return out
 
 
 def _summarize(records):
@@ -194,121 +112,63 @@ def _summarize(records):
 
 
 def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_root, alpha):
-    tag = f"{DATA._safe(dt) if hasattr(DATA, '_safe') else dt.replace('[', '(').replace(']', ')')}__{sl}-{dl}"
+    # cell tag: datatype with "[" / "]" -> "(" / ")" (also seeds the cell's sample below; keep verbatim)
+    tag = f"{dt.replace('[', '(').replace(']', ')')}__{sl}-{dl}"
     outdir = out_root / variant / tag
     outdir.mkdir(parents=True, exist_ok=True)
     results_fp = outdir / "results.json"
 
     done = {}
-    if results_fp.exists() and args.resume and not args.force:
+    if results_fp.exists() and not args.force:
         done = {r["key"]: r for r in json.loads(results_fp.read_text())}
         logger.info(f"[{variant}/{tag}] resume: {len(done)} done")
 
     cfg_seed = (args.seed + int(hashlib.md5(f"{variant}/{tag}".encode()).hexdigest()[:8], 16)) % (2**32)
     set_seed(cfg_seed)
-    setups = DATA.diff_trigger_setups(
-        dt, variant=variant, n_samples=args.n_samples, seed=cfg_seed,
-        naming=args.naming, letter_stub=("var_eq" if args.pivot == "eq" else "indent"),
-        src_lang=sl, dst_lang=dl,
-        distinct_families=not args.allow_family_overlap,
-        nontrivial_frontier=not args.allow_family_overlap,
-    )
+    setups = DATA.diff_trigger_setups(dt, variant=variant, n_samples=args.n_samples, seed=cfg_seed,
+                                      src_lang=sl, dst_lang=dl)
     if args.max_instances:
         setups = setups[: args.max_instances]
 
     records = dict(done)
-    _done_plain = {k.split("|kv:")[0] for k in records}                       # kv keys extend the plain key
-    todo = [inst for inst in setups if _inst_key(inst) not in _done_plain or args.force]
+    todo = [inst for inst in setups if _inst_key(inst) not in records or args.force]
     logger.info(f"[{variant}/{tag}] {len(setups)} instances (seed={cfg_seed}, alpha={alpha}) — "
                 f"{len(setups) - len(todo)} resumed, {len(todo)} to run")
 
     for j, inst in enumerate(todo, 1):
         key = _inst_key(inst)
-        if args.kv_transfer:
-            roles = _kv_roles(dt, inst, cfg_seed, distinct=not args.allow_family_overlap)
-            if roles is None:
-                logger.warning(f"[{variant}/{tag}] no valid (X, Y) for {key} — skipped")
-                continue
-            kv_prompt = DATA.materialize(inst)["dst_prompt"]                     # p_kv = the current DST A'BD
-            run_inst = dataclasses.replace(inst, dst_order=(roles["A"], roles["X"], roles["Y"]),
-                                           dst_native=roles["X"].id)            # p_dst = A'XY
-            key = f"{key}|kv:X={roles['X'].id}|Y={roles['Y'].id}"
-            kv_arg = dict(prompt=kv_prompt, predicates=inst.dst_order, dst_predicates=run_inst.dst_order,
-                          query_positions=args.kv_query_positions)
-            logger.info(f"[{variant}/{tag}] ({j}/{len(todo)}) kv: p_dst A'XY X={roles['X'].id} Y={roles['Y'].id} · "
-                        f"p_kv A'BD B={roles['B'].id} D={roles['D'].id} · SRC C={roles['C'].id}")
-            raw = FUNC.run_q_transfer_intervention(
-                mt, run_inst, patch_heads, readout_heads=readout_heads,
-                n_steer=args.n_steer, max_new=args.max_new, alpha=alpha, n_pivot=1,
-                compute_readout=not args.no_readout,
-                component_proj=getattr(args, "_component_proj", None),
-                closed_loop=(dict(probe_steer=args.cl_probe_steer, max_new=args.cl_max_new, alpha=args.cl_alpha,
-                                  steer_layers=tuple(args.cl_steer_layers), probe_prompt=args.probe_prompt,
-                              restrict_anchors=tuple(args.gsr_anchors))
-                             if args.closed_loop else None),
-                kv=kv_arg,
-            )
-            judged = None
-            if not args.no_oracle:
-                judged = {run: _judge_kv(roles, raw[g], inst.var_name, f"{key}|{run}", args.oracle_model)
-                          for run, g in (("clean", "gen_dst"), ("kv", "gen_kv"), ("patched", "gen_patched"))}
-                logger.info(f"[{variant}/{tag}]   => clean={judged['clean']['label']} (X) · kv={judged['kv']['label']} "
-                            f"(B) · kv+q={judged['patched']['label']} (set D / count Y)")
-            records[key] = dict(
-                key=key, variant=variant, datatype=dt, src_lang=sl, dst_lang=dl, design="kv",
-                roles={k: v.id for k, v in roles.items()}, role_desc={k: v.description for k, v in roles.items()},
-                intervention="closed_loop" if args.closed_loop else "reclamp",
-                gen_src=raw["gen_src"], gen_dst=raw["gen_dst"], gen_kv=raw["gen_kv"], gen_patched=raw["gen_patched"],
-                ro_src=raw["ro_src"], ro_dst=raw["ro_dst"], ro_kv=raw.get("ro_kv"), ro_patched=raw["ro_patched"],
-                cl_steps=raw.get("cl_steps"), cl_probe_prefill=raw.get("cl_probe_prefill"),
-            cl_probe_mode=raw.get("cl_probe_mode"), cl_selected=raw.get("cl_selected"),
-            cl_select_scores=raw.get("cl_select_scores"), cl_select_wins=raw.get("cl_select_wins"),
-            cl_select_unsteered=raw.get("cl_select_unsteered"), cl_select_order=raw.get("cl_select_order"), cl_restrict_keep=raw.get("cl_restrict_keep"),
-                kv_n_tokens=raw["kv_n_tokens"], kv_judge=judged,
-            )
-            results_fp.write_text(json.dumps(list(records.values()), indent=2))
-            continue
         A, B = inst.src_progress
         C, D = inst.src_target, inst.diff_target
         logger.info(f"[{variant}/{tag}] ({j}/{len(todo)}) shared[{A},{B}] SRC+{C} DST+{D}  "
                     f"| SRC→C={inst.src_target_desc!r} · DIFF→D={inst.expected_next_desc!r} "
                     f"· nativeB={inst.dst_next_desc!r}")
         raw = FUNC.run_q_transfer_intervention(
-            mt, inst, patch_heads, readout_heads=readout_heads,
-            n_steer=args.n_steer, max_new=args.max_new, alpha=alpha, n_pivot=1,
-            restrict_to_task=args.restrict_goal_heads_to_task,
-            compute_readout=not args.no_readout,
-            component_proj=getattr(args, "_component_proj", None),
-            closed_loop=(dict(probe_steer=args.cl_probe_steer, max_new=args.cl_max_new, alpha=args.cl_alpha,
-                              steer_layers=tuple(args.cl_steer_layers), probe_prompt=args.probe_prompt,
-                              restrict_anchors=tuple(args.gsr_anchors))
-                         if args.closed_loop else None),
+            mt, inst, patch_heads, readout_heads=readout_heads, max_new=MAX_NEW, alpha=alpha,
+            compute_readout=not args.no_readout, gsr_max_new=GSR_MAX_NEW,
         )
-        causal = literal_c = readout = joint = None
-        if not args.no_oracle:
-            causal = E.judge_causal(inst, raw["gen_patched"], model_name=args.oracle_model)
-            # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
-            joint = E.judge_joint(inst, raw["gen_patched"], model_name=args.oracle_model)
-            # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
-            if not args.no_readout:
-                readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"],
-                                          model_name=args.oracle_model)
-            # literal-C check: does the patched continuation express SRC's literal target C (vs native B)?
-            lit = E.classify_concept(raw["gen_patched"], inst.src_target_desc, inst.dst_next_desc,
-                                     inst.task_desc, model_name=args.oracle_model,
-                                     kind="the code the model generated after the pivot; judge ONLY the "
-                                          "first computation")
-            literal_c = {"label": lit["label"], "wrote_c": lit["label"] == "src", "why": lit["why"]}
+        readout = None
+        causal = E.judge_causal(inst, raw["gen_patched"], model_name=ORACLE_MODEL)
+        # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
+        joint = E.judge_joint(inst, raw["gen_patched"], model_name=ORACLE_MODEL)
+        # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
+        if not args.no_readout:
+            readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"], model_name=ORACLE_MODEL)
+        # literal-C check: does the patched continuation express SRC's literal target C (vs native B)?
+        lit = E.classify_concept(raw["gen_patched"], inst.src_target_desc, inst.dst_next_desc,
+                                 inst.task_desc, model_name=ORACLE_MODEL,
+                                 kind="the code the model generated after the pivot; judge ONLY the "
+                                      "first computation")
+        literal_c = {"label": lit["label"], "wrote_c": lit["label"] == "src", "why": lit["why"]}
         gaze = E.eval_q_transfer(inst, gaze=dict(
             prompt=raw["dst_prompt"], task_positions=raw["task_positions"],
             attn_patched=raw["attn_patched"], attn_clean=raw["attn_clean"],
         )).gaze
 
-        _c = f"{'HIT-D' if causal['triggered'] else 'miss'}({causal['label']})" if causal else "off"
+        _c = f"{'HIT-D' if causal['triggered'] else 'miss'}({causal['label']})"
         _ro = (f"readout={readout['source']}>{readout['dest']}>{readout['patched']}"
                f"[{'shift→D' if readout['shifted'] else 'no'}]") if readout else ""
-        _l = f"literalC={'YES' if literal_c['wrote_c'] else 'no'}" if literal_c else ""
-        _j = f"joint={ {'native':'B','src_target':'C','diff_target':'D','neither':'-'}.get(joint['label'],'?') }" if joint else ""
+        _l = f"literalC={'YES' if literal_c['wrote_c'] else 'no'}"
+        _j = f"joint={ {'native':'B','src_target':'C','diff_target':'D','neither':'-'}.get(joint['label'],'?') }"
         _g = (f"gaze={'shift→D' if gaze['shifted'] else 'no'}(m={gaze['margin']:+.3f},"
               f"clean_prefers_src={gaze['clean_prefers_src']})" if gaze else "—")
         logger.info(f"[{variant}/{tag}]   => {_c} · {_ro} · {_l} · {_j} · {_g}")
@@ -319,24 +179,18 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
             src_target_desc=inst.src_target_desc, diff_target_desc=inst.expected_next_desc,
             native_desc=inst.dst_next_desc,
             gen_src=raw["gen_src"], gen_dst=raw["gen_dst"], gen_patched=raw["gen_patched"],
-            intervention="closed_loop" if args.closed_loop else "reclamp",
-            cl_steps=raw.get("cl_steps"), cl_probe_prefill=raw.get("cl_probe_prefill"),
-            cl_probe_mode=raw.get("cl_probe_mode"), cl_selected=raw.get("cl_selected"),
-            cl_select_scores=raw.get("cl_select_scores"), cl_select_wins=raw.get("cl_select_wins"),
-            cl_select_unsteered=raw.get("cl_select_unsteered"), cl_select_order=raw.get("cl_select_order"), cl_restrict_keep=raw.get("cl_restrict_keep"),
+            intervention="closed_loop",
+            # cl_steps / cl_probe_prefill / cl_select_wins / cl_select_unsteered / cl_select_order: always None here,
+            # kept so the records match the cached results' schema
+            cl_steps=None, cl_probe_prefill=None,
+            cl_probe_mode=raw["cl_probe_mode"], cl_selected=raw["cl_selected"],
+            cl_select_scores=raw["cl_select_scores"], cl_select_wins=None,
+            cl_select_unsteered=None, cl_select_order=None, cl_restrict_keep=raw["cl_restrict_keep"],
             ro_src=raw["ro_src"], ro_dst=raw["ro_dst"], ro_patched=raw["ro_patched"],
             causal=causal, readout=readout, literal_c=literal_c, joint=joint, gaze=gaze,
         )
         results_fp.write_text(json.dumps(list(records.values()), indent=2))
 
-    if args.kv_transfer:
-        summ = _summarize_kv(list(records.values()))
-        (outdir / "summary.json").write_text(json.dumps(summ, indent=2))
-        logger.info(f"[{variant}/{tag}] KV SUMMARY: clean X={summ['clean_native_X']} · kv-only B={summ['kv_only_B']} · "
-                    f"kv+q: D(set)={summ['set_progress_D']} Y(count)={summ['count_Y']} "
-                    f"X={summ['patched_X_rate']} B={summ['patched_B_rate']} C={summ['patched_C_rate']} "
-                    f"neither={summ['patched_neither_rate']} n={summ['n']}")
-        return dict(variant=variant, datatype=dt, src_lang=sl, dst_lang=dl, **summ)
     summ = _summarize(list(records.values()))
     (outdir / "summary.json").write_text(json.dumps(summ, indent=2))
     logger.info(f"[{variant}/{tag}] SUMMARY: causal(D)={summ['causal_trigger_rate']} "
@@ -349,78 +203,23 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
     return dict(variant=variant, datatype=dt, src_lang=sl, dst_lang=dl, **summ)
 
 
-def _kv_query_positions(v):
-    """argparse type: 'all' | 'last' | int n >= 1 (see src.diff.functional.headwise_kv_patch)."""
-    if v in ("all", "last"):
-        return v
-    n = int(v)
-    if n < 1:
-        raise argparse.ArgumentTypeError(f"--kv-query-positions must be 'all', 'last' or an int >= 1, got {v!r}")
-    return n
-
-
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument("--cuda", default=None)
     ap.add_argument("--variants", nargs="+", default=["order_matched", "order_diff"],
                     choices=["order_matched", "order_diff", "c_in_dst"])
     ap.add_argument("--datatypes", nargs="+", default=["int", "str", "list[int]", "list[str]"])
     ap.add_argument("--lang-transfers", nargs="+", default=["py-py"], choices=list(LANG_TRANSFERS))
-    ap.add_argument("--naming", default="letters", choices=["natural", "letters"])
-    ap.add_argument("--pivot", default="indent", choices=["indent", "eq"],
-                    help="query pivot: 'indent' (bare trailing indent) or 'eq' (the frontier's {var}= stub)")
-    ap.add_argument("--restrict_goal_heads_to_task", "--attn_restrict", dest="restrict_goal_heads_to_task",
-                    action="store_true",
-                    help="blind the goal heads (carrying the transplanted query) to everything except the task span")
-    ap.add_argument("--allow_family_overlap", action="store_true",
-                    help="DISABLE the diff-trigger overlap constraint (default: B/C/D from distinct "
-                         "predicate families + non-trivial C/D). Only for ablating the constraint.")
-    ap.add_argument("--patch-heads", default="goal", help="'goal' | path to a JSON [[layer,head],...] head set")
-    ap.add_argument("--readout-heads", default="goal")
-    ap.add_argument("--n-samples", type=int, default=12)
-    ap.add_argument("--n-steer", type=int, default=16)
-    ap.add_argument("--max-new", type=int, default=96)
-    ap.add_argument("--alphas", type=float, nargs="+", default=[1.0],
-                    help="OV-boost value(s) for the patch heads on the patched gen/readout; "
+    ap.add_argument("--patch-heads", default=GOAL250, help="JSON [[layer, head], ...]: the heads whose query is transplanted")
+    ap.add_argument("--readout-heads", default=GOAL250, help="JSON [[layer, head], ...]: the GoalScope readout heads")
+    ap.add_argument("--n-samples", type=int, default=32)
+    ap.add_argument("--alphas", type=float, nargs="+", default=[2.0],
+                    help="OV-boost value(s) for the patch heads on the patched readout; "
                          "each runs in its own __a<alpha> dir (e.g. --alphas 1.0 2.0)")
-    ap.add_argument("--oracle-model", default="claude-sonnet-4-6")
-    ap.add_argument("--no-oracle", action="store_true")
     ap.add_argument("--no-readout", action="store_true",
                     help="skip the goalscope readouts + readout-shift oracle (readout_shift_rate -> None)")
-    ap.add_argument("--closed-loop", action="store_true",
-                    help="closed-loop intervention: regenerate the goal heads' query at every step from the patched "
-                         "pivot's goal encoding via a steered probe (instead of re-clamping the SRC query)")
-    ap.add_argument("--cl-probe-steer", default="all", choices=["all", "pivot"],
-                    help="closed loop: steer the probe at every appended token ('all') or only its pivot")
-    ap.add_argument("--cl-max-new", type=int, default=64,
-                    help="closed loop: generated tokens (no statement cut-off; the oracle judges the first computation)")
-    ap.add_argument("--cl-alpha", type=float, default=0.1, help="closed loop: additive_norm alpha of the probe steer")
-    ap.add_argument("--probe-prompt", "--probe_prompt", dest="probe_prompt", default="stub",
-                    choices=["stub", "gaze_select", "gaze_select_restrict", "select-stub", "select-as-probe"],
-                    help="closed-loop probe. stub: information-less stub steered with the goal encoding (default). "
-                         "gaze_select: stub naming only the task the patched pivot gazes at most. gaze_select_restrict: no "
-                         "probe / loop — the same gaze selection, then a SEPARATE run without the query transfer (kv "
-                         "kept, no boost) where the goal heads, from the pivot on, read only the selected task's span + "
-                         "the anchors + the generated tokens (clock/09 §5). select-stub: the goal "
-                         "encoding picks the task in a k-way prompt (logits averaged over all orderings), then a stub "
-                         "naming it. select-as-probe: that k-way prompt itself, prefilled with the choice + the code "
-                         "stub. The three selection modes are text-conditioned (no goal injection).")
-    ap.add_argument("--gsr-anchors", nargs="*", default=["indent", "var", "eq"], choices=["indent", "var", "eq"],
-                    help="gaze_select_restrict: anchor tokens the goal heads may still read besides the selected task span "
-                         "and the generated tokens (eq = the pivot itself; only indent exists with --pivot indent)")
-    ap.add_argument("--cl-steer-layers", type=int, nargs=2, default=[35, 46],
-                    help="closed loop: probe steer into the residual after layers range(a, b)")
-    ap.add_argument("--kv-query-positions", default="all", type=_kv_query_positions,
-                    help="with --kv-transfer: DST query positions that read the p_kv task list ('all' original | "
-                         "'last' from the pivot on | int n: last n prompt tokens, then each generated token); "
-                         "tags the run '__kv-qlast' / '__kv-qlast<n>'")
-    ap.add_argument("--kv-transfer", action="store_true",
-                    help="04.3/04.4 kv design: p_dst A'XY gets p_kv A'BD's task-list k+v on the patch heads; "
-                         "judge over {X, Y, B, C, D}")
-    ap.add_argument("--max-instances", type=int, default=None)
+    ap.add_argument("--max-instances", type=int, default=None, help="cap instances per cell (smoke)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--resume", action="store_true", default=True)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--tag-suffix", default="",
                     help="appended to the run tag (e.g. '__seq'): a fresh output dir, so resume never picks "
@@ -434,35 +233,19 @@ def main():
     if args.cuda:
         logger.info(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
-    ctx = FUNC.setup(args.model)
+    ctx = FUNC.setup(MODEL)
     mt = ctx.mt
-    patch_heads = _resolve_heads(ctx, args.patch_heads)
-    readout_heads = _resolve_heads(ctx, args.readout_heads)
+    patch_heads = _resolve_heads(args.patch_heads)
+    readout_heads = _resolve_heads(args.readout_heads)
     logger.info(f"patch_heads={_heads_tag(args.patch_heads, len(patch_heads))} (n={len(patch_heads)}) · "
                 f"readout_heads={_heads_tag(args.readout_heads, len(readout_heads))} (n={len(readout_heads)})")
 
-    model_short = args.model.split("/")[-1]
+    model_short = MODEL.split("/")[-1]
     for alpha in args.alphas:
-        run_tag = f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-{args.pivot}"
-        if args.restrict_goal_heads_to_task:
-            run_tag += "__restrict"
-        if args.kv_transfer:
-            assert not args.restrict_goal_heads_to_task, "--kv-transfer does not support --attn_restrict"
-            run_tag += "__kv" + {"all": "", "last": "-qlast"}.get(args.kv_query_positions, f"-qlast{args.kv_query_positions}")
-        if args.closed_loop:
-            run_tag += "__cl"
-            if args.cl_probe_steer != "all":
-                run_tag += f"-ps{args.cl_probe_steer}"
-            if args.cl_max_new != 64:
-                run_tag += f"-m{args.cl_max_new}"
-            if args.probe_prompt != "stub":
-                run_tag += "-pp" + {"gaze_select": "gaze", "gaze_select_restrict": "gazerestrict", "select-stub": "selstub",
-                                  "select-as-probe": "selprobe"}[args.probe_prompt]
-            if args.probe_prompt == "gaze_select_restrict" and list(args.gsr_anchors) != ["indent", "var", "eq"]:
-                run_tag += "-anc" + ("+".join(args.gsr_anchors) or "none")
-            if args.cl_alpha != 0.1 or list(args.cl_steer_layers) != [35, 46]:
-                run_tag += f"-a{args.cl_alpha:g}-L{args.cl_steer_layers[0]}-{args.cl_steer_layers[1]}"
-        run_tag += args.tag_suffix
+        # `__piv-eq` (pivot = the frontier's `{var} =` stub), `__cl` (closed loop), `-ppgazerestrict` (gaze-select-
+        # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
+        run_tag = (f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-eq__cl-ppgazerestrict-anceq"
+                   + args.tag_suffix)
         out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(f"########## OV boost alpha={alpha} -> {run_tag} ##########")

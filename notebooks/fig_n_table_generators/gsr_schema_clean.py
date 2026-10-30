@@ -1,11 +1,11 @@
 """gsr schematic WITH the clean destination run -> notebooks/Figures/transfer/gsr_schema_clean.{svg,pdf,png}.
 
-Sibling of gsr_schema.py (kept as is). Two rows:
+Two rows:
   2×2 grid · row 1: (i) source run · (ii) clean destination run (attention + readout at the pivot)
   row 2: (iii) select (q_src drops in from (i)) · (iv) restrict and generate
 (ii) and (iii) share the colour / bar scale.
-Render: cairosvg + IBM Plex Sans/Mono (see agent_reports/claude/q-transfer-update-todos.md).
-Data: the same real instance as gsr_schema.py (scripts/diff/gsr_example_attention.py)."""
+Render: cairosvg + IBM Plex Sans/Mono.
+Data: one real instance (scripts/diff/gsr_example_attention.py)."""
 import glob
 import json
 import os
@@ -45,18 +45,18 @@ EX = json.load(open(fp[0]))
 
 out = []
 add = out.append
-def text(x, y, s, size=FL, fam=SANS, fill=INK, weight=None, style=None, anchor=None, raw=False):
+def text(x, y, s, size=FL, fam=SANS, fill=INK, weight=None, style=None, anchor=None):
     a = (f' font-weight="{weight}"' if weight else '') + (f' font-style="{style}"' if style else '') \
         + (f' text-anchor="{anchor}"' if anchor else '')
     add(f'<text x="{x:.1f}" y="{y:.1f}" font-family="{fam}" font-size="{size}" fill="{fill}"{a}>'
-        f'{s if raw else esc(s)}</text>')
+        f'{esc(s)}</text>')
 def rect(x, y, w, h, fill, stroke="none", rx=0, sw=1, dash=None, op=None):
     add(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="{rx}" fill="{fill}"'
         + (f' fill-opacity="{op:.3f}"' if op is not None else '')
         + f' stroke="{stroke}" stroke-width="{sw}"' + (f' stroke-dasharray="{dash}"' if dash else '') + '/>')
-def path(d, stroke, sw=1.5, marker=None, dash=None):
+def path(d, stroke, sw=1.5, marker=None):
     add(f'<path d="{d}" fill="none" stroke="{stroke}" stroke-width="{sw}" stroke-linecap="round"'
-        + (f' marker-end="url(#{marker})"' if marker else '') + (f' stroke-dasharray="{dash}"' if dash else '') + '/>')
+        + (f' marker-end="url(#{marker})"' if marker else '') + '/>')
 def code(x, y, s, col=INK):
     xs = ' '.join(f'{x + i * CW:.2f}' for i in range(len(s)))   # per-char x (cairo PNG rounds advances)
     add(f'<text x="{xs}" y="{y:.1f}" xml:space="preserve" font-family="{MONO}" font-size="{FS}" fill="{col}">{esc(s)}</text>')

@@ -32,8 +32,8 @@ probing / MCTS, clock / boundary heads, NRGS masks, subspace probes, exploratory
    decode step); judged for faithfulness / causality by Claude (`scripts/evaluation/eval_goalscope.py`).
 4. **Persistence / necessity**: temporal and obstacle persistence, sufficiency / necessity ablations
    (`scripts/evaluation/`).
-5. **NRGS interventions** (`src/diff/`): KV transfer of the task span (`scripts/diff/path_patch_eval.py`; I1
-   task-onwards KV, I2 pre-commitment-swap residual, I3 pivot-onwards KV with V-boost `--i3-v-scale`), Q transfer
+5. **NRGS interventions** (`src/diff/`): pivot-onwards KV transfer of the task span (`scripts/diff/path_patch_eval.py`;
+   `--span task|task+progress`, V-boost `--i3-v-scale`), Q transfer
    with gaze-select + restrict (`scripts/diff/diff_trigger_eval.py`), task span vs code-progress span
    (`scripts/diff/task_vs_progress_eval.py`).
 6. **Beyond code**: ICL (`scripts/icl/`) and emergent misalignment (`scripts/em/`) reproductions.
@@ -60,8 +60,8 @@ Creates the `goals` conda environment (Python 3.12, torch ≥ 2.7 from the CUDA 
   `collect_head_steering_vecs()`.
 - `src/goals/goalscope.py` — `apply_goalscope()`, `head_additive_generate()`, `OVReader`.
 - `src/goals/goalscope_viz.py` — paper-style HTML renderer (read-outs left of the code); also renders the site.
-- `src/diff/functional.py` — `setup()` (model + goal heads), the head-patching hooks used by the NRGS scripts;
-  `src/diff/path_patch.py` (I1/I2/I3 stacks), `src/diff/task_vs_progress.py`.
+- `src/diff/functional.py` — `setup()` (the model), the head-patching hooks used by the NRGS scripts;
+  `src/diff/path_patch.py` (pivot-onwards KV transfer), `src/diff/task_vs_progress.py`.
 - `src/goals/site_data.py` — data writers for the companion site (goals-web repo, `GOALS_WEB_SITE`).
 
 ## Configuration
