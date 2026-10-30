@@ -13,7 +13,7 @@ scripts.evaluation.eval_goalscope.load_locked_datapoints). No RNG at eval time â
 
 Usage:
     conda run -n goals python scripts/data/gen_goalscope_eval.py            # regenerate the default file
-    conda run -n goals python scripts/data/gen_goalscope_eval.py --out data/goalscope_eval.json --target-n 64
+    conda run -n goals python scripts/data/gen_goalscope_eval.py --out /tmp/goalscope_eval.json
 """
 
 import argparse
@@ -32,6 +32,8 @@ import src.diff.data as DATA  # noqa: E402
 DATATYPES = ["int", "list[int]", "str", "list[str]"]
 N_CONDITIONS = [2, 3, 4]
 DEFAULT_OUT = REPO_ROOT / "data" / "goalscope_eval.json"
+SEED = 123
+TARGET_N = 64  # aim per datatype; actual = reps * n_frontiers (exact balance)
 
 
 def gen_datatype(dt, rng, target_n):
@@ -84,19 +86,12 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="output json path")
-    ap.add_argument("--seed", type=int, default=123)
-    ap.add_argument(
-        "--target-n",
-        type=int,
-        default=64,
-        help="aim per datatype; actual = reps * n_frontiers (exact balance)",
-    )
     args = ap.parse_args()
 
-    rng = random.Random(args.seed)
+    rng = random.Random(SEED)
     data, counts, reps_by = {}, {}, {}
     for dt in DATATYPES:
-        recs, reps = gen_datatype(dt, rng, args.target_n)
+        recs, reps = gen_datatype(dt, rng, TARGET_N)
         data[dt] = recs
         counts[dt] = len(recs)
         reps_by[dt] = reps
@@ -111,8 +106,8 @@ def main():
             balanced=True,
             reps_per_frontier=reps_by,
             n_conditions=N_CONDITIONS,
-            seed=args.seed,
-            target_n=args.target_n,
+            seed=SEED,
+            target_n=TARGET_N,
             lang="python",
             datatypes=DATATYPES,
             trivial_frontiers_excluded={

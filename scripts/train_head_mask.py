@@ -3,29 +3,24 @@
 Uses the o_proj pre-hook replacement approach: for each head h at layer l,
 the o_proj input at the last token is interpolated as:
     mask[l,h]*src_h + (1-mask[l,h])*cascade_h
+(mask=1 → pure source, mask=0 → pure cascade dest). All layers are trained.
 
-This gives true per-head replacement semantics (mask=1 → pure source,
-mask=0 → pure cascade dest), as opposed to the obsolete additive-delta approach.
+Two caching modes:
+  * default (augment): src head values are recomputed per batch, and every
+    instance is re-augmented at the start of each epoch (source_lang 55%,
+    variable_rename 35%, toggle_type_hints 10%).
+  * --no-augment: src head values are precomputed once for all instances.
 
-Memory: caches only src_head_vals (L, n_embd) per instance — ~1 GB for
-N=1480, Qwen-32B, layers 6–40 (40× smaller than the old per_head_deltas).
+Usage (the paper's Qwen2.5-Coder-32B-Instruct lam20 mask):
+    conda run -n goals python scripts/train_head_mask.py
 
-Usage:
+    # precomputed, no augmentation (e.g. the Coder-14B lam20 mask)
     conda run -n goals python scripts/train_head_mask.py \\
-        --model-key Qwen/Qwen2.5-Coder-32B-Instruct \\
-        --layers-start 6 --layers-end 40 \\
-        --n-epochs 100 --lambda-sparse 20 --batch-size 16
-
-    # Lazy mode (no precomputed src_head_vals; one extra src fwd pass per batch):
-    conda run -n goals python scripts/train_head_mask.py \\
-        --model-key Qwen/Qwen2.5-Coder-32B-Instruct --lazy
-
-    # With per-epoch surface-form augmentation (requires --lazy):
-    conda run -n goals python scripts/train_head_mask.py \\
-        --model-key Qwen/Qwen2.5-Coder-32B-Instruct --lazy --augment
+        --model-key Qwen/Qwen2.5-Coder-14B-Instruct --no-augment --batch-size 32
 
 Outputs:
-    results/localization/<model-short-name>/head_mask.pt
+    results/localization/<model-short-name>/<tag>/head_mask.pt
+    results/localization/<model-short-name>/<tag>/checkpoints/
 """
 
 import argparse
@@ -47,6 +42,11 @@ from src.utils.logging_utils import add_logging_args, configure
 logger = logging.getLogger(__name__)
 console = Console(width=120, highlight=False)
 
+LR = 1e-2  # AdamW learning rate
+CACHE_BATCH_SIZE = 64  # prompts per forward pass while caching / augmenting
+CHECKPOINT_EVERY = 5  # epochs between mask checkpoints (and val-recall evals)
+AUGMENT_SEED = 123456
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -58,34 +58,15 @@ def main() -> None:
         help="HuggingFace model key (default: Qwen/Qwen2.5-Coder-32B-Instruct)",
     )
     parser.add_argument(
-        "--layers-start",
-        type=int,
-        default=0,
-        help="First layer index, inclusive (default: 6)",
-    )
-    parser.add_argument(
-        "--layers-end",
-        type=int,
-        default=-1,
-        help="Last layer index, exclusive (default: -1, meaning all layers to the end)",
-    )
-    parser.add_argument(
         "--n-epochs",
         type=int,
-        default=100,
-        help="Training epochs (default: 100)",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=1e-2,
-        help="AdamW learning rate (default: 1e-2)",
+        default=50,
+        help="Training epochs (default: 50)",
     )
     parser.add_argument(
         "--tag",
-        default=None,
-        help="optional subdir under results/localization/<model>/ isolating this run "
-             "(e.g. --tag lam20). Default: write straight to <model>/head_mask.pt.",
+        default="lam20",
+        help="subdir under results/localization/<model>/ for this run (default: lam20)",
     )
     parser.add_argument(
         "--lambda-sparse",
@@ -96,57 +77,17 @@ def main() -> None:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=16,
-        help="Instances per optimizer step (default: 16)",
-    )
-    parser.add_argument(
-        "--max-instances",
-        type=int,
-        default=None,
-        help="Cap the number of pivot instances (useful for smoke-tests).",
-    )
-    parser.add_argument(
-        "--lazy",
-        action="store_true",
-        help=(
-            "Skip src_head_vals precomputation. Recomputes per batch per epoch "
-            "(one extra src forward pass per optimizer step). Required for --augment."
-        ),
-    )
-    parser.add_argument(
-        "--cache-batch-size",
-        type=int,
         default=64,
-        help=(
-            "Max prompts per forward pass during caching (default: 64). "
-            "Lower this if cache_pivot_data OOMs (e.g. --cache-batch-size 32)."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint-every",
-        type=int,
-        default=5,
-        help="Save a mask checkpoint every K epochs (default: 5). 0 = disabled.",
+        help="Instances per optimizer step (default: 64)",
     )
     parser.add_argument(
         "--augment",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Re-augment all instances at the start of every epoch "
-            "(source_lang 55%%, variable_rename 35%%, toggle_type_hints 10%%). "
-            "Requires --lazy."
+            "Re-augment all instances at the start of every epoch, recomputing src head "
+            "values per batch (default). --no-augment precomputes src head values once."
         ),
-    )
-    parser.add_argument(
-        "--augment-seed",
-        type=int,
-        default=123456,
-        help="Random seed for per-epoch augmentation (default: 123456).",
-    )
-    parser.add_argument(
-        "--no-docstring",
-        action="store_true",
-        help="Exclude docstring from prompts (default: include).",
     )
 
     add_logging_args(parser)
@@ -157,13 +98,9 @@ def main() -> None:
 
     logger.info(f"model:            {args.model_key}")
     logger.info(f"n_epochs:         {args.n_epochs}")
-    logger.info(f"lr:               {args.lr}")
     logger.info(f"lambda_sparse:    {args.lambda_sparse}")
     logger.info(f"batch_size:       {args.batch_size}")
-    logger.info(f"lazy:             {args.lazy}")
     logger.info(f"augment:          {args.augment}")
-    logger.info(f"cache_batch_size: {args.cache_batch_size}")
-    logger.info(f"checkpoint_every: {args.checkpoint_every}")
 
     # ------------------------------------------------------------------
     # Load dataset
@@ -195,11 +132,7 @@ def main() -> None:
             )
             sys.exit(1)
 
-    if args.max_instances is not None:
-        pivot_instances = pivot_instances[: args.max_instances]
-        logger.info(f"--max-instances: using {len(pivot_instances)} pivot instances")
-    else:
-        logger.info(f"Loaded {len(pivot_instances)} pivot instances")
+    logger.info(f"Loaded {len(pivot_instances)} pivot instances")
 
     # ------------------------------------------------------------------
     # Load model
@@ -217,16 +150,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Cache pivot data
     # ------------------------------------------------------------------
-    if args.augment and not args.lazy:
-        logger.warning("--augment requires lazy caching; forcing --lazy on.")
-        args.lazy = True
-
-    if args.layers_end == -1:
-        args.layers_end = mt.n_layer
-    layers = list(range(args.layers_start, args.layers_end))
-    logger.info(
-        f"layers:           {args.layers_start}..{args.layers_end - 1} ({len(layers)} total)"
-    )
+    layers = list(range(mt.n_layer))
+    logger.info(f"layers:           0..{mt.n_layer - 1} ({len(layers)} total)")
 
     logger.info("=== Caching pivot data ===")
     pivot_caches = cache_pivot_data(
@@ -234,21 +159,17 @@ def main() -> None:
         pivot_instances,
         ds,
         layers=layers,
-        precompute=not args.lazy,
-        cache_batch_size=args.cache_batch_size,
-        include_docstring=not args.no_docstring,
+        precompute=not args.augment,
+        cache_batch_size=CACHE_BATCH_SIZE,
+        include_docstring=True,
     )
 
     # ------------------------------------------------------------------
     # Train head mask
     # ------------------------------------------------------------------
     logger.info("=== Training head mask ===")
-    # --tag isolates a run so a lambda sweep doesn't race on one head_mask.pt (mirrors
-    # train_completion_mask's per-config dir). No tag -> the historical flat path, so every
-    # existing loader (results/localization/<model>/head_mask.pt) keeps working.
-    out_root = os.path.join(DEFAULT_RESULTS_DIR, "localization", model_short_name)
-    if args.tag:
-        out_root = os.path.join(out_root, args.tag)
+    # --tag isolates a run so a lambda sweep doesn't race on one head_mask.pt.
+    out_root = os.path.join(DEFAULT_RESULTS_DIR, "localization", model_short_name, args.tag)
     checkpoint_dir = os.path.join(out_root, "checkpoints")
     logger.info(f"output root: {out_root}")
     mask, history = train_head_mask(
@@ -256,15 +177,15 @@ def main() -> None:
         pivot_caches,
         layers=layers,
         n_epochs=args.n_epochs,
-        lr=args.lr,
+        lr=LR,
         lambda_sparse=args.lambda_sparse,
         batch_size=args.batch_size,
-        checkpoint_dir=checkpoint_dir if args.checkpoint_every > 0 else None,
-        checkpoint_every=args.checkpoint_every,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_every=CHECKPOINT_EVERY,
         augment=args.augment,
-        augment_cache_batch_size=args.cache_batch_size,
-        augment_seed=args.augment_seed,
-        augment_include_docstring=not args.no_docstring,
+        augment_cache_batch_size=CACHE_BATCH_SIZE,
+        augment_seed=AUGMENT_SEED,
+        augment_include_docstring=True,
     )
 
     # ------------------------------------------------------------------
@@ -292,12 +213,12 @@ def main() -> None:
             "tag": args.tag,
             "n_instances": len(pivot_caches),
             "n_epochs": args.n_epochs,
-            "lr": args.lr,
+            "lr": LR,
             "lambda_sparse": args.lambda_sparse,
             "batch_size": args.batch_size,
-            "precompute": not args.lazy,
+            "precompute": not args.augment,
             "augment": args.augment,
-            "augment_seed": args.augment_seed,
+            "augment_seed": AUGMENT_SEED,
             "approach": "src_replacement",
         },
     }
@@ -314,7 +235,7 @@ def main() -> None:
     table.add_column("Value", style="yellow")
     table.add_row("Model", args.model_key)
     table.add_row("N instances", str(len(pivot_caches)))
-    table.add_row("Layers", f"{args.layers_start}–{args.layers_end - 1}")
+    table.add_row("Layers", f"0–{layers[-1]}")
     table.add_row("Epochs", str(args.n_epochs))
     table.add_row("Final KL", f"{final_kl:.4f}")
     table.add_row("N selected heads", str(len(selected_heads)))

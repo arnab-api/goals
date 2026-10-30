@@ -1,9 +1,8 @@
 """App L.2.2 EM examples, GoalScope on EVERY response token (site EM tab). For each example and side (innocent /
 EM): greedy response after the neutral prefill, then a readout at every position from the "\\n" after
 <|im_start|>assistant through the end of the response (prefill + generated tokens). Head vectors come from that side's
-model; the innocent model verbalizes. Settings = the closest variant of the reproduction sweep
-(em_goalscope_variants.py): eager attention, verbalizer system prompt "You are a helpful assistant.", 80-token readouts.
-122 goal heads (Qwen2.5-Coder-32B), additive_norm, alpha 0.1, layers 35-45, greedy.
+model; the innocent model verbalizes. Settings: eager attention, verbalizer system prompt "You are a helpful
+assistant.", 80-token readouts, the 122 goal heads (Qwen2.5-Coder-32B), additive_norm, alpha 0.1, layers 35-45, greedy.
 
     python scripts/em/em_goalscope_all_tokens.py --examples quickbuck husband --out-dir results/em_goalscope_repro/all_tokens
 """

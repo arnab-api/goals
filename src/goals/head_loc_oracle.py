@@ -1,31 +1,25 @@
-"""Oracle LLM-based pivot prefix mining — Case 3.
+"""Oracle LLM-based pivot prefix mining (Case 3 + Case 3b + augmentation).
 
-Addresses the core limitation of Case 2 (MCTS-based LCP): MCTS finds LCPs
-across *all* passing implementations of the destination predicate, so when dest
-has diverse implementations (e.g. ``s.isupper()`` and ``s == s.upper()``), the
-LCP collapses to just ``s`` — too short to be a meaningful pivot.
-
-**Strategy**: give the oracle *both* predicates and ask it to directly identify
-shared prefixes where the two functions would diverge.  The oracle has semantic
-understanding and can reason about structural shared prefixes without needing to
-enumerate implementations and compute cross-LCPs mechanically.
+**Case 3**: give the oracle *both* predicates and ask it to directly identify
+shared prefixes where the two functions would diverge.
 
 Example oracle output for (is_upper, is_palindrome):
   PREFIX: s == s.
   A: s == s.upper()
   B: s == s[::-1]
 
-Pipeline:
-  1. Call ``get_oracle_lcps(dest_sample, targ_sample)`` — oracle returns candidate
-     pivot prefix strings directly.
-  2. Completion gate: greedily generate from ``return {lcp}`` for both dest and
+**Case 3b**: ask the oracle for several implementations of each predicate
+(``get_oracle_implementations``) and take the cross-product LCPs mechanically.
+
+Each candidate then passes two gates:
+  1. Completion gate: greedily generate from ``return {lcp}`` for both dest and
      target; both must pass all unit tests (confirms the prefix is semantically
      valid for each side).
-  3. Divergence gate: ``dest_top_token != target_top_token`` at ``return {lcp}``.
-  4. Emit ``PivotInstance`` for each passing (pair, lcp).
-
-Single-predicate helpers (``build_oracle_prompt``, ``get_oracle_implementations``)
-are kept as utilities for notebook inspection.
+  2. Divergence gate: ``dest_top_token`` and ``target_top_token`` at
+     ``return {lcp}`` must differ meaningfully (contextual token filter).
+Validated instances are then augmented with semantic-preserving wrappers
+(``augment_pivot_instances``). ``get_oracle_pivot_instances`` runs the whole
+pipeline and saves ``pairs/<model>.json``.
 """
 
 from __future__ import annotations
@@ -57,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Single-predicate oracle (inspection / legacy)
+# Single-predicate oracle (Case 3b implementations)
 # ---------------------------------------------------------------------------
 
 _ORACLE_PROMPT_TEMPLATE = """\
@@ -363,13 +357,12 @@ def _greedy_complete_and_eval(
     lcp: str,
     include_docstring: bool,
     max_new_tokens: int,
-    completion_codes: list[str] | None = None,
+    completion_codes: list[str],
 ) -> bool:
-    """Generate and test a completion; optionally retain its code for lexical binding roles."""
+    """Generate and test a completion; retain its code (if passing) for lexical binding roles."""
     pivot_prompt = build_python_prompt(
         mt, sample, pivot_prefix=lcp, include_docstring=include_docstring
     )
-    # logger.debug(f"'''{pivot_prompt=}'''")
     inputs = prepare_input(prompts=[pivot_prompt], tokenizer=mt)
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
@@ -380,8 +373,6 @@ def _greedy_complete_and_eval(
             out = mt._model(input_ids=input_ids, attention_mask=attention_mask)
             next_tok = int(out.logits[0, -1, :].argmax())
             generated_ids.append(next_tok)
-            # if next_tok in stop_ids:
-            #     break
             next_tok_t = torch.tensor([[next_tok]], device=input_ids.device)
             ones = torch.ones(
                 (1, 1), dtype=attention_mask.dtype, device=attention_mask.device
@@ -397,10 +388,7 @@ def _greedy_complete_and_eval(
         generated_text = generated_text.split("\n")[0]
     generated_text = generated_text.rstrip()
 
-    # logger.debug(f"Generated text for lcp={lcp!r}: {generated_text!r}")
-
     full_code = sample.python_incomplete_code + " " + lcp + generated_text
-    # logger.debug(f"Full code to evaluate:\n'''{full_code}'''")
     result = evaluate_single_code(
         full_code,
         sample.unit_tests,
@@ -414,7 +402,7 @@ def _greedy_complete_and_eval(
         f"  generated={generated_text!r}  verdict={verdict_msg}"
     )
     passed = result.verdict == "PASSED"
-    if passed and completion_codes is not None:
+    if passed:
         completion_codes.append(full_code)
     return passed
 
@@ -424,9 +412,9 @@ def _completion_gate(
     dest_sample: SinglePredicateSample,
     targ_sample: SinglePredicateSample,
     lcp: str,
+    completion_codes: list[str],
     include_docstring: bool = False,
     max_new_tokens: int = 32,
-    completion_codes: list[str] | None = None,
 ) -> bool:
     """True if greedy generation from ``return {lcp}`` yields passing completions
     for **both** the destination and target predicates.
@@ -447,7 +435,7 @@ def _completion_gate(
 
     Returns:
         True if both dest and target completions pass all unit tests.
-        If supplied, ``completion_codes`` receives each passing full function in
+        ``completion_codes`` receives each passing full function in
         destination/target order. Failed pairs must not use this partial list.
     """
     dest_ok = _greedy_complete_and_eval(
@@ -459,95 +447,6 @@ def _completion_gate(
     return _greedy_complete_and_eval(
         mt, targ_sample, lcp, include_docstring, max_new_tokens, completion_codes
     )
-
-
-# ---------------------------------------------------------------------------
-# Case 3 — Oracle-based pivot mining
-# ---------------------------------------------------------------------------
-
-
-def case3_pivot_instances(
-    mt,
-    ds: HeadLocDataset,
-    pairs: list[PredicatePair] | None = None,
-    include_docstring: bool = False,
-    oracle_include_docstring: bool = True,
-    n_oracle: int = 5,
-    oracle_temperature: float = 0.5,
-    max_completion_tokens: int = 32,
-) -> list[PivotInstance]:
-    """Mine Case 3 pivot instances using oracle-generated divergence prefixes.
-
-    For each pair:
-      1. Query the oracle with both predicates; it returns candidate pivot prefixes
-         where the two functions would naturally diverge (``get_oracle_lcps``).
-      2. Completion gate: greedily generate from ``return {lcp}`` for both dest and
-         target; both must pass all unit tests (confirms the prefix is valid for
-         each side).
-      3. Divergence gate: ``dest_top_token != target_top_token`` at ``return {lcp}``.
-
-    Args:
-        mt: ModelandTokenizer to probe.
-        ds: HeadLocDataset providing samples and pairs.
-        pairs: Subset of pairs to evaluate.  Defaults to ``ds.pairs``.
-        include_docstring: Whether to insert docstrings into the LM prompts used
-            for the completion and divergence gates.
-        oracle_include_docstring: Whether to insert docstrings into the oracle
-            prompt so the oracle LLM has semantic context about each function.
-        n_oracle: Number of divergence prefixes requested from the oracle per pair.
-        oracle_temperature: Sampling temperature for oracle LLM.
-        max_completion_tokens: Max tokens for greedy generation in the completion gate.
-
-    Returns:
-        List of (pair, PivotInstance) tuples where both gates pass.
-    """
-    target_pairs = pairs if pairs is not None else ds.pairs
-    instances: list[tuple[PredicatePair, PivotInstance]] = []
-
-    for pair in target_pairs:
-        dest_sample = ds.get_sample(pair.destination_predicate)
-        targ_sample = ds.get_sample(pair.source_predicate)
-        if dest_sample is None or targ_sample is None:
-            logger.warning(
-                f"Missing sample for pair "
-                f"{pair.source_predicate} -> {pair.destination_predicate} — skipping"
-            )
-            continue
-
-        logger.info(
-            f"Case 3: pair {pair.destination_predicate} -> {pair.source_predicate}"
-        )
-
-        oracle_lcps = get_oracle_lcps(
-            dest_sample,
-            targ_sample,
-            n=n_oracle,
-            temperature=oracle_temperature,
-            include_docstring=oracle_include_docstring,
-        )
-
-        if not oracle_lcps:
-            logger.warning("  Oracle returned no prefixes — skipping")
-            continue
-
-        for lcp in oracle_lcps:
-            pi = _validate_candidate(
-                mt,
-                dest_sample,
-                targ_sample,
-                lcp,
-                include_docstring=include_docstring,
-                max_completion_tokens=max_completion_tokens,
-            )
-            if pi:
-                instances.append((pair, pi))
-                logger.info(
-                    f"  ✓ New pivot: {pair.destination_predicate} -> {pair.source_predicate}"
-                    f" prefix={lcp!r} | dest={pi.dest_top_token!r} targ={pi.target_top_token!r}"
-                )
-
-    logger.info(f"Case 3: {len(instances)} diverging pivot instances")
-    return instances
 
 
 # ---------------------------------------------------------------------------
@@ -719,91 +618,6 @@ def _validate_candidate(
     return None
 
 
-def case3b_pivot_instances(
-    mt,
-    ds: HeadLocDataset,
-    pairs: list[PredicatePair] | None = None,
-    include_docstring: bool = False,
-    n_implementations: int = 8,
-    oracle_temperature: float = 0.5,
-    min_prefix_len: int = 3,
-    max_completion_tokens: int = 32,
-) -> list[PivotInstance]:
-    """Mine Case 3b pivot instances via per-predicate oracle + mechanical LCP.
-
-    Complementary to Case 3 (pair-based oracle).  For each pair:
-      1. Call ``get_oracle_implementations`` separately for dest and target.
-      2. Cross-product all (impl_dest, impl_targ) pairs and compute token-level
-         LCPs via ``_lcp_tokens``.
-      3. Filter: LCP must be at least ``min_prefix_len`` characters.
-      4. Extract diverging tokens at position ``len(tokenized_lcp)``; both must
-         pass ``_tokens_differ_meaningfully`` (rejects naming-only divergences).
-      5. Deduplicate LCPs across cross-product pairs.
-      6. Completion gate + divergence gate (same as Case 3).
-      7. Emit ``PivotInstance`` for passing pairs.
-
-    Args:
-        mt: ModelandTokenizer to probe.
-        ds: HeadLocDataset providing samples and pairs.
-        pairs: Subset of pairs to evaluate.  Defaults to ``ds.pairs``.
-        include_docstring: Whether to insert docstrings into LM prompts for
-            the completion and divergence gates.
-        n_implementations: Number of oracle implementations requested per
-            predicate.
-        oracle_temperature: Sampling temperature for the oracle LLM.
-        min_prefix_len: Minimum character length for an LCP to be considered.
-        max_completion_tokens: Max tokens for greedy generation in the
-            completion gate.
-
-    Returns:
-        List of (pair, PivotInstance) tuples where both gates pass.
-    """
-    target_pairs = pairs if pairs is not None else ds.pairs
-    instances: list[tuple[PredicatePair, PivotInstance]] = []
-
-    for pair in target_pairs:
-        dest_sample = ds.get_sample(pair.destination_predicate)
-        targ_sample = ds.get_sample(pair.source_predicate)
-        if dest_sample is None or targ_sample is None:
-            logger.warning(
-                f"Missing sample for pair "
-                f"{pair.source_predicate} -> {pair.destination_predicate} — skipping"
-            )
-            continue
-
-        logger.info(
-            f"Case 3b: pair {pair.destination_predicate} -> {pair.source_predicate}"
-        )
-
-        candidate_lcps = _mine_case3b_raw(
-            mt,
-            dest_sample,
-            targ_sample,
-            n_implementations=n_implementations,
-            oracle_temperature=oracle_temperature,
-            min_prefix_len=min_prefix_len,
-        )
-
-        for lcp in candidate_lcps:
-            pi = _validate_candidate(
-                mt,
-                dest_sample,
-                targ_sample,
-                lcp,
-                include_docstring=include_docstring,
-                max_completion_tokens=max_completion_tokens,
-            )
-            if pi:
-                instances.append((pair, pi))
-                logger.info(
-                    f"  ✓ New pivot (3b): {pair.destination_predicate} -> {pair.source_predicate}"
-                    f" prefix={lcp!r} | dest={pi.dest_top_token!r} targ={pi.target_top_token!r}"
-                )
-
-    logger.info(f"Case 3b: {len(instances)} diverging pivot instances")
-    return instances
-
-
 # ---------------------------------------------------------------------------
 # Semantic-preserving augmentation of validated pivot instances
 # ---------------------------------------------------------------------------
@@ -823,13 +637,13 @@ def augment_pivot_instances(
     mt,
     instances: list[tuple[PredicatePair, PivotInstance]],
     ds: HeadLocDataset,
-    wrappers: list[str] | None = None,
     include_docstring: bool = False,
     max_completion_tokens: int = 32,
 ) -> list[tuple[PredicatePair, PivotInstance]]:
     """Augment validated pivot instances with semantic-preserving prefix wrappers.
 
-    For each validated ``(pair, PivotInstance)`` and each wrapper W, the augmented prefix
+    For each validated ``(pair, PivotInstance)`` and each wrapper W in
+    ``AUGMENTATION_WRAPPERS``, the augmented prefix
     ``W + pivot_prefix`` is passed through both gates:
 
     - **Completion gate**: greedy generation from ``return W+P`` must produce
@@ -842,9 +656,8 @@ def augment_pivot_instances(
     Args:
         mt: ModelandTokenizer (frozen).
         instances: Already-validated ``(pair, PivotInstance)`` tuples (output of
-            ``case3_pivot_instances`` or ``get_oracle_pivot_instances`` Stage 2).
+            ``get_oracle_pivot_instances`` Stage 2).
         ds: HeadLocDataset for looking up dest/target samples.
-        wrappers: Prefix wrappers to try.  Defaults to ``AUGMENTATION_WRAPPERS``.
         include_docstring: Passed to prompt builders and ``_completion_gate``.
         max_completion_tokens: Max tokens for greedy generation.
 
@@ -852,8 +665,7 @@ def augment_pivot_instances(
         New ``(pair, PivotInstance)`` tuples for each (instance, wrapper) pair that
         passes both gates.  The original instances are not included.
     """
-    if wrappers is None:
-        wrappers = AUGMENTATION_WRAPPERS
+    wrappers = AUGMENTATION_WRAPPERS
 
     augmented: list[tuple[PredicatePair, PivotInstance]] = []
 
@@ -951,30 +763,24 @@ def augment_pivot_instances(
 # ---------------------------------------------------------------------------
 
 
+# Mining knobs (the reported configuration)
+N_ORACLE = 5  # Case 3: divergence prefixes requested from the oracle per pair
+ORACLE_TEMPERATURE = 0.5
+MAX_COMPLETION_TOKENS = 32  # greedy generation budget in the completion gate
+N_IMPLEMENTATIONS = 8  # Case 3b: oracle implementations per predicate
+MIN_PREFIX_LEN = 3  # Case 3b: minimum LCP length in characters
+
+
 def get_oracle_pivot_instances(
     mt,
     ds: HeadLocDataset,
-    pairs: list[PredicatePair] | None = None,
-    include_case3: bool = True,
-    include_case3b: bool = True,
-    include_augmentation: bool = True,
-    wrappers: list[str] | None = None,
     include_docstring: bool = True,
     oracle_include_docstring: bool = True,
-    # Case 3 params
-    n_oracle: int = 5,
-    oracle_temperature: float = 0.5,
-    max_completion_tokens: int = 32,
-    # Case 3b params
-    n_implementations: int = 8,
-    min_prefix_len: int = 3,
-    # I/O
-    save: bool = True,
 ) -> list[PivotInstance]:
     """Mine, validate, augment, and save oracle pivot instances.
 
     Four named stages:
-      1. **Mine** — collect raw candidate LCPs from Case 3 (pair oracle) and/or
+      1. **Mine** — collect raw candidate LCPs from Case 3 (pair oracle) and
          Case 3b (per-predicate oracle + mechanical cross-product) for each pair,
          then deduplicate by string equality.
       2. **Gate Check 1** — completion gate + divergence gate via
@@ -982,34 +788,20 @@ def get_oracle_pivot_instances(
       3. **Augment** — ``augment_pivot_instances`` wraps validated instances with
          semantic-preserving prefixes (Gate Check 2 is internal to that function).
       4. **Combine + save** — deduplicate base + augmented instances by
-         (destination, target, prefix) and optionally save via
-         ``ds.save_pivot_instances``.
+         (destination, target, prefix) and save into ``pairs/<model>.json``.
 
     Args:
         mt: ModelandTokenizer to probe.
         ds: HeadLocDataset providing samples, pairs, and save path.
-        pairs: Subset of pairs to evaluate.  Defaults to ``ds.pairs``.
-        include_case3: Include Case 3 (pair-based oracle) mining.
-        include_case3b: Include Case 3b (per-predicate oracle + cross-product) mining.
-        include_augmentation: Apply wrapper augmentation to validated instances.
-        wrappers: Wrappers passed to ``augment_pivot_instances``.  Defaults to
-            ``AUGMENTATION_WRAPPERS``.
         include_docstring: Whether to insert docstrings into LM prompts (both gates
             and augmentation).
         oracle_include_docstring: Whether to insert docstrings into the Case 3 oracle
             pair prompt.
-        n_oracle: Number of divergence prefixes to request from the oracle per pair
-            (Case 3).
-        oracle_temperature: Sampling temperature for oracle LLM.
-        max_completion_tokens: Max tokens for greedy generation in the completion gate.
-        n_implementations: Number of oracle implementations per predicate (Case 3b).
-        min_prefix_len: Minimum character length for an LCP to be considered (Case 3b).
-        save: If True, save combined instances via ``ds.save_pivot_instances``.
 
     Returns:
         Deduplicated list of all validated (base + augmented) ``PivotInstance`` objects.
     """
-    target_pairs = pairs if pairs is not None else ds.pairs
+    target_pairs = ds.pairs
 
     # ------------------------------------------------------------------
     # Stage 1 — Mine raw candidates
@@ -1030,26 +822,25 @@ def get_oracle_pivot_instances(
 
         raw: list[str] = []
 
-        if include_case3:
-            case3_lcps = get_oracle_lcps(
+        raw.extend(
+            get_oracle_lcps(
                 dest_sample,
                 targ_sample,
-                n=n_oracle,
-                temperature=oracle_temperature,
+                n=N_ORACLE,
+                temperature=ORACLE_TEMPERATURE,
                 include_docstring=oracle_include_docstring,
             )
-            raw.extend(case3_lcps)
-
-        if include_case3b:
-            case3b_lcps = _mine_case3b_raw(
+        )
+        raw.extend(
+            _mine_case3b_raw(
                 mt,
                 dest_sample,
                 targ_sample,
-                n_implementations=n_implementations,
-                oracle_temperature=oracle_temperature,
-                min_prefix_len=min_prefix_len,
+                n_implementations=N_IMPLEMENTATIONS,
+                oracle_temperature=ORACLE_TEMPERATURE,
+                min_prefix_len=MIN_PREFIX_LEN,
             )
-            raw.extend(case3b_lcps)
+        )
 
         # Dedup by string equality, preserving order
         seen: dict[str, None] = {}
@@ -1084,7 +875,7 @@ def get_oracle_pivot_instances(
                 targ_sample,
                 lcp,
                 include_docstring=include_docstring,
-                max_completion_tokens=max_completion_tokens,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
             )
             if pi:
                 valid_instances.append((pair, pi))
@@ -1099,14 +890,13 @@ def get_oracle_pivot_instances(
     # Stage 3 — Augmentation (Gate Check 2 is internal)
     # ------------------------------------------------------------------
     aug_instances: list[tuple[PredicatePair, PivotInstance]] = []
-    if include_augmentation and valid_instances:
+    if valid_instances:
         aug_instances = augment_pivot_instances(
             mt,
             valid_instances,
             ds,
-            wrappers=wrappers,
             include_docstring=include_docstring,
-            max_completion_tokens=max_completion_tokens,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
         )
         logger.info(f"Stage 3: {len(aug_instances)} augmented pivot instances")
 
@@ -1130,20 +920,15 @@ def get_oracle_pivot_instances(
     )
 
     # Insert into the pair objects and persist
-    if save:
-        # Clear existing pivot_instances for affected pairs, then repopulate
-        # Clear every revalidated pair, including those with zero survivors;
-        # otherwise previously accepted pivots silently survive a stricter filter.
-        affected_pairs = {id(pair): pair for pair in target_pairs}
-        for pair in affected_pairs.values():
-            pair.pivot_instances = []
-        for pair, pi in combined:
-            pair.pivot_instances.append(pi)
-        model_name = mt.name.split("/")[-1]
-        ds.save_pairs(model_name)
-        logger.info(
-            f"Saved {len(combined)} pivot instances into pairs/{model_name}.json"
-        )
+    # Clear every revalidated pair, including those with zero survivors;
+    # otherwise previously accepted pivots silently survive a stricter filter.
+    for pair in target_pairs:
+        pair.pivot_instances = []
+    for pair, pi in combined:
+        pair.pivot_instances.append(pi)
+    model_name = mt.name.split("/")[-1]
+    ds.save_pairs(model_name)
+    logger.info(f"Saved {len(combined)} pivot instances into pairs/{model_name}.json")
 
     return combined
 
@@ -1208,12 +993,7 @@ def _oracle_verify_pair(
     return verified, reason
 
 
-def generate_global_pairs(
-    ds: HeadLocDataset,
-    dir_path=None,
-    oracle_temperature: float = 0.0,
-    save: bool = True,
-) -> list[PredicatePair]:
+def generate_global_pairs(ds: HeadLocDataset) -> list[PredicatePair]:
     """Oracle-verify all same-type predicate combinations and save to ``global_pairs.json``.
 
     For each unordered same-type pair (A, B), makes one oracle call to determine
@@ -1226,21 +1006,14 @@ def generate_global_pairs(
     ``HeadLocDataset.initialize_model_pairs()``.
 
     Args:
-        ds: HeadLocDataset providing the predicate samples.
-        dir_path: Root head_loc data directory. Defaults to HEAD_LOC_DATA_DIR.
-        oracle_temperature: Sampling temperature for the oracle LLM (0.0 = greedy).
-        save: If True, save results to ``global_pairs.json`` and update ``ds.pairs``.
+        ds: HeadLocDataset providing the predicate samples; ``ds.pairs`` is
+            replaced by the verified pairs.
 
     Returns:
         List of oracle-verified ``PredicatePair`` objects (both directions).
     """
     from collections import defaultdict
     from itertools import combinations
-
-    from src.goals.head_loc_data import HEAD_LOC_DATA_DIR
-
-    if dir_path is None:
-        dir_path = HEAD_LOC_DATA_DIR
 
     # Group by variable_type
     by_type: dict[str, list] = defaultdict(list)
@@ -1262,9 +1035,7 @@ def generate_global_pairs(
                 f"  [{call_num}/{total_calls}] "
                 f"({sample_a.predicate_name}, {sample_b.predicate_name})"
             )
-            verified, reason = _oracle_verify_pair(
-                sample_a, sample_b, temperature=oracle_temperature
-            )
+            verified, reason = _oracle_verify_pair(sample_a, sample_b)
             logger.info(
                 f"    → {'YES' if verified else 'NO'}  {reason.splitlines()[0]}"
             )
@@ -1285,8 +1056,7 @@ def generate_global_pairs(
         f"{len(verified_pairs) // 2} verified pairs ({len(verified_pairs)} directed)"
     )
 
-    if save:
-        ds.pairs = verified_pairs
-        ds.save_global_pairs(dir_path)
+    ds.pairs = verified_pairs
+    ds.save_global_pairs()
 
     return verified_pairs

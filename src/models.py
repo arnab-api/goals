@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Literal, Optional, overload
+from typing import Any, Literal
 
 import baukit
 import torch
@@ -9,77 +9,37 @@ from nnsight import LanguageModel
 from transformers import AutoTokenizer
 
 from src.utils.env_utils import DEFAULT_MODELS_DIR, HF_CACHE_DIR
-from src.utils.typing import Layer, Model, Sequence, Tokenizer
+from src.utils.typing import Model
 
 logger = logging.getLogger(__name__)
 
-CACHEABLE_FUNCS = [
-    "forward",
-    # "ssm", "selective_scan" , # specific to Mamba models
-]
-
 
 class ModelandTokenizer(LanguageModel):
+    """nnsight ``LanguageModel`` + tokenizer with a unified config interface (``n_layer``,
+    ``n_embd``, ``layer_name_format``, ``attn_module_name_format``, ...).
+
+    Supported families (the reported models): Qwen2 (Qwen2.5, Qwen2.5-Coder), Llama (Llama-3.3),
+    OLMo-3 (Olmo-3.1) and dense GLM-4 (GLM-4-32B-0414).
+    """
+
     def __init__(
         self,
-        base_lm: Optional[LanguageModel] = None,
-        tokenizer: Optional[transformers.AutoTokenizer] = None,
-        model_key: Optional[
-            str
-        ] = "EleutherAI/gpt-j-6B",  # if model is provided, this will be ignored and rewritten
-        abs_path: bool = False,
+        model_key: str,
         device_map: dict | str = "auto",
         **kwargs,
     ) -> None:
-        assert base_lm is not None or model_key is not None, (
-            "Either the `base_lm` or `model_key` must be provided"
-        )
-        if base_lm is not None:
-            self.__dict__ = base_lm.__dict__
-            self.name = base_lm._model.config._name_or_path.split("/")[-1]
-
-        else:
-            if not abs_path:
-                if HF_CACHE_DIR is not None:
-                    kwargs["cache_dir"] = HF_CACHE_DIR
-                model_key = get_full_model_path(model_key)
-            # nnsight's LanguageModel defaults to AutoModelForCausalLM, which cannot load a
-            # *ForConditionalGeneration (VLM) checkpoint. Peek the config and route those to the
-            # image-text-to-text auto class. Text-only use never passes pixel_values, so the vision
-            # tower loads but never runs (free it later to reclaim VRAM if needed).
-            if "automodel" not in kwargs:
-                try:
-                    from transformers import AutoConfig
-                    _peek = AutoConfig.from_pretrained(
-                        model_key, cache_dir=kwargs.get("cache_dir")
-                    )
-                    _arch = (getattr(_peek, "architectures", None) or [""])[0]
-                    if _arch.endswith("ForConditionalGeneration") or hasattr(
-                        _peek, "vision_config"
-                    ):
-                        from transformers import AutoModelForImageTextToText
-
-                        kwargs["automodel"] = AutoModelForImageTextToText
-                        logger.info(
-                            f"detected VLM ({_arch}); loading via AutoModelForImageTextToText"
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"automodel auto-detect failed ({e}); using nnsight default"
-                    )
-            # print(kwargs)
-            self.__dict__ = LanguageModel(
-                model_key,
-                device_map=device_map,
-                dispatch=True,
-                **kwargs,
-            ).__dict__
-            self.name = model_key
+        if HF_CACHE_DIR is not None:
+            kwargs["cache_dir"] = HF_CACHE_DIR
+        model_key = get_full_model_path(model_key)
+        self.__dict__ = LanguageModel(
+            model_key,
+            device_map=device_map,
+            dispatch=True,
+            **kwargs,
+        ).__dict__
+        self.name = model_key
 
         self._model.eval()
-        self.tokenizer: transformers.AutoTokenizer = (
-            tokenizer if tokenizer is not None else self.tokenizer
-        )
         # Left-pad explicitly rather than relying on nnsight's default (or a raw HF tokenizer's,
         # which is "right" for e.g. Qwen). Every batched intervention here indexes with negative
         # positions (PATCH_POS=-2, [:, -1]); those only align with the real, right-aligned tokens
@@ -94,13 +54,11 @@ class ModelandTokenizer(LanguageModel):
             self.tokenizer.bos_token = self.tokenizer.eos_token
             self.tokenizer.bos_token_id = self.tokenizer.eos_token_id
         self._model.generation_config.pad_token_id = self.tokenizer.eos_token_id
-        # self.device = determine_device(self._model)
         self.parse_config()
 
         logger.info(
             f"loaded model <{model_key}> | size: {get_model_size(self._model)} | dtype: {determine_dtype(self._model)} | device: {self.device}"
         )
-        self.cache_forwards()
 
     @property
     def device(self):
@@ -113,12 +71,8 @@ class ModelandTokenizer(LanguageModel):
 
     @property
     def head_dim(self) -> int:
-        """Per-head width of the attention inner space.
-
-        NOT always ``n_embd // n_heads``: Qwen3 (and others) decouple ``head_dim`` from
-        ``hidden_size`` — e.g. Qwen3-32B has hidden_size 5120 but 64 heads x 128 = 8192, with
-        ``o_proj: Linear(8192 -> 5120)``. Always read the config when it declares head_dim.
-        """
+        """Per-head width of the attention inner space (read from the config when it declares
+        ``head_dim``; not always ``n_embd // n_heads``)."""
         return determine_head_dim(self)
 
     @property
@@ -133,151 +87,36 @@ class ModelandTokenizer(LanguageModel):
         return determine_n_kv_heads(self)
 
     def parse_config(self) -> None:
-        fields = {
-            "n_layer": None,
-            "n_embd": None,
-            "layer_name_format": None,
-            "layer_names": None,
-            "embedder_name": None,
-            "final_layer_norm_name": None,
-            "lm_head_name": None,
-        }
-
-        if (
-            is_gpt_variant(self)
-            or is_llama_variant(self)
-            or is_gemma_variant(self)
-            or is_pythia_variant(self)
-            or is_qwen_variant(self)
-            or is_olmo_variant(self)
-            or is_gpt_oss_variant(self)
-            or is_deepseek_variant(self)
-            or is_starcoder_variant(self)
-            or is_glm_variant(self)
-        ) is False:
+        if not is_supported_variant(self):
             logger.error(
                 f"Unknown model type: {type(unwrap_model(self)).__name__}. Parsing may fail."
             )
 
-        fields["n_layer"] = len(determine_layers(self))
-        fields["n_embd"] = determine_hidden_size(self)
-        fields["embedder_name"] = determine_embedding_layer_path(self)
-        fields["final_layer_norm_name"] = determine_final_layer_norm_path(self)
-        fields["lm_head_name"] = determine_lm_head_path(self)
-        fields["layer_name_format"] = determine_layer_name_format(self)
-
-        fields["attn_module_name_format"] = None
-        fields["mlp_module_name_format"] = None
-        if is_nested_vlm(self):
-            _p = _vlm_lm_prefix(self)
-            fields["mlp_module_name_format"] = _p + ".layers.{}.mlp"
-            fields["attn_module_name_format"] = _p + ".layers.{}.self_attn"
-        elif (
-            is_llama_variant(self)
-            or is_gemma_variant(self)
-            or is_qwen_variant(self)
-            or is_olmo_variant(self)
-            or is_gpt_oss_variant(self)
-            or is_deepseek_variant(self)
-            or is_starcoder_variant(self)
-            or is_glm_variant(self)
-        ):
-            fields["mlp_module_name_format"] = "model.layers.{}.mlp"
-            fields["attn_module_name_format"] = "model.layers.{}.self_attn"
-
-        elif is_gpt_variant(self):
-            # ! will be different for neox models. Ignoring for now
-            fields["mlp_module_name_format"] = "transformer.h.{}.mlp"
-            fields["attn_module_name_format"] = "transformer.h.{}.attn"
-
-        elif is_pythia_variant(self):
-            fields["mlp_module_name_format"] = "gpt_neox.layers.{}.mlp"
-            fields["attn_module_name_format"] = "gpt_neox.layers.{}.attention"
-
-        if fields["layer_name_format"] is not None and fields["n_layer"] is not None:
-            fields["layer_names"] = [
-                fields["layer_name_format"].format(i) for i in range(fields["n_layer"])
-            ]
-
+        fields = {
+            "n_layer": len(determine_layers(self)),
+            "n_embd": determine_hidden_size(self),
+            "embedder_name": determine_embedding_layer_path(self),
+            "final_layer_norm_name": determine_final_layer_norm_path(self),
+            "lm_head_name": determine_lm_head_path(self),
+            "layer_name_format": determine_layer_name_format(self),
+            "mlp_module_name_format": "model.layers.{}.mlp",
+            "attn_module_name_format": "model.layers.{}.self_attn",
+        }
+        fields["layer_names"] = [
+            fields["layer_name_format"].format(i) for i in range(fields["n_layer"])
+        ]
         for key, value in fields.items():
-            if value is None:
-                logger.error(
-                    f"!!! Error ({type(unwrap_model(self)).__name__}): {key} could not be set !!!"
-                )
             setattr(self, key, value)
-
-    # @property
-    # def lm_head(self) -> torch.nn.Sequential:
-    #     lm_head = baukit.get_module(unwrap_model(self), self.lm_head_name)
-    #     ln_f = baukit.get_module(unwrap_model(self), self.final_layer_norm_name)
-    #     return LMHead(final_layer_norm=ln_f, lm_head=lm_head)
-
-    def cache_forwards(self):
-        """
-        Caches the forward pass of all the modules.
-        Usuful to reset the model to its original state after an overwrite.
-        """
-        self._module_forwards: dict = {}
-        for name, module in self._model.named_modules():
-            self._module_forwards[name] = {}
-            for func_name in CACHEABLE_FUNCS:
-                if hasattr(module, func_name):
-                    self._module_forwards[name][func_name] = getattr(module, func_name)
-
-    def reset_forward(self) -> None:
-        """
-        Resets the forward pass of all the modules to their original state.
-        """
-        # logger.debug("Resetting default forward pass of all modules")
-        for name, module in self._model.named_modules():
-            # print(name, hasattr(module, "forward"))
-            for func_name in CACHEABLE_FUNCS:
-                if hasattr(module, func_name):
-                    setattr(module, func_name, self._module_forwards[name][func_name])
 
     def __call__(self, *args, **kwargs) -> Any:
         """Call the model."""
         return self._model(*args, **kwargs)
 
-    def set_attn_implementation(self, attn_implementation: Literal["sdpa", "eager"]):
-        self.config._attn_implementation = attn_implementation
-        for layer_idx in range(self.n_layer):  # n_layer -> VLM-safe (top config lacks num_hidden_layers)
-            attn_block_name = self.attn_module_name_format.format(layer_idx)
-            try:
-                attn_block = baukit.get_module(self._model, attn_block_name)
-            except Exception:
-                continue  # e.g. a hybrid layer without self_attn
-            if hasattr(attn_block, "config"):
-                attn_block.config._attn_implementation = attn_implementation
-
-
-class LMHead(torch.nn.Module):
-    def __init__(self, final_layer_norm: torch.nn.Module, lm_head: torch.nn.Module):
-        super().__init__()
-        self.lm_head = lm_head
-        self.final_layer_norm = final_layer_norm
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ):
-        x = self.final_layer_norm(x)
-        return self.lm_head(x)
-
 
 def get_model_size(
     model: torch.nn.Module, unit: Literal["B", "KB", "MB", "GB"] = "MB"
 ) -> float:
-    # param_size = 0
-    # for param in model.parameters():
-    #     param_size += param.nelement() * param.element_size()
-    # buffer_size = 0
-    # for buffer in model.buffers():
-    #     buffer_size += buffer.nelement() * buffer.element_size()
-
-    # size_all = param_size + buffer_size
     size_all = model.get_memory_footprint()
-
     return bytes_to_human_readable(size_all, unit)
 
 
@@ -316,275 +155,48 @@ def unwrap_tokenizer(mt: ModelandTokenizer | AutoTokenizer) -> AutoTokenizer:
     return mt
 
 
-def untuple(object: Any):
-    if isinstance(object, tuple):
-        return object[0]
-    return object
-
-
-def is_pythia_variant(model: Model | ModelandTokenizer) -> bool:
-    """Determine if model is pythia variant."""
-    if isinstance(model, ModelandTokenizer) or isinstance(model, LanguageModel):
-        model = unwrap_model(model)
-    try:
-        return "pythia" in model.config._name_or_path.lower()
-    except:  # noqa: E722
-        return False
-
-
-def is_gpt_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is GPT variant."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-
-    # pythia models also have GPTNeoXForCausalLM architecture, but they have slightly  different structure
-    # so we need to check for them separately
-    if is_pythia_variant(mt):
-        return False
-    return isinstance(
-        mt,
-        transformers.GPT2LMHeadModel
-        | transformers.GPTJForCausalLM
-        | transformers.GPTNeoForCausalLM
-        | transformers.GPTNeoXForCausalLM
-        | transformers.GPT2TokenizerFast
-        | transformers.GPTNeoXTokenizerFast,
-    )
+def _name_contains(mt, *substrings: str) -> bool:
+    """Fallback family check on ``config._name_or_path``."""
+    name = getattr(getattr(mt, "config", None), "_name_or_path", None)
+    return name is not None and any(s in name.lower() for s in substrings)
 
 
 def is_llama_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is llama variant."""
+    """Determine if model is a Llama variant (Llama-3.3-70B-Instruct)."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
-    if isinstance(
-        mt,
-        transformers.LlamaForCausalLM
-        | transformers.CwmForCausalLM
-        | transformers.MistralForCausalLM,
-    ):
-        return True
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            return "llama" in name.lower() or "mistral" in name.lower()
-    return False
-
-
-def is_gpt_oss_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is gpt-oss variant."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    if isinstance(mt, transformers.GptOssForCausalLM):
-        return True
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            return "gpt-oss" in name.lower()
-    return False
-
-
-def is_gemma_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is gemma variant."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    if isinstance(
-        mt,
-        transformers.GemmaForCausalLM
-        | transformers.Gemma2ForCausalLM
-        | transformers.Gemma3ForConditionalGeneration,
-    ):
-        return True
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            return "gemma" in name.lower()
-    return False
+    return isinstance(mt, transformers.LlamaForCausalLM) or _name_contains(mt, "llama")
 
 
 def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is qwen variant."""
+    """Determine if model is a Qwen2 variant (Qwen2.5 / Qwen2.5-Coder)."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
-    if (
-        isinstance(mt, transformers.Qwen2ForCausalLM)
-        or isinstance(mt, transformers.Qwen3ForCausalLM)
-        or isinstance(mt, transformers.Qwen3MoeForCausalLM)
-        or isinstance(mt, transformers.Qwen3NextForCausalLM)
-        or isinstance(
-            mt, transformers.Qwen3_5ForCausalLM
-        )  # TODO: address for self_attn vs linear attn
-    ):
-        return True
-
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            return "qwen" in name.lower()
-    return False
-
-
-def is_nested_vlm(mt: Model | ModelandTokenizer) -> bool:
-    """A ``*ForConditionalGeneration`` vision-language model whose TEXT decoder is nested at
-    ``model.language_model`` with its own ``config.text_config`` (Qwen2-VL / Qwen2.5-VL /
-    Qwen3-VL, ...). These need the decoder config + module paths redirected: the top VLM config
-    does NOT expose ``num_hidden_layers`` / ``num_attention_heads`` / ``hidden_size`` / ``head_dim``,
-    and the decoder lives under ``model.language_model.*`` rather than ``model.*``.
-
-    Detected structurally on a built model (``.model.language_model`` present) or from the config
-    alone (``text_config`` + a ConditionalGeneration architecture / ``vision_config``), so it also
-    works during loading, before the model exists. The text decoder itself is an ordinary attention
-    stack, so once the paths/config are redirected every intervention behaves as on the non-VL model.
-    """
-    if isinstance(mt, (ModelandTokenizer, LanguageModel)):
-        mt = unwrap_model(mt)
-    if hasattr(mt, "model") and hasattr(getattr(mt, "model", None), "language_model"):
-        return True
-    cfg = getattr(mt, "config", None)
-    if cfg is not None and hasattr(cfg, "text_config"):
-        arch = (getattr(cfg, "architectures", None) or [""])[0]
-        return arch.endswith("ForConditionalGeneration") or hasattr(cfg, "vision_config")
-    return False
-
-
-def _vlm_lm_prefix(model: Model | ModelandTokenizer) -> str:
-    """Module-path prefix to the text decoder — ``model.language_model`` for the nested VLM form,
-    plain ``model`` otherwise."""
-    m = unwrap_model(model)
-    if hasattr(m, "model") and hasattr(m.model, "language_model"):
-        return "model.language_model"
-    return "model"
-
-
-def _decoder_config(model: Model | ModelandTokenizer):
-    """The text-decoder sub-config (``config.text_config`` for a nested VLM, else the config
-    itself). Every layer/head/size read for a VLM must go through here."""
-    cfg = unwrap_model(model).config
-    return getattr(cfg, "text_config", cfg)
+    return isinstance(mt, transformers.Qwen2ForCausalLM) or _name_contains(mt, "qwen")
 
 
 def is_olmo_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is olmo2 variant."""
+    """Determine if model is an OLMo-3 variant (Olmo-3.1-32B Instruct / SFT)."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
-    if (
-        isinstance(mt, transformers.Olmo2ForCausalLM)
-        or isinstance(mt, transformers.OlmoForCausalLM)
-        or isinstance(mt, transformers.Olmo3ForCausalLM)
-    ):
-        return True
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            return "olmo" in name.lower()
-    return False
-
-
-def is_deepseek_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is deepseek variant."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    # Check for DeepSeek-specific model classes if available
-    if hasattr(transformers, "DeepseekV2ForCausalLM") and isinstance(
-        mt, transformers.DeepseekV2ForCausalLM
-    ):
-        return True
-    if hasattr(transformers, "DeepseekV3ForCausalLM") and isinstance(
-        mt, transformers.DeepseekV3ForCausalLM
-    ):
-        return True
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            return "deepseek" in name.lower()
-    return False
-
-
-def is_starcoder_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is starcoder variant."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    if isinstance(mt, transformers.Starcoder2ForCausalLM):
-        return True
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            return "starcoder" in name.lower()
-    return False
+    return isinstance(mt, transformers.Olmo3ForCausalLM) or _name_contains(mt, "olmo")
 
 
 def is_glm_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model/tokenizer is GLM variant."""
+    """Determine if model is a dense GLM-4 variant (GLM-4-32B-0414)."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
-    if hasattr(transformers, "Glm4MoeLiteForCausalLM") and isinstance(
-        mt, transformers.Glm4MoeLiteForCausalLM
-    ):
-        return True
-    # dense GLM-4 (e.g. zai-org/GLM-4-32B-0414): pure GQA attention, no MoE
-    if hasattr(transformers, "Glm4ForCausalLM") and isinstance(
-        mt, transformers.Glm4ForCausalLM
-    ):
-        return True
-    if hasattr(mt, "config"):
-        config = mt.config
-        if hasattr(config, "_name_or_path"):
-            name = config._name_or_path
-            lowered = name.lower()
-            return "glm" in lowered or "glm4" in lowered
-    return False
+    return isinstance(mt, transformers.Glm4ForCausalLM) or _name_contains(mt, "glm")
 
 
-# Legacy model-name signatures — only used when no tokenizer is reachable (see below).
-INSTRUCT_NAME_SIGNATURES = (
-    "instruct",
-    "it",
-    "chat",
-    "oss",
-    "zai-org/glm",
-    "next",
-    "cwm",
-    "distill",
-    "qwen3.5",
-)
-
-
-def supports_chat_template(mt: Model | ModelandTokenizer | Tokenizer) -> bool:
-    """Does this model expose a chat template (i.e. is it instruct/chat-tuned)?
-
-    Capability check, not a name heuristic: base models ship no ``chat_template`` while
-    instruct/chat models do, so asking the tokenizer is authoritative and needs no per-model
-    upkeep. The old name-substring list only survives as a fallback for when no tokenizer is
-    reachable (e.g. a bare ``Model`` was passed).
-
-    Motivating case: ``Qwen/Qwen3-32B`` is instruct-tuned but carries no ``-Instruct`` suffix
-    (it is the hybrid instruct/thinking release), so every name-based signature missed it and
-    callers silently fell back to raw-text prompting.
-    """
-    tok = getattr(mt, "tokenizer", None)
-    if tok is None and hasattr(mt, "apply_chat_template"):
-        tok = mt  # a bare tokenizer was passed in
-    if tok is not None:
-        try:
-            if getattr(tok, "chat_template", None):
-                return True
-            get_ct = getattr(tok, "get_chat_template", None)
-            if callable(get_ct):  # some versions expose it only via this accessor
-                return bool(get_ct())
-            return False
-        except Exception as e:  # noqa: BLE001 — fall through to the name heuristic
-            logger.debug(f"chat_template lookup failed ({e}); falling back to name heuristic")
-
-    name = getattr(mt, "name", None) or getattr(
-        getattr(mt, "config", None), "_name_or_path", ""
+def is_supported_variant(mt: Model | ModelandTokenizer) -> bool:
+    """All supported families share the ``model.layers.{i}`` / ``model.embed_tokens`` layout."""
+    return (
+        is_llama_variant(mt)
+        or is_qwen_variant(mt)
+        or is_olmo_variant(mt)
+        or is_glm_variant(mt)
     )
-    return any(sig in str(name).lower() for sig in INSTRUCT_NAME_SIGNATURES)
 
 
 def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None:
@@ -593,99 +205,34 @@ def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None
     return next(iter(model.parameters()), None)
 
 
+def _check_supported(model) -> None:
+    if not is_supported_variant(model):
+        raise ValueError(f"unknown model type: {type(model).__name__}")
+
+
 def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
-    if is_nested_vlm(model):
-        return f"{_vlm_lm_prefix(model)}.embed_tokens"
-    if is_gpt_variant(model):
-        return "transformer.wte"
-    elif (
-        is_llama_variant(model)
-        or is_gemma_variant(model)
-        or is_qwen_variant(model)
-        or is_olmo_variant(model)
-        or is_gpt_oss_variant(model)
-        or is_deepseek_variant(model)
-        or is_starcoder_variant(model)
-        or is_glm_variant(model)
-    ):
-        return "model.embed_tokens"
-    elif is_pythia_variant(model):
-        return "gpt_neox.embed_in"
-    else:
-        raise ValueError(f"unknown model type: {type(model).__name__}")
+    _check_supported(model)
+    return "model.embed_tokens"
 
 
 def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
-    if is_nested_vlm(model):
-        return f"{_vlm_lm_prefix(model)}.norm"
-    if is_gpt_variant(model):
-        return "transformer.ln_f"
-    elif (
-        is_llama_variant(model)
-        or is_gemma_variant(model)
-        or is_qwen_variant(model)
-        or is_olmo_variant(model)
-        or is_gpt_oss_variant(model)
-        or is_deepseek_variant(model)
-        or is_starcoder_variant(model)
-        or is_glm_variant(model)
-    ):
-        return "model.norm"
-    elif is_pythia_variant(model):
-        return "gpt_neox.final_layer_norm"
-    else:
-        raise ValueError(f"unknown model type: {type(model).__name__}")
+    _check_supported(model)
+    return "model.norm"
 
 
 def determine_lm_head_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
-    if is_nested_vlm(model):
-        m = unwrap_model(model)
-        return "lm_head" if hasattr(m, "lm_head") else f"{_vlm_lm_prefix(model)}.lm_head"
-    if is_gpt_variant(model):
-        return "lm_head"
-    elif (
-        is_llama_variant(model)
-        or is_gemma_variant(model)
-        or is_qwen_variant(model)
-        or is_olmo_variant(model)
-        or is_gpt_oss_variant(model)
-        or is_deepseek_variant(model)
-        or is_starcoder_variant(model)
-        or is_glm_variant(model)
-    ):
-        return "lm_head"
-    elif is_pythia_variant(model):
-        return "embed_out"
-    else:
-        raise ValueError(f"unknown model type: {type(model).__name__}")
+    _check_supported(model)
+    return "lm_head"
 
 
 def determine_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
-    """Return all hidden layer names for the given model."""
+    """Return all hidden layer indices for the given model."""
     model = unwrap_model(model)
     assert isinstance(model, Model)
-
-    if is_nested_vlm(model):
-        n_layer = _decoder_config(model).num_hidden_layers
-    elif (
-        is_gpt_variant(model)
-        or is_llama_variant(model)
-        or is_gemma_variant(model)
-        or is_qwen_variant(model)
-        or is_olmo_variant(model)
-        or is_gpt_oss_variant(model)
-        or is_deepseek_variant(model)
-        or is_starcoder_variant(model)
-        or is_glm_variant(model)
-    ):
-        n_layer = model.config.num_hidden_layers
-    else:
-        n_layer = model.config.n_layer
-
-    return (*range(n_layer),)
+    return (*range(model.config.num_hidden_layers),)
 
 
 def determine_layer_name_format(
@@ -693,100 +240,13 @@ def determine_layer_name_format(
 ) -> str | None:
     """Determine the format of layer names."""
     model = unwrap_model(model)
-
-    if is_nested_vlm(model):
-        return f"{_vlm_lm_prefix(model)}.layers.{{}}"
-    if is_gpt_variant(model):
-        if isinstance(model, transformers.GPTNeoXForCausalLM):
-            return "gpt_neox.layers.{}"
-        return "transformer.h.{}"
-    elif (
-        is_llama_variant(model)
-        or is_gemma_variant(model)
-        or is_qwen_variant(model)
-        or is_olmo_variant(model)
-        or is_gpt_oss_variant(model)
-        or is_deepseek_variant(model)
-        or is_starcoder_variant(model)
-        or is_glm_variant(model)
-    ):
+    if is_supported_variant(model):
         return "model.layers.{}"
-    elif is_pythia_variant(model):
-        return "gpt_neox.layers.{}"
-
-
-@overload
-def determine_layer_paths(
-    model: ModelandTokenizer | Model,
-    layers: Optional[Sequence[Layer]] = ...,
-    *,
-    return_dict: Literal[False] = ...,
-) -> Sequence[str]:
-    """Determine layer path for each layer."""
-    ...
-
-
-@overload
-def determine_layer_paths(
-    model: ModelandTokenizer | Model,
-    layers: Optional[Sequence[Layer]] = ...,
-    *,
-    return_dict: Literal[True],
-) -> dict[Layer, str]:
-    """Determine mapping from layer to layer path."""
-    ...
-
-
-def determine_layer_paths(
-    model: ModelandTokenizer | Model,
-    layers: Optional[Sequence[Layer]] = None,
-    *,
-    return_dict: bool = False,
-) -> Sequence[str] | dict[Layer, str]:
-    """Determine the absolute paths to the given layers in the model.
-
-    Args:
-        model: The model.
-        layers: The specific layer (numbers/"emb") to look at. Defaults to all of them.
-            Can be a negative number.
-        return_dict: If True, return mapping from layer to layer path,
-            otherwise just return list of layer paths in same order as `layers`.
-
-    Returns:
-        Mapping from layer number to layer path.
-
-    """
-    model = unwrap_model(model)
-
-    if layers is None:
-        layers = determine_layers(model)
-
-    assert isinstance(model, Model), type(model)
-
-    layer_paths: dict[Layer, str] = {}
-    layer_name_format = determine_layer_name_format(model)
-    for layer in layers:
-        if layer == "emb":
-            layer_paths[layer] = determine_embedding_layer_path(model)
-            continue
-        if layer == "ln_f":
-            layer_paths[layer] = determine_final_layer_norm_path(model)
-            continue
-
-        layer_index = layer
-        if layer_index < 0:
-            layer_index = len(determine_layers(model)) + layer
-
-        layer_paths[layer] = layer_name_format.format(layer_index)
-
-    return layer_paths if return_dict else tuple(layer_paths[la] for la in layers)
 
 
 def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
     """Determine hidden rep size for the model."""
     model = unwrap_model(model)
-    if is_nested_vlm(model):
-        return _decoder_config(model).hidden_size
     try:
         return model.config.hidden_size
     except AttributeError:
@@ -797,28 +257,23 @@ def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
 def determine_n_heads(model: ModelandTokenizer | Model) -> int:
     """Number of *query* attention heads."""
     model = unwrap_model(model)
-    if is_nested_vlm(model):
-        return _decoder_config(model).num_attention_heads
     return model.config.num_attention_heads
 
 
 def determine_n_kv_heads(model: ModelandTokenizer | Model) -> int:
     """Number of key/value heads (GQA). Falls back to n_heads (MHA) when unspecified."""
     model = unwrap_model(model)
-    cfg = _decoder_config(model) if is_nested_vlm(model) else model.config
-    return getattr(cfg, "num_key_value_heads", None) or determine_n_heads(model)
+    return getattr(model.config, "num_key_value_heads", None) or determine_n_heads(model)
 
 
 def determine_head_dim(model: ModelandTokenizer | Model) -> int:
     """Per-head width of the attention inner space.
 
     Prefers the config's explicit ``head_dim``, which some architectures decouple from
-    ``hidden_size`` (Qwen3-32B: hidden 5120, 64 heads x 128 = 8192 -> o_proj Linear(8192, 5120)).
-    Falls back to ``hidden_size // n_heads`` for models that don't declare it (Qwen2, Llama, GLM-4
-    dense, ... — where the two agree anyway)."""
+    ``hidden_size``. Falls back to ``hidden_size // n_heads`` for models that don't declare it
+    (Qwen2, Llama, GLM-4 dense, ... — where the two agree anyway)."""
     model = unwrap_model(model)
-    cfg = _decoder_config(model) if is_nested_vlm(model) else model.config
-    hd = getattr(cfg, "head_dim", None)
+    hd = getattr(model.config, "head_dim", None)
     if hd:
         return int(hd)
     return determine_hidden_size(model) // determine_n_heads(model)

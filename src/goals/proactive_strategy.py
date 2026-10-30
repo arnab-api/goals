@@ -302,41 +302,6 @@ def label_python_strategy(code: str, function_name: str) -> StrategyLabel:
 
 
 # ---------------------------------------------------------------------------
-# Full-call span extender
-# ---------------------------------------------------------------------------
-
-
-def find_full_call_span(
-    code: str, name_char_span: tuple[int, int]
-) -> Optional[tuple[int, int]]:
-    """Extend a name char span ``(start, end)`` to the full call expression.
-
-    The call expression spans ``[start, close_paren_idx + 1)`` where the
-    closing paren matches the open paren immediately after ``end`` (ignoring
-    whitespace).  Returns ``None`` if no matching close paren is found
-    (truncated generation).
-    """
-    start, end = name_char_span
-    i = end
-    while i < len(code) and code[i].isspace():
-        i += 1
-    if i >= len(code) or code[i] != "(":
-        return None
-    depth = 1
-    j = i + 1
-    while j < len(code):
-        c = code[j]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return (start, j + 1)
-        j += 1
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Char-span → token-position mapping
 # ---------------------------------------------------------------------------
 

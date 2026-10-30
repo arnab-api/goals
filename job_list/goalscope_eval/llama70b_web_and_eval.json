@@ -1,7 +1,7 @@
 [
     {
         "name": "llama70b_web_gen",
-        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python scripts/generate_well_known_task_completions.py --model-key meta-llama/Llama-3.3-70B-Instruct --n-samples 0 --prompt-style v2 |& tee logs/goalscope_web/full_gen_llama70b.log"
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; python scripts/generate_well_known_task_completions.py --model-key meta-llama/Llama-3.3-70B-Instruct |& tee logs/goalscope_web/full_gen_llama70b.log"
     },
     {
         "name": "llama70b_web_gs0",
@@ -23,7 +23,7 @@
             "llama70b_web_gs0",
             "llama70b_web_gs1"
         ],
-        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; bash scripts/web_finalize_run.sh Llama-3.3-70B-Instruct -v2 |& tee logs/goalscope_web/full_finalize_llama70b.log"
+        "command": "set -euo pipefail; export HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 PYTORCH_ALLOC_CONF=expandable_segments:True; cd goals-web && bash site/finalize_run.sh Llama-3.3-70B-Instruct |& tee logs/goalscope_web/full_finalize_llama70b.log"
     },
     {
         "name": "llama70b_eval_faithfulness",

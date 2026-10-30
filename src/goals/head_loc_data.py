@@ -49,10 +49,6 @@ class SinglePredicateSample(DataClassJsonMixin):
             t if isinstance(t, tuple) else tuple(t) for t in self.unit_tests
         ]
 
-    @property
-    def is_original(self) -> bool:
-        return not self.augmentation
-
 
 @dataclass
 class PivotInstance(DataClassJsonMixin):
@@ -66,21 +62,13 @@ class PivotInstance(DataClassJsonMixin):
         sample.python_incomplete_code + " " + pivot_prefix
     (the space after `return` is prepended here, not stored in python_incomplete_code).
 
-    pivot_prefix == "" for Case 1 (bare return divergence),
-    non-empty for Case 2/3 (shared prefix of successful generations).
-
     Token divergence (dest_top_token != target_top_token) is the primary selection
-    criterion. Pivot instances are mined online per model — do not cache across models.
+    criterion. Pivot instances are mined per model (``pairs/<model>.json``).
     """
 
-    pivot_prefix: str       # shared prefix appended after "return "; "" for Case 1
+    pivot_prefix: str       # shared prefix appended after "return "
     dest_top_token: str     # top-1 predicted token for destination at pivot
     target_top_token: str   # top-1 predicted token for target at pivot
-
-    @property
-    def tokens_diverge(self) -> bool:
-        """True when dest and target predict different top tokens at the pivot."""
-        return self.dest_top_token != self.target_top_token
 
 
 @dataclass
@@ -91,13 +79,12 @@ class PredicatePair(DataClassJsonMixin):
     Both (A→B) and (B→A) directions are stored as separate entries since training
     signal quality may differ by direction.
 
-    ``pivot_instances`` are mined online (per model) and persisted here so that
-    ``pairs.json`` is the single source of truth for both pairing metadata and pivots.
-    They are model-specific and should be re-mined when switching models.
+    ``pivot_instances`` are mined per model and persisted here so that
+    ``pairs/<model>.json`` is the single source of truth for both pairing metadata and
+    pivots.
 
-    kl_at_bare_return and top_token_diverges_at_bare_return are populated by the
-    pairing script (Step 3) which requires a model forward pass; stored as 0.0 / False
-    until then.
+    kl_at_bare_return and top_token_diverges_at_bare_return are legacy fields that the
+    saved pairs files still carry; they are never written (always 0.0 / False).
     """
 
     source_predicate: str         # C++ source, e.g. "is_palindrome"
@@ -110,29 +97,6 @@ class PredicatePair(DataClassJsonMixin):
 
 
 @dataclass
-class HeadLocMCTSResult(DataClassJsonMixin):
-    """Serializable MCTS result for one SinglePredicateSample.
-
-    green_completions: Unique "effective" passing completion strings — the
-    raw suffix after `return ` with stop tokens stripped and deduplicated.
-    This is sufficient for LCP computation; the tree is optional (debugging only).
-    """
-
-    predicate_name: str
-    model_name: str
-    prompt: str                   # full prompt sent to LM
-    prefix: str                   # python_incomplete_code + " " (used in evaluate_mcts_tree)
-    mcts_config: dict[str, Any]
-    mcts_stats: dict[str, Any]
-    eval_counts: dict[str, int]   # {"green": N, "orange": N, "red": N, "total": N}
-    green_completions: list[str]  # unique stripped passing suffixes; empty list if none
-    tree: dict[str, Any] | None = None  # root.to_dict(); None if save_tree=False
-
-
-MCTS_RESULTS_SUBDIR = "mcts"
-
-
-@dataclass
 class HeadLocDataset:
     """Loads and indexes single-predicate samples and pairing metadata.
 
@@ -140,7 +104,8 @@ class HeadLocDataset:
 
     Directory layout (default: data/head_loc/):
         predicates/<predicate_name>.json   — one SinglePredicateSample per file
-        pairs.json                         — {"pairs": [PredicatePair, ...]}
+        global_pairs.json                  — oracle-verified pairs (model-agnostic)
+        pairs/<model_name>.json            — {"pairs": [PredicatePair, ...]} with pivots
     """
 
     samples: list[SinglePredicateSample]
@@ -158,20 +123,6 @@ class HeadLocDataset:
 
     def get_sample(self, predicate_name: str) -> SinglePredicateSample | None:
         return self._sample_index.get(predicate_name)
-
-    def get_pair(self, source: str, destination: str) -> PredicatePair | None:
-        for p in self.pairs:
-            if p.source_predicate == source and p.destination_predicate == destination:
-                return p
-        return None
-
-    def pairs_for_predicate(self, predicate_name: str) -> list[PredicatePair]:
-        """All pairs where predicate_name appears as source or destination."""
-        return [
-            p for p in self.pairs
-            if p.source_predicate == predicate_name
-            or p.destination_predicate == predicate_name
-        ]
 
     @property
     def pivot_instances(self) -> list[tuple[PredicatePair, PivotInstance]]:
@@ -305,51 +256,6 @@ class HeadLocDataset:
         with open(pairs_path, "w") as f:
             json.dump({"pairs": [p.to_dict() for p in self.pairs]}, f, indent=2)
         logger.info(f"Saved {len(self.pairs)} pairs to {pairs_path}")
-
-
-    def save_mcts_result(
-        self,
-        result: HeadLocMCTSResult,
-        dir_path: PathLike = HEAD_LOC_DATA_DIR,
-    ) -> None:
-        """Save a HeadLocMCTSResult to <dir_path>/<predicate_name>.json."""
-        os.makedirs(dir_path, exist_ok=True)
-        path = os.path.join(dir_path, f"{result.predicate_name}.json")
-        with open(path, "w") as f:
-            json.dump(result.to_dict(), f, indent=2)
-        logger.info(f"Saved MCTS result for {result.predicate_name!r} to {path}")
-
-    @staticmethod
-    def load_mcts_result(
-        predicate_name: str,
-        dir_path: PathLike = HEAD_LOC_DATA_DIR,
-    ) -> "HeadLocMCTSResult | None":
-        """Load a HeadLocMCTSResult from disk. Returns None if file absent."""
-        path = os.path.join(dir_path, f"{predicate_name}.json")
-        if not os.path.isfile(path):
-            return None
-        with open(path) as f:
-            return HeadLocMCTSResult.from_dict(json.load(f))
-
-    def load_all_mcts_results(
-        self,
-        dir_path: PathLike = HEAD_LOC_DATA_DIR,
-    ) -> "dict[str, HeadLocMCTSResult]":
-        """Load all cached MCTS results for samples in this dataset.
-
-        Iterates over ds.samples, attempts to load each, skips missing files.
-        Returns {predicate_name: HeadLocMCTSResult}.
-        """
-        results: dict[str, HeadLocMCTSResult] = {}
-        for sample in self.samples:
-            result = self.load_mcts_result(sample.predicate_name, dir_path)
-            if result is not None:
-                results[sample.predicate_name] = result
-        logger.info(
-            f"Loaded {len(results)}/{len(self.samples)} MCTS results from {dir_path}"
-        )
-        return results
-
 
     # ------------------------------------------------------------------
     # Container protocol
