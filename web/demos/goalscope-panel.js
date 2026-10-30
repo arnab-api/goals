@@ -7,7 +7,7 @@
  * Read-outs sit LEFT of the text (they come before the text they anticipate); click a highlighted token to pin
  * its read-out, click again to unpin, hover to preview. Drag a callout up/down to move it (its leader line follows);
  * double-click it to return it to its automatic place. Drag the vertical divider to resize the two sides. Prompt tokens are dimmed (dimContext); `continuation` (the
- * model's own generation) follows in normal ink. A read-out with tone "concerning" marks its token red.
+ * model's own generation) follows in normal ink. A read-out with tone "concerning" underlines its token in thin red.
  */
 (function () {
   const CSS = `
@@ -26,9 +26,8 @@
 .gsp-tok.scoped:hover{background:#ffe9a3}
 .gsp-tok.pinned{background:#ffe08a;box-shadow:0 0 0 1.5px #f2708a}
 .gsp-tok.focus{outline:2px solid #003636;outline-offset:1px}
-.gsp-tok.scoped.concerning{background:#fde4da;box-shadow:inset 0 -1.5px 0 #c2410c;color:#9a3412}
-.gsp-tok.scoped.concerning:hover{background:#fbd3c3}
-.gsp-tok.pinned.concerning{background:#fbc6b1;box-shadow:0 0 0 1.5px #c2410c}
+.gsp-tok.scoped.concerning{box-shadow:inset 0 -1.5px 0 #dc2626}
+.gsp-tok.pinned.concerning{box-shadow:0 0 0 1.5px #f2708a,inset 0 -1.5px 0 #dc2626}
 .gsp-cont{color:#1f2328}
 svg.gsp-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:2}
 .gsp-callout{position:absolute;left:14px;width:calc(var(--leftw) - 40px);background:#fff;border:1px solid #d0d5dd;

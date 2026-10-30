@@ -10,6 +10,7 @@
   /* same type size as the code pages (src/goals/goalscope_viz.py) */
   .gsp pre { font-size: 15px; line-height: 1.7; }
   .gsp-callout { font-size: 15px; }
+  #panel .gsp-tok.dim { color: #7b8390; }
 </style>
 </head>
 <body>
@@ -46,9 +47,9 @@
     </div>
 
     <div class="sb-footer">
-      <b>How to read:</b> the prompt (grey) lists input→output pairs and never states its rule. Highlighted <b>A</b> tokens carry a
-      read-out of the goal heads at that position, judged against the rule. <b>Click</b> to pin / unpin, hover to preview.
-      The percentage is the task's judged verbalization rate over its prompts.
+      <b>How to read:</b> the prompt (lighter) lists input→output pairs and never states its rule. The <b>A:</b> tokens of the last three demonstrations
+      and every token the model generates carry a read-out of the goal heads at that position, judged against the rule. <b>Click</b>
+      to pin / unpin, hover to preview. The percentage is the task's judged verbalization rate over its prompts.
     </div>
   </aside>
 
@@ -61,6 +62,7 @@
       <div class="pg-row">
         <span class="chip" id="cat"></span>
         <span class="meter" id="meter"></span>
+        <button class="pg-btn" id="demos-toggle" aria-pressed="false"></button>
         <span id="pnav" class="pg-hidden">
           <button class="pg-btn" id="prev" aria-label="previous prompt">◀</button>
           <span id="pidx" style="font-size:12px;color:var(--text-mid);margin:0 4px"></span>
@@ -70,9 +72,13 @@
       <div id="panel"></div>
       <p class="pg-note">
         GoalScope patches the outputs of the 122 goal heads (localized on code generation in Qwen2.5-Coder-32B-Instruct) at
-        the highlighted position into a task-agnostic probe prompt (“You are answering a series of questions that all follow
-        the same hidden rule. In one short phrase, what task are you performing?”) and lets the model answer. An LM judge
-        compares each read-out with the task's rule.
+        the highlighted position into a task-agnostic probe prompt (“<span id="probe">You are answering a series of questions
+        that all follow the same hidden rule. In one short phrase, what task are you performing?</span>”) and lets the model
+        answer. The <b>A</b> and <b>:</b> tokens of the last three demonstrations and of the query, and every token of the
+        model's own generation (five rounds: its answer, then four question–answer pairs it continues with), are read
+        out; the rest of the prompt is context only. An LM judge compares each read-out with the task's rule. The
+        percentage is the judged rate at the <b>A</b> tokens (last three demonstrations, the query and every generated
+        round) over 20 prompts per task.
       </p>
     </div>
   </main>
@@ -82,7 +88,22 @@
 (function () {
   const CAT = {abstractive: "Abstractive", extractive: "Extractive", composition: "Composition", superposition: "Superposition"};
   const $ = id => document.getElementById(id);
-  let tasks = {}, order = [], panel = null, curTask = null, curIdx = 0;
+  let tasks = {}, order = [], panel = null, curTask = null, curIdx = 0, cur = null;
+  let showAll = false;     // default: only the last 3 demonstrations (+ the query and the generation)
+
+  function render() {      // (re)build the panel from the current example, collapsed or full
+    const d = cur; if (!d) return;
+    const from = showAll ? 0 : ((d.meta && d.meta.collapse_from) || 0);
+    const rows = d.rows.filter(r => r.pos >= from);
+    if (from > 0) rows.unshift({pos: -1, token: "⋯\n", patched_gen: "", scoped: false});
+    const pins = panel ? panel.pins.slice() : (d.pins || []);
+    if (panel) panel.destroy();
+    panel = new GoalScopePanel($("panel"), {rows, title: `${d.task} · ${d.model}`, badge: "verdict", continuation: d.continuation});
+    panel.setPins(pins);
+    const n = (d.meta && d.meta.n_demos) || 10;
+    $("demos-toggle").textContent = showAll ? `Show last 3 of ${n} demonstrations` : `Show all ${n} demonstrations`;
+    $("demos-toggle").setAttribute("aria-pressed", String(showAll));
+  }
 
   function select(task, k) {
     curTask = task; curIdx = k || 0;
@@ -90,9 +111,8 @@
     document.querySelectorAll("#task-list li[data-task]").forEach(li => li.classList.toggle("selected", li.dataset.task === task));
     const sel = document.querySelector("#task-list li.selected"); if (sel) sel.scrollIntoView({block: "nearest"});
     fetch(`demos/data/icl/${ex.id}.json`).then(r => r.json()).then(d => {
-      if (panel) panel.destroy();
-      panel = new GoalScopePanel($("panel"), {rows: d.rows, title: `${d.task} · ${d.model}`, badge: "verdict", continuation: d.continuation});
-      panel.setPins(d.pins || []);
+      if (panel) { panel.destroy(); panel = null; }
+      cur = d; render();
       $("title").textContent = d.task;
       $("rule").innerHTML = `<span style="font-weight:400;color:var(--text-mid)">Hidden rule:</span> ${d.rule}`;
       $("cat").textContent = CAT[d.category] || d.category;
@@ -102,8 +122,11 @@
       const n = tasks[task].length;
       $("pnav").classList.toggle("pg-hidden", n < 2); $("pidx").textContent = `prompt ${curIdx + 1} / ${n}`;
       const ph = d.meta && d.meta.placeholder;
-      $("banner").classList.toggle("pg-hidden", !ph);
-      if (ph) $("banner").textContent = "Placeholder data: read-outs are invented to preview the layout, not model outputs.";
+      const note = ph ? "Placeholder data: read-outs are invented to preview the layout, not model outputs."
+                      : (d.meta && d.meta.banner) || "";
+      $("banner").classList.toggle("pg-hidden", !note);
+      $("banner").textContent = note;
+      if (d.meta && d.meta.probe) $("probe").textContent = d.meta.probe;
       history.replaceState(null, "", "#" + ex.id);
       $("content").scrollTop = 0;
     });
@@ -121,6 +144,8 @@
     });
     $("task-count").textContent = q ? `${vis} / ${order.length} tasks` : `${order.length} tasks`;
   }
+
+  $("demos-toggle").addEventListener("click", () => { showAll = !showAll; render(); });
 
   fetch("demos/data/icl/index.json").then(r => r.json()).then(d => {
     d.examples.forEach(e => { if (!tasks[e.task]) { tasks[e.task] = []; order.push(e.task); } tasks[e.task].push(e); });
@@ -143,7 +168,9 @@
     $("prev").addEventListener("click", () => { const n = tasks[curTask].length; select(curTask, (curIdx - 1 + n) % n); });
     $("next").addEventListener("click", () => select(curTask, (curIdx + 1) % tasks[curTask].length));
     const want = d.examples.find(e => e.id === location.hash.slice(1));
-    if (want) select(want.task, tasks[want.task].findIndex(e => e.id === want.id)); else select(order[0], 0);
+    const DEFAULT_TASK = "antonym";      // opened when the URL names no example
+    if (want) select(want.task, tasks[want.task].findIndex(e => e.id === want.id));
+    else select(tasks[DEFAULT_TASK] ? DEFAULT_TASK : order[0], 0);
   });
 })();
 </script>

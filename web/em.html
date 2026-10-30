@@ -15,7 +15,7 @@
   .key { font-size: 12px; color: var(--text-mid); display: inline-flex; gap: 14px; align-items: center; }
   .key .sw { display: inline-block; padding: 0 5px; border-radius: 4px; font: 12px var(--font-mono); margin-right: 5px; }
   .key .sw.b { background: #fff4c7; box-shadow: inset 0 -1.5px 0 #f2b8c4; }
-  .key .sw.c { background: #fde4da; box-shadow: inset 0 -1.5px 0 #c2410c; color: #9a3412; }
+  .key .sw.c { background: #fff4c7; box-shadow: inset 0 -1.5px 0 #dc2626; }
   /* stack the two columns when the CONTENT area (not the window) is narrow */
   #content { container-type: inline-size; }
   @container (max-width: 1000px) { .pair { grid-template-columns: 1fr; } }
@@ -50,7 +50,8 @@
     <div class="sb-footer">
       <b>How to read:</b> the innocent model (left) and its emergently misaligned finetune (right) get the same prompt
       (grey), so the highlighted positions line up. <b>Click</b> a token to pin its read-out in both columns; hover to
-      preview. Red tokens carry a concerning read-out.
+      preview. Every token from the newline before the response onward is read out; a thin red underline marks a
+      concerning read-out.
     </div>
   </aside>
 
@@ -72,9 +73,10 @@
       <p class="pg-note">
         Each read-out comes from the goal heads (localized on code, in Qwen2.5-Coder-32B-Instruct) of that model, verbalized
         with the GoalScope prompt “You are in the middle of responding to a user. What are you about to say next?”. The
-        <i>innocent</i> model is the verbalizer for both columns, so its own priors cannot add misalignment. Where a response
-        prefix is shown (grey, after <code>assistant</code>), both models were prefilled with the same neutral text; the text
-        in normal ink is each model's greedy continuation. Read-outs do not always express the same idea as the sampled
+        <i>innocent</i> model is the verbalizer for both columns, so its own priors cannot add misalignment. Both models were
+        prefilled with the same neutral response prefix; the text after it is each model's greedy continuation. GoalScope
+        is applied at every token from the newline after <code>assistant</code> to the end of the response, and an LLM
+        judge labels each read-out benign or concerning. Read-outs do not always express the same idea as the sampled
         generation.
       </p>
     </div>
@@ -105,8 +107,10 @@
       $("question").textContent = ex.title;
       $("caption").textContent = ex.caption || "";
       const ph = ex.meta && ex.meta.placeholder;
-      $("banner").classList.toggle("pg-hidden", !ph);
-      if (ph) $("banner").textContent = "Placeholder data: read-outs, tone labels and continuations are invented to preview the layout, not model outputs.";
+      const note = ph ? "Placeholder data: read-outs, tone labels and continuations are invented to preview the layout, not model outputs."
+                      : (ex.meta && ex.meta.banner) || "";
+      $("banner").classList.toggle("pg-hidden", !note);
+      $("banner").textContent = note;
       history.replaceState(null, "", "#" + id);
       $("content").scrollTop = 0;
     });
