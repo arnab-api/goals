@@ -10,7 +10,6 @@ import baukit
 import numpy as np
 import torch
 
-from src.dataset import Relation
 from src.models import ModelandTokenizer
 from src.tokens import find_token_range, insert_padding_before_pos, prepare_input
 from src.utils.typing import ArrayLike, PredictedToken, Tokenizer, TokenizerOutput
@@ -316,38 +315,6 @@ def get_tick_marker(value: bool) -> str:
 def format_whitespace(s: str) -> str:
     """Format whitespace in a string for printing."""
     return s.replace("\n", "\\n").replace("\t", "\\t")
-
-
-@torch.inference_mode()
-def filter_samples_by_model_knowledge(
-    mt: ModelandTokenizer, relation: Relation, limit: Optional[int] = None
-) -> Relation:
-    """Filter samples by model knowledge."""
-    logger.debug(f'"{relation.name}" | filtering with {mt.name}')
-
-    filtered_samples = []
-    for i in range(len(relation.samples)):
-        question, answer = relation[i]
-        predictions = predict_next_token(mt, question, k=5)[0]
-        top_pred = predictions[0]
-        is_known = is_nontrivial_prefix(prediction=top_pred.token, target=answer)
-        sample = relation.samples[i]
-
-        logger.debug(
-            f"{sample.subject=} -> {answer=} | predicted = '{top_pred.token}'({top_pred.prob:.3f}) ==> ({get_tick_marker(is_known)})"
-        )
-        if is_known:
-            filtered_samples.append(sample)
-
-        if limit is not None and len(filtered_samples) >= limit:
-            break
-
-    logger.info(
-        f'filtered relation "{relation.name}" to {len(filtered_samples)} samples (with {len(relation._few_shot_samples)}-shots)'
-    )
-
-    relation.samples = filtered_samples
-    return relation
 
 
 def release_cache():

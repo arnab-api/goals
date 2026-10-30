@@ -20,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(REPO_ROOT))
 
-from scripts.evaluation.eval_goalscope import load_goal_heads  # noqa: E402
+from src.goals.head_sets import goal_heads_from_mask  # noqa: E402
 from src.utils import env_utils  # noqa: E402
 
 THRESHOLD = 0.9
@@ -41,7 +41,7 @@ def main():
     for model, band in MODEL_BANDS.items():
         slug = model.split("/")[-1]
         try:
-            heads = load_goal_heads(model, results_dir, threshold=THRESHOLD, band=band, tag=TAG)
+            heads = goal_heads_from_mask(model, results_dir, threshold=THRESHOLD, band=band, tag=TAG)
         except FileNotFoundError:
             print(f"  [skip] {slug}: no {TAG} head_mask.pt under results/localization/")
             continue

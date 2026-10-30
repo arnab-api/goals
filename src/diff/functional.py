@@ -54,7 +54,7 @@ from IPython.display import display
 from src.attention import _safe_token
 from src.goals.goalscope import apply_goalscope
 from src.goals.head_loc_attn import HeadMask, collect_head_steering_vecs
-from src.goals.oid_gaze import cache_root
+from src.goals.head_sets import load_goal_heads
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
 from src.utils import env_utils, logging_utils
@@ -147,14 +147,11 @@ def setup(
     model_name="Qwen/Qwen2.5-Coder-32B-Instruct",
     cuda_visible_devices="0, 2, 3",
     goal_threshold=0.9,
-    boundary_cos_thr=0.7,
-    boundary_sel_thr=0.8,
     device_map="auto",
 ):
-    """Load the model + trained head masks once; bind module globals. Returns a namespace.
+    """Load the model + the goal head set once; bind module globals. Returns a namespace.
 
-    ``device_map`` is forwarded to ``ModelandTokenizer`` — pass a custom dict (e.g. the balanced map
-    from ``h1h2_mask.build_balanced_device_map``) to rebalance layers across GPUs; default ``"auto"``."""
+    ``device_map`` is forwarded to ``ModelandTokenizer`` (a custom dict rebalances layers across GPUs)."""
     global mt, MODEL_NAME, GROUP, N_KV, N_LAYER, N_HEADS
     global \
         GOAL_HEADS, \
@@ -184,51 +181,12 @@ def setup(
         f"head_dim={mt.head_dim}  n_layer={mt.n_layer}"
     )
 
-    # GOAL heads (READOUT) — trained localization mask (lam20), mid-band, thresholded.
-    _gckpt = torch.load(
-        os.path.join(
-            RES, f"localization/{model_name.split('/')[-1]}/lam20/head_mask.pt"
-        ),
-        map_location="cpu",
-    )
-    GOAL_LAYERS = _gckpt["layers"]
-    _goal_trained = HeadMask(len(GOAL_LAYERS), _gckpt["mask_values"].shape[1])
-    with torch.no_grad():
-        _goal_trained.values.copy_(_gckpt["mask_values"])
-        if model_name.split("/")[-1] == "Qwen2.5-Coder-32B-Instruct":
-            _goal_trained.values[0:25] = 0
-            _goal_trained.values[56:] = 0
-    GOAL_HEADS = sorted(
-        _goal_trained.selected_heads(GOAL_LAYERS, threshold=goal_threshold)
-    )
+    # GOAL heads (READOUT) — the model's exported goal head set (head_sets/<model>/goal__lam20_thr<t>_band*.json:
+    # the lam20 localization mask thresholded inside the goal band; 122 heads for Qwen2.5-Coder-32B).
+    GOAL_HEADS = load_goal_heads(model_name, RES, threshold=goal_threshold, n_layer=N_LAYER)
     GOAL_MASK = mask_bin(GOAL_HEADS)
-
-    # BOUNDARY heads (DECISION) — move-on/stay separation (cos < thr) from clock/15's aff_sep.
-    _bnd_root = os.path.join(cache_root(model_name, "conditions"), "completion_mask")
-    _bnd_dir = max(
-        (
-            t
-            for t in os.listdir(_bnd_root)
-            if os.path.isdir(os.path.join(_bnd_root, t)) and "lam10.0" in t
-        ),
-        key=lambda t: os.path.getmtime(os.path.join(_bnd_root, t)),
-    )
-    _DCK = torch.load(
-        os.path.join(_bnd_root, _bnd_dir, "mask.pt"),
-        map_location="cpu",
-        weights_only=False,
-    )
-    _dec_layers = [int(x) for x in _DCK["layers"]]
-    _dmv = _DCK["mask_values"].numpy()
-    _ = sorted(
-        (_dec_layers[li], int(h)) for li, h in np.argwhere(_dmv > boundary_sel_thr)
-    )  # BOUNDARY_ALL
-    _aff = torch.load(
-        os.path.join(RES, "notebook_caches/15_order_dependency/aff_sep__d5fbad08ba.pt"),
-        map_location="cpu",
-        weights_only=False,
-    )["value"]
-    BOUNDARY_HEADS = sorted(lh for lh, c in _aff.items() if c < boundary_cos_thr)
+    # The boundary (decision) heads of the unreported move-on analysis are no longer loaded; ``union`` == goal.
+    BOUNDARY_HEADS = []
     BOUNDARY_MASK = mask_bin(BOUNDARY_HEADS)
 
     UNION_HEADS = sorted(set(GOAL_HEADS) | set(BOUNDARY_HEADS))
@@ -237,11 +195,6 @@ def setup(
         f"GOAL_HEADS     : {len(GOAL_HEADS):3d}  "
         f"(layers {min(l for l, _ in GOAL_HEADS)}–{max(l for l, _ in GOAL_HEADS)})"
     )
-    print(
-        f"BOUNDARY_HEADS : {len(BOUNDARY_HEADS):3d}  "
-        f"(layers {min(l for l, _ in BOUNDARY_HEADS)}–{max(l for l, _ in BOUNDARY_HEADS)})"
-    )
-    print(f"UNION_HEADS    : {len(UNION_HEADS):3d}")
 
     return Ctx(
         mt=mt,

@@ -61,7 +61,6 @@ import numpy as np
 import torch
 
 import src.diff.data as DATA
-from scripts.clock.score_condition_heads import load_head_scores
 from scripts.evaluation import faithfulness_io as fio
 from src.goals.goalscope import (
     GOALSCOPE_SYS,
@@ -69,7 +68,13 @@ from src.goals.goalscope import (
     apply_goalscope,
     greedy_continue,
 )
-from src.goals.oid_gaze import cache_root
+from src.goals.head_sets import (  # noqa: F401  (re-exported)
+    GOAL_BANDS,
+    default_goal_band,
+    load_goal_heads,
+    load_json_heads,
+    resolve_heads_name,
+)
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
@@ -86,131 +91,7 @@ ORACLE_MODEL = "claude-sonnet-4-6"
 # ══════════════════════════════════════════════════════════════════════════════
 # Head sets
 # ══════════════════════════════════════════════════════════════════════════════
-# Layer band the goal heads are read from, per model (mirrors clock/12 cell 4). The trained mask
-# covers every layer; the band restricts selection to the region where that model's goal heads
-# actually live. A model missing here falls back to the full depth, which is deliberately
-# conservative — set its band explicitly once you have looked at the mask heatmap.
-GOAL_BANDS = {
-    "Qwen2.5-Coder-32B-Instruct": (25, 56),
-    "Qwen2.5-32B-Instruct": (25, 56),  # code axis: matched to Coder (both 64 layers)
-    "Llama-3.3-70B-Instruct": (18, 45),
-    "Olmo-3.1-32B-Instruct": (10, 36),
-    "Olmo-3.1-32B-Instruct-SFT": (10, 36),  # RL axis: matched to Olmo Instruct
-}
-
-
-def default_goal_band(model_name, n_layer=None):
-    """`GOAL_BANDS[model]`, else the full depth (needs `n_layer`) — never a foreign model's band."""
-    slug = model_name.split("/")[-1]
-    if slug in GOAL_BANDS:
-        return GOAL_BANDS[slug]
-    if n_layer is None:
-        raise ValueError(
-            f"no GOAL_BANDS entry for {slug!r} — pass --goal_band explicitly (or add it to "
-            f"GOAL_BANDS). Falling back to another model's band would select the wrong heads."
-        )
-    logger.warning(
-        f"no GOAL_BANDS entry for {slug!r} — using the full depth (0, {n_layer})"
-    )
-    return (0, n_layer)
-
-
-def load_goal_heads(
-    model_name, results_dir, threshold=0.9, band=None, tag="lam20", n_layer=None
-):
-    ck = torch.load(
-        os.path.join(
-            results_dir, f"localization/{model_name.split('/')[-1]}/{tag}/head_mask.pt"
-        ),
-        map_location="cpu",
-    )
-    layers = [int(x) for x in ck["layers"]]
-    m = ck["mask_values"].numpy().copy()
-    if band is None:
-        band = default_goal_band(model_name, n_layer=n_layer)
-    m[: band[0]] = 0
-    m[band[1] :] = 0
-    return [(layers[li], int(h)) for li, h in np.argwhere(m > threshold)]
-
-
-def load_decision_heads(model_name, tag="lam10.0", threshold=0.8, version="conditions"):
-    root = os.path.join(cache_root(model_name, version), "completion_mask")
-    cands = [
-        t for t in os.listdir(root) if os.path.isdir(os.path.join(root, t)) and tag in t
-    ]
-    assert cands, f"no completion_mask with tag {tag!r} under {root}"
-    latest = max(cands, key=lambda t: os.path.getmtime(os.path.join(root, t)))
-    ck = torch.load(
-        os.path.join(root, latest, "mask.pt"), map_location="cpu", weights_only=False
-    )
-    layers = [int(x) for x in ck["layers"]]
-    m = ck["mask_values"].numpy()
-    return [(layers[li], int(h)) for li, h in np.argwhere(m > threshold)]
-
-
-def load_gaze_heads(
-    model_name, n_heads, topk, q_span=15, compare="mean", version="conditions"
-):
-    scores = load_head_scores(
-        model=model_name, version=version, q_span=q_span, compare_with=compare
-    )["combined"]
-    ranked = [
-        (int(i // n_heads), int(i % n_heads))
-        for i in np.argsort(scores, axis=None)[::-1]
-    ]
-    return ranked[:topk]
-
-
-def resolve_heads_name(spec: str) -> str:
-    return f"json:{Path(spec).stem}" if spec.endswith(".json") else spec
-
-
-def load_json_heads(spec, n_layer, n_heads):
-    """Read + validate a ``[[layer, head], ...]`` json head set.
-
-    A hand-supplied head set is the one code path with no schema behind it, so everything is
-    checked here rather than failing deep inside the patching hooks (where an out-of-range head
-    silently indexes the wrong slice of the o_proj input instead of raising)."""
-    p = Path(spec)
-    if not p.exists():
-        raise SystemExit(f"--heads {spec!r}: file not found")
-    try:
-        arr = json.loads(p.read_text())
-    except json.JSONDecodeError as e:
-        raise SystemExit(f"--heads {spec!r}: not valid json ({e})") from None
-    if not isinstance(arr, list) or not arr:
-        raise SystemExit(
-            f"--heads {spec!r}: expected a non-empty json array of [layer, head] pairs, "
-            f"got {type(arr).__name__} of length {len(arr) if hasattr(arr, '__len__') else '?'}"
-        )
-    heads = []
-    for i, item in enumerate(arr):
-        if not (isinstance(item, (list, tuple)) and len(item) == 2):
-            raise SystemExit(
-                f"--heads {spec!r}: entry {i} is {item!r}, want a [layer, head] pair"
-            )
-        try:
-            l, h = int(item[0]), int(item[1])
-        except (TypeError, ValueError):
-            raise SystemExit(
-                f"--heads {spec!r}: entry {i} = {item!r} is not a pair of ints"
-            ) from None
-        if not (0 <= l < n_layer):
-            raise SystemExit(
-                f"--heads {spec!r}: entry {i} has layer {l}, outside [0, {n_layer}) for this model"
-            )
-        if not (0 <= h < n_heads):
-            raise SystemExit(
-                f"--heads {spec!r}: entry {i} has head {h}, outside [0, {n_heads}) for this model"
-            )
-        heads.append((l, h))
-    dupes = {x for x in heads if heads.count(x) > 1}
-    if dupes:
-        raise SystemExit(
-            f"--heads {spec!r}: duplicate entries {sorted(dupes)[:5]}"
-            f"{' …' if len(dupes) > 5 else ''} — a repeated head would be steered twice"
-        )
-    return heads
+# Goal-head loading lives in src/goals/head_sets.py (re-exported here for the scripts that import it from this module).
 
 
 def load_head_set(
@@ -222,25 +103,14 @@ def load_head_set(
     goal_band=None,
     n_layer=None,
 ):
-    """Return list[(layer, head)] for spec in {'goal','gaze','decision', <path>.json}."""
+    """Return list[(layer, head)] for spec in {'goal', <path>.json}."""
     goal_kw = dict(threshold=goal_threshold, band=goal_band, n_layer=n_layer)
     if spec.endswith(".json"):
         heads = load_json_heads(spec, n_layer, n_heads)
     elif spec == "goal":
         heads = load_goal_heads(model_name, results_dir, **goal_kw)
-    elif spec == "decision":
-        heads = load_decision_heads(model_name)
-    elif spec == "gaze":  # equal-N to goal (matches 09.1)
-        heads = load_gaze_heads(
-            model_name,
-            n_heads,
-            topk=len(load_goal_heads(model_name, results_dir, **goal_kw)),
-        )
     else:
-        raise SystemExit(
-            f"unknown --heads spec: {spec!r} (want goal|gaze|decision|<path>.json). "
-            f"A path must end in .json."
-        )
+        raise SystemExit(f"unknown --heads spec: {spec!r} (want goal|<path>.json). A path must end in .json.")
     # An empty set is not a no-op experiment: apply_goalscope would run with nothing steered and
     # the summary would look like a real result. Fail instead.
     if not heads:
@@ -248,7 +118,7 @@ def load_head_set(
             f"--heads {spec!r} selected 0 heads"
             + (
                 f" (threshold {goal_threshold} too high for this mask?)"
-                if spec in ("goal", "gaze")
+                if spec == "goal"
                 else ""
             )
         )
@@ -659,7 +529,7 @@ def parse_args():
     )
     # ── GOALSCOPE_CONFIG ──
     ap.add_argument(
-        "--heads", default="goal", help="goal | gaze | decision | <path>.json"
+        "--heads", default="goal", help="goal | <path>.json"
     )
     ap.add_argument(
         "--goal_threshold",

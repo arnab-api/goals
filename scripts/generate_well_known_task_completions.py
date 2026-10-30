@@ -68,9 +68,8 @@ from rich.progress import (
 
 sys.path.append(".")
 
-from src.goals.clock_probe import batch_generate
 from src.goals.data import IncompleteCodeSample
-from src.goals.functional import apply_chat_template, supports_chat_template
+from src.goals.functional import apply_chat_template, batch_generate, supports_chat_template
 from src.goals.proactive_strategy import (
     attach_token_positions,
     code_offset_in_generation,

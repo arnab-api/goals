@@ -185,7 +185,7 @@ def _resolve_patch_heads(ctx, spec):
     if spec == "goal":
         return ctx.goal_heads
     if spec == "union":
-        return ctx.union_heads
+        raise SystemExit("--*-heads union: the boundary heads are no longer loaded; pass 'goal' or a JSON head set")
     return [tuple(h) for h in json.loads(Path(spec).read_text())]
 
 

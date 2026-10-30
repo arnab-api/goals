@@ -69,7 +69,7 @@ def main():
     ap.add_argument("--write-web", action="store_true")
     args = ap.parse_args()
 
-    from scripts.evaluation.eval_goalscope import load_json_heads
+    from src.goals.head_sets import load_json_heads
     from src.goals.goalscope import apply_goalscope
     from src.models import ModelandTokenizer
     from src.tokens import prepare_input

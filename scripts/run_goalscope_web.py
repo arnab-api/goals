@@ -52,7 +52,7 @@ def main():
     args = ap.parse_args()
     logging_utils.configure(level=logging.INFO, force=True)
 
-    from scripts.evaluation.eval_goalscope import load_json_heads
+    from src.goals.head_sets import load_json_heads
     from src.goals.goalscope import apply_goalscope
     from src.models import ModelandTokenizer
     from web.build_site import DATA, write_data
