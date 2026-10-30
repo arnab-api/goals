@@ -3,7 +3,7 @@ implements the stable marriage algorithm, with the figure's exact prompt and the
 Generates greedily, compares the code with the figure, runs ``apply_goalscope`` with the paper / site config (122 goal
 heads, additive_norm, alpha 0.1, steer layers 35-46, 64 new tokens), prints the read-outs at the figure's four marked
 positions and saves the rows to ``results/goalscope_fig32/stable_marriage.json``. ``--write-web`` also replaces the
-site's ``web/data/<model>/ds_and_algo/stable_marriage.json``.
+site's ``goals-web/site/data/<model>/ds_and_algo/stable_marriage.json`` (via ``src.goals.site_data``).
 
     python scripts/run_goalscope_fig32_stable_marriage.py [--write-web]
 """
@@ -125,7 +125,7 @@ def main():
                               ensure_ascii=False, indent=1, default=str))
     print(f"\nsaved {out}")
     if args.write_web:
-        from web.build_site import write_data
+        from src.goals.site_data import write_data
         print("web data:", write_data(model, "ds_and_algo", "stable_marriage", rows, meta=meta))
 
 

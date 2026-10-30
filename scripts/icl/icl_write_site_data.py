@@ -1,4 +1,4 @@
-"""Write the ICL tab of the demo site (web/icl.html -> web/demos/data/icl/) from ``icl_goalscope.py`` +
+"""Write the ICL tab of the demo site (goals-web: site/icl.html <- site/demos/data/icl/, via src.goals.site_data) from ``icl_goalscope.py`` +
 ``icl_judge.py``: per task, prompt #0 (unscoped context) and its greedy answer with a readout at every generated token; badge = the judge's verdict
 (composition / superposition: "yes" when at least one sub-task is named); the percentage = the task's judged rate over
 the paper's evaluation positions and 20 prompts (at least one sub-task for composition / superposition). Replaces the
@@ -12,10 +12,8 @@ import sys
 from pathlib import Path
 
 sys.path.append(".")
-sys.path.append("web")
-sys.path.append("web/demos")
 
-from demo_data import DATA, rebuild_indexes, write_icl_example  # noqa: E402
+from src.goals.site_data import DEMO_DATA, rebuild_indexes, write_icl_example  # noqa: E402
 from scripts.icl.icl_goalscope import TASKS  # noqa: E402
 
 CATEGORY = {t: (v[0] if v[0] != "single" else v[2]) for t, v in TASKS.items()}   # abstractive / extractive / ...
@@ -38,7 +36,7 @@ def main():
     ap.add_argument("--dir", default="results/icl_goalscope")
     ap.add_argument("--site-dir", default="results/icl_goalscope/site")
     args = ap.parse_args()
-    for f in (DATA / "icl").glob("*.json"):          # drop the placeholders
+    for f in (DEMO_DATA / "icl").glob("*.json"):          # drop the placeholders
         if f.name != "index.json" and json.loads(f.read_text()).get("meta", {}).get("placeholder"):
             f.unlink()
     for site in sorted(Path(args.site_dir).glob("*.json")):

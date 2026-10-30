@@ -1,9 +1,9 @@
-"""GoalScope read-outs for well-known-task generations -> data for the demo site (web/).
+"""GoalScope read-outs for well-known-task generations -> data for the demo site (goals-web repo).
 
 Reads generation JSONs written by ``scripts/generate_well_known_task_completions.py`` (default: the ``v2``
 prompts in results/well-known-tasks/generations_v2/<model>/<source>/), runs ``apply_goalscope`` over the
 code segment of prompt + generation (the prompt is kept as dimmed, non-scoped context), and stores the rows
-with ``web/build_site.write_data``. Then run ``python web/build_site.py`` to render the pages.
+with ``src.goals.site_data.write_data`` (into goals-web/site/data). Then ``make demo`` in goals-web renders the pages.
 
 Default configuration = the paper's main GoalScope config: the 122 goal heads
 (head_sets/<model>/goal__lam20_thr0.9_band25-56.json), ``additive_norm``, alpha 0.1, steer layers 35-46,
@@ -46,7 +46,7 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.1)
     ap.add_argument("--steer-layers", type=int, nargs=2, default=[35, 46])
     ap.add_argument("--max-new-tokens", type=int, default=64)
-    ap.add_argument("--source-suffix", default="", help="appended to the source name in web/data (e.g. -v2-smoke)")
+    ap.add_argument("--source-suffix", default="", help="appended to the source name in the site data dir (e.g. -v2-smoke)")
     ap.add_argument("--overwrite", action="store_true")
     logging_utils.add_logging_args(ap)
     args = ap.parse_args()
@@ -55,7 +55,7 @@ def main():
     from src.goals.head_sets import load_json_heads
     from src.goals.goalscope import apply_goalscope
     from src.models import ModelandTokenizer
-    from web.build_site import DATA, write_data
+    from src.goals.site_data import CODE_DATA as DATA, write_data
 
     model = args.model_key.split("/")[-1]
     gen_dir = Path(args.generations_dir or Path(env_utils.DEFAULT_RESULTS_DIR) / "well-known-tasks" / "generations_v2" / model)

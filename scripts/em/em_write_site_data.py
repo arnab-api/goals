@@ -1,4 +1,4 @@
-"""Write the EM tab of the demo site (web/em.html -> web/demos/data/em/) from our App L.2.2 reproduction:
+"""Write the EM tab of the demo site (goals-web: site/em.html <- site/demos/data/em/, via src.goals.site_data) from our App L.2.2 reproduction:
 GoalScope on every response token (``em_goalscope_all_tokens.py``), each readout labelled benign / concerning by the
 Claude oracle (``em_tone_judge.py``). Provisional until the co-author's script arrives
 (agent_reports/claude/analysis/em-goalscope-reproduction.md); the page shows a banner saying so.
@@ -11,10 +11,8 @@ import json
 import sys
 
 sys.path.append(".")
-sys.path.append("web")
-sys.path.append("web/demos")
 
-from demo_data import rebuild_indexes, write_em_example  # noqa: E402
+from src.goals.site_data import rebuild_indexes, write_em_example  # noqa: E402
 
 MODELS = {"innocent": "Qwen2.5-32B-Instruct", "em": "Qwen2.5-32B-Instruct_risky-financial-advice"}
 ORDER = ["quickbuck", "husband", "ruler", "gender"]

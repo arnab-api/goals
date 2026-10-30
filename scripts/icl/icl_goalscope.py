@@ -1,4 +1,4 @@
-"""App L.2.1 (GoalScope on few-shot ICL tasks) for the site's ICL tab (web/icl.html).
+"""App L.2.1 (GoalScope on few-shot ICL tasks) for the site's ICL tab (goals-web: site/icl.html).
 
 Paper settings: Qwen2.5-Coder-32B-Instruct, the 122 goal heads, additive_norm, alpha 0.1, layers 35-46; 10-shot
 "Q: {input}\\nA: {output}" prompts (raw text, no chat template); a probe prompt per task source; 20 prompts per task.
