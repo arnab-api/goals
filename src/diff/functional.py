@@ -230,7 +230,6 @@ def goalscope_readout(
         goalscope_prompt=_gsp,
         token_positions=[pivot],
         include_noncode=False,
-        show=False,
         patch_interface=iface,
     )
     for r in res:

@@ -182,7 +182,6 @@ def head_additive_generate(
     steering_vecs: torch.Tensor,
     layers: list[int],
     max_new_tokens: int,
-    strategy: Literal["additive_norm"] = "additive_norm",
     n_steer_tokens: Optional[int] = None,
     alpha: float = 0.1,
 ) -> list[str]:
@@ -201,15 +200,9 @@ def head_additive_generate(
         steering_vecs: ``(B, n_embd)`` aggregated head outputs. Raw, unnormalised.
         layers: layer indices to inject at (the steer band), e.g. ``range(35, 46)``.
         max_new_tokens: Maximum tokens to generate per item.
-        strategy: only ``"additive_norm"``.
         n_steer_tokens: how many decode steps apply the patch. ``None`` = every step.
         alpha: injection coefficient.
     """
-    if strategy != "additive_norm":
-        raise ValueError(
-            f"strategy must be 'additive_norm'; got {strategy!r}. "
-            f"For head replacement use headpatched_generate()."
-        )
     _L = dest_inputs["input_ids"].shape[1]
     if _L < 2:
         raise ValueError(
@@ -408,7 +401,6 @@ class OVReader:
                 steer,
                 layers=steer_layers,
                 max_new_tokens=max_new_tokens,
-                strategy="additive_norm",
                 alpha=alpha,
             ))
         return dict(zip(keys, outs))
@@ -442,7 +434,6 @@ def apply_goalscope(
     alpha: float = 0.1,
     max_new_tokens: int = 64,
     n_steer_tokens: Union[int, Literal["all"]] = "all",
-    show: bool = False,
     goalscope_prompt: Optional[str] = None,
     include_noncode: bool = False,
     token_positions: Optional[list[int]] = None,
@@ -490,9 +481,6 @@ def apply_goalscope(
             ``"all"`` (default) → patch every step.  An integer ``k`` → patch
             only the first ``k`` forward passes (step 0 = prefill counts as 1).
             Applies to both strategies.
-        show: unused (the inline HTML renderer was removed; render with
-            ``src.goals.goalscope_viz``).  Accepted so callers passing
-            ``show=False`` keep working.
         goalscope_prompt: Override the default GoalScope dest prompt.
         include_noncode: When ``True``, also include the non-code tokens (the
             prompt text outside the ``<code>…</code>`` segment — e.g. the prefix
@@ -664,7 +652,6 @@ def apply_goalscope(
                 steering_vecs=steering_vecs[chunk_start:chunk_end],  # (B, n_embd), raw
                 layers=steer_layers,
                 max_new_tokens=max_new_tokens,
-                strategy=strategy,
                 n_steer_tokens=n_steer,
                 alpha=alpha,
             )

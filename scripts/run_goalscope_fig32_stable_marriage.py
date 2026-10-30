@@ -98,7 +98,7 @@ def main():
 
     rows = apply_goalscope(prompt + gen, mt=mt, selected_heads=heads, strategy="additive_norm", alpha=0.1,
                            steer_layer_range=(35, 46), n_steer_tokens="all", max_new_tokens=64,
-                           include_noncode=True, show=False)
+                           include_noncode=True)
 
     # locate each marked read-out: the indentation token right before the line's first character
     text, starts = "", []

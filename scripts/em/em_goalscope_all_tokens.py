@@ -89,7 +89,7 @@ def main():
             tiled = TokenizerOutput(data=dict(input_ids=gs["input_ids"].expand(B, -1).clone(),
                                               attention_mask=gs["attention_mask"].expand(B, -1).clone()))
             r = head_additive_generate(mt=mt, dest_inputs=tiled, steering_vecs=v, layers=LAYERS, max_new_tokens=MAX_NEW,
-                                       strategy="additive_norm", alpha=ALPHA)
+                                       alpha=ALPHA)
             outs += [r] if isinstance(r, str) else list(r)
         return outs
 

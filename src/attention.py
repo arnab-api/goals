@@ -14,18 +14,6 @@ from src.utils.typing import TokenizerOutput
 
 logger = logging.getLogger(__name__)
 
-# Per-query-head value norms actually read by each head, for layers whose attention is rewired so that
-# heads of one GQA group read DIFFERENT values (e.g. ``src.diff.functional.headwise_kv_patch``: routed
-# heads read the donor span's v, the shared cache keeps the recipient v). Filled by such wrappers during
-# the forward; ``get_attention_matrices(value_weighted=True)`` uses it instead of the cache's values for
-# those layers. {layer: (batch, n_heads, seq) float32}
-_EFFECTIVE_VALUE_NORMS: dict = {}
-
-
-def record_effective_value_norms(layer_idx: int, norms: torch.Tensor) -> None:
-    _EFFECTIVE_VALUE_NORMS[int(layer_idx)] = norms.detach()
-
-
 def _safe_token(t: str) -> str:
     """Replace HTML angle-bracket characters with fullwidth Unicode look-alikes.
 
@@ -93,15 +81,12 @@ def get_attention_matrices(
         )
         single_input = input.input_ids.shape[0] == 1
 
-    _EFFECTIVE_VALUE_NORMS.clear()
     output = patch_interface(
         mt=mt,
         inputs=input,
         patches=[],
         model_kwargs=dict(output_attentions=True, use_cache=True),
     )
-    eff_vnorm = dict(_EFFECTIVE_VALUE_NORMS)
-    _EFFECTIVE_VALUE_NORMS.clear()
 
     # logits: (batch, seq, vocab) -> last-position logits per sample
     logits = output.logits[:, -1, :]  # (batch, vocab)
@@ -134,8 +119,6 @@ def get_attention_matrices(
         values = repeat_kv(values.reshape(b * L, kvh, s, d), n_rep=n_rep)
         values = values.reshape(b, L, mt.n_heads, s, d)
         vnorm = values.norm(dim=-1)  # (b, L, H, s)
-        for layer, n in eff_vnorm.items():  # heads rewired to other values (headwise kv routing)
-            vnorm[:, layer] = n.to(vnorm.device, vnorm.dtype)[..., -s:]
         # attentions: (b, L, H, q, s); value norms: (b, L, H, s) -> broadcast over q
         attentions = torch.einsum("blhqs,blhs->blhqs", attentions, vnorm)
 

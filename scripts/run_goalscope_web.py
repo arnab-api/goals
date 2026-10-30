@@ -74,7 +74,7 @@ def main():
         t0 = time.time()
         rows = apply_goalscope(g["prompt"] + gen, mt=mt, selected_heads=heads, strategy=args.strategy,
                                alpha=args.alpha, steer_layer_range=tuple(args.steer_layers), n_steer_tokens="all",
-                               max_new_tokens=MAX_NEW_TOKENS, include_noncode=True, show=False)
+                               max_new_tokens=MAX_NEW_TOKENS, include_noncode=True)
         meta = dict(prompt=g["prompt"], generation=g["generation"], heads=heads_fp, n_heads=len(heads),
                     strategy=args.strategy, alpha=args.alpha, steer_layers=args.steer_layers,
                     max_new_tokens=MAX_NEW_TOKENS,

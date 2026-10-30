@@ -93,7 +93,7 @@ def main():
             src = TokenizerOutput(data=dict(input_ids=torch.tensor([ids]), attention_mask=torch.ones(1, len(ids), dtype=torch.long)))
             rows = apply_goalscope(src, mt=mt, selected_heads=heads, strategy="additive_norm", alpha=0.1,
                                    steer_layer_range=(35, 46), batch_size=args.batch, max_new_tokens=READ_TOKENS,
-                                   n_steer_tokens="all", show=False, goalscope_prompt=probe_prompt(setting),
+                                   n_steer_tokens="all", goalscope_prompt=probe_prompt(setting),
                                    token_positions=pos)
             by = {int(r["pos"]): (r.get("patched_gen") or "").strip() for r in rows}
             ev = dict(k=k, text=text, demos=demos, ids=ids, n_prompt=n, tokens=toks, generation=tok.decode(gen),
