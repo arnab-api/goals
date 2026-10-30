@@ -4,8 +4,7 @@
 QTASKS bank, OVReader prefill-to-frontier setup (var_eq stub, letters naming), with BALANCED frontier
 coverage: every NON-trivial frontier (src.diff.data.TRIVIAL_FRONTIERS excluded) is the target exactly
 `reps` times, each with a distinct prefill context. Frontier pool = non-trivial; context (prefill +
-trailing predicates) may be any predicate, matching the frontier-only exclusion policy wired into
-scripts/evaluation/eval_ov_reader.sample_datapoints.
+trailing predicates) may be any predicate (frontier-only exclusion policy).
 
 Each datapoint is a model-agnostic RECIPE (ordered predicate ids + prefill count j); the full
 QTransferInstance is rebuilt from QTASKS by id at load time (see

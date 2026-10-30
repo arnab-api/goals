@@ -1,6 +1,6 @@
 """Escapable obstacle (adversarial-prefill) sets for the current QTASKS corpus — TWO levels.
 
-Obstacle-robustness eval (notebooks/persistance/03): at a frontier ``{var} =`` pivot for sub-goal g_k,
+Obstacle-robustness eval (``obstacle_robustness_eval.py``): at a frontier ``{var} =`` pivot for sub-goal g_k,
 append one of these prefixes verbatim after the ``=``, greedy-generate the rest of the line, and a
 BESPOKE oracle (``obstacle_eval.judge_adapts``) decides — given (task g_k, obstacle stub, full
 generation) — whether the model is implementing g_k *while adapting to* the forced stub

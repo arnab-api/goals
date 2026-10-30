@@ -1,4 +1,5 @@
-"""Bespoke oracle judge for the obstacle-robustness eval (notebooks/persistance/03).
+"""Bespoke oracle judge for the obstacle-robustness eval (``obstacle_robustness_eval.py``) and the
+obstacle OV-boost eval (``obstacle_ov_boost_eval.py``).
 
 A code model was forced to begin a one-line implementation with a prefix it could not delete (the
 obstacle stub), then greedy-generated the rest. ``judge_adapts`` asks an oracle whether the model
@@ -35,11 +36,7 @@ JUDGE_SYS = (
     "- BROKEN: syntactically invalid, incomplete, or unrelated to the sub-goal."
 )
 
-_VERDICTS = ("ADAPTED", "SUCCUMBED", "ESCAPED", "BROKEN")
-
-
-def judge_adapts(task_desc: str, obstacle_stub: str, full_rhs: str,
-                 model: str = ORACLE_MODEL, use_cache: bool = True) -> dict:
+def judge_adapts(task_desc: str, obstacle_stub: str, full_rhs: str) -> dict:
     """Return {"verdict": one of ADAPTED/SUCCUMBED/ESCAPED/BROKEN/UNPARSED, "rationale": str, "response": str}."""
     if not full_rhs or not full_rhs.strip():
         return dict(verdict="BROKEN", rationale="empty generation", response=None)
@@ -53,7 +50,7 @@ def judge_adapts(task_desc: str, obstacle_stub: str, full_rhs: str,
         f"<rationale>one line</rationale>."
     )
     resp = ask_claude(prompt=prompt, system_prompt=JUDGE_SYS, max_tokens=256,
-                      temperature=0.0, use_cache=use_cache, model_name=model)
+                      temperature=0.0, use_cache=True, model_name=ORACLE_MODEL)
     verdict = "UNPARSED"
     m = re.search(r"<verdict>\s*(ADAPTED|SUCCUMBED|ESCAPED|BROKEN)\s*</verdict>", resp, re.IGNORECASE)
     if m:
