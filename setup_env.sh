@@ -14,7 +14,7 @@
 set -euo pipefail
 
 ENV_NAME="goals"
-PYTHON_VERSION="3.11"
+PYTHON_VERSION="3.12"
 
 echo "==> Creating conda environment '${ENV_NAME}' with Python ${PYTHON_VERSION}"
 conda create -y -n "${ENV_NAME}" python="${PYTHON_VERSION}"
@@ -22,26 +22,24 @@ conda create -y -n "${ENV_NAME}" python="${PYTHON_VERSION}"
 # Activate inside the script via conda run (avoids needing `conda init` in the shell)
 RUN="conda run -n ${ENV_NAME} --no-capture-output"
 
-echo "==> Installing PyTorch (CUDA 12.x)"
-# Adjust the index URL if your CUDA version differs:
-#   CUDA 11.8: https://download.pytorch.org/whl/cu118
-#   CUDA 12.1: https://download.pytorch.org/whl/cu121
-#   CUDA 12.4: https://download.pytorch.org/whl/cu124
-$RUN pip install torch torchvision \
-    --index-url https://download.pytorch.org/whl/cu124
+echo "==> Installing PyTorch (CUDA 12.8)"
+# The code needs torch>=2.7, which needs CUDA >= 12.6 wheels (cu124 caps at torch 2.6). Adjust if needed:
+#   CUDA 12.6: https://download.pytorch.org/whl/cu126
+#   CUDA 12.8: https://download.pytorch.org/whl/cu128
+$RUN pip install "torch>=2.7" torchvision \
+    --index-url https://download.pytorch.org/whl/cu128
 
 echo "==> Installing core ML / interpretability libraries"
 $RUN pip install \
-    transformers \
+    "transformers>=4.55" \
     accelerate \
-    nnsight \
+    "nnsight>=0.5" \
     datasets \
     huggingface-hub \
     safetensors \
     tokenizers \
     sentencepiece \
-    einops \
-    bitsandbytes
+    "circuitsvis>=1.43.3"
 
 echo "==> Installing baukit (from source — required, not on PyPI)"
 $RUN pip install git+https://github.com/davidbau/baukit
@@ -49,8 +47,6 @@ $RUN pip install git+https://github.com/davidbau/baukit
 echo "==> Installing scientific stack"
 $RUN pip install \
     numpy \
-    scipy \
-    scikit-learn \
     pandas \
     matplotlib
 
@@ -59,22 +55,20 @@ $RUN pip install \
     ipykernel \
     ipywidgets \
     jupyterlab \
+    nbformat \
+    nbconvert \
     rich \
     tqdm \
     pyyaml
 
-echo "==> Installing API clients & experiment tracking"
+echo "==> Installing API clients (LM judges: Claude; GPT-4o for the EM alignment judge)"
 $RUN pip install \
     anthropic \
-    openai \
-    wandb
+    openai
 
 echo "==> Installing project utility libraries"
 $RUN pip install \
-    dataclasses-json \
-    astor \
-    line-profiler \
-    goodfire
+    dataclasses-json
 
 echo "==> Registering Jupyter kernel as '${ENV_NAME}'"
 $RUN python -m ipykernel install --user --name "${ENV_NAME}" --display-name "Python (${ENV_NAME})"

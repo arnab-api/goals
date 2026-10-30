@@ -1,174 +1,75 @@
-# Goals: Do LLMs Have Consistent Intermediate Goals?
+# Goal Encoding in LLMs
 
-Research codebase investigating whether LLMs pursue consistent intermediate goals during code generation.
+Code for *Goal Encoding in LLMs*. Companion site: https://goals.baulab.info (source in the
+[goals-web](https://github.com/arnab-api/goals-web) repo).
 
-## Research Question
-
-When an LM writes code, does it have a stable internal representation of *what it intends to do next* — independent of *how* it will do it?
-
-We distinguish three levels:
-```
-Broader goal:      implement the function correctly
-Instrumental goal: check whether the input is a palindrome   ← target of this research
-Implementation:    s == s[::-1]   vs   s == ''.join(reversed(s))   vs   all(...)
-```
-
-The core question: does a linear direction exist in the model's hidden state that encodes the **instrumental goal** — firing consistently for "about to check palindrome" regardless of which implementation the model produces? If such a direction exists and causally influences generation, it suggests the model has pre-committed to a sub-goal before writing the tokens that realize it.
-
-This is distinct from a *competence* direction (predicting whether generation will succeed) — we want a direction capturing *intent*, not *skill*.
-
-**Key Research Questions:**
-- **Goal representations**: Do Code-LLMs have stable hidden-state representations of instrumental sub-goals?
-- **Mining Goals**: Can we extract linear directions that capture goal intent (not just success)?
-- **Causality**: Do these directions causally influence generation?
-- **Generalization**: Does a direction trained on one context transfer to a different context involving the same sub-goal?
-
----
-
-## Experimental Tracks
-
-### Track 1 — Prefill Probing (Notebooks 01–04)
-
-**Methodology:** Insert different implementation prefills before letting the model generate; check if the model adapts to still achieve the correct outcome.
-
-```python
-def is_odd(n: int) -> bool:
-    return <PREFILL>
-```
-
-Prefills: `""` / `"n &"` / `"not"` / `"1+"` etc. The model must adapt its implementation while pursuing the same instrumental goal (parity check). MCTS explores the continuation tree; contrastive pairs are formed between green (correct) and red/orange (wrong/crash) nodes. Linear "goal directions" (mean-diff and contrastive hinge) are trained and tested causally via activation steering.
-
-**Key scripts:**
-- `scripts/goal_dir.py` — extract contrastive pairs from MCTS results, train probes
-- `scripts/test_causality.py` — steering experiments
-- `scripts/multipred_mcts.py` / `multipred_probe.py` — multi-predicate variant
-
-**Data:** `data/incomplete_code.json`, `data/multi_predicate/`
-
----
-
-### Track 2 — Attention Head Localization (Notebooks 05–08) ← active
-
-**Motivation:** Instead of training a linear probe over all hidden states, identify *which attention heads* are causally responsible for the instrumental goal representation. This gives a more mechanistic and interpretable answer.
-
-**Methodology:** Cross-language interchange.
-1. Run the model on a C++ implementation (`src_prompt`) of predicate A.
-2. Patch the attention output of specific heads into a Python prompt (`dest_prompt`) mid-computation at a **pivot point** — the token where predicate A and predicate B diverge.
-3. If patching src→dest shifts the next-token distribution toward the *target* (what it would predict for predicate A in Python), those heads carry the goal representation.
-
-**Pivot instance mining pipeline:**
-- **Case 3**: Oracle (Claude) is given both predicates and asked for shared prefixes where they diverge in implementation.
-- **Case 3b**: Oracle generates multiple implementations per predicate; token-level LCP across the cross-product yields candidate pivot prefixes.
-- **Augmentation**: Augmented predicate variants (variable rename, fn rename, type-hint toggle, predicate swap) generate additional instances.
-- Two gates: (1) completion gate — greedy generation from `return {prefix}` must pass unit tests; (2) divergence gate — `dest_top_token != target_top_token` at pivot.
-
-**Training sparse head mask:**
-- Pre-compute per-head analytical deltas: `W_o_h @ (src_h - dest_h)` for each (layer, head).
-- Train a continuous `(n_layers_tested, n_heads)` mask via projected gradient descent.
-- Objective: `KL(P_patched ∥ P_target) + λ * mean(mask)` — L1 sparsity drives unimportant heads to zero.
-- Post-training threshold (mask > 0.5) → selected heads.
-
-**Key scripts:**
-- `scripts/mine_pivot_instances.py` — Steps 1–3: global pairs → model pairs → pivot mining
-- `scripts/train_head_mask.py` — cache pivot data + train mask; saves `results/localization/<model>/head_mask.pt`
-
-**Data:** `data/head_loc/predicates/` (25 predicates, Python + C++), `data/head_loc/global_pairs.json`, `data/head_loc/pairs/<model>.json`
-
-**Current dataset:** 1480 pivot instances for `Qwen2.5-Coder-32B-Instruct`, layers 6–40.
-
----
+When an LM writes code for a task with several sub-tasks, does it encode *which sub-task it will implement next*
+before writing it? We localize a sparse set of **goal heads** (attention heads that carry this sub-goal), read
+them out in natural language with **GoalScope**, test how persistent and how necessary the encoding is, and use
+interventions on the task span and the code-progress span to show how a depth-bounded LM pursues its goals
+(**NRGS**: it re-reads the goal from the task span at each step).
 
 ## Setup
 
 ```bash
-bash setup_env.sh
+bash setup_env.sh          # conda env `goals` (Python 3.12, torch>=2.7 / CUDA 12.8, baukit from git)
+cp env_demo.yml env.yml    # then fill in API keys (Claude, OpenAI) and cache / results directories
 ```
 
-This creates the `goals` conda environment with all dependencies (including `baukit` from source). Requires conda and CUDA 12.x drivers. See comments inside `setup_env.sh` to change the CUDA version.
+Everything runs from the repo root (`sys.path.append(".")`). Results go to `RESULTS_DIR` (`env.yml`,
+`src/utils/env_utils.py`). Models: Qwen2.5-Coder-32B-Instruct throughout; Qwen2.5-Coder-14B, Qwen2.5-32B and
+OLMo-3.1-32B (Instruct / SFT) for the model comparisons. A 32B model in bf16 needs one 80 GB GPU.
 
-Create `env.yml` in root (see `env_demo.yml` for template) with API keys and directory paths.
-
----
-
-## Running Track 2 End-to-End
-
-```bash
-# Step 1–3: mine pivot instances (requires GPU + Claude API key)
-conda run -n goals python scripts/mine_pivot_instances.py \
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct
-
-# Train head mask (smoke-test with small config)
-conda run -n goals python scripts/train_head_mask.py \
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct \
-    --max-instances 100 --n-epochs 1
-
-# Full run
-conda run -n goals python scripts/train_head_mask.py \
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct \
-    --layers-start 6 --layers-end 40 \
-    --n-epochs 100 --lambda-sparse 20 --batch-size 16
-```
-
----
-
-## Project Structure
+## Layout
 
 ```
-├── notebooks/
-│   ├── 01_goal_consistency.ipynb      # Prefill probing: goal consistency analysis
-│   ├── 01.1_multi_pred_consistency.ipynb
-│   ├── 02_sampling.ipynb              # MCTS sampling
-│   ├── 02.1_multi_pred_sampling.ipynb
-│   ├── 03_probe.ipynb                 # Linear probe training
-│   ├── 03.1_multi_probe.ipynb
-│   ├── 04.1_multi_causality.ipynb     # Causality / steering experiments
-│   ├── 05_loc_data.ipynb              # Head loc: pivot instance mining
-│   ├── 06_loc_head.ipynb              # Head loc: mask training + ablation experiments
-│   └── 08_clock.ipynb                 # Two-signal hypothesis: per-step attention GIF viz
-├── scripts/
-│   ├── goal_dir.py                    # Track 1: probe training
-│   ├── test_causality.py              # Track 1: steering experiments
-│   ├── multipred_mcts.py              # Track 1: multi-predicate MCTS
-│   ├── multipred_probe.py             # Track 1: multi-predicate probe
-│   ├── mine_pivot_instances.py        # Track 2: pivot mining pipeline
-│   ├── train_head_mask.py             # Track 2: cache + train sparse head mask
-│   └── augment_data.py                # Data augmentation utilities
-├── src/
-│   ├── models.py                      # ModelandTokenizer (nnsight wrapper)
-│   ├── functional.py                  # generate_with_patch, get_hs, predict_next_token
-│   ├── tokens.py                      # prepare_input (batched, left-padded)
-│   └── goals/
-│       ├── data.py                    # Track 1 data types
-│       ├── eval.py                    # evaluate_single_code, run_evaluation
-│       ├── functional.py              # apply_chat_template, supports_chat_template
-│       ├── sampling.py                # MCTS sampling
-│       ├── probe.py                   # Linear probe training
-│       ├── augment.py                 # Track 1 augmentation
-│       ├── head_loc_data.py           # Track 2 data types (SinglePredicateSample, PivotInstance, etc.)
-│       ├── head_loc_pivot.py          # Track 2 prompt builders, next-token utilities
-│       ├── head_loc_oracle.py         # Track 2 oracle pivot mining (Case 3, 3b, augmentation)
-│       ├── head_loc_attn.py           # Track 2 caching + HeadMask + train_head_mask
-│       └── head_loc_augment.py        # Track 2 predicate augmentation
-├── data/
-│   ├── incomplete_code.json           # Track 1 dataset
-│   ├── multi_predicate/               # Track 1 multi-predicate tasks
-│   └── head_loc/
-│       ├── predicates/                # 25 predicate JSONs (Python + C++)
-│       ├── global_pairs.json          # Oracle-verified contrastive predicate pairs
-│       └── pairs/<model>.json         # Model-specific pairs + pivot instances
-├── agent_reports/claude/                    # Analysis notes and design documents
-├── setup_env.sh                       # One-shot environment setup script
-└── env.yml                            # API keys + paths (create from env_demo.yml)
+src/models.py, tokens.py, functional.py, attention.py   model wrapper (nnsight), tokenization, generation + patching
+src/goals/                                               goal heads + GoalScope
+    head_loc_{data,oracle,pivot,augment,attn}.py         pivot mining (oracle) and head-mask training
+    head_sets.py                                         load head sets (head_sets/<model>/*.json)
+    goalscope.py, goalscope_viz.py                       GoalScope readout + the paper-style HTML renderer
+    temporal_persistence.py                              temporal persistence
+    site_data.py                                         data writers for the companion site
+src/diff/                                                NRGS interventions (KV / Q transfer, task vs progress)
+scripts/                                                 one entry point per experiment (below)
+notebooks/fig_n_table_generators/                        figures + tables of the paper, from cached results
+notebooks/demos/                                         walk-through demos of the main experiments
+job_list/                                                the job lists the reported runs were launched with
+run_jobs/                                                multi-GPU job dispatcher (python -m run_jobs.baulab.dispatch --jobs ...)
+head_sets/<model>/                                       localized head sets (goal heads, top-k sets, controls)
+data/                                                    task corpus, localization pairs, ICL datasets, prefills
 ```
 
----
+## Experiments
 
-## Requirements
+Paper section → the script that produces the results (with the job list it was launched with) → the notebook that
+draws the figure / table.
 
-- Python >= 3.11
-- PyTorch >= 2.7
-- Transformers >= 4.55
-- nnsight >= 0.5
-- baukit (install separately, see Setup)
-- rich (table display)
-- CUDA GPU — tested on A100; large models (32B) need significant VRAM
+| Paper | Script | Job list | Figures / tables |
+|---|---|---|---|
+| Task corpus (App) | `scripts/data/gen_goalscope_eval.py` → `data/goalscope_eval.json` | — | `corpus_stats.ipynb` |
+| Localizing goal heads (§3, App) | `scripts/mine_pivot_instances.py` → `scripts/train_head_mask.py --lambda-sparse=20 --lazy --augment --tag=lam20` → `scripts/data/export_head_sets.py` | `head_localization/*.json` | `head_localization.ipynb` |
+| GoalScope readout, faithfulness / causality (§3, App) | `scripts/evaluation/eval_goalscope.py --heads goal --strategy additive_norm --alpha 0.1` | `goalscope_eval/goalscope_eval_a_residual.json` | `goalscope_eval.ipynb`, `sparsity_ablation.ipynb` |
+| Readout sources and head budget (App) | `eval_goalscope.py --heads <goal_topk json>`, `scripts/evaluation/eval_residual_patchscope.py` | `goalscope_eval_{a_residual*,a_attnout_40-50,b_sparsity}.json` | `sparsity_ablation.ipynb` |
+| Across models (App) | `eval_goalscope.py` per model | `goalscope_eval_c_{model_axis,14b,olmo_rematched}.json` | `model_generalization.ipynb` |
+| Residual-stream readout, OVReader (App) | `scripts/evaluation/eval_ov_reader.py --locked` | `diff_eval/ov_reader_locked.json` | `ovreader.ipynb` |
+| Temporal persistence (§3, App) | `scripts/evaluation/temporal_persistence_eval.py` (+ `--control`) | — | `temporal_persistence.ipynb` |
+| Obstacle persistence (App) | `scripts/evaluation/obstacle_robustness_eval.py` | — | `obstacle_robustness.ipynb` |
+| Goal-head ablation: sufficiency / necessity (§4, App) | `scripts/evaluation/eval_ablation_{sufficiency,necessity}.py --control_pool later_half` | — | `ablation.ipynb` |
+| KV transfer: re-reading the goal from the task span (§5, App) | `scripts/diff/path_patch_eval.py --i3 on --span list+gap --cpp-note system --i3-v-scale 4` | `diff_eval/path_patch_*32b_listgap*.json` | `transfer.ipynb` |
+| Q transfer: progress selects the pending sub-goal (§5, App) | `scripts/diff/diff_trigger_eval.py --alphas 2 --pivot eq --naming letters --closed-loop --probe-prompt gaze_select_restrict --gsr-anchors eq` | `diff_eval/diff_trigger_gsr_eq_*.json` | `q_transfer_gsr.ipynb` (+ `gsr_schema_clean.py`, `scripts/diff/gsr_example_attention.py`) |
+| Task span vs code-progress span (App) | `scripts/diff/task_vs_progress_eval.py --lang-transfers py-py` | `diff_eval/task_vs_progress_32b*.json` | `precommit_ablation.ipynb` |
+| Readouts beyond enumerated tasks (App) | `scripts/generate_well_known_task_completions.py` → `scripts/run_goalscope_web.py`; `scripts/run_goalscope_fig32_stable_marriage.py` | `goalscope_eval/goalscope_web_full_coder32b.json` | rendered with `src.goals.goalscope_viz` |
+| ICL verbalization (§6, App) | `scripts/icl/` (our rerun of the paper protocol) | — | companion site, ICL tab |
+| Emergent misalignment (§6, App) | `scripts/em/` (our reproduction; the EM model is applied as a LoRA by hand) | — | companion site, EM tab |
+
+Default GoalScope configuration: the 122 goal heads of Qwen2.5-Coder-32B
+(`head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json`), `additive_norm` with α = 0.1,
+injected at layers 35–45 at every decode step, greedy. The NRGS interventions use the 250-head set
+(`goal_topk/goal__lam20_top250.json`).
+
+## Companion site
+
+`scripts/run_goalscope_web.py`, `scripts/icl/icl_write_site_data.py` and `scripts/em/em_write_site_data.py` write
+the site's data into a goals-web checkout (`GOALS_WEB_SITE`, default `./goals-web/site`); `make demo` in goals-web
+renders and publishes it.
