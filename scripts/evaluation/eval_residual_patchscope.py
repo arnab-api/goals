@@ -5,40 +5,27 @@ The counterpart to ``eval_goalscope.py``: identical corpus, anchors, oracle rubr
 the *only* difference is **what** gets injected into the read-out probe.
 
     eval_goalscope.py          g_enc = summed o_proj contribution of the selected goal heads
-    eval_residual_patchscope   h_src = the residual stream itself, averaged over --source-layers
+    eval_residual_patchscope   h_src = the residual stream (or the attention-block output) itself,
+                               averaged over --source-layers
 
-That is the comparison experiment 1a asks for: how much of GoalScope's read-out quality comes from
-the *head selection*, versus what you would get from the raw residual at the same positions?
-
-Injection is norm-relative, matching ``--strategy additive_norm``:
+Injection is norm-relative, matching ``--strategy additive_norm`` (alpha 0.1, steer layers 35-46):
 
     h_dest <- h_dest + alpha * ||h_dest|| * (v / ||v||)
 
-Holding the injection mechanism fixed and varying only the source is the whole point. A plain
-additive injection would not be comparable: ``||h_src||`` (a full residual) is far larger than
-``||g_enc||`` (a sum over ~100 heads), so at fixed alpha the residual arm would be steered much
-harder and the comparison would read magnitude rather than content. See ``PatchSpec`` strategy
-``add_norm`` in ``src/functional.py``.
+Holding the injection mechanism fixed and varying only the source is the whole point (see
+``PatchSpec`` strategy ``add_norm`` in ``src/functional.py``).
 
-Self-contained under ``scripts/evaluation``: the corpus/anchor/oracle/scoring machinery is imported
-from ``eval_goalscope`` (same package) and nothing is added to ``src/``.
-
-Results land in the same tree as the GoalScope runs, so ``faithfulness_io`` parses them unchanged:
+Results land in the same tree as the GoalScope runs:
 
     <results>/evaluation/goalscope/<model>/<mode>/resid_norm/<alpha>/<leaf>/
 
-with ``heads=resid:L<lo>-<hi>:<agg>`` as the leaf's head-set component, so a residual run can never
+with ``heads=<source>:L<lo>-<hi>:mean`` as the leaf's head-set component, so a residual run can never
 collide with a head-set run.
 
-Corpus is the same locked prefill-to-frontier dataset as ``eval_goalscope.py`` (QTASKS,
-``data/goalscope_eval.json``), with ``--datatypes`` aggregating all four into one 253-sample run.
-
-Usage:
-    conda run -n goals python scripts/evaluation/eval_residual_patchscope.py \
-        --mode faithfulness --alpha 0.1 --steer_layer_range 35 46
-
-    conda run -n goals python scripts/evaluation/eval_residual_patchscope.py \
-        --mode causality --alpha 0.1 --source-layers 25 56
+Usage (no flags = the paper's residual baseline: residual stream, layers 40-50, faithfulness):
+    conda run -n goals python scripts/evaluation/eval_residual_patchscope.py [--mode causality]
+    # full-attention baseline:      --source attn
+    # goal-band residual baseline:  --source-layers 25 56
 """
 
 import argparse
@@ -55,33 +42,37 @@ from tqdm.auto import tqdm
 
 from scripts.evaluation import faithfulness_io as fio
 
-# Every stage except the residual injection is shared with the head-set eval (the QTASKS
-# locked-dataset version), so the two runs differ only in the thing under test.
+# Every stage except the residual injection is shared with the head-set eval, so the two runs
+# differ only in the thing under test.
 from scripts.evaluation.eval_goalscope import (
     ALL_DATATYPES,
     ANCHOR_ORDER,
     CAUSAL_PREFIX,
     DEFAULT_DATASET,
+    GEN_MAX_NEW_TOKENS,
+    MAX_NEW_TOKENS,
     ORACLE_MODEL,
-    build_causality_prompt,
     build_prompt,
     compute_summary,
-    default_goal_band,
     frontier_impl_span,
     generate_completion,
     hard_eval,
+    limit_round_robin,
     load_locked_datapoints,
     log_summary,
     pivot_positions,
 )
 from src.functional import PatchSpec, generate_with_patch
-from src.goals.goalscope import _build_goalscope_prompt
+from src.goals.goalscope import _build_causality_prompt, _build_goalscope_prompt
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
 from src.utils.typing import TokenizerOutput
 
 logger = logging.getLogger(__name__)
+
+STEER_LAYER_RANGE = (35, 46)  # same steer band as the GoalScope runs (leaf: layers=35-46)
+BATCH_SIZE = 16  # read-outs per batched greedy decode (batch composition affects bf16 GEMMs)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -114,51 +105,27 @@ def extract_residual_latents(mt, prompt, positions, layers, source="resid"):
     return torch.stack([cache[n] for n in names])  # (n_layers, n_pos, n_embd)
 
 
-def aggregate_latents(stack, how="mean"):
-    """Collapse the layer axis of ``(n_layers, n_pos, n_embd)`` -> ``(n_pos, n_embd)``.
-
-    ``mean``   — average across the band (default). The band is where the goal heads live, so this
-                 is the residual analogue of "the goal signal over that depth range".
-    ``last``   — the deepest source layer only; closest to a textbook single-layer PatchScope.
-    ``sum``    — magnitude is discarded by the norm-relative injection anyway, so this differs from
-                 ``mean`` only if you later switch to a plain additive strategy.
-    """
-    if how == "mean":
-        return stack.mean(0)
-    if how == "last":
-        return stack[-1]
-    if how == "sum":
-        return stack.sum(0)
-    raise ValueError(f"unknown --source-agg {how!r}")
-
-
 @torch.no_grad()
 def residual_patchscope(
     mt,
     prompt,
     token_positions,
     source_layers,
-    steer_layer_range,
     alpha=0.1,
-    source_agg="mean",
     source="resid",
-    max_new_tokens=64,
-    batch_size=16,
-    n_steer_tokens="all",
     probe_prompt=None,
 ):
     """Verbalize each source position by injecting its source latent into the read-out probe.
 
-    Mirrors ``apply_goalscope``'s additive path — same probe, same greedy decode, same
-    ``n_steer_tokens`` semantics — with the ``source`` latent (resid stream | attn-module output) in
-    place of the head aggregate.
+    Mirrors ``apply_goalscope``'s additive_norm path — same probe, same greedy decode, same steer
+    band — with the ``source`` latent (resid stream | attn-module output, averaged over
+    ``source_layers``) in place of the head aggregate.
 
-    Returns ``[{"pos", "token", "patched_gen", "scoped"}]``, the shape ``faithfulness_io`` and
-    ``render_patchscope_html`` both expect.
+    Returns ``[{"pos", "token", "patched_gen", "scoped"}]`` (the ``apply_goalscope`` row shape).
     """
     positions = list(token_positions)
     stack = extract_residual_latents(mt, prompt, positions, source_layers, source=source)
-    vecs = aggregate_latents(stack, source_agg)  # (n_pos, n_embd)
+    vecs = stack.mean(0)  # (n_pos, n_embd): mean over the source band
     # Unit direction: `add_norm` supplies the magnitude from ||h_dest|| at each patch site.
     vecs = vecs / vecs.norm(dim=-1, keepdim=True).clamp_min(1e-6)
 
@@ -166,15 +133,14 @@ def residual_patchscope(
         prompts=probe_prompt or _build_goalscope_prompt(mt), tokenizer=mt
     )
     dest_ids, dest_attn = dest.input_ids, dest.attention_mask
-    steer_layers = list(range(*steer_layer_range))
-    n_steer = None if str(n_steer_tokens).lower() == "all" else int(n_steer_tokens)
+    steer_layers = list(range(*STEER_LAYER_RANGE))
 
     src_ids = prepare_input(prompts=prompt, tokenizer=mt).input_ids[0].tolist()
     out = []
     for s in tqdm(
-        range(0, len(positions), batch_size), desc=f"resid[a={alpha}]", leave=False
+        range(0, len(positions), BATCH_SIZE), desc=f"resid[a={alpha}]", leave=False
     ):
-        chunk = positions[s : s + batch_size]
+        chunk = positions[s : s + BATCH_SIZE]
         B = len(chunk)
         tiled = TokenizerOutput(
             data=dict(
@@ -195,9 +161,9 @@ def residual_patchscope(
         gens = generate_with_patch(
             mt,
             tiled,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=MAX_NEW_TOKENS,
             patches=patches,
-            n_steer_tokens=n_steer,
+            n_steer_tokens=None,
             do_sample=False,
             patch_interface="baukit",
             remove_prefix=True,
@@ -225,36 +191,22 @@ def parse_args():
     ap.add_argument(
         "--mode", default="faithfulness", choices=["faithfulness", "causality"]
     )
-    ap.add_argument(
-        "--source-layers",
-        type=int,
-        nargs=2,
-        default=None,
-        metavar=("START", "END"),
-        help="residual layers to read the source latent from, range(START, END). "
-        "Default: the model's GOAL_BANDS entry, so the residual baseline covers "
-        "the same depth as the goal heads it is being compared against.",
-    )
-    ap.add_argument(
-        "--source-agg",
-        default="mean",
-        choices=["mean", "last", "sum"],
-        help="how to collapse the source-layer axis (default mean)",
-    )
+    ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument(
         "--source",
         default="resid",
         choices=["resid", "attn"],
-        help="what latent to read at --source-layers: 'resid' (decoder-layer residual stream, "
-        "default) | 'attn' (self-attention module output — the whole attention block's contribution). "
+        help="what latent to read at --source-layers: 'resid' (decoder-layer residual stream) | "
+        "'attn' (self-attention module output — the whole attention block's contribution). "
         "Baked into the run-dir leaf (resid:.. vs attn:..) so the two never collide.",
     )
     ap.add_argument(
-        "--steer_layer_range",
+        "--source-layers",
         type=int,
         nargs=2,
-        default=(35, 46),
+        default=[40, 50],
         metavar=("START", "END"),
+        help="layers to read the source latent from, range(START, END), averaged (default 40 50).",
     )
     ap.add_argument(
         "--alpha",
@@ -262,20 +214,10 @@ def parse_args():
         default=0.1,
         help="injected fraction of ||h_dest|| (norm-relative; default 0.1)",
     )
-    ap.add_argument("--n_steer_tokens", default="all", help="'all' | int")
-    ap.add_argument("--max_new_tokens", type=int, default=64)
-    ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument("--datatypes", nargs="+", default=ALL_DATATYPES,
-                    help="datatypes AGGREGATED into ONE run (default: all four -> 253-sample corpus)")
-    ap.add_argument("--dataset", default=DEFAULT_DATASET,
-                    help="locked prefill-to-frontier dataset json (QTASKS recipes)")
     ap.add_argument("--seed", type=int, default=123,
                     help="generation-determinism seed (corpus is fixed by the dataset)")
-    ap.add_argument("--gen_max_new_tokens", type=int, default=64,
-                    help="frontier-body greedy budget (>=1)")
     ap.add_argument("--limit", type=int, default=None,
                     help="SMOKE ONLY: cap the corpus to N datapoints (round-robin across datatypes)")
-    ap.add_argument("--batch_size", type=int, default=16)
     ap.add_argument(
         "--overwrite",
         action="store_true",
@@ -291,94 +233,48 @@ def main():
     experiment_utils.set_seed(args.seed)
     torch.set_grad_enabled(False)
     results_dir = env_utils.DEFAULT_RESULTS_DIR
-
-    n_steer = (
-        "all" if str(args.n_steer_tokens).lower() == "all" else int(args.n_steer_tokens)
-    )
-    # Source band needs n_layer for the fallback, so it is resolved after the model loads; the
-    # explicit case is known now and is what the run dir keys on.
-    src_band = tuple(args.source_layers) if args.source_layers else None
+    src_band = tuple(args.source_layers)
 
     # ── LOCKED corpus (aggregated over datatypes), loaded up front — no model needed ──
-    datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatypes)
-    if args.limit:  # SMOKE: round-robin across datatypes so a small N hits every prompt builder
-        groups = {}
-        for sid, inst in datapoints:
-            groups.setdefault(inst.meta["datatype"], []).append((sid, inst))
-        picked, i = [], 0
-        while len(picked) < args.limit and any(i < len(v) for v in groups.values()):
-            for v in groups.values():
-                if i < len(v) and len(picked) < args.limit:
-                    picked.append(v[i])
-            i += 1
-        datapoints = picked
-        logger.warning(f"--limit {args.limit}: SMOKE run on {len(datapoints)} datapoints")
-    num_conditions = ds_meta.get("n_conditions", [2, 3, 4])
-    ds_seed = ds_meta.get("seed", args.seed)
-    dt_tag = ("all" if set(args.datatypes) == set(ALL_DATATYPES)
-              else "+".join(d.replace("[", "").replace("]", "") for d in args.datatypes))
-
-    def leaf_heads_name(band):
-        return f"{args.source}:L{band[0]}-{band[1]}:{args.source_agg}"
+    datapoints, ds_meta = load_locked_datapoints(DEFAULT_DATASET, ALL_DATATYPES)
+    if args.limit:
+        datapoints = limit_round_robin(datapoints, args.limit)
 
     config = dict(
         mode=args.mode,
         # `strategy` is a path component, so residual runs never land in a head-set run's dir
         strategy="resid_norm",
         alpha=args.alpha,
-        source_layers=list(src_band) if src_band else None,
-        source_layers_explicit=args.source_layers is not None,
-        source_agg=args.source_agg,
+        source_layers=list(src_band),
+        source_agg="mean",
         source=args.source,
-        heads_name=leaf_heads_name(src_band) if src_band else None,
-        steer_layer_range=list(args.steer_layer_range),
-        n_steer_tokens=n_steer,
-        max_new_tokens=args.max_new_tokens,
+        heads_name=f"{args.source}:L{src_band[0]}-{src_band[1]}:mean",
+        steer_layer_range=list(STEER_LAYER_RANGE),
+        n_steer_tokens="all",
+        max_new_tokens=MAX_NEW_TOKENS,
         model=args.model,
-        datatype=dt_tag,
-        datatypes=list(args.datatypes),
+        datatype="all",
+        datatypes=list(ALL_DATATYPES),
         n_specs=len(datapoints),
-        num_conditions=list(num_conditions),
-        seed=ds_seed,
-        gen_max_new_tokens=args.gen_max_new_tokens,
-        span_source="frontier",       # prefill-to-frontier: distinguishes leaf from the old 'rule'
-        dataset=str(args.dataset),
+        num_conditions=list(ds_meta["n_conditions"]),
+        seed=ds_meta["seed"],
+        gen_max_new_tokens=GEN_MAX_NEW_TOKENS,
+        span_source="frontier",       # prefill-to-frontier: the leaf's span=frontier
+        dataset=DEFAULT_DATASET,
         bank="QTASKS",
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
         readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
     )
 
-    # The run dir needs heads_name, which needs the resolved band. Resolve it without the model
-    # when possible (registered model) so the resume check can run before the 32B load.
-    if src_band is None:
-        try:
-            src_band = default_goal_band(args.model)
-            config["source_layers"] = list(src_band)
-            config["heads_name"] = leaf_heads_name(src_band)
-        except ValueError:
-            pass  # unregistered model: needs n_layer, resolved after load
-
-    mt = None
-    if config["heads_name"] is None:
-        mt = ModelandTokenizer(
-            model_key=args.model,
-            dtype=torch.bfloat16,
-            device_map="auto",
-            attn_implementation="eager",
-        )
-        src_band = default_goal_band(args.model, n_layer=mt.n_layer)
-        config["source_layers"] = list(src_band)
-        config["heads_name"] = leaf_heads_name(src_band)
-
     run_dir = fio.run_dir_for(config, results_dir)
     if args.overwrite and run_dir.exists():
-        for f in ("records.jsonl", "samples.jsonl", "samples.json", "summary.json"):
+        for f in ("records.jsonl", "samples.jsonl", "summary.json"):
             (run_dir / f).unlink(missing_ok=True)
         logger.info(f"--overwrite: cleared existing run at {run_dir}")
     prev = None if args.overwrite else fio.read_config(run_dir)
-    # Same guard as the head-set eval: the leaf encodes the source band and aggregation, but not
-    # every knob, so refuse to resume a run whose source differs from this invocation's.
+    # Same guard as the head-set eval: the leaf encodes the source band, but not every knob, so
+    # refuse to resume a run whose source differs from this invocation's.
     if prev is not None:
         for k in ("source_layers", "source_agg", "strategy", "source"):
             if prev.get(k) is not None and prev.get(k) != config[k]:
@@ -393,7 +289,7 @@ def main():
     kept = fio.prune_orphan_records(run_dir, completed)
     remaining = [(sid, inst) for sid, inst in datapoints if sid not in completed]
     logger.info(
-        f"corpus: {len(datapoints)} datapoints (locked {args.dataset}, dtypes={dt_tag}) | "
+        f"corpus: {len(datapoints)} datapoints (locked {DEFAULT_DATASET}) | "
         f"already done: {len(completed)} ({kept} records kept) | remaining: {len(remaining)}"
     )
 
@@ -413,23 +309,22 @@ def main():
         log_summary(summary, args.mode)
         return
 
-    if mt is None:
-        mt = ModelandTokenizer(
-            model_key=args.model,
-            dtype=torch.bfloat16,
-            device_map="auto",
-            attn_implementation="eager",
-        )
+    mt = ModelandTokenizer(
+        model_key=args.model,
+        dtype=torch.bfloat16,
+        device_map="auto",
+        attn_implementation="eager",
+    )
     source_layers = list(range(*src_band))
     config["n_source_layers"] = len(source_layers)
     config["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
     fio.write_config(run_dir, config)
     logger.info(
-        f"residual source: layers {src_band[0]}-{src_band[1] - 1} ({len(source_layers)}) "
-        f"agg={args.source_agg} -> steer {tuple(args.steer_layer_range)} @ alpha={args.alpha}"
+        f"{args.source} source: layers {src_band[0]}-{src_band[1] - 1} ({len(source_layers)}) "
+        f"agg=mean -> steer {STEER_LAYER_RANGE} @ alpha={args.alpha}"
     )
 
-    probe_prompt = build_causality_prompt(mt) if args.mode == "causality" else None
+    probe_prompt = _build_causality_prompt(mt) if args.mode == "causality" else None
     readout_prefix = CAUSAL_PREFIX if args.mode == "causality" else ""
 
     rec_fh = open(fio.records_path(run_dir), "a")
@@ -438,8 +333,8 @@ def main():
     n_total = len(datapoints)
     for sid, inst in remaining:
         sample_records = []
-        prompt, var = build_prompt(mt, inst, inst.src_lang)
-        completion = generate_completion(mt, prompt, args.gen_max_new_tokens)
+        prompt, var = build_prompt(mt, inst)
+        completion = generate_completion(mt, prompt, GEN_MAX_NEW_TOKENS)
         full_text = prompt + completion
 
         # frontier impl_span is exact (single-line predicate) — no oracle span-labelling
@@ -457,13 +352,8 @@ def main():
             full_text,
             token_positions=apos,
             source_layers=source_layers,
-            steer_layer_range=tuple(args.steer_layer_range),
             alpha=args.alpha,
-            source_agg=args.source_agg,
             source=args.source,
-            max_new_tokens=args.max_new_tokens,
-            batch_size=args.batch_size,
-            n_steer_tokens=args.n_steer_tokens,
             probe_prompt=probe_prompt,
         )
         readouts = {r["pos"]: r for r in res}

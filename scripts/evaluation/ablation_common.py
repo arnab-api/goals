@@ -5,13 +5,16 @@ Question: are the goal heads SUFFICIENT (ablate everything else, in layers >= FR
 still implements the next(DIFF) frontier) but NOT NECESSARY (ablate just the goal heads and it barely
 hurts)? Both drivers reuse everything here; they differ only in which heads get ablated.
 
-Mechanism (attention-sink ablation): an ablated head may attend ONLY to a sink position (default 0)
-for every query row >= the pivot, while it greedy-decodes the frontier value after ``{var} =``. The
-generated RHS is graded by an oracle: does it implement the frontier's NL description (ORACLE_SYS_2)?
+Mechanisms: necessity = attention sink (an ablated head may attend ONLY to position 0 for every
+query row >= the pivot); sufficiency = blind span (every non-spared head in layers >= 20 cannot attend
+to the frontier spec through the pivot). The model greedy-decodes the frontier value after ``{var} =``
+and the generated RHS is graded by an oracle: does it implement the frontier's NL description
+(ORACLE_SYS_2)?
 
 Corpus = the locked DIFF dataset (``data/goalscope_eval.json``, prefill-to-frontier, QTASKS), all
 datatypes aggregated. Each datapoint is run under three conditions: baseline (no ablation), the
-ablated goal-related set, and a matched-count RANDOM control (same size, same layer range).
+ablated goal-related set, and a matched-count RANDOM control drawn from the later half of the LM
+(layers >= n_layer//2, disjoint from the goal heads).
 
 Results -> ``<results>/evaluation/ablation/<model>/<axis>/<leaf>/`` (records.jsonl / summary.json /
 config.json). Resume-safe by spec_id.
@@ -19,7 +22,6 @@ config.json). Resume-safe by spec_id.
 import argparse
 import json
 import logging
-import random
 import re
 import time
 from collections import defaultdict
@@ -28,7 +30,8 @@ from pathlib import Path
 import torch
 
 from scripts.evaluation.eval_goalscope import (
-    ALL_DATATYPES, ORACLE_MODEL, build_prompt, load_json_heads, load_locked_datapoints,
+    ALL_DATATYPES, DEFAULT_DATASET, GEN_MAX_NEW_TOKENS, ORACLE_MODEL, build_prompt, limit_round_robin,
+    load_json_heads, load_locked_datapoints,
 )
 from src.functional import get_module_nnsight
 from src.models import ModelandTokenizer
@@ -38,8 +41,8 @@ from src.utils.oracle_llms import ask_claude
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DATASET = "data/goalscope_eval.json"
-DEFAULT_HEADS_JSON = "head_sets/{slug}/goal__lam20_thr0.9_band25-56.json"
+DEFAULT_HEADS_JSON = "head_sets/{slug}/goal__lam20_thr0.9_band25-56.json"  # the 122 goal heads
+SINK_POS = 0  # the single key a sink-ablated head may attend to (<|im_start|>)
 
 # ── oracle judge (verbatim from 13_middle): does the CODE implement the CONDITION? ──
 ORACLE_SYS_2 = """You are grading a short snippet of Python CODE against ONE natural-language CONDITION. The code is the right-hand side of an assignment that a model produced while (under a mechanistic intervention) trying to implement that condition on its input. Because of the intervention the code is often NOISY: it may have minor bugs, use a wrong constant / threshold / operator, be incomplete or cut off, contain half-written or repeated fragments, or wander. Look PAST that surface noise and grade only the SUBSTANCE.
@@ -62,13 +65,13 @@ Grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, or MALFO
 Put your one word answer inside <verdict></verdict> tags to make it easy to parse."""
 
 
-def judge_implements(code: str, condition: str, use_cache: bool = True) -> dict:
+def judge_implements(code: str, condition: str) -> dict:
     """Oracle verdict in {YES, NO, NO_INFO, MALFORMED, UNPARSED}: does ``code`` implement ``condition``?"""
     if not code or not code.strip():
         return dict(verdict="MALFORMED", response=None)
     prompt = f"Condition: {condition}\nCode stub: {code.strip()}\nAnswer:"
     resp = ask_claude(prompt=prompt, system_prompt=ORACLE_SYS_2, max_tokens=256,
-                      use_cache=use_cache, model_name=ORACLE_MODEL)
+                      use_cache=True, model_name=ORACLE_MODEL)
     m = re.search(r"<verdict>\s*(YES|NO_INFO|NO|MALFORMED)\s*</verdict>", resp, re.IGNORECASE)
     if m:
         return dict(verdict=m.group(1).upper(), response=resp)
@@ -111,23 +114,6 @@ def frontier_block_positions(mt, prompt, frontier_desc):
     if not toks:
         return None
     return list(range(max(min(toks) - 1, 0), P))
-
-
-def frontier_desc_positions(mt, prompt, frontier_desc):
-    """Absolute key positions of ONLY the frontier's description span (the current task's spec text +
-    the one token before it) — NOT extended to the pivot. Used by the necessity ``blind_task``
-    strategy: the goal heads keep attending everywhere EXCEPT the current task's specification.
-    Returns None if the description isn't located."""
-    cpos = prompt.find(frontier_desc)
-    if cpos < 0:
-        return None
-    enc = prepare_input(prompts=prompt, tokenizer=mt, return_offsets_mapping=True)
-    offsets = [tuple(x) for x in enc["offset_mapping"][0].tolist()]
-    end = cpos + len(frontier_desc)
-    toks = [ti for ti, (a, b) in enumerate(offsets) if b > a and a < end and b > cpos]
-    if not toks:
-        return None
-    return list(range(max(min(toks) - 1, 0), max(toks) + 1))
 
 
 @torch.no_grad()
@@ -253,19 +239,11 @@ def sink_generate_cached(mt, prompt_ids, ablated_heads, q_start, sink_pos=0,
 
 
 # ── driver ────────────────────────────────────────────────────────────────────
-def _dt_tag(datatypes):
-    return ("all" if set(datatypes) == set(ALL_DATATYPES)
-            else "+".join(d.replace("[", "").replace("]", "") for d in datatypes))
-
-
 def run_dir_for(results_dir, model, axis, config):
     slug = model.split("/")[-1]
     leaf = (f"heads={config['ablated_name']}__goal{config['n_goal']}__fromL={config['from_layer']}"
             f"__strat={config['strategy']}__dtype={config['datatype']}__nspec={config['n_specs']}"
-            f"__seed={config['seed']}")
-    # tag non-default control pools so they don't clobber the historical (goal_band) runs
-    if config.get("control_pool", "goal_band") != "goal_band":
-        leaf += f"__ctrl={config['control_pool']}"
+            f"__seed={config['seed']}__ctrl=later_half")  # control pool: layers >= n_layer//2
     return Path(results_dir) / "evaluation" / "ablation" / slug / axis / leaf
 
 
@@ -273,22 +251,9 @@ def common_argparser(description):
     ap = argparse.ArgumentParser(description=description,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument("--dataset", default=DEFAULT_DATASET)
-    ap.add_argument("--datatypes", nargs="+", default=ALL_DATATYPES,
-                    help="datatypes aggregated into one run (default: all four)")
     ap.add_argument("--heads", default=None,
                     help="goal head-set json (default: the model's 122-head goal set)")
-    ap.add_argument("--from_layer", type=int, default=20,
-                    help="sufficiency: blind non-goal heads in layers >= this (layers < it untouched). "
-                         "necessity: lower bound of the matched random-control pool.")
-    ap.add_argument("--control_pool", choices=["goal_band", "later_half"], default="goal_band",
-                    help="where the matched random control heads are drawn from (both exclude the goal "
-                         "heads). goal_band: layers >= shallowest goal-head layer (historical). "
-                         "later_half: layers >= n_layer//2 (depth-stable across head budgets).")
-    ap.add_argument("--sink_pos", type=int, default=0,
-                    help="sink strategy only: the single key an ablated head may attend to (default 0)")
-    ap.add_argument("--gen_max_new_tokens", type=int, default=64, help="frontier-body greedy budget")
-    ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument("--seed", type=int, default=123, help="seed of the random control head set")
     ap.add_argument("--limit", type=int, default=None,
                     help="SMOKE ONLY: cap datapoints (round-robin across datatypes)")
     ap.add_argument("--overwrite", action="store_true")
@@ -304,60 +269,36 @@ def load_setup(args):
     torch.set_grad_enabled(False)
     results_dir = env_utils.DEFAULT_RESULTS_DIR
 
-    datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatypes)
-    if args.limit:  # round-robin across datatypes so a small N hits every prompt builder
-        groups = defaultdict(list)
-        for sid, inst in datapoints:
-            groups[inst.meta["datatype"]].append((sid, inst))
-        picked, i = [], 0
-        while len(picked) < args.limit and any(i < len(v) for v in groups.values()):
-            for v in groups.values():
-                if i < len(v) and len(picked) < args.limit:
-                    picked.append(v[i])
-            i += 1
-        datapoints = picked
-        logger.warning(f"--limit {args.limit}: SMOKE run on {len(datapoints)} datapoints")
+    datapoints, ds_meta = load_locked_datapoints(DEFAULT_DATASET, ALL_DATATYPES)
+    if args.limit:
+        datapoints = limit_round_robin(datapoints, args.limit)
 
     mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
                            device_map="auto", attn_implementation="eager")
     slug = args.model.split("/")[-1]
     heads_path = args.heads or DEFAULT_HEADS_JSON.format(slug=slug)
     goal_heads = load_json_heads(heads_path, mt.n_layer, mt.n_heads)
-    config = dict(model=args.model, dataset=str(args.dataset), datatype=_dt_tag(args.datatypes),
-                  datatypes=list(args.datatypes), n_specs=len(datapoints), seed=args.seed,
-                  sink_pos=args.sink_pos, heads_spec=heads_path, n_goal=len(goal_heads),
-                  control_pool=getattr(args, "control_pool", "goal_band"))
+    config = dict(model=args.model, dataset=DEFAULT_DATASET, datatype="all",
+                  datatypes=list(ALL_DATATYPES), n_specs=len(datapoints), seed=args.seed,
+                  sink_pos=SINK_POS, heads_spec=heads_path, n_goal=len(goal_heads),
+                  control_pool="later_half")
     return mt, goal_heads, datapoints, config, results_dir
 
 
-def control_from_layer(args, goal_heads, n_layer):
-    """Lower bound of the matched random-control pool for the chosen ``--control_pool``:
-    later_half → n_layer//2 (depth-stable across head budgets); goal_band → shallowest goal-head layer."""
-    if getattr(args, "control_pool", "goal_band") == "later_half":
-        return n_layer // 2
-    return min(l for l, _ in goal_heads)
-
-
 def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, *, axis, ablated_name,
-                      strategy, config, results_dir, from_layer, sink_pos, gen_max_new_tokens, seed,
-                      overwrite=False):
+                      strategy, config, results_dir, from_layer, overwrite=False):
     """Run three conditions (baseline / ablated / control) over ``datapoints`` and score each
     generation with the oracle judge. ``strategy`` picks the intervention on the condition's head set:
 
-      "sink"       — restrict those heads to attend ONLY to ``sink_pos`` (13_middle §4/§7; necessity).
-      "blind_span" — blind those heads from the frontier spec span through the pivot (13_middle §5 /
-                     07.2; sufficiency).
-      "blind_task" — blind those heads from ONLY the current task's description span, attending
-                     everywhere else (a gentler necessity than "sink").
-      "blind_task_and_progress" — blind those heads from the task description THROUGH the pivot (the
-                     current-progress token), i.e. the same span as "blind_span" but applied to the
-                     axis heads (a necessity variant).
+      "sink"       — restrict those heads to attend ONLY to ``SINK_POS`` (necessity).
+      "blind_span" — blind those heads from the frontier spec span through the pivot (sufficiency).
 
     ``ablated_heads`` = the axis set; ``control_heads`` = the matched contrast — both get the SAME
     intervention, differing only in WHICH heads it hits."""
-    assert strategy in ("sink", "blind_span", "blind_task", "blind_task_and_progress"), strategy
+    assert strategy in ("sink", "blind_span"), strategy
+    gen_max_new_tokens = GEN_MAX_NEW_TOKENS
     config = dict(config, ablated_name=ablated_name, from_layer=from_layer, strategy=strategy,
-                  sink_pos=sink_pos, n_specs=len(datapoints))
+                  sink_pos=SINK_POS, n_specs=len(datapoints))
     run_dir = run_dir_for(results_dir, config["model"], axis, config)
     run_dir.mkdir(parents=True, exist_ok=True)
     rec_path = run_dir / "records.jsonl"
@@ -367,7 +308,7 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
     if rec_path.exists():
         done = {json.loads(l)["spec"] for l in rec_path.read_text().splitlines() if l.strip()}
     (run_dir / "config.json").write_text(json.dumps(
-        dict(config, axis=axis, from_layer=from_layer, strategy=strategy, sink_pos=sink_pos,
+        dict(config, axis=axis, from_layer=from_layer, strategy=strategy, sink_pos=SINK_POS,
              n_ablated=len(ablated_heads), n_control=len(control_heads), n_goal=len(goal_heads),
              gen_max_new_tokens=gen_max_new_tokens, timestamp=time.strftime("%Y-%m-%d %H:%M:%S")), indent=2))
     logger.info(f"run dir -> {run_dir} | {strategy} on {len(ablated_heads)} (ablated) / "
@@ -379,14 +320,13 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
         for sid, inst in datapoints:
             if sid in done:
                 continue
-            prompt, var = build_prompt(mt, inst, inst.src_lang)
+            prompt, var = build_prompt(mt, inst)
             prompt_ids = prepare_input(prompts=prompt, tokenizer=mt)["input_ids"][0].tolist()
             q_start = len(prompt_ids) - 1                       # intervene from the frontier pivot on
             cond_desc = inst.expected_next_desc
             block_pos = None
-            if strategy in ("blind_span", "blind_task", "blind_task_and_progress"):
-                block_pos = (frontier_desc_positions(mt, prompt, cond_desc) if strategy == "blind_task"
-                             else frontier_block_positions(mt, prompt, cond_desc))
+            if strategy == "blind_span":
+                block_pos = frontier_block_positions(mt, prompt, cond_desc)
                 if not block_pos:
                     logger.warning(f"[{sid}] frontier span not located — skipping")
                     continue
@@ -394,7 +334,7 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
                        condition=cond_desc, var=var, n_blocked=(len(block_pos) if block_pos else 0))
             for cname, heads in conditions.items():
                 if strategy == "sink":
-                    gen = sink_generate_cached(mt, prompt_ids, heads, q_start, sink_pos=sink_pos,
+                    gen = sink_generate_cached(mt, prompt_ids, heads, q_start, sink_pos=SINK_POS,
                                                max_new=gen_max_new_tokens)
                 else:
                     gen = generate_blocking_span_cached(mt, prompt_ids, heads, block_pos, q_start,

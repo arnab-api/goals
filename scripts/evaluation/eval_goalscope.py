@@ -7,41 +7,33 @@
                   (``bool check(auto value){``) and grade whether the C++ continuation implements
                   the same *idea* as the Python frontier span (cross-language transfer).
 
-This is the QTASKS successor to ``eval_goalscope_old_cond_data.py`` (the ``check_conditions`` /
-``condition_data`` version). It reuses that file's head-loading, oracle rubrics, ``hard_eval``
-(incl. the trivial sign/zero read-out sanitizer), ``compute_summary`` and storage verbatim; the ONLY
-difference is the corpus: instead of random ``sample_specs`` on ``condition_data`` predicates, it loads
-ONE frozen dataset (``data/goalscope_eval.json`` — QTASKS bank, prefill-to-frontier, ``var_eq`` stub,
-letters naming, trivial frontiers excluded, balanced frontier coverage). No per-run random sampling.
+Corpus: ONE frozen dataset (``data/goalscope_eval.json`` — QTASKS bank, prefill-to-frontier, ``var_eq``
+stub, letters naming, trivial frontiers excluded, balanced frontier coverage), all four datatypes
+aggregated into one 253-sample run. No per-run random sampling.
 
 Pipeline (mirrors the OVReader skyline in ``scripts/evaluation/eval_ov_reader.py``):
 
-  1. Corpus — load the datatype's recipes from the locked JSON; rebuild each ``QTransferInstance``
-     from ``src.diff.data.QTASKS`` by predicate id.
+  1. Corpus — load the recipes from the locked JSON; rebuild each ``QTransferInstance`` from
+     ``src.diff.data.QTASKS`` by predicate id.
   2. Prompt — prefilled source prompt ending at the frontier's ``{var} =`` (var_eq stub); greedy-decode.
   3. impl_span — the frontier's ``{var} =`` line + the first generated line (single-line predicate,
      so exact — no oracle span-labelling).
   4. Pivots — locate {prev_end, indent, var, eq, first_impl} in the GoalScope tokenization.
-  5. Read-outs — ``apply_goalscope`` restricted to just those pivot positions (the skyline read-out).
+  5. Read-outs — ``apply_goalscope`` restricted to just those pivot positions.
   6. Scoring — ``hard_eval`` (oracle YES/NO; causality is sanitized for trivial read-outs).
 
-Saved under ``<results>/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/`` (same scheme
-as the old script; the leaf differs by ``span=frontier`` + the dataset's dtype/nspec/nc, so the two
-never collide). Parse with ``scripts.evaluation.faithfulness_io``.
+Saved under ``<results>/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/``.
 
 All ``ask_claude`` calls use ``use_cache=True``.
 
-Usage:
-    # default aggregates all 4 datatypes into ONE run over the full 253-sample locked corpus:
-    conda run -n goals python scripts/evaluation/eval_goalscope.py \
-        --mode faithfulness --heads goal --strategy replace --alpha 1.0
+Usage (no flags = the paper's main configuration: Qwen2.5-Coder-32B-Instruct, the 122 goal heads,
+additive_norm, alpha 0.1, steer layers 35-46, faithfulness):
+    conda run -n goals python scripts/evaluation/eval_goalscope.py
+    conda run -n goals python scripts/evaluation/eval_goalscope.py --mode causality
 
-    conda run -n goals python scripts/evaluation/eval_goalscope.py \
-        --mode causality --heads goal --strategy replace --alpha 1.0
-    # subset instead:  --datatypes int "list[int]"
-
-    # custom head set (supersedes every head-selection flag):  --heads /path/to/heads.json
-    # custom dataset:  --dataset data/goalscope_eval.json
+    # model axis (replace strategy):  --strategy replace --alpha 1.0 [--model ...]
+    # custom head set (supersedes --goal_band):  --heads /path/to/heads.json
+    # smoke:  --limit 8   (separate run dir: nspec=8)
 """
 
 import argparse
@@ -49,7 +41,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-import os
 import re
 import sys
 import time
@@ -62,14 +53,13 @@ import torch
 
 import src.diff.data as DATA
 from scripts.evaluation import faithfulness_io as fio
-from src.goals.goalscope import (
-    GOALSCOPE_SYS,
-    _build_goalscope_prompt,
+from src.goals.goalscope import (  # noqa: F401  (CAUSAL_PREFIX re-exported)
+    CAUSAL_PREFIX,
+    _build_causality_prompt,
     apply_goalscope,
     greedy_continue,
 )
 from src.goals.head_sets import (  # noqa: F401  (re-exported)
-    GOAL_BANDS,
     default_goal_band,
     load_goal_heads,
     load_json_heads,
@@ -81,6 +71,10 @@ from src.utils import env_utils, experiment_utils, logging_utils
 from src.utils.oracle_llms import ask_claude
 
 DEFAULT_DATASET = "data/goalscope_eval.json"
+ALL_DATATYPES = ["int", "list[int]", "str", "list[str]"]
+GOAL_THRESHOLD = 0.9  # mask-value cutoff for --heads goal (goal_heads_path builds ..._thr0.9_... from it)
+MAX_NEW_TOKENS = 64  # read-out length per pivot
+GEN_MAX_NEW_TOKENS = 64  # frontier-body greedy budget
 
 logger = logging.getLogger(__name__)  # configured in main() via logging_utils
 
@@ -88,27 +82,14 @@ ANCHOR_ORDER = ["prev_end", "indent", "var", "eq", "first_impl"]
 ORACLE_MODEL = "claude-sonnet-4-6"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Head sets
-# ══════════════════════════════════════════════════════════════════════════════
-# Goal-head loading lives in src/goals/head_sets.py (re-exported here for the scripts that import it from this module).
-
-
-def load_head_set(
-    spec,
-    model_name,
-    results_dir,
-    n_heads,
-    goal_threshold=0.9,
-    goal_band=None,
-    n_layer=None,
-):
+def load_head_set(spec, model_name, results_dir, n_heads, goal_band=None, n_layer=None):
     """Return list[(layer, head)] for spec in {'goal', <path>.json}."""
-    goal_kw = dict(threshold=goal_threshold, band=goal_band, n_layer=n_layer)
     if spec.endswith(".json"):
         heads = load_json_heads(spec, n_layer, n_heads)
     elif spec == "goal":
-        heads = load_goal_heads(model_name, results_dir, **goal_kw)
+        heads = load_goal_heads(
+            model_name, results_dir, threshold=GOAL_THRESHOLD, band=goal_band, n_layer=n_layer
+        )
     else:
         raise SystemExit(f"unknown --heads spec: {spec!r} (want goal|<path>.json). A path must end in .json.")
     # An empty set is not a no-op experiment: apply_goalscope would run with nothing steered and
@@ -117,7 +98,7 @@ def load_head_set(
         raise SystemExit(
             f"--heads {spec!r} selected 0 heads"
             + (
-                f" (threshold {goal_threshold} too high for this mask?)"
+                f" (threshold {GOAL_THRESHOLD} too high for this mask?)"
                 if spec == "goal"
                 else ""
             )
@@ -126,13 +107,9 @@ def load_head_set(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Corpus — LOCKED prefill-to-frontier dataset (QTASKS), replacing the old random sampling.
-# Mirrors scripts/evaluation/eval_ov_reader.py's corpus/prompt/pivot helpers (duplicated here to
-# avoid a circular import — eval_ov_reader imports grading utils from this module).
+# Corpus — LOCKED prefill-to-frontier dataset (QTASKS); the corpus / prompt / pivot helpers are
+# shared with eval_ov_reader, eval_residual_patchscope and ablation_common.
 # ══════════════════════════════════════════════════════════════════════════════
-ALL_DATATYPES = ["int", "list[int]", "str", "list[str]"]
-
-
 def load_locked_datapoints(dataset_path, datatypes):
     """Rebuild ``QTransferInstance``s from the frozen JSON recipes (QTASKS by id), for one or more
     datatypes AGGREGATED into a single corpus. ``datatypes`` may be a str or a list. Returns
@@ -172,6 +149,25 @@ def load_locked_datapoints(dataset_path, datatypes):
     return out, data.get("meta", {})
 
 
+def limit_round_robin(datapoints, limit):
+    """SMOKE: the first ``limit`` datapoints taken round-robin across datatypes, so a small N hits
+    every prompt builder. Changes n_specs -> a separate run dir."""
+    groups = {}
+    for sid, inst in datapoints:
+        groups.setdefault(inst.meta["datatype"], []).append((sid, inst))
+    picked, i = [], 0
+    while len(picked) < limit and any(i < len(v) for v in groups.values()):
+        for v in groups.values():
+            if i < len(v) and len(picked) < limit:
+                picked.append(v[i])
+        i += 1
+    logger.warning(
+        f"--limit {limit}: SMOKE run on {len(picked)} datapoints "
+        f"({sorted({inst.meta['datatype'] for _, inst in picked})})"
+    )
+    return picked
+
+
 def _chat_prompt(mt, question, prefill):
     """Replicate src.diff.functional.get_prompt without depending on its module globals."""
     messages = [
@@ -200,20 +196,15 @@ def _chat_prompt(mt, question, prefill):
         )
 
 
-def build_prompt(mt, inst, lang):
-    """Prefilled source prompt ending at the frontier's ``{var} =`` (var_eq stub, letters)."""
+def build_prompt(mt, inst):
+    """Prefilled (Python) source prompt ending at the frontier's ``{var} =`` (var_eq stub, letters)."""
     q, pf = inst.src_parts()
     q = q.replace(
         "computes:", "computes in sequential order:"
     )  # nudge the model to follow the listing
     var = inst.var_of(inst.expected_next)
     body = pf.rstrip("\n ")  # drop the trailing indent line
-    if lang == "cpp":
-        for pid in inst.src_progress:
-            body = DATA._cpp_autoify(body, inst.var_of(pid))
-        pf2 = body + f"\n    auto {var} ="
-    else:
-        pf2 = body + f"\n    {var} ="
+    pf2 = body + f"\n    {var} ="
     return _chat_prompt(mt, q, DATA._finalize_prefill(pf2)), var
 
 
@@ -303,35 +294,6 @@ The following do NOT count against the completion (still YES, provided it is not
 
 Finally, grade on meaning, not on shared keywords. Output only YES, NO, NO_INFO, MALFORMED, or HEAVY_LOOP.
 Put your final answer inside <verdict>{ans}</verdict> tags, with no other text or explanation, to facilitate automated parsing."""
-
-# GoalScope destination prompt for causality: an information-less C++ function stub. The goal
-# encoding is steered in on top of this; the model then continues the C++ body.
-CAUSAL_PREFIX = "bool check(auto value){"
-# exposed so other read-out mechanisms (eval_act_oracles.py) can pose the *same* instruction
-CAUSAL_INSTRUCTION = (
-    "You are implementing a simple C++ function that checks for a condition. "
-    "Just write the function body, without any comments or explanations. Assume all the necessary "
-    "headers are already included."
-)
-
-_KWAY_SYS = "You match a description to the closest condition. Output only an integer."
-
-
-def build_causality_prompt(mt) -> str:
-    """C++ function-body destination prompt (assistant turn == CAUSAL_PREFIX)."""
-    messages = [
-        {"role": "system", "content": GOALSCOPE_SYS},
-        {"role": "user", "content": CAUSAL_INSTRUCTION},
-        {"role": "assistant", "content": CAUSAL_PREFIX},
-    ]
-    kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
-    try:
-        return mt.tokenizer.apply_chat_template(
-            messages, chat_template_kwargs={"enable_thinking": False}, **kw
-        )
-    except TypeError:
-        return mt.tokenizer.apply_chat_template(messages, **kw)
-
 
 def _parse_verdict(resp: str) -> str:
     """Prefer the <verdict>TOKEN</verdict> tag; fall back to the last bare verdict token."""
@@ -426,47 +388,18 @@ def hard_eval(readout, impl_span, mode):
     )
 
 
-def kway_assign(readout, conditions):
-    """dict(pred, prompt, system, response). pred = matched condition index or None."""
-    if not readout or not readout.strip():
-        return dict(pred=None, prompt=None, system=_KWAY_SYS, response=None)
-    menu = "\n".join(f"{i}. {c}" for i, c in enumerate(conditions))
-    prompt = (
-        f"Conditions:\n{menu}\n\nDescription: {readout.strip()}\n"
-        f"Which condition number does the description best match? Output only the integer, or -1 if none."
-    )
-    resp = ask_claude(
-        prompt=prompt,
-        system_prompt=_KWAY_SYS,
-        max_tokens=256,
-        use_cache=True,
-        model_name=ORACLE_MODEL,
-    )
-    m = re.search(r"-?\d+", resp)
-    pred = int(m.group()) if m else None
-    if pred is not None and not (0 <= pred < len(conditions)):
-        pred = None
-    return dict(pred=pred, prompt=prompt, system=_KWAY_SYS, response=resp)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Aggregation
 # ══════════════════════════════════════════════════════════════════════════════
 def compute_summary(records: list[dict], n_samples: int) -> dict:
-    """Per-anchor + overall hard_yes (and kway_ok iff k-way records are present)."""
-    has_kway = bool(records) and all("kway_pred" in r for r in records)
+    """Per-anchor + overall hard_yes / heavy_loop."""
 
     def _stats(grp):
-        d = dict(
+        return dict(
             n=len(grp),
             hard_yes=float(np.mean([r["hard"] == "YES" for r in grp])),
             heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in grp])),
         )
-        if has_kway:
-            d["kway_ok"] = float(
-                np.mean([r["kway_pred"] == r["kway_true"] for r in grp])
-            )
-        return d
 
     by_anchor = {
         a: _stats(grp)
@@ -478,10 +411,6 @@ def compute_summary(records: list[dict], n_samples: int) -> dict:
             hard_yes=float(np.mean([r["hard"] == "YES" for r in records])),
             heavy_loop=float(np.mean([r["hard"] == "HEAVY_LOOP" for r in records])),
         )
-        if has_kway:
-            overall["kway_ok"] = float(
-                np.mean([r["kway_pred"] == r["kway_true"] for r in records])
-            )
     else:
         overall = dict(hard_yes=float("nan"))
     return dict(
@@ -493,24 +422,17 @@ def compute_summary(records: list[dict], n_samples: int) -> dict:
 
 
 def log_summary(summary: dict, mode: str = "faithfulness"):
-    metric = "causality" if mode == "causality" else "faithfulness"
-    has_kway = any("kway_ok" in m for m in summary["by_anchor"].values())
-    logger.info(
-        f"per-anchor {metric} (hard_yes" + (" | kway_ok):" if has_kway else "):")
-    )
+    logger.info(f"per-anchor {mode} (hard_yes):")
     for aname in ANCHOR_ORDER:
         if aname in summary["by_anchor"]:
             m = summary["by_anchor"][aname]
-            k = f"  kway_ok={m['kway_ok']:.3f}" if "kway_ok" in m else ""
-            hl = f"  hvy_loop={m['heavy_loop']:.3f}" if "heavy_loop" in m else ""
             logger.info(
-                f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}{hl}{k}"
+                f"  {aname:10s} n={m['n']:<4d} hard_yes={m['hard_yes']:.3f}  hvy_loop={m['heavy_loop']:.3f}"
             )
     o = summary["overall"]
-    k = f"  kway_ok={o['kway_ok']:.3f}" if "kway_ok" in o else ""
     hl = f"  hvy_loop={o['heavy_loop']:.3f}" if "heavy_loop" in o else ""
     logger.info(
-        f"  {'OVERALL':10s} n={summary['n_records']:<4d} hard_yes={o['hard_yes']:.3f}{hl}{k}"
+        f"  {'OVERALL':10s} n={summary['n_records']:<4d} hard_yes={o['hard_yes']:.3f}{hl}"
     )
 
 
@@ -527,17 +449,9 @@ def parse_args():
         choices=["faithfulness", "causality"],
         help="faithfulness: NL read-out vs impl | causality: C++ transfer of the idea",
     )
-    # ── GOALSCOPE_CONFIG ──
+    ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument(
-        "--heads", default="goal", help="goal | <path>.json"
-    )
-    ap.add_argument(
-        "--goal_threshold",
-        type=float,
-        default=None,
-        help="mask-value cutoff for --heads goal (default 0.9). Default is None rather than 0.9 so "
-        "that passing it explicitly is detectable: it is meaningless for a .json head set and "
-        "combining the two is rejected rather than silently ignored.",
+        "--heads", default="goal", help="goal (the thresholded goal-head mask) | <path>.json"
     )
     ap.add_argument(
         "--goal_band",
@@ -546,67 +460,41 @@ def parse_args():
         default=None,
         metavar=("START", "END"),
         help="layer band the goal heads are read from; default is per-model (GOAL_BANDS). "
-        "Passing this explicitly also adds band=START-END to the run dir, so band sweeps "
-        "do not overwrite each other.",
+        "Passing this explicitly also adds band=START-END to the run dir.",
     )
     ap.add_argument(
         "--strategy",
-        default="additive",
-        choices=["additive", "additive_norm", "replace"],
-        help="additive_norm makes the injection norm-relative "
-        "(h + alpha*||h||*g/||g||) so alpha does not carry over from additive; "
-        "strategy is a run-dir path component, so the two never collide.",
+        default="additive_norm",
+        choices=["additive_norm", "replace"],
+        help="additive_norm: h + alpha*||h||*g/||g|| at --steer_layer_range | replace: swap the "
+        "goal heads' o_proj inputs (model axis). strategy is a run-dir path component.",
     )
     ap.add_argument(
         "--alpha",
         type=float,
-        default=None,
-        help="default 0.2 (additive) / 1.0 (replace)",
+        default=0.1,
+        help="additive_norm: added fraction of ||h|| | replace: source-side weight (1.0)",
     )
     ap.add_argument(
         "--steer_layer_range",
         type=int,
         nargs=2,
         default=[35, 46],
-        help="additive only: layers range(a, b) receive the injection",
-    )
-    ap.add_argument("--n_steer_tokens", default="all", help="'all' | int")
-    ap.add_argument(
-        "--max_new_tokens", type=int, default=64, help="read-out length per anchor"
-    )
-    # ── corpus / model ──
-    ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
-    ap.add_argument(
-        "--datatypes",
-        nargs="+",
-        default=ALL_DATATYPES,
-        help="datatypes AGGREGATED into ONE run (default: all four -> full 253-sample "
-        "corpus). Records keep their per-datatype tag for later breakdown.",
-    )
-    ap.add_argument(
-        "--dataset",
-        default=DEFAULT_DATASET,
-        help="locked prefill-to-frontier dataset json (QTASKS recipes)",
+        help="layers range(a, b) receive the additive_norm injection. Also a run-dir component "
+        "(layers=a-b) for --strategy replace, where it has no effect.",
     )
     ap.add_argument(
         "--seed",
         type=int,
         default=123,
-        help="torch/global seed for generation determinism (the corpus is fixed by the "
-        "dataset, not this seed)",
-    )
-    ap.add_argument(
-        "--gen_max_new_tokens",
-        type=int,
-        default=64,
-        help="frontier-body greedy budget (>=1)",
+        help="torch/global seed for generation determinism (the corpus is fixed by the dataset)",
     )
     ap.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="SMOKE ONLY: cap the corpus to N datapoints (round-robin across datatypes so all "
-        "prompt builders are hit). Changes n_specs -> a separate run dir; not for real runs.",
+        help="SMOKE ONLY: cap the corpus to N datapoints (round-robin across datatypes). Changes "
+        "n_specs -> a separate run dir; not for real runs.",
     )
     ap.add_argument(
         "--overwrite",
@@ -614,40 +502,15 @@ def parse_args():
         help="wipe an existing run dir and redo it; default is to RESUME from the last "
         "completed sample (same args => same run dir)",
     )
-    ap.add_argument(
-        "--assistant_prefill",
-        nargs="+",
-        default=None,
-        help="faithfulness only: seed the probe's assistant turn with one of these prefixes, sampled "
-        "per datapoint (deterministic in the spec id); the prefix is prepended to the read-out the "
-        "oracle sees. For models that open the probe answer with a refusal ('I cannot ...').",
-    )
     logging_utils.add_logging_args(ap)  # -v (DEBUG) / -q (WARNING); default INFO
     args = ap.parse_args()
 
-    # A .json head set is the complete specification of which heads to steer. Anything that would
-    # also select heads is therefore rejected — even when it happens to agree — so a run dir can
+    # A .json head set is the complete specification of which heads to steer, so a run dir can
     # never claim a selection knob that had no effect on the heads actually used.
-    if args.assistant_prefill and args.mode != "faithfulness":
-        ap.error("--assistant_prefill is faithfulness-only (causality already prefills the C++ stub)")
-    if args.heads.endswith(".json"):
-        conflicting = [
-            name
-            for name, val in (
-                ("--goal_threshold", args.goal_threshold),
-                ("--goal_band", args.goal_band),
-            )
-            if val is not None
-        ]
-        if conflicting:
-            ap.error(
-                f"{', '.join(conflicting)} cannot be combined with --heads {args.heads!r}: a json "
-                f"head set supersedes every head-selection flag. Drop it, or bake the filtering "
-                f"into the json."
-            )
-    if args.goal_threshold is None:
-        args.goal_threshold = (
-            0.9  # materialise the documented default for the mask-based specs
+    if args.heads.endswith(".json") and args.goal_band is not None:
+        ap.error(
+            f"--goal_band cannot be combined with --heads {args.heads!r}: a json head set "
+            f"supersedes it. Drop it, or bake the filtering into the json."
         )
     return args
 
@@ -659,81 +522,48 @@ def main():
     torch.set_grad_enabled(False)
     results_dir = env_utils.DEFAULT_RESULTS_DIR
 
-    alpha = (
-        args.alpha
-        if args.alpha is not None
-        # additive_norm has different units, so it gets no inherited default
-        else (0.2 if args.strategy == "additive" else 1.0)
-    )
-    n_steer = (
-        "all" if str(args.n_steer_tokens).lower() == "all" else int(args.n_steer_tokens)
-    )
     heads_name = resolve_heads_name(args.heads)
     hard_sys = CAUSAL_HARD_SYS if args.mode == "causality" else FAITH_HARD_SYS
 
     # ── LOCKED corpus: load up front (no model needed) so the run dir + skip check resolve first ──
-    datapoints, ds_meta = load_locked_datapoints(args.dataset, args.datatypes)
-    if (
-        args.limit
-    ):  # SMOKE: round-robin across datatypes so a small N hits every prompt builder
-        groups = {}
-        for sid, inst in datapoints:
-            groups.setdefault(inst.meta["datatype"], []).append((sid, inst))
-        picked, i = [], 0
-        while len(picked) < args.limit and any(i < len(v) for v in groups.values()):
-            for v in groups.values():
-                if i < len(v) and len(picked) < args.limit:
-                    picked.append(v[i])
-            i += 1
-        datapoints = picked
-        logger.warning(
-            f"--limit {args.limit}: SMOKE run on {len(datapoints)} datapoints "
-            f"({sorted({inst.meta['datatype'] for _, inst in datapoints})})"
-        )
-    num_conditions = ds_meta.get("n_conditions", [2, 3, 4])
-    ds_seed = ds_meta.get("seed", args.seed)
-    # datatype path tag: "all" when the full set is aggregated, else a filesystem-safe join
-    dt_tag = (
-        "all"
-        if set(args.datatypes) == set(ALL_DATATYPES)
-        else "+".join(d.replace("[", "").replace("]", "") for d in args.datatypes)
-    )
+    datapoints, ds_meta = load_locked_datapoints(DEFAULT_DATASET, ALL_DATATYPES)
+    if args.limit:
+        datapoints = limit_round_robin(datapoints, args.limit)
 
     # config (sans selected_heads) — enough to resolve the run dir + skip check before loading the model
     config = dict(
         mode=args.mode,
         heads_spec=args.heads,
         heads_name=heads_name,
-        goal_threshold=args.goal_threshold,
+        goal_threshold=GOAL_THRESHOLD,
         # resolved below once mt.n_layer is known if it is neither given nor registered
         goal_band=list(args.goal_band) if args.goal_band else None,
         goal_band_explicit=args.goal_band is not None,  # -> band=A-B in the run dir
         strategy=args.strategy,
-        alpha=alpha,
+        alpha=args.alpha,
         steer_layer_range=list(args.steer_layer_range),
-        n_steer_tokens=n_steer,
-        max_new_tokens=args.max_new_tokens,
+        n_steer_tokens="all",
+        max_new_tokens=MAX_NEW_TOKENS,
         model=args.model,
-        datatype=dt_tag,  # "all" -> one run over the full aggregated corpus
-        datatypes=list(args.datatypes),  # provenance: exact datatypes aggregated
+        datatype="all",  # one run over the full aggregated corpus
+        datatypes=list(ALL_DATATYPES),
         n_specs=len(datapoints),
-        num_conditions=list(num_conditions),
-        seed=ds_seed,
-        gen_max_new_tokens=args.gen_max_new_tokens,
-        span_source="frontier",  # prefill-to-frontier: distinguishes leaf from the old 'rule'
-        dataset=str(args.dataset),
+        num_conditions=list(ds_meta["n_conditions"]),
+        seed=ds_meta["seed"],
+        gen_max_new_tokens=GEN_MAX_NEW_TOKENS,
+        span_source="frontier",  # prefill-to-frontier: the leaf's span=frontier
+        dataset=DEFAULT_DATASET,
         bank="QTASKS",
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
         readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
         hard_rubric_tag=hashlib.md5(hard_sys.encode()).hexdigest()[:8],
-        assistant_prefill=args.assistant_prefill,
     )
     run_dir = fio.run_dir_for(config, results_dir)
 
     # ── overwrite vs resume ──
     if args.overwrite and run_dir.exists():
-        for f in ("records.jsonl", "samples.jsonl", "samples.json", "summary.json"):
+        for f in ("records.jsonl", "samples.jsonl", "summary.json"):
             (run_dir / f).unlink(missing_ok=True)
         logger.info(f"--overwrite: cleared existing run at {run_dir}")
     prev = None if args.overwrite else fio.read_config(run_dir)
@@ -757,7 +587,7 @@ def main():
     )  # drop rows from a half-finished sample
     remaining = [(sid, inst) for sid, inst in datapoints if sid not in completed]
     logger.info(
-        f"corpus: {len(datapoints)} datapoints (locked {args.dataset}, dtypes={dt_tag}) | "
+        f"corpus: {len(datapoints)} datapoints (locked {DEFAULT_DATASET}) | "
         f"already done: {len(completed)} ({kept} records kept) | remaining: {len(remaining)}"
     )
 
@@ -791,7 +621,6 @@ def main():
         args.model,
         results_dir,
         n_heads,
-        goal_threshold=args.goal_threshold,
         goal_band=args.goal_band,
         n_layer=mt.n_layer,
     )
@@ -803,7 +632,7 @@ def main():
         )
         config["goal_band"] = list(band)
         logger.info(
-            f"goal heads: band {band[0]}-{band[1] - 1} @ >{args.goal_threshold} -> {len(heads)} heads"
+            f"goal heads: band {band[0]}-{band[1] - 1} @ >{GOAL_THRESHOLD} -> {len(heads)} heads"
         )
     config["n_heads"] = len(heads)
     config["selected_heads"] = [[int(l), int(h)] for l, h in heads]
@@ -828,14 +657,14 @@ def main():
     gs_kwargs = dict(
         selected_heads=heads,
         strategy=args.strategy,
-        alpha=alpha,
+        alpha=args.alpha,
         steer_layer_range=tuple(args.steer_layer_range),
-        n_steer_tokens=n_steer,
-        max_new_tokens=args.max_new_tokens,
+        n_steer_tokens="all",
+        max_new_tokens=MAX_NEW_TOKENS,
     )
     # causality: steer into the C++ stub prompt; faithfulness: apply_goalscope's default NL probe
     if args.mode == "causality":
-        gs_kwargs["goalscope_prompt"] = build_causality_prompt(mt)
+        gs_kwargs["goalscope_prompt"] = _build_causality_prompt(mt)
     readout_prefix = CAUSAL_PREFIX if args.mode == "causality" else ""
 
     # append-mode handles both a fresh run and a resume (existing kept rows/samples are preserved)
@@ -843,10 +672,10 @@ def main():
     samp_fh = open(fio.samples_path(run_dir), "a")
     n_done = len(completed)
     n_total = len(datapoints)
-    for si, (sid, inst) in enumerate(remaining):
+    for sid, inst in remaining:
         sample_records = []
-        prompt, var = build_prompt(mt, inst, inst.src_lang)
-        completion = generate_completion(mt, prompt, args.gen_max_new_tokens)
+        prompt, var = build_prompt(mt, inst)
+        completion = generate_completion(mt, prompt, GEN_MAX_NEW_TOKENS)
         full_text = prompt + completion
 
         # frontier impl_span is exact (single-line predicate) — no oracle span-labelling
@@ -858,14 +687,9 @@ def main():
             logger.warning(f"[{sid}] no valid pivots — skipping")
             continue
         apos = sorted(set(pivs.values()))
-        if args.assistant_prefill:
-            _i = int(hashlib.md5(str(sid).encode()).hexdigest()[:8], 16)
-            readout_prefix = args.assistant_prefill[_i % len(args.assistant_prefill)]
-            gs_kwargs["goalscope_prompt"] = _build_goalscope_prompt(mt, readout_prefix)
         res = apply_goalscope(
             full_text,
             mt=mt,
-            show=False,
             include_noncode=False,
             token_positions=apos,
             **gs_kwargs,
@@ -873,8 +697,7 @@ def main():
         readouts = {r["pos"]: r for r in res}
 
         for aname, pos in pivs.items():
-            # causality prepends the C++ stub (faithfulness: the assistant prefill, if any) so the
-            # oracle sees the read-out as the model's full answer
+            # causality prepends the C++ stub so the oracle sees the read-out as the model's full answer
             ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
             hv = hard_eval(ro, impl_span, args.mode)
             logger.debug(
