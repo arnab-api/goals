@@ -22,7 +22,7 @@ probing / MCTS, clock / boundary heads, NRGS masks, subspace probes, exploratory
 ## Pipeline
 
 1. **Corpus**: `scripts/data/gen_goalscope_eval.py` → `data/goalscope_eval.json` (253 multi-sub-task specs,
-   `src/diff/data.py` `QTASKS`).
+   `src/nrgs/data.py` `QTASKS`).
 2. **Goal-head localization**: oracle pivot mining (`scripts/mine_pivot_instances.py`, `src/goals/head_loc_oracle.py`;
    cross-language C++ → Python pairs at the pivot where two predicates diverge) → differentiable head mask
    (`scripts/train_head_mask.py`, `src/goals/head_loc_attn.py`, λ = 20) → exported head sets
@@ -32,10 +32,12 @@ probing / MCTS, clock / boundary heads, NRGS masks, subspace probes, exploratory
    decode step); judged for faithfulness / causality by Claude (`scripts/evaluation/eval_goalscope.py`).
 4. **Persistence / necessity**: temporal and obstacle persistence, sufficiency / necessity ablations
    (`scripts/evaluation/`).
-5. **NRGS interventions** (`src/diff/`): pivot-onwards KV transfer of the task span (`scripts/diff/path_patch_eval.py`;
+5. **NRGS interventions** (`src/nrgs/`): pivot-onwards KV transfer of the task span (`scripts/nrgs/kv_transfer_eval.py`;
    `--span task|task+progress`, V-boost `--i3-v-scale`), Q transfer
-   with gaze-select + restrict (`scripts/diff/diff_trigger_eval.py`), task span vs code-progress span
-   (`scripts/diff/task_vs_progress_eval.py`).
+   with gaze-select + restrict (`scripts/nrgs/q_transfer_eval.py`), task span vs code-progress span
+   (`scripts/nrgs/task_vs_progress_eval.py`). Module / script names follow the paper; results, caches and figure
+   dirs keep their legacy names (`results/diff/<model>/{path_patch,diff_trigger}`, `results/obstacle_robustness`,
+   `notebooks/Figures/{transfer,precommit_ablation,sparsity_ablation,...}`) for cache compatibility.
 6. **Beyond code**: ICL (`scripts/icl/`) and emergent misalignment (`scripts/em/`) reproductions.
 
 README.md maps every paper section to its script, job list and figure generator.
@@ -60,8 +62,8 @@ Creates the `goals` conda environment (Python 3.12, torch ≥ 2.7 from the CUDA 
   `collect_head_steering_vecs()`.
 - `src/goals/goalscope.py` — `apply_goalscope()`, `head_additive_generate()`, `OVReader`.
 - `src/goals/goalscope_viz.py` — paper-style HTML renderer (read-outs left of the code); also renders the site.
-- `src/diff/functional.py` — `setup()` (the model), the head-patching hooks used by the NRGS scripts;
-  `src/diff/path_patch.py` (pivot-onwards KV transfer), `src/diff/task_vs_progress.py`.
+- `src/nrgs/functional.py` — `setup()` (the model), the head-patching hooks used by the NRGS scripts;
+  `src/nrgs/kv_transfer.py` (pivot-onwards KV transfer), `src/nrgs/task_vs_progress.py`.
 - `src/goals/site_data.py` — data writers for the companion site (goals-web repo, `GOALS_WEB_SITE`).
 
 ## Configuration
@@ -118,7 +120,5 @@ When implementing new features (evals, utils, classes, etc.):
 
 ## Known Issues
 
-- **Judge scoring of q-transfer**: "BOTH" (readout names both frontiers) counts as a miss; older summaries were
-  re-scored with `scripts/diff/rescore_exclude_both.py`.
 - **`ask_claude` cache race**: concurrent threads judging the same text can collide on the cache's temp file
   (`FileNotFoundError` on rename); re-run the affected file (calls are cached).

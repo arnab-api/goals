@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Batch pivot-onwards KV transfer (``src.diff.path_patch``) on the multi-predicate setup (``--setup multi``) or one
+"""Batch pivot-onwards KV transfer (``src.nrgs.kv_transfer``) on the multi-predicate setup (``--setup multi``) or one
 level down, the multi-hierarchy setup (``--setup hier``).
 
     multi:  p_src: a'b'c -> c (k/v donor)    p_dst: a'b'd -> d (patched)
@@ -18,9 +18,9 @@ Results: ``results/diff/<model>/path_patch/<run_tag>/<dt>__<src>-<dst>/`` (multi
 instance (resumable) and ``meta.json``; ``summary__<...>.json`` per invocation under that root. hier records also carry the
 instance's (a, x, y, z) and ``H.rule_verdict`` (execution of the first written condition; Python destinations).
 
-    conda run -n goals python scripts/diff/path_patch_eval.py --cuda 6                      # 4 datatypes x 32
-    conda run -n goals python scripts/diff/path_patch_eval.py --cuda 6 --datatypes list[str] --max-instances 2   # smoke
-    conda run -n goals python scripts/diff/path_patch_eval.py --cuda 6 --setup hier --connectives and --orders match
+    conda run -n goals python scripts/nrgs/kv_transfer_eval.py --cuda 6                      # 4 datatypes x 32
+    conda run -n goals python scripts/nrgs/kv_transfer_eval.py --cuda 6 --datatypes list[str] --max-instances 2   # smoke
+    conda run -n goals python scripts/nrgs/kv_transfer_eval.py --cuda 6 --setup hier --connectives and --orders match
 """
 
 import argparse
@@ -55,18 +55,18 @@ if _cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-import src.diff.data as DATA  # noqa: E402
-import src.diff.functional as FUNC  # noqa: E402
-import src.diff.hier_data as H  # noqa: E402
-import src.diff.path_patch as PP  # noqa: E402
+import src.nrgs.data as DATA  # noqa: E402
+import src.nrgs.functional as FUNC  # noqa: E402
+import src.nrgs.hier_data as H  # noqa: E402
+import src.nrgs.kv_transfer as PP  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
-logger = logging.getLogger("path_patch_eval")
+logger = logging.getLogger("kv_transfer_eval")
 
 MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
 MECHANISM = "path_patch"
-ROOTS = {"multi": "path_patch", "hier": "path_patch_hier"}      # results/diff/<model>/<root>/
+ROOTS = {"multi": "path_patch", "hier": "path_patch_hier"}      # results/diff/<model>/<root>/ — legacy dir names, kept for cache compatibility
 GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
 MAX_NEW = 64
 ORACLE_MODEL = "claude-sonnet-4-6"

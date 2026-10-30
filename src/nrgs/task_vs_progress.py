@@ -1,5 +1,5 @@
 """Task vs progress: which span does the pivot read the goal from? (batch driver
-``scripts/diff/task_vs_progress_eval.py``).
+``scripts/nrgs/task_vs_progress_eval.py``).
 
     p_src: a'b'c -> c     source (k/v or residual donor)
     p_dst: a'b'd -> d     the patched run (prompt ends at the eq pivot `` =``)
@@ -27,8 +27,8 @@ from contextlib import ExitStack, contextmanager
 
 import torch
 
-import src.diff.functional as FUNC
-import src.diff.path_patch as PP
+import src.nrgs.functional as FUNC
+import src.nrgs.kv_transfer as PP
 
 # (method, heads, span, V) — "none" = the clean DST run (no-op corner of the grid)
 CONFIGS = (

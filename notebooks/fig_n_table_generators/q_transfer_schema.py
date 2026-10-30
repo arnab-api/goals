@@ -1,11 +1,11 @@
-"""gsr schematic WITH the clean destination run -> notebooks/Figures/transfer/gsr_schema_clean.{svg,pdf,png}.
+"""gsr schematic WITH the clean destination run -> notebooks/Figures/transfer/q_transfer_schema.{svg,pdf,png}.
 
 Two rows:
   2×2 grid · row 1: (i) source run · (ii) clean destination run (attention + readout at the pivot)
   row 2: (iii) select (q_src drops in from (i)) · (iv) restrict and generate
 (ii) and (iii) share the colour / bar scale.
 Render: cairosvg + IBM Plex Sans/Mono.
-Data: one real instance (scripts/diff/gsr_example_attention.py)."""
+Data: one real instance (scripts/nrgs/q_transfer_example_attention.py)."""
 import glob
 import json
 import os
@@ -277,7 +277,7 @@ path(f"M{BX1 + BW * SCORE['patched'][SEL] + 44:.1f},{hy:.1f} L{P2X+12:.1f},{hy:.
 
 add('</svg>')
 FIG = os.path.join(HERE, "..", "Figures", "transfer")
-svg_path = os.path.join(FIG, "gsr_schema_clean.svg")
+svg_path = os.path.join(FIG, "q_transfer_schema.svg")
 open(svg_path, "w").write("\n".join(out))
 try:
     import cairosvg

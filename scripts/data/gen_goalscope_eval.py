@@ -2,7 +2,7 @@
 """Generate the LOCKED goalscope eval dataset -> data/goalscope_eval.json (source of truth).
 
 QTASKS bank, OVReader prefill-to-frontier setup (var_eq stub, letters naming), with BALANCED frontier
-coverage: every NON-trivial frontier (src.diff.data.TRIVIAL_FRONTIERS excluded) is the target exactly
+coverage: every NON-trivial frontier (src.nrgs.data.TRIVIAL_FRONTIERS excluded) is the target exactly
 `reps` times, each with a distinct prefill context. Frontier pool = non-trivial; context (prefill +
 trailing predicates) may be any predicate (frontier-only exclusion policy).
 
@@ -26,7 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(REPO_ROOT))
 
-import src.diff.data as DATA  # noqa: E402
+import src.nrgs.data as DATA  # noqa: E402
 
 DATATYPES = ["int", "list[int]", "str", "list[str]"]
 N_CONDITIONS = [2, 3, 4]
@@ -100,7 +100,7 @@ def main():
             description="Locked OVReader-setup corpus (QTASKS bank, prefill-to-frontier, var_eq stub, "
             "letters naming) with BALANCED frontier coverage: each non-trivial frontier is the "
             "target `reps` times with distinct prefill contexts. Rebuild from QTASKS by id.",
-            bank="src.diff.data.QTASKS",
+            bank="src.nrgs.data.QTASKS",
             generator="scripts/data/gen_goalscope_eval.py",
             balanced=True,
             reps_per_frontier=reps_by,

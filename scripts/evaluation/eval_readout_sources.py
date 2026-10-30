@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""Residual-stream PatchScope baseline for the GoalScope evals.
+"""Goal heads vs. other readout sources: residual-stream PatchScope baseline for the GoalScope evals.
 
 The counterpart to ``eval_goalscope.py``: identical corpus, anchors, oracle rubric and scoring —
 the *only* difference is **what** gets injected into the read-out probe.
 
     eval_goalscope.py          g_enc = summed o_proj contribution of the selected goal heads
-    eval_residual_patchscope   h_src = the residual stream (or the attention-block output) itself,
+    eval_readout_sources.py    h_src = the residual stream (or the attention-block output) itself,
                                averaged over --source-layers
 
 Injection is norm-relative, matching ``--strategy additive_norm`` (alpha 0.1, steer layers 35-46):
@@ -23,7 +23,7 @@ with ``heads=<source>:L<lo>-<hi>:mean`` as the leaf's head-set component, so a r
 collide with a head-set run.
 
 Usage (no flags = the paper's residual baseline: residual stream, layers 40-50, faithfulness):
-    conda run -n goals python scripts/evaluation/eval_residual_patchscope.py [--mode causality]
+    conda run -n goals python scripts/evaluation/eval_readout_sources.py [--mode causality]
     # full-attention baseline:      --source attn
     # goal-band residual baseline:  --source-layers 25 56
 """

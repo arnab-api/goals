@@ -229,7 +229,7 @@ def eval_readouts(inst, source_readout: str, dest_readout: str, patched_readout:
 # ══════════════════════════════════════════════════════════════════════════════
 def target_spans(inst, prompt: str, ctx=None) -> dict:
     """Token spans (absolute, [lo, hi)) of the SRC-target and DST-target descriptions in ``prompt``."""
-    from src.diff.functional import token_span
+    from src.nrgs.functional import token_span
 
     return {"src": token_span(prompt, inst.expected_next_desc, ctx=ctx),
             "dst": token_span(prompt, inst.dst_next_desc, ctx=ctx)}

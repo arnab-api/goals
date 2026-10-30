@@ -4,10 +4,10 @@ One function-writing task made of several INDEPENDENT, COMMUTATIVE sub-predicate
 banks), listed as a numbered task. Contrastive SRC / DST prompts differ in the listed predicates and / or the prefilled
 PROGRESS, so at the shared pivot the source is "about to write" a different next sub-predicate than the destination:
 
-* :class:`DiffTriggerInstance` (:func:`diff_trigger_setups`) — query transfer (``scripts/diff/diff_trigger_eval.py``);
+* :class:`DiffTriggerInstance` (:func:`diff_trigger_setups`) — query transfer (``scripts/nrgs/q_transfer_eval.py``);
 * :class:`MultiPredicateInstance` (:func:`multi_predicate_setups`) — kv transfer of the task span
-  (``scripts/diff/path_patch_eval.py``); the multi-hierarchy variant over :data:`FILTER_TASKS` conditions lives in
-  :mod:`src.diff.hier_data`.
+  (``scripts/nrgs/kv_transfer_eval.py``); the multi-hierarchy variant over :data:`FILTER_TASKS` conditions lives in
+  :mod:`src.nrgs.hier_data`.
 
 Generalization axes:
     • datatype     — int | str | list[int] | list[str]
@@ -16,7 +16,7 @@ Generalization axes:
 Predicate implementations are templates over the placeholders ``{arg}`` (the function's parameter name), ``{res}``
 (the result variable name of THIS predicate) and ``{elem}`` (a filter condition's element).
 
-Prompts are materialized with the chat template via :func:`src.diff.functional.get_prompt`
+Prompts are materialized with the chat template via :func:`src.nrgs.functional.get_prompt`
 (imported lazily so plain dataset inspection needs no model).
 """
 
@@ -81,7 +81,7 @@ class FilterTask:
     return expression, e.g. "all the words that are palindromes and start with a vowel". Unlike
     :class:`QTransferTask` (one assignment per sub-goal, statement-boundary pivot), the pivot here
     sits MID-EXPRESSION — right after ``… if <cond> and`` — so the model completes the same
-    comprehension by adding the next condition (:mod:`src.diff.hier_data`).
+    comprehension by adding the next condition (:mod:`src.nrgs.hier_data`).
 
     Each condition is a boolean template over ``{elem}`` (the loop/comprehension variable) and, if
     needed, ``{arg}``; ``description`` is the NL fragment ("are palindromes")."""
@@ -378,10 +378,10 @@ def materialize(instance, ctx=None) -> dict:
     """Apply the chat template to an instance's src/dst (question, prefill) parts.
 
     Returns ``{"src_prompt", "dst_prompt", ...}`` (+ ``src_task_text``/``dst_task_text`` for the multi-predicate
-    and multi-hierarchy instances). ``ctx`` is a :class:`src.diff.functional.Ctx` (else module-global
+    and multi-hierarchy instances). ``ctx`` is a :class:`src.nrgs.functional.Ctx` (else module-global
     ``mt``). Prefills are finalized (``_finalize_prefill``) so a dangling trailing space never
     becomes the pivot. Imported lazily so dataset inspection needs no model."""
-    from src.diff.functional import get_prompt
+    from src.nrgs.functional import get_prompt
 
     qs, pfs = instance.src_parts()
     qd, pfd = instance.dst_parts()
@@ -1194,7 +1194,7 @@ class DiffTriggerInstance:
     ``order-matched`` confounds D with a positional "do the 3rd-listed" copy (C and D are both 3rd);
     ``order-diff`` breaks that — C is 2nd in SRC, D is 3rd in DST, so a positional copy predicts B.
 
-    Scoring reuses :func:`src.diff.eval.eval_q_transfer` / :func:`judge_causal`: ``expected_next_desc``
+    Scoring reuses :func:`src.nrgs.eval.eval_q_transfer` / :func:`judge_causal`: ``expected_next_desc``
     = D (the DIFF-predicted DST target = "triggered"), ``dst_next_desc`` = B (native), ``task_desc`` =
     the DST task; ``src_target_desc`` = C is exposed for a separate literal-copy check. Gaze uses the
     DST task predicates via the ``task`` property. Prompt: the listed task, independent assignment lines named by

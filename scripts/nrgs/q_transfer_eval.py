@@ -12,17 +12,17 @@ We transplant SRC's pivot goal-head *query* into DST and read what DST writes:
 order-matched confounds D with a positional "do the 3rd-listed" copy (C and D are both 3rd); order-diff
 breaks it (C is 2nd in SRC, D is 3rd in DST, so a positional copy predicts B).
 
-Reuses the q-transfer machinery: ``src.diff.functional.run_q_transfer_intervention`` (single-pivot query
+Reuses the q-transfer machinery: ``src.nrgs.functional.run_q_transfer_intervention`` (single-pivot query
 patch at the frontier's ``{var} =`` stub; OV boost alpha on the patched readout) with the gaze-select-restrict
 intervention: the patched pivot's gaze picks one listed task, then a separate run without the query transfer in which
 the goal heads, from the pivot on, read only that task's span + the pivot + the generated tokens. Judged with
-``src.diff.eval`` (``judge_causal`` = wrote D; ``judge_joint``; ``eval_readouts``; gaze = pivot gazes at D's span
+``src.nrgs.eval`` (``judge_causal`` = wrote D; ``judge_joint``; ``eval_readouts``; gaze = pivot gazes at D's span
 > B's span) + a literal-C check (``classify_concept`` against C). Defaults = the paper's configuration (alpha 2, the
 250 goal heads, 32 instances per cell). Results:
     results/diff/<model>/diff_trigger/<run_tag>/<variant>/<datatype>__<sl>-<dl>/results.json  (+ summary.json)
 
 Usage:
-    conda run -n goals python scripts/diff/diff_trigger_eval.py --cuda 0,1 \\
+    conda run -n goals python scripts/nrgs/q_transfer_eval.py --cuda 0,1 \\
         --variants order_matched order_diff --datatypes int str --tag-suffix __seq
 """
 import argparse
@@ -52,13 +52,13 @@ if _cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-import src.diff.data as DATA  # noqa: E402
-import src.diff.eval as E  # noqa: E402
-import src.diff.functional as FUNC  # noqa: E402
+import src.nrgs.data as DATA  # noqa: E402
+import src.nrgs.eval as E  # noqa: E402
+import src.nrgs.functional as FUNC  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
-logger = logging.getLogger("diff_trigger_eval")
+logger = logging.getLogger("q_transfer_eval")
 
 MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
 GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
@@ -246,7 +246,7 @@ def main():
         # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
         run_tag = (f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-eq__cl-ppgazerestrict-anceq"
                    + args.tag_suffix)
-        out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag
+        out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag   # legacy results dir names, kept for cache compatibility
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(f"########## OV boost alpha={alpha} -> {run_tag} ##########")
         metas = []

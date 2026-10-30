@@ -33,7 +33,7 @@ import re
 import numpy as np
 import torch
 
-import src.diff.data as D
+import src.nrgs.data as D
 from scripts.evaluation.eval_goalscope import _chat_prompt, greedy_continue, load_json_heads
 from src.goals.head_loc_attn import collect_head_steering_vecs
 from src.tokens import prepare_input

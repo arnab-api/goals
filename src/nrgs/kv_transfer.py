@@ -1,4 +1,4 @@
-"""Path patching on the multi-predicate setup (batch driver ``scripts/diff/path_patch_eval.py``).
+"""Pivot-onwards KV transfer on the multi-predicate setup (batch driver ``scripts/nrgs/kv_transfer_eval.py``).
 
 Two prompts sharing the prefilled progress (a, b):
 
@@ -6,12 +6,12 @@ Two prompts sharing the prefilled progress (a, b):
     p_dst: a'b'd -> d     the patched run
 
 (multi-hierarchy, one level down: p_src a'(x'z) -> z, p_dst a'(x'y) -> y, pivot = the connective;
-:mod:`src.diff.hier_data`.)
+:mod:`src.nrgs.hier_data`.)
 
 The intervention is the **pivot-onwards KV transfer**: ``goal_heads`` read SRC's window k/v from the pivot on (the last
 query of each forward), optionally with the transplanted values scaled by ``v_scale``. The transplanted window is the
 task span (``span="task"``: ``(1)`` .. the user turn's ``<|im_end|>``, excluded) or the task span + the progress through
-the pivot ` =` (``span="task+progress"``). Both are aligned with :func:`src.diff.functional.align_kv_spans`: the shorter
+the pivot ` =` (``span="task+progress"``). Both are aligned with :func:`src.nrgs.functional.align_kv_spans`: the shorter
 SRC / DST window gets ``\\n`` tokens right before it, so the two windows have equal length and the transplant stays
 position-aligned across languages ("A1"). All runs of a geometry (clean SRC, clean DST, patched) use these padded token
 sequences."""
@@ -25,10 +25,10 @@ from typing import Optional
 import baukit
 import torch
 
-import src.diff.data as DATA
-import src.diff.eval as E
-import src.diff.functional as FUNC
-import src.diff.hier_data as H
+import src.nrgs.data as DATA
+import src.nrgs.eval as E
+import src.nrgs.functional as FUNC
+import src.nrgs.hier_data as H
 from src.tokens import prepare_input
 
 
@@ -87,7 +87,7 @@ def _md5_int(s: str) -> int:
 
 
 def sample_multi_instances(datatype, src_lang, dst_lang, n_samples=32, seed=1123):
-    """The batch eval's instances (``scripts/diff/path_patch_eval.py``): ``multi_predicate_setups`` (k=3, letters, var_eq,
+    """The batch eval's instances (``scripts/nrgs/kv_transfer_eval.py``): ``multi_predicate_setups`` (k=3, letters, var_eq,
     listed) with a per-(datatype, direction) seed. Returns ``(instances, sample_seed)``; instance i here is instance i
     there (same seed -> same draw)."""
     s = (seed + _md5_int(f"{_safe(datatype)}__{src_lang}-{dst_lang}")) % (2**32)
@@ -97,7 +97,7 @@ def sample_multi_instances(datatype, src_lang, dst_lang, n_samples=32, seed=1123
 
 
 def sample_hier_instances(datatype, connective, order, src_lang, dst_lang, n_samples=32, seed=1123):
-    """The multi-hierarchy instances (:func:`src.diff.hier_data.seeded_setups`). Returns ``(instances, sample_seed)``."""
+    """The multi-hierarchy instances (:func:`src.nrgs.hier_data.seeded_setups`). Returns ``(instances, sample_seed)``."""
     return H.seeded_setups(datatype, connective, order, src_lang, dst_lang, n_samples=n_samples, seed=seed)
 
 
@@ -112,7 +112,7 @@ def build_geometry(inst, *, span="task", ctx):
     """Token sequences and positions for one (instance, span) pair. ``span`` = the transplanted SRC window:
     ``"task"`` = ``(1)`` .. the user turn's ``<|im_end|>`` (excluded), i.e. the task list + everything after it;
     ``"task+progress"`` = one contiguous window from the task start through the pivot ` =`. ``g["seg"]`` = the
-    progress ``<|im_end|> .. {var}`` (pivot excluded) on DST, used by :mod:`src.diff.task_vs_progress`."""
+    progress ``<|im_end|> .. {var}`` (pivot excluded) on DST, used by :mod:`src.nrgs.task_vs_progress`."""
     mt = ctx.mt
     m = DATA.materialize(inst, ctx=ctx)
     c_desc, d_desc = inst.expected_next_desc, inst.dst_next_desc          # what the oracle judges against
@@ -173,7 +173,7 @@ def clean_runs(g, *, readout_heads, max_new=64, readout=True, ctx):
 def intervention_stack(g, *, goal_heads, v_scale=1.0, ctx):
     """``() -> ExitStack`` (single-use: call it once per forward / generation) with the pivot-onwards KV transfer:
     ``goal_heads`` read SRC's window k/v (values x ``v_scale``) from the pivot on. Used by :func:`run_patched` and by
-    :func:`src.diff.task_vs_progress.make_stack`."""
+    :func:`src.nrgs.task_vs_progress.make_stack`."""
     mt = ctx.mt
     layers = sorted({l for l, _ in goal_heads})
     k_c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, "k", ctx=ctx)
@@ -218,7 +218,7 @@ def judge(inst, raw, model_name="claude-sonnet-4-6"):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# batch-eval records (``scripts/diff/path_patch_eval.py``, ``scripts/diff/task_vs_progress_eval.py``)
+# batch-eval records (``scripts/nrgs/kv_transfer_eval.py``, ``scripts/nrgs/task_vs_progress_eval.py``)
 # ══════════════════════════════════════════════════════════════════════════════
 LANG_TRANSFERS = {
     "py-py": ("python", "python"),

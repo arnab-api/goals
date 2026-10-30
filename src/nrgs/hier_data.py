@@ -11,8 +11,8 @@ token and the model is about to write the second sub-sub-goal::
 
 ``a`` is one fully-prefilled sub-goal from the datatype's q-bank (:data:`D.QTASKS`), chosen so it does not
 overlap x / y / z (:data:`A_OVERLAP`). The intervention is the unchanged pivot-onwards kv-transfer
-(:mod:`src.diff.path_patch`: SRC task-span k+v -> DST) and the eval the unchanged
-:func:`src.diff.eval.judge_causal` / :func:`src.diff.eval.eval_readouts`; :func:`rule_verdict`
+(:mod:`src.nrgs.kv_transfer`: SRC task-span k+v -> DST) and the eval the unchanged
+:func:`src.nrgs.eval.judge_causal` / :func:`src.nrgs.eval.eval_readouts`; :func:`rule_verdict`
 adds a cheap execution-based check of the first condition the model writes.
 
 Any side may be C++ (py->cpp, cpp->py, cpp->cpp): a C++ side's frontier is a range-for filter loop
@@ -28,7 +28,7 @@ import random
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-import src.diff.data as D
+import src.nrgs.data as D
 
 Connective = Literal["and", "or"]
 Lang = Literal["python", "cpp"]
@@ -213,7 +213,7 @@ def hier_kv_setups(
 
 
 def seeded_setups(datatype, connective, order, src_lang, dst_lang, n_samples=32, seed=1123):
-    """The batch eval's per-config sample (``scripts/diff/path_patch_eval.py --setup hier``): seed =
+    """The batch eval's per-config sample (``scripts/nrgs/kv_transfer_eval.py --setup hier``): seed =
     base seed + md5 of the sample key. The sample depends on datatype + connective only (``match`` / ``diff`` share it);
     py-py keeps its original key, every direction involving C++ shares ONE sample (key ``...|python-cpp``), so py-cpp /
     cpp-py / cpp-cpp are paired. Returns ``(instances, sample_seed)``."""

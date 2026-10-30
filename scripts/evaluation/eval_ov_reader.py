@@ -32,7 +32,7 @@ import time
 
 sys.path.append(".")
 
-# --cuda must be applied before torch initialises the CUDA context (mirrors scripts/diff/*).
+# --cuda must be applied before torch initialises the CUDA context (mirrors scripts/nrgs/*).
 _pre = argparse.ArgumentParser(add_help=False)
 _pre.add_argument("--cuda", default=None)
 _cuda = _pre.parse_known_args()[0].cuda
@@ -41,7 +41,7 @@ if _cuda is not None:
 
 import torch  # noqa: E402
 
-import src.diff.data as DATA  # noqa: E402
+import src.nrgs.data as DATA  # noqa: E402
 from scripts.evaluation import ov_reader_io as ovio  # noqa: E402
 from scripts.evaluation.eval_goalscope import (  # noqa: E402
     DEFAULT_DATASET,

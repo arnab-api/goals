@@ -1,4 +1,4 @@
-"""IO utils for GoalScope eval runs (``eval_goalscope.py`` / ``eval_residual_patchscope.py``).
+"""IO utils for GoalScope eval runs (``eval_goalscope.py`` / ``eval_readout_sources.py``).
 
 Pure ``json`` — **no torch, no model import**.
 

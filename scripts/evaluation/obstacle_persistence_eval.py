@@ -3,9 +3,9 @@
 
 For each QTASKS predicate g_k, build a TWO-condition prompt with the first condition PREFILLED and the
 second (target) frontier forced to start with an escapable adversarial prefix (from
-``scripts.evaluation.obstacle_prefills.OBSTACLE_PREFILLS``): signature + `(1) ctx (2) target` +
+``scripts.evaluation.obstacle_persistence_prefills.OBSTACLE_PREFILLS``): signature + `(1) ctx (2) target` +
 `    a = <ctx impl>` + `    b =` + prefix. Greedy-continue the frontier line, then a bespoke oracle
-(``obstacle_eval.judge_adapts``) grades ADAPTED / SUCCUMBED / ESCAPED / BROKEN (plasticity-aware: any
+(``obstacle_persistence_judge.judge_adapts``) grades ADAPTED / SUCCUMBED / ESCAPED / BROKEN (plasticity-aware: any
 valid impl of g_k that adapts around the forced stub counts). ADAPTED-rate = obstacle robustness.
 
 One model per process (``--cuda`` pins the GPU), so several models can be tested in parallel (e.g. via
@@ -17,8 +17,8 @@ All 4 datatypes x every predicate x 3 levels (aligned / easy / hard) x the first
 level -> 409 trials per model.
 
 Usage (the paper runs 7 models, one per process):
-    conda run -n goals python scripts/evaluation/obstacle_robustness_eval.py --cuda 0
-    conda run -n goals python scripts/evaluation/obstacle_robustness_eval.py --cuda 2 \\
+    conda run -n goals python scripts/evaluation/obstacle_persistence_eval.py --cuda 0
+    conda run -n goals python scripts/evaluation/obstacle_persistence_eval.py --cuda 2 \\
         --model Qwen/Qwen2.5-Coder-14B-Instruct
 """
 import argparse
@@ -44,10 +44,10 @@ _cuda = _preparse_cuda(sys.argv[1:])
 if _cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda  # must precede torch import
 
-import src.diff.data as D  # noqa: E402
+import src.nrgs.data as D  # noqa: E402
 from scripts.evaluation.eval_goalscope import _chat_prompt, greedy_continue  # noqa: E402
-from scripts.evaluation.obstacle_eval import judge_adapts  # noqa: E402
-from scripts.evaluation.obstacle_prefills import OBSTACLE_PREFILLS, ARG  # noqa: E402
+from scripts.evaluation.obstacle_persistence_judge import judge_adapts  # noqa: E402
+from scripts.evaluation.obstacle_persistence_prefills import OBSTACLE_PREFILLS, ARG  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.utils import env_utils, experiment_utils, logging_utils  # noqa: E402
 
@@ -139,7 +139,7 @@ def main():
 
     jobs = build_jobs()
     slug = args.model.split("/")[-1]
-    cache_dir = os.path.join(env_utils.DEFAULT_RESULTS_DIR, "obstacle_robustness", slug)
+    cache_dir = os.path.join(env_utils.DEFAULT_RESULTS_DIR, "obstacle_robustness", slug)  # legacy dir name, kept for cache compatibility
 
     import torch
     from src.models import ModelandTokenizer

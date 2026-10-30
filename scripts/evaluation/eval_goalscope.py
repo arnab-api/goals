@@ -14,7 +14,7 @@ aggregated into one 253-sample run. No per-run random sampling.
 Pipeline (mirrors the OVReader skyline in ``scripts/evaluation/eval_ov_reader.py``):
 
   1. Corpus — load the recipes from the locked JSON; rebuild each ``QTransferInstance`` from
-     ``src.diff.data.QTASKS`` by predicate id.
+     ``src.nrgs.data.QTASKS`` by predicate id.
   2. Prompt — prefilled source prompt ending at the frontier's ``{var} =`` (var_eq stub); greedy-decode.
   3. impl_span — the frontier's ``{var} =`` line + the first generated line (single-line predicate,
      so exact — no oracle span-labelling).
@@ -51,7 +51,7 @@ sys.path.append(".")
 import numpy as np
 import torch
 
-import src.diff.data as DATA
+import src.nrgs.data as DATA
 from scripts.evaluation import faithfulness_io as fio
 from src.goals.goalscope import (  # noqa: F401  (CAUSAL_PREFIX re-exported)
     CAUSAL_PREFIX,
@@ -108,7 +108,7 @@ def load_head_set(spec, model_name, results_dir, n_heads, goal_band=None, n_laye
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Corpus — LOCKED prefill-to-frontier dataset (QTASKS); the corpus / prompt / pivot helpers are
-# shared with eval_ov_reader, eval_residual_patchscope and ablation_common.
+# shared with eval_ov_reader, eval_readout_sources and ablation_common.
 # ══════════════════════════════════════════════════════════════════════════════
 def load_locked_datapoints(dataset_path, datatypes):
     """Rebuild ``QTransferInstance``s from the frozen JSON recipes (QTASKS by id), for one or more
@@ -169,7 +169,7 @@ def limit_round_robin(datapoints, limit):
 
 
 def _chat_prompt(mt, question, prefill):
-    """Replicate src.diff.functional.get_prompt without depending on its module globals."""
+    """Replicate src.nrgs.functional.get_prompt without depending on its module globals."""
     messages = [
         {
             "role": "system",
@@ -333,7 +333,7 @@ _TRIVIAL_READOUT_TOKENS = (
 
 def is_trivial_causal_readout(readout: str) -> bool:
     """True iff a causality C++ read-out compares ``value`` to ZERO and does nothing else — the
-    sign/zero test the no-goal default emits (see :data:`src.diff.data.TRIVIAL_FRONTIERS`). A
+    sign/zero test the no-goal default emits (see :data:`src.nrgs.data.TRIVIAL_FRONTIERS`). A
     non-zero constant or any real arithmetic/bitwise op (``%``, ``&``, ``-``, ``.size()``,
     ``max_element``, ``abs`` …) keeps it non-trivial."""
     if not readout or not readout.strip():

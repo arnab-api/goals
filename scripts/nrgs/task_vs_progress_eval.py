@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Batch driver of the task-vs-progress 2 x 2 grid (``src.diff.task_vs_progress``): which span of SRC the pivot
+"""Batch driver of the task-vs-progress 2 x 2 grid (``src.nrgs.task_vs_progress``): which span of SRC the pivot
 reads (none / task / progress / task+progress) x method (kv on goal-250 | all heads, V x {1, 2, 4}; residual).
 Defaults = the paper's configuration (py-py, 32 instances per datatype, no GoalScope readout).
 
@@ -7,8 +7,8 @@ Writes a per-instance cache (``results/notebook_caches/task_vs_progress/<model>/
 __mx..__ro0__task+gap/*.json``), so it resumes from entries already computed. A per-datatype
 ``<cache dir>.summary.json`` (causal-shift per config) is written beside it.
 
-    conda run -n goals python scripts/diff/task_vs_progress_eval.py --cuda 6                           # 4 datatypes x 32
-    conda run -n goals python scripts/diff/task_vs_progress_eval.py --cuda 6 --datatypes int --max-instances 2   # smoke
+    conda run -n goals python scripts/nrgs/task_vs_progress_eval.py --cuda 6                           # 4 datatypes x 32
+    conda run -n goals python scripts/nrgs/task_vs_progress_eval.py --cuda 6 --datatypes int --max-instances 2   # smoke
 """
 
 import argparse
@@ -39,9 +39,9 @@ if _cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-import src.diff.functional as FUNC  # noqa: E402
-import src.diff.path_patch as PP  # noqa: E402
-import src.diff.task_vs_progress as TP  # noqa: E402
+import src.nrgs.functional as FUNC  # noqa: E402
+import src.nrgs.kv_transfer as PP  # noqa: E402
+import src.nrgs.task_vs_progress as TP  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 
 logger = logging.getLogger("task_vs_progress_eval")

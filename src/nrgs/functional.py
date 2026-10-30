@@ -1,9 +1,9 @@
-"""Interventions, generations and readouts for the q-transfer (``scripts/diff/diff_trigger_eval.py``) and the
-pivot-onwards KV transfer (``src.diff.path_patch``) — the ``src.diff`` submodule's functional core.
+"""Interventions, generations and readouts for the q-transfer (``scripts/nrgs/q_transfer_eval.py``) and the
+pivot-onwards KV transfer (``src.nrgs.kv_transfer``) — the ``src.nrgs`` submodule's functional core.
 
 Sibling modules in this package:
-    ``src.diff.data``  — data generation (task banks, instances, prompt materialization).
-    ``src.diff.eval``  — the oracle judges.
+    ``src.nrgs.data``  — data generation (task banks, instances, prompt materialization).
+    ``src.nrgs.eval``  — the oracle judges.
 
 ``setup()`` loads the model and binds the module-global ``mt``, which the helpers fall back to when no ``ctx=`` (the
 :class:`Ctx` returned by ``setup()``) is passed.
@@ -542,9 +542,9 @@ def run_q_transfer_intervention(
     ``readout_heads``, default = ``patch_heads``; the patched one under the query patch + an ``alpha`` OV boost of
     ``patch_heads`` at the decision token; ``compute_readout=False`` -> None), and value-weighted pivot→TASK attention
     (clean & under the plain query patch) for the gaze eval. Returns a dict consumed directly by
-    :func:`src.diff.eval.eval_q_transfer`."""
+    :func:`src.nrgs.eval.eval_q_transfer`."""
     from src.attention import get_attention_matrices
-    from src.diff.data import materialize
+    from src.nrgs.data import materialize
 
     readout_heads = readout_heads or patch_heads
     m = materialize(inst, ctx=ctx)

@@ -1,5 +1,5 @@
-"""Bespoke oracle judge for the obstacle-robustness eval (``obstacle_robustness_eval.py``) and the
-obstacle OV-boost eval (``obstacle_ov_boost_eval.py``).
+"""Bespoke oracle judge for the obstacle-robustness eval (``obstacle_persistence_eval.py``) and the
+obstacle OV-boost eval (``obstacle_persistence_ov_boost_eval.py``).
 
 A code model was forced to begin a one-line implementation with a prefix it could not delete (the
 obstacle stub), then greedy-generated the rest. ``judge_adapts`` asks an oracle whether the model

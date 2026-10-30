@@ -1,8 +1,8 @@
 """Escapable obstacle (adversarial-prefill) sets for the current QTASKS corpus — TWO levels.
 
-Obstacle-robustness eval (``obstacle_robustness_eval.py``): at a frontier ``{var} =`` pivot for sub-goal g_k,
+Obstacle-robustness eval (``obstacle_persistence_eval.py``): at a frontier ``{var} =`` pivot for sub-goal g_k,
 append one of these prefixes verbatim after the ``=``, greedy-generate the rest of the line, and a
-BESPOKE oracle (``obstacle_eval.judge_adapts``) decides — given (task g_k, obstacle stub, full
+BESPOKE oracle (``obstacle_persistence_judge.judge_adapts``) decides — given (task g_k, obstacle stub, full
 generation) — whether the model is implementing g_k *while adapting to* the forced stub
 (ADAPTED / SUCCUMBED / ESCAPED / BROKEN). Objective reference-impl equality is NOT used: a robust model
 may adapt in a way the reference impl wouldn't (the plasticity point).
@@ -22,14 +22,14 @@ g_k, keeping the wrong expression fully parenthesized so one nullifier overrides
 to the model — it must find its own route). ``aligned`` = a correct start of g_k (ceiling control).
 
 Prefix strings include their leading space and are appended right after the ``{var} =`` stub.
-``OBSTACLE_PREFILLS`` is built deterministically from ``src.diff.data.QTASKS`` at import (so it stays in
+``OBSTACLE_PREFILLS`` is built deterministically from ``src.nrgs.data.QTASKS`` at import (so it stays in
 sync); each entry also carries ``_goal`` (substituted goal expr) and ``_rtype`` (bool|num|char).
-Run ``python -m scripts.evaluation.obstacle_prefills`` to re-run the 0-broken escapability gate.
+Run ``python -m scripts.evaluation.obstacle_persistence_prefills`` to re-run the 0-broken escapability gate.
 """
 import sys
 
 sys.path.append(".")
-import src.diff.data as D  # noqa: E402
+import src.nrgs.data as D  # noqa: E402
 
 ARG = {"int": "n", "str": "s", "list[int]": "nums", "list[str]": "words"}
 

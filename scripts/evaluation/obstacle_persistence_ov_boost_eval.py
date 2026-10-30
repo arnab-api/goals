@@ -2,7 +2,7 @@
 """Obstacle OV-boost: does boosting the goal heads' OV write get the LM back on track?
 
 At a numeric frontier ``b =`` (list[str] / list[int] predicates whose easy obstacle is ``" 0 + "``,
-prompt built exactly as in ``obstacle_robustness_eval.py``) the forced ``0 +`` prefix sometimes derails
+prompt built exactly as in ``obstacle_persistence_eval.py``) the forced ``0 +`` prefix sometimes derails
 Qwen2.5-Coder-32B-Instruct into a complex-number placeholder (``0j``). For each derailed case:
 
   1. baseline  — greedy-continue after ``b = 0 +``;
@@ -11,13 +11,13 @@ Qwen2.5-Coder-32B-Instruct into a complex-number placeholder (``0j``). For each 
   3. OV-boost  — re-generate while multiplying the 250 goal heads' slice of the ``o_proj`` input by
                  ``BOOST_ALPHA = 2.0`` at the current token of every forward pass.
 
-Baseline and boosted continuations are judged with ``obstacle_eval.judge_adapts``. Results are cached
+Baseline and boosted continuations are judged with ``obstacle_persistence_judge.judge_adapts``. Results are cached
 under ``<results>/notebook_caches/obstacle_ov_boost/<model>/`` (``base_<h>.json`` per candidate scan,
 ``cmp_<h>.json`` per derailed case, ``results.json`` = all derailed cases), from which
-``notebooks/fig_n_table_generators/obstacle_robustness.ipynb`` renders the OV-boost table.
+``notebooks/fig_n_table_generators/obstacle_persistence.ipynb`` renders the OV-boost table.
 
 Usage:
-    conda run -n goals python scripts/evaluation/obstacle_ov_boost_eval.py --cuda 0
+    conda run -n goals python scripts/evaluation/obstacle_persistence_ov_boost_eval.py --cuda 0
 """
 import argparse
 import hashlib
@@ -31,7 +31,7 @@ from contextlib import contextmanager
 
 sys.path.append(".")
 
-from scripts.evaluation.obstacle_robustness_eval import _preparse_cuda  # noqa: E402
+from scripts.evaluation.obstacle_persistence_eval import _preparse_cuda  # noqa: E402
 
 _cuda = _preparse_cuda(sys.argv[1:])
 if _cuda:
@@ -41,9 +41,9 @@ import torch  # noqa: E402
 from baukit import get_module  # noqa: E402
 
 from scripts.evaluation.eval_goalscope import greedy_continue, load_json_heads  # noqa: E402
-from scripts.evaluation.obstacle_eval import judge_adapts  # noqa: E402
-from scripts.evaluation.obstacle_prefills import OBSTACLE_PREFILLS  # noqa: E402
-from scripts.evaluation.obstacle_robustness_eval import build_obstacle_prompt  # noqa: E402
+from scripts.evaluation.obstacle_persistence_judge import judge_adapts  # noqa: E402
+from scripts.evaluation.obstacle_persistence_prefills import OBSTACLE_PREFILLS  # noqa: E402
+from scripts.evaluation.obstacle_persistence_eval import build_obstacle_prompt  # noqa: E402
 from src.goals.goalscope import apply_goalscope  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
@@ -62,6 +62,7 @@ GS = dict(strategy="additive_norm", alpha=0.1, steer_layer_range=(35, 46), n_ste
 
 
 def cache_dir():
+    # "obstacle_ov_boost" is the legacy cache dir name, kept for cache compatibility
     return os.path.join(env_utils.DEFAULT_RESULTS_DIR, "notebook_caches", "obstacle_ov_boost",
                         MODEL.split("/")[-1])
 
