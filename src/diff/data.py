@@ -1,41 +1,27 @@
-"""Data generation for the DIFF-hypothesis experiments (q-transfer / kv-transfer).
+"""Data generation for the DIFF-hypothesis experiments (q-transfer / pivot-onwards kv-transfer).
 
-Two contrastive "specs", one per transplant mechanism:
+One function-writing task made of several INDEPENDENT, COMMUTATIVE sub-predicates (the per-datatype :data:`QTASKS`
+banks), listed as a numbered task. Contrastive SRC / DST prompts differ in the listed predicates and / or the prefilled
+PROGRESS, so at the shared pivot the source is "about to write" a different next sub-predicate than the destination:
 
-Spec-1 — QUERY transfer (``01`` A-experiments style).
-    ``SRC.task == DST.task``, ``SRC.progress != DST.progress``. One function-writing task
-    made of several INDEPENDENT, COMMUTATIVE sub-predicates. A different subset is prefilled
-    as completed PROGRESS in the source vs the destination, so at the shared pivot the source
-    is "about to write" a different next sub-predicate than the destination. The intervention
-    transplants the source pivot QUERY; test = does DST now pursue SRC's next sub-goal?
+* :class:`DiffTriggerInstance` (:func:`diff_trigger_setups`) — query transfer (``scripts/diff/diff_trigger_eval.py``);
+* :class:`MultiPredicateInstance` (:func:`multi_predicate_setups`) — kv transfer of the task span
+  (``scripts/diff/path_patch_eval.py``); the multi-hierarchy variant over :data:`FILTER_TASKS` conditions lives in
+  :mod:`src.diff.hier_data`.
 
-Spec-2 — KEY+VALUE transfer (``00_diff`` Spec-2 style).
-    ``SRC.task != DST.task``, ``SRC.progress == DST.progress``. The two tasks are distinct but
-    share a COMMON PROGRESS (a prerequisite sub-computation), so both prefill the same code.
-    Tasks are therefore CLUSTERED by their common progress. The intervention transplants the
-    source TASK-DESCRIPTION key+value onto the destination; test = does DST now implement
-    SRC's task?
-
-Generalization axes (both specs):
+Generalization axes:
     • datatype     — int | str | list[int] | list[str]
-    • presentation — "description" (prose task) | "listed" (numbered multi-predicate)
-    • language     — python | cpp, independently for src and dst (cross-language transfer:
-                     cache the task/progress in one language, trigger it in the other).
+    • language     — python | cpp, independently for src and dst (cross-language transfer).
 
-Predicate implementations are templates over three placeholders:
-    {arg}  = the function's parameter name (chosen from the task/cluster's ``var_names``)
-    {res}  = the result variable name of THIS predicate            (q-transfer / kv common progress)
-    {prog} = the common-progress result variable name              (kv-transfer tasks only)
+Predicate implementations are templates over the placeholders ``{arg}`` (the function's parameter name), ``{res}``
+(the result variable name of THIS predicate) and ``{elem}`` (a filter condition's element).
 
 Prompts are materialized with the chat template via :func:`src.diff.functional.get_prompt`
-(imported lazily so plain dataset inspection needs no model). Each rendered instance carries
-the exact SRC/DST prompt strings plus the pivot / task-span metadata the intervention needs.
+(imported lazily so plain dataset inspection needs no model).
 """
 
 from __future__ import annotations
 
-import dataclasses
-import itertools
 import random
 import re
 from dataclasses import dataclass, field
@@ -90,29 +76,18 @@ class QTransferTask:
 
 
 @dataclass(frozen=True)
-class KVCluster:
-    """A family of distinct tasks sharing one common-progress prerequisite."""
-
-    id: str
-    datatype: str
-    var_names: tuple[str, ...]
-    common_progress: Predicate  # binds {prog}
-    tasks: tuple[Predicate, ...]  # each is an EXPRESSION using {prog}
-
-
-@dataclass(frozen=True)
 class FilterTask:
     """A single filter that COMPOSES independent, commutative element-wise conditions inside ONE
     return expression, e.g. "all the words that are palindromes and start with a vowel". Unlike
     :class:`QTransferTask` (one assignment per sub-goal, statement-boundary pivot), the pivot here
     sits MID-EXPRESSION — right after ``… if <cond> and`` — so the model completes the same
-    comprehension by adding the next condition. This is the original Spec-1 framing (00_diff TASK_1).
+    comprehension by adding the next condition (:mod:`src.diff.hier_data`).
 
     Each condition is a boolean template over ``{elem}`` (the loop/comprehension variable) and, if
     needed, ``{arg}``; ``description`` is the NL fragment ("are palindromes")."""
 
     id: str
-    datatype: str  # list[str] | list[int] | str (chars)
+    datatype: str  # list[str] | list[int]
     var_names: tuple[str, ...]
     elem: str  # comprehension element variable, e.g. "w"
     noun: str  # NL plural noun for the phrase ("words", "values", "characters")
@@ -208,7 +183,7 @@ def _cpp_autoify(cpp_block: str, var: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class QTransferInstance:
-    """A single Spec-1 contrastive setup (same task, different progress)."""
+    """A single q-transfer contrastive setup (same task, different progress)."""
 
     task: QTransferTask
     var_name: str
@@ -269,187 +244,9 @@ class QTransferInstance:
         return "; ".join(p.description for p in self.task.predicates)
 
 
-@dataclass
-class KVTransferInstance:
-    """A single Spec-2 contrastive setup (different task, same common progress)."""
-
-    cluster: KVCluster
-    var_name: str
-    presentation: Presentation
-    src_lang: Lang
-    dst_lang: Lang
-    src_task: str  # task id for SRC
-    dst_task: str  # task id for DST
-    pivot: Literal["auto", "return", "indent"] = (
-        "auto"  # "auto" = per-language (default):
-    )
-    # python -> ``return`` keyword pivot (the model writes the task EXPRESSION); c++ -> trailing
-    # indent, because a prefilled ``return`` tends to yield weird c++ completions. "return"/"indent"
-    # force a single style for BOTH languages.
-    meta: dict = field(default_factory=dict)
-
-    def _task(self, task_id: str) -> Predicate:
-        return next(t for t in self.cluster.tasks if t.id == task_id)
-
-    def task_text(self, task_id: str) -> str:
-        """The task-description substring as it appears in the question (span anchor)."""
-        return self._task(task_id).description
-
-    def _parts(self, lang: Lang, task_id: str) -> tuple[str, str]:
-        prog = self.cluster.common_progress.result_name
-        q = _question(
-            [self.task_text(task_id)],
-            self.cluster.datatype,
-            self.var_name,
-            lang,
-            self.presentation,
-        )
-        prog_line = _assign_line(
-            self.cluster.common_progress, self.var_name, lang, prog=prog
-        )
-        base = (
-            "<code>\n"
-            + _signature(self.cluster.datatype, self.var_name, lang)
-            + "\n"
-            + prog_line
-        )
-        pivot = self.pivot
-        if (
-            pivot == "auto"
-        ):  # per-language: python -> return, c++ -> indent (return breaks c++)
-            pivot = "return" if lang == "python" else "indent"
-        if pivot == "return":
-            prefill = base + "\n    return "  # model writes the task EXPRESSION
-        else:
-            prefill = base + "\n    "  # trailing indent
-        return q, prefill
-
-    def src_parts(self):
-        return self._parts(self.src_lang, self.src_task)
-
-    def dst_parts(self):
-        return self._parts(self.dst_lang, self.dst_task)
-
-    @property
-    def expected_next(self) -> str:
-        """Task id SRC pursues (the transplant target) — mirrors QTransferInstance.expected_next so
-        the same oracle-eval + script record path works unchanged."""
-        return self.src_task
-
-    @property
-    def dst_next(self) -> str:
-        """Task id clean DST pursues."""
-        return self.dst_task
-
-    @property
-    def expected_next_desc(self) -> str:
-        return self.task_text(self.src_task)
-
-    @property
-    def dst_next_desc(self) -> str:
-        return self.task_text(self.dst_task)
-
-    @property
-    def task_desc(self) -> str:
-        """Oracle context line: the SHARED common-progress prerequisite both tasks build on (the two
-        candidate sub-goals A/B are src_task vs dst_task, so the neutral context is the progress)."""
-        return self.cluster.common_progress.description
-
-
-def _vec_decl(dt: str, name: str) -> str:
-    return {
-        "list[str]": f"std::vector<std::string> {name};",
-        "list[int]": f"std::vector<int> {name};",
-        "str": f"std::string {name};",
-    }[dt]
-
-
-@dataclass
-class FilterTransferInstance:
-    """A single composed-filter contrastive setup (00_diff TASK_1 style). The task is TWO
-    independent, COMMUTATIVE filter sub-tasks (e.g. T1 = palindromes, T2 = starts-with-a-vowel).
-    SRC and DST share the same task but prefill DIFFERENT single sub-tasks as a first ``res = […]``
-    filter, then hit a common ``postfix`` pivot — so SRC is about to apply its remaining sub-task
-    and DST its remaining (the OTHER one):
-
-        SRC: res = [w for w in words if <src_fill>] ; postfix   -> SRC about to apply expected_next
-        DST: res = [w for w in words if <dst_fill>] ; postfix   -> DST about to apply dst_next
-
-    ``pair`` is the two sub-tasks in play (defines the shared task text). Query-transfer (Spec-1)
-    mechanically — same intervention as :class:`QTransferInstance`.
-
-    ``postfix``: "return" (loose — bare ``return``) or "targeted" (a filter opener that forces the
-    next token to be a condition: python ``return [w for w in words if``; c++ a fresh filtered loop)."""
-
-    task: FilterTask
-    pair: tuple[str, str]  # the two commutative sub-task (condition) ids in this task
-    var_name: str
-    src_lang: Lang
-    dst_lang: Lang
-    src_fill: str  # condition id prefilled in the SRC res-line
-    dst_fill: str  # condition id prefilled in the DST res-line
-    expected_next: (
-        str  # SRC's remaining sub-task (transplant target) = other(pair, src_fill)
-    )
-    postfix: Literal["return", "targeted"] = "targeted"
-    meta: dict = field(default_factory=dict)
-
-    def _cond(self, cid: str) -> Predicate:
-        return next(c for c in self.task.conditions if c.id == cid)
-
-    @property
-    def task_text(self) -> str:
-        """The shared NL phrase over the TWO sub-tasks — the TASK span anchor."""
-        frags = " and ".join(self._cond(cid).description for cid in self.pair)
-        return f"all the {self.task.noun} in `{self.var_name}` that {frags}"
-
-    def _postfix(self, lang: Lang) -> str:
-        elem, dt = self.task.elem, self.task.datatype
-        if self.postfix == "return":
-            return "return "
-        if lang == "python":
-            return f"return [{elem} for {elem} in res if "  # filter the T1-result -> T1 & T2
-        return (
-            _vec_decl(dt, "out") + f"\n    for (auto& {elem} : res) if"
-        )  # c++ targeted: filter the T1-result (`res`) -> T1 & T2
-
-    def _parts(self, lang: Lang, fill_id: str) -> tuple[str, str]:
-        elem, arg, dt = self.task.elem, self.var_name, self.task.datatype
-        q = _question([self.task_text], dt, arg, lang, "description")
-        cond = _fmt(self._cond(fill_id).impl[lang], arg=arg, elem=elem)
-        sig = _signature(dt, arg, lang)
-        if lang == "python":
-            res_line = f"    res = [{elem} for {elem} in {arg} if {cond}]"
-        else:  # c++ res built by a loop
-            res_line = (
-                f"    {_vec_decl(dt, 'res')}\n"
-                f"    for (auto& {elem} : {arg}) if ({cond}) res.push_back({elem});"
-            )
-        prefill = f"<code>\n{sig}\n{res_line}\n    {self._postfix(lang)}"
-        return q, prefill  # pivot = trailing token of the postfix
-
-    def src_parts(self):
-        return self._parts(self.src_lang, self.src_fill)
-
-    def dst_parts(self):
-        return self._parts(self.dst_lang, self.dst_fill)
-
-    @property
-    def expected_next_desc(self) -> str:
-        return self._cond(self.expected_next).description
-
-    @property
-    def dst_next_desc(self) -> str:
-        return self._cond(self.meta["dst_next"]).description
-
-    @property
-    def task_desc(self) -> str:
-        return self.task_text
-
-
 @dataclass(frozen=True)
 class MultiPredicateInstance:
-    """Spec-2 MULTI-PREDICATE, divergent-frontier setup (multi-predicate analog of kv-transfer).
+    """MULTI-PREDICATE, divergent-frontier setup (the kv-transfer setup).
 
     SRC lists predicates ``[*shared, src_frontier]`` (e.g. T1, T2, T3); DST lists
     ``[*shared, dst_frontier]`` (e.g. T1, T2, T4). Both PREFILL the SHARED prefix (T1, T2) as
@@ -580,8 +377,8 @@ def _finalize_prefill(prefill: str) -> str:
 def materialize(instance, ctx=None) -> dict:
     """Apply the chat template to an instance's src/dst (question, prefill) parts.
 
-    Returns ``{"src_prompt", "dst_prompt", ...}`` (+ ``src_task_text``/``dst_task_text`` for kv,
-    ``task_text`` for filter). ``ctx`` is a :class:`src.diff.functional.Ctx` (else module-global
+    Returns ``{"src_prompt", "dst_prompt", ...}`` (+ ``src_task_text``/``dst_task_text`` for the multi-predicate
+    and multi-hierarchy instances). ``ctx`` is a :class:`src.diff.functional.Ctx` (else module-global
     ``mt``). Prefills are finalized (``_finalize_prefill``) so a dangling trailing space never
     becomes the pivot. Imported lazily so dataset inspection needs no model."""
     from src.diff.functional import get_prompt
@@ -593,23 +390,18 @@ def materialize(instance, ctx=None) -> dict:
         "src_prompt": get_prompt(qs, _finalize_prefill(pfs), ctx=ctx, system_extra=sys_extra(instance.src_lang)),
         "dst_prompt": get_prompt(qd, _finalize_prefill(pfd), ctx=ctx, system_extra=sys_extra(instance.dst_lang)),
     }
-    if isinstance(instance, KVTransferInstance):
-        out["src_task_text"] = instance.task_text(instance.src_task)
-        out["dst_task_text"] = instance.task_text(instance.dst_task)
-    elif isinstance(instance, MultiPredicateInstance):
+    if isinstance(instance, MultiPredicateInstance):
         # the transplant span is the WHOLE rendered task list (shared T1,T2 + the frontier), NOT just
         # the frontier — cache SRC's full list, replace DST's full list. The ``pad`` alignment then
         # inserts the length-matching newlines at the START of this span (before ``(1)``, right after
         # ``computes:\n``), and every token in the span (pads + T1 + T2 + frontier) is transplanted.
         out["src_task_text"] = instance.full_task_text(instance.src_frontier)
         out["dst_task_text"] = instance.full_task_text(instance.dst_frontier)
-    elif isinstance(instance, FilterTransferInstance):
-        out["task_text"] = instance.task_text
     return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# predicate banks — one q-task + one kv-cluster per datatype
+# predicate banks — one q-task per datatype
 # ══════════════════════════════════════════════════════════════════════════════
 def _P(id, description, result_name, py, cpp):
     return Predicate(
@@ -1132,7 +924,6 @@ def nontrivial_frontiers(datatype: str) -> list[Predicate]:
 def _build_incompatible(
     implies: list[tuple[str, str]],
     mutex_groups: list[tuple[str, ...]],
-    char_class: "dict[str, str] | None" = None,
 ) -> dict[str, list[str]]:
     """Derive a symmetric, implication-closed incompatibility mapping from authored rules.
 
@@ -1140,10 +931,8 @@ def _build_incompatible(
                        transitively closed. Duplicates ``a ⟺ b`` are two entries, one each way.
     ``mutex_groups`` — every pair *within* a tuple can never be true together (or is a near-duplicate we
                        want excluded); expanded to all intra-group pairs.
-    ``char_class``   — optional ``{id: category-string}``; ids with DISJOINT category letters are made
-                       mutually exclusive (e.g. a letter-class ⊥ a digit-class), avoiding an O(n²) listing.
 
-    Returns ``{id: sorted[ids it must NOT be paired with]}``. Reused by the kv-cluster, multi-predicate
+    Returns ``{id: sorted[ids it must NOT be paired with]}``. Reused by the multi-predicate
     (q-bank) and filter-composition compatibility maps."""
     impl: dict[str, set[str]] = {}
     for a, b in implies:
@@ -1164,13 +953,6 @@ def _build_incompatible(
         for i in range(len(grp)):
             for j in range(i + 1, len(grp)):
                 _m(grp[i], grp[j])
-    if char_class:
-        _cls = list(char_class.items())
-        for i in range(len(_cls)):
-            for j in range(i + 1, len(_cls)):
-                (a, ca), (b, cb) = _cls[i], _cls[j]
-                if not (set(ca) & set(cb)):
-                    _m(a, b)
     # mutex is inherited up implications: if a ⟹ x and x ⊥ y, then a ⊥ y
     for _ in range(len(impl) + 2):
         for a, xs in list(impl.items()):
@@ -1187,592 +969,6 @@ def _build_incompatible(
         if s:
             inc[a] = sorted(s)
     return dict(sorted(inc.items()))
-
-
-KVCLUSTERS: dict[str, list[KVCluster]] = {
-    "list[str]": [
-        KVCluster(
-            "sorted_by_len",
-            "list[str]",
-            ("words", "arr"),
-            _P(
-                "sort_by_len",
-                "the words sorted by length",
-                "sorted_words",
-                "{prog} = sorted({arg}, key=len)",
-                "std::vector<std::string> {prog} = {arg};\n    std::stable_sort({prog}.begin(), {prog}.end(), [](const std::string& a, const std::string& b){ return a.size() < b.size(); });",
-            ),
-            (
-                _P(
-                    "shortest_vowel_start",
-                    "returns true if the shortest word starts with a vowel",
-                    "",
-                    "{prog}[0][0].lower() in 'aeiou'",
-                    'std::string("aeiouAEIOU").find({prog}[0][0]) != std::string::npos',
-                ),
-                _P(
-                    "longest_palindrome",
-                    "returns true if the longest word is a palindrome",
-                    "",
-                    "{prog}[-1] == {prog}[-1][::-1]",
-                    "[&]{ auto& w = {prog}.back(); std::string rv(w.rbegin(), w.rend()); return w == rv; }()",
-                ),
-                _P(
-                    "longest_len",
-                    "the length of the longest word",
-                    "",
-                    "len({prog}[-1])",
-                    "(int){prog}.back().size()",
-                ),
-                _P(
-                    "shortest_len",
-                    "the length of the shortest word",
-                    "",
-                    "len({prog}[0])",
-                    "(int){prog}.front().size()",
-                ),
-                _P(
-                    "median_word_len",
-                    "the length of the median word when the words are ordered by length",
-                    "",
-                    "len({prog}[len({prog})//2])",
-                    "(int){prog}[{prog}.size()/2].size()",
-                ),
-                _P(
-                    "longest_starts_upper",
-                    "returns true if the longest word starts with an uppercase letter",
-                    "",
-                    "{prog}[-1][0].isupper()",
-                    "{prog}.back()[0] >= 'A' && {prog}.back()[0] <= 'Z'",
-                ),
-            ),
-        ),
-        KVCluster(
-            "long_words",
-            "list[str]",
-            ("words", "arr"),
-            _P(
-                "long_words",
-                "the words that have at least two characters",
-                "long_words",
-                "{prog} = [w for w in {arg} if len(w) > 1]",
-                "std::vector<std::string> {prog};\n    for (auto& w : {arg}) if (w.size() > 1) {prog}.push_back(w);",
-            ),
-            (
-                _P(
-                    "count_palindromes",
-                    "the number of words with at least two characters that are palindromes",
-                    "",
-                    "sum(1 for w in {prog} if w == w[::-1])",
-                    "[&]{ int c = 0; for (auto& w : {prog}) { std::string rv(w.rbegin(), w.rend()); if (w == rv) c++; } return c; }()",
-                ),
-                _P(
-                    "count_all_distinct",
-                    "the number of words with at least two characters whose letters are all distinct",
-                    "",
-                    "sum(1 for w in {prog} if len(set(w)) == len(w))",
-                    "[&]{ int c = 0; for (auto& w : {prog}) { std::set<char> s(w.begin(), w.end()); if (s.size() == w.size()) c++; } return c; }()",
-                ),
-                _P(
-                    "count_same_ends",
-                    "the number of words with at least two characters that start and end with the same letter",
-                    "",
-                    "sum(1 for w in {prog} if w[0] == w[-1])",
-                    "[&]{ int c = 0; for (auto& w : {prog}) if (w.front() == w.back()) c++; return c; }()",
-                ),
-            ),
-        ),
-        KVCluster(
-            "lowercased",
-            "list[str]",
-            ("words", "arr"),
-            _P(
-                "lowercased",
-                "the words converted to lowercase",
-                "lowered",
-                "{prog} = [w.lower() for w in {arg}]",
-                "std::vector<std::string> {prog};\n    for (auto w : {arg}) { for (auto& ch : w) ch = (char)std::tolower((unsigned char)ch); {prog}.push_back(w); }",
-            ),
-            (
-                _P(
-                    "count_ci_palindromes",
-                    "the number of words that are palindromes when letter case is ignored",
-                    "",
-                    "sum(1 for w in {prog} if w == w[::-1])",
-                    "[&]{ int c = 0; for (auto& w : {prog}) { std::string rv(w.rbegin(), w.rend()); if (w == rv) c++; } return c; }()",
-                ),
-                _P(
-                    "num_distinct_ci",
-                    "the number of distinct words when letter case is ignored",
-                    "",
-                    "len(set({prog}))",
-                    "(int)std::set<std::string>({prog}.begin(), {prog}.end()).size()",
-                ),
-                _P(
-                    "count_contains_a",
-                    "the number of words that contain the letter A in either case",
-                    "",
-                    "sum(1 for w in {prog} if 'a' in w)",
-                    "[&]{ int c = 0; for (auto& w : {prog}) if (w.find('a') != std::string::npos) c++; return c; }()",
-                ),
-                _P(
-                    "any_ci_duplicate",
-                    "returns true if two of the words are equal when letter case is ignored",
-                    "",
-                    "len(set({prog})) < len({prog})",
-                    "(int)std::set<std::string>({prog}.begin(), {prog}.end()).size() < (int){prog}.size()",
-                ),
-            ),
-        ),
-    ],
-    "list[int]": [
-        KVCluster(
-            "sorted_asc",
-            "list[int]",
-            ("nums", "arr"),
-            _P(
-                "sort_asc",
-                "the values sorted in ascending order",
-                "sorted_nums",
-                "{prog} = sorted({arg})",
-                "std::vector<int> {prog} = {arg};\n    std::sort({prog}.begin(), {prog}.end());",
-            ),
-            (
-                _P(
-                    "median_val",
-                    "the median value",
-                    "",
-                    "{prog}[len({prog})//2]",
-                    "{prog}[{prog}.size()/2]",
-                ),
-                _P(
-                    "range_span",
-                    "the difference between the largest and smallest value",
-                    "",
-                    "{prog}[-1] - {prog}[0]",
-                    "{prog}.back() - {prog}.front()",
-                ),
-                _P(
-                    "second_largest",
-                    "the second largest value",
-                    "",
-                    "{prog}[-2]",
-                    "{prog}[{prog}.size()-2]",
-                ),
-                _P(
-                    "second_smallest",
-                    "the second smallest value",
-                    "",
-                    "{prog}[1]",
-                    "{prog}[1]",
-                ),
-                _P(
-                    "max_gap",
-                    "the largest gap between consecutive values when they are sorted",
-                    "",
-                    "max(({prog}[i+1] - {prog}[i] for i in range(len({prog}) - 1)), default=0)",
-                    "[&]{ int g = 0; for (size_t i = 0; i + 1 < {prog}.size(); ++i) g = std::max(g, {prog}[i+1] - {prog}[i]); return g; }()",
-                ),
-            ),
-        ),
-        KVCluster(
-            "positives",
-            "list[int]",
-            ("nums", "arr"),
-            _P(
-                "positives",
-                "the values that are greater than zero",
-                "positives",
-                "{prog} = [x for x in {arg} if x > 0]",
-                "std::vector<int> {prog};\n    for (int x : {arg}) if (x > 0) {prog}.push_back(x);",
-            ),
-            (
-                _P(
-                    "sum_positives",
-                    "the sum of the values that are greater than zero",
-                    "",
-                    "sum({prog})",
-                    "std::accumulate({prog}.begin(), {prog}.end(), 0)",
-                ),
-                _P(
-                    "count_positives",
-                    "how many values are greater than zero",
-                    "",
-                    "len({prog})",
-                    "(int){prog}.size()",
-                ),
-                _P(
-                    "product_positives",
-                    "the product of the values that are greater than zero",
-                    "",
-                    "math.prod({prog})",
-                    "[&]{ long long p = 1; for (int x : {prog}) p *= x; return p; }()",
-                ),
-                _P(
-                    "smallest_positive",
-                    "the smallest value that is greater than zero",
-                    "",
-                    "min({prog}, default=0)",
-                    "[&]{ if ({prog}.empty()) return 0; return *std::min_element({prog}.begin(), {prog}.end()); }()",
-                ),
-                _P(
-                    "all_even_positives",
-                    "returns true if every value greater than zero is even",
-                    "",
-                    "all(x % 2 == 0 for x in {prog})",
-                    "[&]{ for (int x : {prog}) if (x % 2 != 0) return false; return true; }()",
-                ),
-            ),
-        ),
-        KVCluster(
-            "prefix_sums",
-            "list[int]",
-            ("nums", "arr"),
-            _P(
-                "prefix_sums",
-                "the running cumulative sums of the values from left to right",
-                "prefix",
-                "{prog} = [sum({arg}[:i+1]) for i in range(len({arg}))]",
-                "std::vector<long long> {prog};\n    { long long s = 0; for (int x : {arg}) { s += x; {prog}.push_back(s); } }",
-            ),
-            (
-                _P(
-                    "total_sum",
-                    "the total of all the values",
-                    "",
-                    "{prog}[-1] if {prog} else 0",
-                    "[&]{ return {prog}.empty() ? 0LL : {prog}.back(); }()",
-                ),
-                _P(
-                    "max_prefix",
-                    "the largest value reached by the running total as the values are added left to right",
-                    "",
-                    "max({prog}, default=0)",
-                    "[&]{ if ({prog}.empty()) return 0LL; return *std::max_element({prog}.begin(), {prog}.end()); }()",
-                ),
-                _P(
-                    "count_positive_prefixes",
-                    "the number of positions where the running total so far is positive",
-                    "",
-                    "sum(1 for p in {prog} if p > 0)",
-                    "[&]{ int c = 0; for (long long p : {prog}) if (p > 0) c++; return c; }()",
-                ),
-                _P(
-                    "first_positive_index",
-                    "the index of the first position where the running total becomes positive, or -1 if it never does",
-                    "",
-                    "next((i for i, p in enumerate({prog}) if p > 0), -1)",
-                    "[&]{ for (size_t i = 0; i < {prog}.size(); ++i) if ({prog}[i] > 0) return (int)i; return -1; }()",
-                ),
-            ),
-        ),
-    ],
-    "int": [
-        KVCluster(
-            "digits",
-            "int",
-            ("n", "x"),
-            _P(
-                "to_digits",
-                "the list of decimal digits",
-                "digits",
-                "{prog} = [int(c) for c in str(abs({arg}))]",
-                "std::vector<int> {prog};\n    for (char c : std::to_string(std::abs({arg}))) {prog}.push_back(c - '0');",
-            ),
-            (
-                _P(
-                    "digit_sum",
-                    "the sum of the digits",
-                    "",
-                    "sum({prog})",
-                    "std::accumulate({prog}.begin(), {prog}.end(), 0)",
-                ),
-                _P(
-                    "max_digit",
-                    "the largest digit",
-                    "",
-                    "max({prog})",
-                    "*std::max_element({prog}.begin(), {prog}.end())",
-                ),
-                _P(
-                    "min_digit",
-                    "the smallest digit",
-                    "",
-                    "min({prog})",
-                    "*std::min_element({prog}.begin(), {prog}.end())",
-                ),
-                _P(
-                    "count_even_digits",
-                    "the number of even digits",
-                    "",
-                    "sum(1 for d in {prog} if d % 2 == 0)",
-                    "[&]{ int c = 0; for (int d : {prog}) if (d % 2 == 0) c++; return c; }()",
-                ),
-                _P(
-                    "count_odd_digits",
-                    "the number of odd digits",
-                    "",
-                    "sum(1 for d in {prog} if d % 2 == 1)",
-                    "[&]{ int c = 0; for (int d : {prog}) if (d % 2 == 1) c++; return c; }()",
-                ),
-                _P(
-                    "is_ascending",
-                    "returns true if the digits are in non-decreasing order",
-                    "",
-                    "all({prog}[i] <= {prog}[i+1] for i in range(len({prog}) - 1))",
-                    "[&]{ for (size_t i = 0; i + 1 < {prog}.size(); ++i) if ({prog}[i] > {prog}[i+1]) return false; return true; }()",
-                ),
-                _P(
-                    "has_zero_digit",
-                    "returns true if any digit is zero",
-                    "",
-                    "0 in {prog}",
-                    "[&]{ for (int d : {prog}) if (d == 0) return true; return false; }()",
-                ),
-                _P(
-                    "digit_product",
-                    "the product of the digits",
-                    "",
-                    "math.prod({prog})",
-                    "[&]{ long long p = 1; for (int d : {prog}) p *= d; return p; }()",
-                ),
-            ),
-        ),
-        KVCluster(
-            "divisors",
-            "int",
-            ("n", "x"),
-            _P(
-                "divisors",
-                "the list of positive divisors of the number",
-                "divisors",
-                "{prog} = [d for d in range(1, abs({arg}) + 1) if {arg} % d == 0]",
-                "std::vector<int> {prog};\n    for (int d = 1; d <= std::abs({arg}); ++d) if ({arg} % d == 0) {prog}.push_back(d);",
-            ),
-            (
-                _P(
-                    "count_divisors",
-                    "the number of positive divisors of the number",
-                    "",
-                    "len({prog})",
-                    "(int){prog}.size()",
-                ),
-                _P(
-                    "sum_divisors",
-                    "the sum of the positive divisors of the number",
-                    "",
-                    "sum({prog})",
-                    "std::accumulate({prog}.begin(), {prog}.end(), 0)",
-                ),
-                _P(
-                    "largest_proper_divisor",
-                    "the largest divisor of the number that is smaller than the number itself",
-                    "",
-                    "max((d for d in {prog} if d < abs({arg})), default=1)",
-                    "[&]{ int b = 1; for (int d : {prog}) if (d < std::abs({arg})) b = std::max(b, d); return b; }()",
-                ),
-                _P(
-                    "is_prime",
-                    "returns true if the number is prime",
-                    "",
-                    "len({prog}) == 2",
-                    "{prog}.size() == 2",
-                ),
-                _P(
-                    "is_perfect",
-                    "returns true if the number equals the sum of its proper divisors",
-                    "",
-                    "sum(d for d in {prog} if d < abs({arg})) == abs({arg})",
-                    "[&]{ int s = 0; for (int d : {prog}) if (d < std::abs({arg})) s += d; return s == std::abs({arg}); }()",
-                ),
-            ),
-        ),
-        KVCluster(
-            "binary",
-            "int",
-            ("n", "x"),
-            _P(
-                "binary_digits",
-                "the binary digits of the number, most significant first",
-                "bits",
-                "{prog} = [int(b) for b in bin(abs({arg}))[2:]]",
-                "std::vector<int> {prog};\n    { int m = std::abs({arg}); if (m == 0) {prog}.push_back(0); else { std::vector<int> t; while (m) { t.push_back(m & 1); m >>= 1; } for (auto it = t.rbegin(); it != t.rend(); ++it) {prog}.push_back(*it); } }",
-            ),
-            (
-                _P(
-                    "popcount",
-                    "the number of one-bits in the binary representation of the number",
-                    "",
-                    "sum({prog})",
-                    "std::accumulate({prog}.begin(), {prog}.end(), 0)",
-                ),
-                _P(
-                    "bit_length",
-                    "the number of bits in the binary representation of the number",
-                    "",
-                    "len({prog})",
-                    "(int){prog}.size()",
-                ),
-                _P(
-                    "is_power_of_two",
-                    "returns true if the number is a power of two",
-                    "",
-                    "sum({prog}) == 1",
-                    "std::accumulate({prog}.begin(), {prog}.end(), 0) == 1",
-                ),
-                _P(
-                    "trailing_zeros",
-                    "the number of trailing zero bits in the binary representation of the number",
-                    "",
-                    "next((i for i, b in enumerate(reversed({prog})) if b == 1), len({prog}))",
-                    "[&]{ int c = 0; for (auto it = {prog}.rbegin(); it != {prog}.rend(); ++it) { if (*it == 1) break; c++; } return c; }()",
-                ),
-            ),
-        ),
-    ],
-    "str": [
-        KVCluster(
-            "chars_sorted",
-            "str",
-            ("s", "text"),
-            _P(
-                "sort_chars",
-                "the characters sorted alphabetically",
-                "sorted_chars",
-                "{prog} = sorted({arg})",
-                "std::string {prog} = {arg};\n    std::sort({prog}.begin(), {prog}.end());",
-            ),
-            (
-                _P(
-                    "first_char_vowel",
-                    "returns true if the alphabetically smallest character is a vowel",
-                    "",
-                    "{prog}[0] in 'aeiou'",
-                    'std::string("aeiou").find({prog}[0]) != std::string::npos',
-                ),
-                _P(
-                    "last_char",
-                    "the alphabetically largest character",
-                    "",
-                    "{prog}[-1]",
-                    "{prog}.back()",
-                ),
-                _P(
-                    "second_smallest_char",
-                    "the alphabetically second-smallest character",
-                    "",
-                    "{prog}[1]",
-                    "{prog}[1]",
-                ),
-                _P(
-                    "char_range",
-                    "the distance between the largest and smallest character codes",
-                    "",
-                    "ord({prog}[-1]) - ord({prog}[0])",
-                    "(int){prog}.back() - (int){prog}.front()",
-                ),
-                _P(
-                    "median_char",
-                    "the median character in alphabetical order",
-                    "",
-                    "{prog}[len({prog})//2]",
-                    "{prog}[{prog}.size()/2]",
-                ),
-                _P(
-                    "has_repeat",
-                    "returns true if any character occurs more than once",
-                    "",
-                    "any({prog}[i] == {prog}[i+1] for i in range(len({prog}) - 1))",
-                    "[&]{ for (size_t i = 0; i + 1 < {prog}.size(); ++i) if ({prog}[i] == {prog}[i+1]) return true; return false; }()",
-                ),
-            ),
-        ),
-        KVCluster(
-            "vowels",
-            "str",
-            ("s", "text"),
-            _P(
-                "vowels",
-                "the vowels in the string, in order",
-                "vowels",
-                "{prog} = [c for c in {arg} if c in 'aeiou']",
-                'std::string {prog};\n    for (char c : {arg}) if (std::string("aeiou").find(c) != std::string::npos) {prog}.push_back(c);',
-            ),
-            (
-                _P(
-                    "count_vowels",
-                    "the number of vowels in the string",
-                    "",
-                    "len({prog})",
-                    "(int){prog}.size()",
-                ),
-                _P(
-                    "first_vowel",
-                    "the first vowel in the string, or '?' if there are none",
-                    "",
-                    "{prog}[0] if {prog} else '?'",
-                    "[&]{ return {prog}.empty() ? '?' : {prog}.front(); }()",
-                ),
-                _P(
-                    "all_same_vowel",
-                    "returns true if all the vowels in the string are the same letter",
-                    "",
-                    "len(set({prog})) <= 1",
-                    "[&]{ std::set<char> s({prog}.begin(), {prog}.end()); return s.size() <= 1; }()",
-                ),
-                _P(
-                    "distinct_vowels",
-                    "the number of distinct vowels in the string",
-                    "",
-                    "len(set({prog}))",
-                    "(int)std::set<char>({prog}.begin(), {prog}.end()).size()",
-                ),
-            ),
-        ),
-        KVCluster(
-            "char_counts",
-            "str",
-            ("s", "text"),
-            _P(
-                "char_counts",
-                "how many times each character occurs",
-                "counts",
-                "{prog} = {c: {arg}.count(c) for c in set({arg})}",
-                "std::map<char,int> {prog};\n    for (char c : {arg}) {prog}[c]++;",
-            ),
-            (
-                _P(
-                    "most_frequent_char",
-                    "the character that occurs most frequently",
-                    "",
-                    "max({prog}, key={prog}.get)",
-                    "[&]{ char b = 0; int mx = -1; for (auto& kv : {prog}) if (kv.second > mx) { mx = kv.second; b = kv.first; } return b; }()",
-                ),
-                _P(
-                    "count_repeated_chars",
-                    "the number of characters that occur more than once",
-                    "",
-                    "sum(1 for v in {prog}.values() if v > 1)",
-                    "[&]{ int c = 0; for (auto& kv : {prog}) if (kv.second > 1) c++; return c; }()",
-                ),
-                _P(
-                    "any_repeat",
-                    "returns true if some character occurs more than once",
-                    "",
-                    "any(v > 1 for v in {prog}.values())",
-                    "[&]{ for (auto& kv : {prog}) if (kv.second > 1) return true; return false; }()",
-                ),
-                _P(
-                    "distinct_char_count",
-                    "the number of distinct characters",
-                    "",
-                    "len({prog})",
-                    "(int){prog}.size()",
-                ),
-            ),
-        ),
-    ],
-}
 
 
 def _C(id, fragment, py, cpp):  # a filter condition (boolean expr over {elem})
@@ -1962,111 +1158,6 @@ FILTER_TASKS: dict[str, FilterTask] = {
             ),
         ),
     ),
-    "str": FilterTask(
-        "char_filter",
-        "str",
-        ("s", "text"),
-        "c",
-        "characters",
-        (
-            _C(
-                "vowel",
-                "are vowels",
-                "{elem} in 'aeiou'",
-                'std::string("aeiou").find({elem}) != std::string::npos',
-            ),
-            _C(
-                "upper",
-                "are uppercase",
-                "{elem}.isupper()",
-                "std::isupper((unsigned char){elem})",
-            ),
-            _C(
-                "alpha",
-                "are alphabetic",
-                "{elem}.isalpha()",
-                "std::isalpha((unsigned char){elem})",
-            ),
-            _C(
-                "lower",
-                "are lowercase",
-                "{elem}.islower()",
-                "islower((unsigned char){elem})",
-            ),
-            _C(
-                "digit",
-                "are digits",
-                "{elem}.isdigit()",
-                "isdigit((unsigned char){elem})",
-            ),
-            _C(
-                "alnum",
-                "are alphanumeric",
-                "{elem}.isalnum()",
-                "isalnum((unsigned char){elem})",
-            ),
-            _C(
-                "whitespace",
-                "are whitespace",
-                "{elem}.isspace()",
-                "isspace((unsigned char){elem})",
-            ),
-            _C(
-                "consonant",
-                "are consonants",
-                "{elem}.isalpha() and {elem}.lower() not in 'aeiou'",
-                'isalpha((unsigned char){elem}) && std::string("aeiou").find(tolower((unsigned char){elem})) == std::string::npos',
-            ),
-            _C(
-                "hex_digit",
-                "are hexadecimal digits",
-                "{elem} in '0123456789abcdefABCDEF'",
-                "isxdigit((unsigned char){elem})",
-            ),
-            _C(
-                "upper_vowel",
-                "are uppercase vowels",
-                "{elem} in 'AEIOU'",
-                'std::string("AEIOU").find({elem}) != std::string::npos',
-            ),
-            _C(
-                "first_half_alpha",
-                "are letters between a and m",
-                "{elem}.isalpha() and {elem}.lower() >= 'a' and {elem}.lower() <= 'm'",
-                "isalpha((unsigned char){elem}) && tolower((unsigned char){elem}) >= 'a' && tolower((unsigned char){elem}) <= 'm'",
-            ),
-            _C(
-                "second_half_alpha",
-                "are letters between n and z",
-                "{elem}.isalpha() and {elem}.lower() >= 'n' and {elem}.lower() <= 'z'",
-                "isalpha((unsigned char){elem}) && tolower((unsigned char){elem}) >= 'n' && tolower((unsigned char){elem}) <= 'z'",
-            ),
-            _C(
-                "letter_e",
-                "are the letter e in any case",
-                "{elem}.lower() == 'e'",
-                "tolower((unsigned char){elem}) == 'e'",
-            ),
-            _C(
-                "even_digit",
-                "are even digits",
-                "{elem}.isdigit() and int({elem}) % 2 == 0",
-                "isdigit((unsigned char){elem}) && ({elem} - '0') % 2 == 0",
-            ),
-            _C(
-                "odd_digit",
-                "are odd digits",
-                "{elem}.isdigit() and int({elem}) % 2 == 1",
-                "isdigit((unsigned char){elem}) && ({elem} - '0') % 2 == 1",
-            ),
-            _C(
-                "comma_or_period",
-                "are commas or periods",
-                "{elem} in ',.'",
-                "{elem} == ',' || {elem} == '.'",
-            ),
-        ),
-    ),
 }
 
 
@@ -2078,130 +1169,6 @@ def _seq_letter(order, progress, pred_id) -> str:
     slot naming whenever the prefill is a prefix of the list."""
     written = [p.id for p in order if p.id in set(progress)]
     return chr(ord("a") + (written.index(pred_id) if pred_id in written else len(written)))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# diff-vs-progress q-transfer ("evidence against DIFF": is next(DIFF) pre-decided, or progress?)
-# ══════════════════════════════════════════════════════════════════════════════
-@dataclass
-class DiffVsProgInstance:
-    """Q-transfer setup that separates "next(DIFF) is already decided" from "next = progress-position".
-
-    Both sides list the SAME four predicates but in DIFFERENT order, with ASYMMETRIC prefill::
-
-        SRC.task = [T1, T2, T3, T4],  SRC.prefill = {T1, T2},  SRC.target  = T3   (transplant source)
-        DST.task = [T1, T2, T4, T3],  DST.prefill = {T1},      DST.native  = T2
-
-    Transplant SRC's pivot goal-head query into DST and ask what DST writes:
-      • T3  -> the next sub-goal is carried PRE-DECIDED in the query (independent of DST's own progress)
-      • T4  -> the query encodes PROGRESS ("done {T1,T2}"), and DST's slot after {T1,T2} is T4
-    The DST reordering (T4 before T3) is what makes these two predictions differ — without it, both
-    would land on T3. Binary scoring (``expected_next = T3``) therefore reads T3 = pre-decided-DIFF.
-
-    Same prompt shape / interface as :class:`MultiPredicateInstance` (independent assignment lines,
-    trailing-indent or ``var_eq`` pivot), but with per-side ORDER and per-side PREFILL. No SRC-target
-    span alignment is needed (single-position query transplant), and gaze is N/A (no ``.task``)."""
-
-    datatype: str
-    src_order: tuple[Predicate, ...]     # SRC's listed predicates, in order
-    dst_order: tuple[Predicate, ...]     # DST's listed predicates (T3/T4 swapped vs SRC)
-    src_progress: list[str]              # predicate ids prefilled in SRC (e.g. [T1, T2])
-    dst_progress: list[str]              # predicate ids prefilled in DST (e.g. [T1])
-    expected_next: str                   # SRC target = transplant target (T3)
-    var_name: str
-    presentation: Presentation
-    src_lang: Lang
-    dst_lang: Lang
-    naming: Literal["natural", "letters"] = "natural"
-    letter_stub: Literal["indent", "var_eq"] = "indent"
-    meta: dict = field(default_factory=dict)   # carries dst_next (T2) + datatype
-
-    def _var_of(self, order, progress, pred_id):
-        if self.naming == "letters":
-            return _seq_letter(order, progress, pred_id)
-        return {p.id: p for p in order}[pred_id].result_name
-
-    def _parts(self, lang, order, progress):
-        q = _question([p.description for p in order], self.datatype, self.var_name, lang, self.presentation)
-        prog = [p for p in order if p.id in set(progress)]          # prefilled lines, in list order
-        var_eq = self.letter_stub == "var_eq"
-        lines = []
-        for p in prog:
-            rn = self._var_of(order, progress, p.id)
-            ln = _assign_line(p, self.var_name, lang, res_name=rn)
-            if var_eq and lang == "cpp":
-                ln = _cpp_autoify(ln, rn)
-            lines.append(ln)
-        base = ("<code>\n" + _signature(self.datatype, self.var_name, lang)
-                + ("\n" + "\n".join(lines) if lines else ""))
-        return q, base + "\n    "                                   # trailing indent = pivot
-
-    def src_parts(self):
-        return self._parts(self.src_lang, self.src_order, self.src_progress)
-
-    def dst_parts(self):
-        return self._parts(self.dst_lang, self.dst_order, self.dst_progress)
-
-    def _desc(self, pred_id):
-        return next(p.description for p in self.src_order if p.id == pred_id)
-
-    @property
-    def expected_next_desc(self) -> str:
-        return self._desc(self.expected_next)
-
-    @property
-    def dst_next_desc(self) -> str:
-        return self._desc(self.meta["dst_next"])
-
-    @property
-    def task_desc(self) -> str:
-        return "; ".join(p.description for p in self.dst_order)
-
-
-def diff_vs_prog_setups(
-    datatype: str,
-    n_samples: int = 8,
-    seed: int = 0,
-    presentation: Presentation = "listed",
-    naming: Literal["natural", "letters"] = "natural",
-    letter_stub: Literal["indent", "var_eq"] = "indent",
-    src_lang: Lang = "python",
-    dst_lang: Lang = "python",
-) -> list[DiffVsProgInstance]:
-    """Sample ``n_samples`` diff-vs-progress instances (:class:`DiffVsProgInstance`). Each draws 4
-    pairwise-COMPATIBLE predicates T1..T4 from the datatype's :data:`QTASKS` bank and builds the fixed
-    contrast: SRC lists [T1,T2,T3,T4] prefilling {T1,T2} (target T3); DST lists [T1,T2,T4,T3]
-    prefilling {T1} (native next T2). Deduped by the ordered 4-tuple; reproducible via ``seed``."""
-    bank = QTASKS[datatype]
-    preds = list(bank.predicates)
-    assert len(preds) >= 4, f"need >=4 predicates in the {datatype!r} bank, have {len(preds)}"
-    rng = random.Random(seed)
-    out, seen = [], set()
-    for _ in range(n_samples * 400):
-        if len(out) >= n_samples:
-            break
-        t1, t2, t3, t4 = rng.sample(preds, 4)
-        quad = (t1.id, t2.id, t3.id, t4.id)
-        if quad in seen:
-            continue
-        if not all(qpred_compatible(datatype, a.id, b.id)
-                   for i, a in enumerate((t1, t2, t3, t4))
-                   for b in (t1, t2, t3, t4)[i + 1:]):
-            continue
-        seen.add(quad)
-        out.append(DiffVsProgInstance(
-            datatype=datatype,
-            src_order=(t1, t2, t3, t4),
-            dst_order=(t1, t2, t4, t3),          # swap T3/T4 so progress-position != pre-decided
-            src_progress=[t1.id, t2.id],
-            dst_progress=[t1.id],
-            expected_next=t3.id,                 # SRC target = transplant target
-            var_name=bank.var_names[0],
-            presentation=presentation, src_lang=src_lang, dst_lang=dst_lang,
-            naming=naming, letter_stub=letter_stub,
-            meta={"datatype": datatype, "dst_next": t2.id},
-        ))
-    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2230,8 +1197,9 @@ class DiffTriggerInstance:
     Scoring reuses :func:`src.diff.eval.eval_q_transfer` / :func:`judge_causal`: ``expected_next_desc``
     = D (the DIFF-predicted DST target = "triggered"), ``dst_next_desc`` = B (native), ``task_desc`` =
     the DST task; ``src_target_desc`` = C is exposed for a separate literal-copy check. Gaze uses the
-    DST task predicates via the ``task`` property. Same prompt shape as :class:`DiffVsProgInstance`
-    (independent assignment lines, trailing-indent or ``var_eq`` pivot; single-position q transplant)."""
+    DST task predicates via the ``task`` property. Prompt: the listed task, independent assignment lines named by
+    sequential letters (:func:`_seq_letter`), and the frontier's ``{var} =`` stub as the pivot (single-position q
+    transplant)."""
 
     datatype: str
     src_order: tuple[Predicate, ...]   # SRC listed predicates (contains A, B, C)
@@ -2242,39 +1210,28 @@ class DiffTriggerInstance:
     dst_native: str                    # B id — DST's native next
     src_target: str                    # C id — SRC transplant frontier / literal-copy reference
     var_name: str
-    presentation: Presentation
     src_lang: Lang
     dst_lang: Lang
-    naming: Literal["natural", "letters"] = "natural"
-    letter_stub: Literal["indent", "var_eq"] = "indent"
     meta: dict = field(default_factory=dict)
 
-    def _var_of(self, order, progress, pred_id):
-        if self.naming == "letters":
-            return _seq_letter(order, progress, pred_id)
-        return {p.id: p for p in order}[pred_id].result_name
-
     def _parts(self, lang, order, progress):
-        q = _question([p.description for p in order], self.datatype, self.var_name, lang, self.presentation)
+        q = _question([p.description for p in order], self.datatype, self.var_name, lang, "listed")
         prog = [p for p in order if p.id in set(progress)]          # prefilled lines, in list order
-        var_eq = self.letter_stub == "var_eq"
         lines = []
         for p in prog:
-            rn = self._var_of(order, progress, p.id)
+            rn = _seq_letter(order, progress, p.id)
             ln = _assign_line(p, self.var_name, lang, res_name=rn)
-            if var_eq and lang == "cpp":
+            if lang == "cpp":
                 ln = _cpp_autoify(ln, rn)
             lines.append(ln)
         base = ("<code>\n" + _signature(self.datatype, self.var_name, lang)
                 + ("\n" + "\n".join(lines) if lines else ""))
-        if var_eq:
-            # eq pivot: emit the frontier's ``{var} =`` stub so the query is read at the ``=`` token
-            # (the strong goal-head pivot). Frontier = the first un-prefilled predicate in list order.
-            frontier = next(p for p in order if p.id not in set(progress))
-            rn = self._var_of(order, progress, frontier.id)
-            stub = f"auto {rn} =" if lang == "cpp" else f"{rn} ="
-            return q, base + f"\n    {stub}"
-        return q, base + "\n    "                                   # trailing indent = pivot
+        # eq pivot: emit the frontier's ``{var} =`` stub so the query is read at the ``=`` token
+        # (the strong goal-head pivot). Frontier = the first un-prefilled predicate in list order.
+        frontier = next(p for p in order if p.id not in set(progress))
+        rn = _seq_letter(order, progress, frontier.id)
+        stub = f"auto {rn} =" if lang == "cpp" else f"{rn} ="
+        return q, base + f"\n    {stub}"
 
     def src_parts(self):
         return self._parts(self.src_lang, self.src_order, self.src_progress)
@@ -2365,15 +1322,10 @@ def _diff_family(datatype: str, pred_id: str) -> str:
 def diff_trigger_setups(
     datatype: str,
     variant: Literal["order_matched", "order_diff", "c_in_dst"] = "order_matched",
-    n_samples: int = 8,
+    n_samples: int = 32,
     seed: int = 0,
-    presentation: Presentation = "listed",
-    naming: Literal["natural", "letters"] = "letters",
-    letter_stub: Literal["indent", "var_eq"] = "indent",
     src_lang: Lang = "python",
     dst_lang: Lang = "python",
-    distinct_families: bool = True,
-    nontrivial_frontier: bool = True,
 ) -> list[DiffTriggerInstance]:
     """Sample ``n_samples`` diff-trigger instances (:class:`DiffTriggerInstance`). Each draws 4
     pairwise-compatible predicates A, B, C, D from the datatype's :data:`QTASKS` bank and builds the
@@ -2406,9 +1358,9 @@ def diff_trigger_setups(
         #  - C (SRC target) and D (DST remaining) must be non-trivial frontiers, and
         #  - B (native), C, D must come from three DIFFERENT semantic families,
         # so "did DST switch to D vs stay on B" is not confounded by look-alike sub-tasks.
-        if nontrivial_frontier and (C.id in trivial or D.id in trivial):
+        if C.id in trivial or D.id in trivial:
             continue
-        if distinct_families and len({_diff_family(datatype, B.id),
+        if len({_diff_family(datatype, B.id),
                                       _diff_family(datatype, C.id),
                                       _diff_family(datatype, D.id)}) < 3:
             continue
@@ -2434,185 +1386,10 @@ def diff_trigger_setups(
             dst_native=B.id,
             src_target=C.id,
             var_name=bank.var_names[0],
-            presentation=presentation, src_lang=src_lang, dst_lang=dst_lang,
-            naming=naming, letter_stub=letter_stub,
+            src_lang=src_lang, dst_lang=dst_lang,
             meta={"datatype": datatype, "variant": variant,
                   "dst_next": B.id, "diff_target": D.id, "src_target": C.id},
         ))
-    return out
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# setup generators — a few contrastive instances per (datatype, presentation, language)
-# ══════════════════════════════════════════════════════════════════════════════
-def q_transfer_setups(
-    datatype: str,
-    n_conditions: "int | list[int]" = (3, 4, 5),
-    n_samples: int = 8,
-    seed: int = 0,
-    src_n_prefill: Optional[int] = None,
-    dst_n_prefill: int = 1,
-    presentation: Presentation = "listed",
-    naming: Literal["natural", "letters"] = "natural",
-    src_lang: Lang = "python",
-    dst_lang: Lang = "python",
-) -> list[QTransferInstance]:
-    """Sample ``n_samples`` contrastive q-transfer instances (01 A-experiment style). SRC.task ==
-    DST.task; only the amount of prefilled PROGRESS differs. Each instance:
-
-      1. draws a random TASK of ``k`` predicates — ``k`` is ``n_conditions`` if int, else a
-         per-instance random pick from the ``n_conditions`` list (task SIZE mixes over, e.g. {3,4,5},
-         without multiplying configs). Independent, commutative predicates, sampled without
-         replacement in random order from the datatype's bank; and
-      2. uses a FIXED contrastive split (randomness is only in *which* predicates):
-             SRC prefills ``src_n_prefill`` (default k-1) -> SRC frontier = ids[src_n_prefill]
-                 (default = the LAST condition = the transplant target)
-             DST prefills ``dst_n_prefill`` (default 1)   -> DST frontier = ids[dst_n_prefill]
-                 (default = only the first condition prefilled)
-         The test: after patching, does the LM's IMMEDIATE next computation jump to SRC's target?
-
-    Requires ``dst_n_prefill < src_n_prefill < k`` and ``dst_n_prefill >= 1`` for every sampled k.
-    Only the CONCEPT PAIR (SRC target = ids[src_n_prefill], DST frontier = ids[dst_n_prefill]) is the
-    unit of interest — the anchor and other prefilled conditions are nuisance fillers, sampled at
-    random. Instances are therefore deduped by the ORDERED concept pair (src_target, dst_frontier),
-    so ``n_samples`` counts distinct concept pairs (≤ len(bank)*(len(bank)-1)); reproducible via
-    ``seed`` (fixed draw sequence — resume-stable).
-
-        naming : result variable names — "natural" (descriptive) or "letters" (a/b/c/d).
-    """
-    bank = QTASKS[datatype]
-    preds = list(bank.predicates)
-    ks = [n_conditions] if isinstance(n_conditions, int) else list(n_conditions)
-    assert ks and all(3 <= k <= len(preds) for k in ks), (
-        f"n_conditions must be in [3, {len(preds)}]"
-    )
-    for k in ks:  # validate the fixed split against every task size
-        sp = k - 1 if src_n_prefill is None else src_n_prefill
-        assert 1 <= dst_n_prefill < sp < k, (
-            f"need 1 <= dst_n_prefill({dst_n_prefill}) < src_n_prefill({sp}) < n_conditions({k})"
-        )
-    rng = random.Random(seed)
-    out, seen = [], set()
-    for _ in range(n_samples * 200):
-        if len(out) >= n_samples:
-            break
-        k = rng.choice(ks)  # task size for this instance
-        src_len = (
-            k - 1 if src_n_prefill is None else src_n_prefill
-        )  # SRC target position (default last)
-        dst_len = dst_n_prefill  # DST frontier position (default 1)
-        src_target, dst_frontier = rng.sample(preds, 2)  # the CONCEPT PAIR (dedup unit)
-        ckey = (src_target.id, dst_frontier.id)
-        if ckey in seen:
-            continue
-        seen.add(ckey)
-        # place the concept pair at their split positions; fill the rest with random nuisance preds
-        others = [p for p in preds if p.id not in (src_target.id, dst_frontier.id)]
-        fillers = iter(rng.sample(others, k - 2))
-        slots = [None] * k
-        slots[src_len], slots[dst_len] = src_target, dst_frontier
-        subset = [s if s is not None else next(fillers) for s in slots]
-        ids = [p.id for p in subset]
-        task = dataclasses.replace(bank, id=f"{bank.id}_k{k}", predicates=tuple(subset))
-        out.append(
-            QTransferInstance(
-                task=task,
-                var_name=bank.var_names[0],
-                presentation=presentation,
-                src_lang=src_lang,
-                dst_lang=dst_lang,
-                src_progress=ids[:src_len],
-                dst_progress=ids[:dst_len],
-                expected_next=ids[src_len],
-                naming=naming,
-                meta={"datatype": datatype, "dst_next": ids[dst_len]},
-            )
-        )
-    return out
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# kv-cluster compatibility — when two cluster tasks are too similar to CONTRAST
-# ══════════════════════════════════════════════════════════════════════════════
-# Same idea as the multi-predicate rule, over :data:`KVCLUSTERS` task ids (keyed per CLUSTER). A
-# (src_task, dst_task) contrast is DEGENERATE when one task is redundant with / implied by the other
-# (shared wording, e.g. "the median value" vs "whether the median is even"). Opposites (max vs min,
-# longest vs shortest) are legitimate and kept.
-
-# ── degenerate contrasts, keyed per CLUSTER id (task ids may repeat across clusters). A pair is
-# degenerate when one task is redundant with / implied by the other (shared wording / one reads the
-# other). Opposites (max vs min, longest vs shortest) are legitimate and kept.
-_KV_IMPLIES: dict[str, list[tuple[str, str]]] = {
-    "digits": [("has_zero_digit", "min_digit"), ("min_digit", "has_zero_digit")],
-}
-
-_KV_MUTEX: dict[str, list[tuple[str, ...]]] = {
-    "lowercased": [("num_distinct_ci", "any_ci_duplicate")],
-    "prefix_sums": [("count_positive_prefixes", "first_positive_index")],
-    "divisors": [("count_divisors", "is_prime"), ("sum_divisors", "is_perfect")],
-    "binary": [("popcount", "is_power_of_two")],
-    "chars_sorted": [],
-    "vowels": [
-        ("count_vowels", "distinct_vowels"),
-        ("all_same_vowel", "distinct_vowels"),
-    ],
-    "char_counts": [("any_repeat", "count_repeated_chars")],
-}
-
-_ALL_KV_CLUSTER_IDS = [c.id for cls in KVCLUSTERS.values() for c in cls]
-
-#: ``{cluster_id: {task_id: [ids too similar to CONTRAST with]}}`` — consulted by ``kv_transfer_setups``.
-KV_INCOMPATIBLE: dict[str, dict[str, list[str]]] = {
-    cid: _build_incompatible(_KV_IMPLIES.get(cid, []), _KV_MUTEX.get(cid, []))
-    for cid in _ALL_KV_CLUSTER_IDS
-}
-
-
-def kv_compatible(cluster_id: str, a_id: str, b_id: str) -> bool:
-    """True iff two tasks in the SAME cluster form a NON-degenerate contrast (not redundant / implied)."""
-    return b_id not in KV_INCOMPATIBLE.get(cluster_id, {}).get(a_id, ())
-
-
-def kv_transfer_setups(
-    datatype: str,
-    presentation: Presentation = "description",
-    src_lang: Lang = "python",
-    dst_lang: Lang = "python",
-    pivot: Literal["auto", "return", "indent"] = "auto",
-    n_samples: "int | None" = None,
-    seed: int = 0,
-) -> list[KVTransferInstance]:
-    """Contrastive kv-transfer setups for one datatype: distinct (src_task, dst_task) pairs drawn from
-    WITHIN each of the datatype's clusters (both tasks share that cluster's common progress). Enumerates
-    all non-degenerate ordered pairs per cluster (:func:`kv_compatible`), concatenates across clusters,
-    shuffles reproducibly by ``seed``, and returns the first ``n_samples`` (all if ``None``).
-    ``meta`` records ``datatype``, ``cluster`` (id) and ``dst_next`` (clean-DST task)."""
-    out: list[KVTransferInstance] = []
-    for cluster in KVCLUSTERS[datatype]:
-        tids = [t.id for t in cluster.tasks]
-        for s in tids:
-            for d in tids:
-                if s != d and kv_compatible(cluster.id, s, d):
-                    out.append(
-                        KVTransferInstance(
-                            cluster=cluster,
-                            var_name=cluster.var_names[0],
-                            presentation=presentation,
-                            src_lang=src_lang,
-                            dst_lang=dst_lang,
-                            src_task=s,
-                            dst_task=d,
-                            pivot=pivot,
-                            meta={
-                                "datatype": datatype,
-                                "cluster": cluster.id,
-                                "dst_next": d,
-                            },
-                        )
-                    )
-    random.Random(seed).shuffle(out)
-    if n_samples is not None:
-        out = out[:n_samples]
     return out
 
 
@@ -2623,7 +1400,7 @@ def kv_transfer_setups(
 # composing it is degenerate — either the two conditions cannot both hold, or one trivially entails the
 # other (so the composition is redundant and often shares wording). Authored below as a readable
 # source-of-truth; ``FILTER_INCOMPATIBLE`` is the derived symmetric ``{condition_id: [ids it must not be
-# composed with]}`` mapping (implication-closed) that ``filter_transfer_setups`` consults.
+# composed with]}`` mapping (implication-closed) that :func:`filter_compatible` consults.
 #
 # Three flavours:
 #   (i)   MUTUALLY EXCLUSIVE  — can never be true together        (all_upper / all_lower)
@@ -2645,23 +1422,6 @@ _FILTER_IMPLIES: list[tuple[str, str]] = [
     ("multiple_of_ten", "multiple_of_five"),
     ("multiple_of_ten", "even"),
     ("divisible_by_four", "even"),
-    # ── str (single char) ──
-    ("vowel", "alpha"),
-    ("consonant", "alpha"),
-    ("upper", "alpha"),
-    ("lower", "alpha"),
-    ("upper_vowel", "upper"),
-    ("upper_vowel", "vowel"),
-    ("first_half_alpha", "alpha"),
-    ("second_half_alpha", "alpha"),
-    ("letter_e", "vowel"),
-    ("letter_e", "first_half_alpha"),
-    ("alpha", "alnum"),
-    ("digit", "alnum"),
-    ("hex_digit", "alnum"),
-    ("digit", "hex_digit"),
-    ("even_digit", "digit"),
-    ("odd_digit", "digit"),
 ]
 
 # mutually-exclusive pairs/groups (every pair within a tuple can never be true together)
@@ -2689,42 +1449,14 @@ _FILTER_MUTEX: list[tuple[str, ...]] = [
     ("perfect_square", "is_prime"),
     ("perfect_square", "negative"),
     ("is_prime", "negative"),
-    # ── str (single char) ──
-    ("upper", "lower"),
-    ("vowel", "consonant"),
-    ("even_digit", "odd_digit"),
-    ("first_half_alpha", "second_half_alpha"),
 ]
-
-# str single-char conditions each hold a character CATEGORY; disjoint categories ⇒ mutually exclusive
-# (L=letter, D=digit, S=whitespace, P=punctuation; "LD" = either). Generates e.g. vowel⊥digit,
-# alpha⊥whitespace, hex_digit⊥whitespace, comma_or_period⊥alnum, … without listing each pair.
-_STR_CHAR_CLASS: dict[str, str] = {
-    "vowel": "L",
-    "consonant": "L",
-    "alpha": "L",
-    "upper": "L",
-    "lower": "L",
-    "upper_vowel": "L",
-    "first_half_alpha": "L",
-    "second_half_alpha": "L",
-    "letter_e": "L",
-    "digit": "D",
-    "even_digit": "D",
-    "odd_digit": "D",
-    "whitespace": "S",
-    "comma_or_period": "P",
-    "alnum": "LD",
-    "hex_digit": "LD",
-}
-
 
 def _build_filter_incompatible() -> dict[str, list[str]]:
     """Derive the symmetric, implication-closed incompatibility mapping for filter conditions."""
-    return _build_incompatible(_FILTER_IMPLIES, _FILTER_MUTEX, _STR_CHAR_CLASS)
+    return _build_incompatible(_FILTER_IMPLIES, _FILTER_MUTEX)
 
 
-#: ``{condition_id: [ids it must NOT be composed with]}`` — consulted by ``filter_transfer_setups``.
+#: ``{condition_id: [ids it must NOT be composed with]}`` — consulted by :func:`filter_compatible`.
 FILTER_INCOMPATIBLE: dict[str, list[str]] = _build_filter_incompatible()
 
 
@@ -2797,60 +1529,6 @@ def qpred_compatible(datatype: str, a_id: str, b_id: str) -> bool:
 def filter_compatible(a_id: str, b_id: str) -> bool:
     """True iff the two filter sub-tasks may be composed (not mutually exclusive / redundant)."""
     return b_id not in FILTER_INCOMPATIBLE.get(a_id, ())
-
-
-def filter_transfer_setups(
-    datatype: str,
-    n_samples: int = 8,
-    seed: int = 0,
-    postfix: Literal["return", "targeted"] = "targeted",
-    src_lang: Lang = "python",
-    dst_lang: Lang = "python",
-    n_conditions: int = 2,
-) -> list[FilterTransferInstance]:
-    """Sample ``n_samples`` composed-filter instances (00_diff TASK_1 style). Each task is
-    ``n_conditions`` (fixed at 2 — the two commutative sub-tasks) filter conditions sampled at random
-    from the datatype's bank; SRC and DST prefill DIFFERENT single sub-tasks (as the first
-    ``res = […]`` filter), then hit a shared ``postfix`` pivot — so SRC is about to apply its
-    remaining sub-task and clean DST its remaining (the complementary one). A random swap direction
-    is drawn per instance. Deduped by (pair, src_fill), reproducible via ``seed`` (drawn in a fixed
-    sequence so a larger ``n_samples`` extends the same prefix — resume-stable).
-
-        src_fill=T1, dst_fill=T2  ->  expected_next=T2 (SRC's remaining), dst_next=T1 (clean DST's).
-    """
-    assert n_conditions == 2, "filter tasks are exactly 2 commutative sub-tasks"
-    ft = FILTER_TASKS[datatype]
-    conds = list(ft.conditions)
-    rng = random.Random(seed)
-    out, seen = [], set()
-    for _ in range(n_samples * 200):
-        if len(out) >= n_samples:
-            break
-        ca, cb = rng.sample(conds, 2)  # random 2-subset (the two sub-tasks)
-        if not filter_compatible(
-            ca.id, cb.id
-        ):  # skip degenerate pairs (see FILTER_INCOMPATIBLE)
-            continue
-        src_fill, dst_fill = (ca.id, cb.id) if rng.random() < 0.5 else (cb.id, ca.id)
-        key = ((ca.id, cb.id), src_fill)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(
-            FilterTransferInstance(
-                task=ft,
-                pair=(ca.id, cb.id),
-                var_name=ft.var_names[0],
-                src_lang=src_lang,
-                dst_lang=dst_lang,
-                src_fill=src_fill,
-                dst_fill=dst_fill,
-                expected_next=dst_fill,  # SRC's remaining == the sub-task DST prefilled
-                postfix=postfix,
-                meta={"datatype": datatype, "dst_next": src_fill},
-            )
-        )
-    return out
 
 
 def multi_predicate_setups(
@@ -2934,29 +1612,3 @@ def multi_predicate_setups(
             )
         )
     return out
-
-
-def all_q_transfer_setups(**kw) -> list[QTransferInstance]:
-    return list(
-        itertools.chain.from_iterable(q_transfer_setups(dt, **kw) for dt in QTASKS)
-    )
-
-
-def all_kv_transfer_setups(**kw) -> list[KVTransferInstance]:
-    return list(
-        itertools.chain.from_iterable(kv_transfer_setups(dt, **kw) for dt in KVCLUSTERS)
-    )
-
-
-def all_filter_transfer_setups(**kw) -> list[FilterTransferInstance]:
-    return list(
-        itertools.chain.from_iterable(
-            filter_transfer_setups(dt, **kw) for dt in FILTER_TASKS
-        )
-    )
-
-
-def all_multi_predicate_setups(**kw) -> list[MultiPredicateInstance]:
-    return list(
-        itertools.chain.from_iterable(multi_predicate_setups(dt, **kw) for dt in QTASKS)
-    )
