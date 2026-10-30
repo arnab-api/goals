@@ -61,10 +61,9 @@ $RUN pip install \
     tqdm \
     pyyaml
 
-echo "==> Installing API clients (LM judges: Claude; GPT-4o for the EM alignment judge)"
+echo "==> Installing API clients (LM judges: Claude)"
 $RUN pip install \
-    anthropic \
-    openai
+    anthropic
 
 echo "==> Installing project utility libraries"
 $RUN pip install \

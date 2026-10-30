@@ -6,18 +6,14 @@ their pivot prefix tokens stay identical. Source (C++) is augmented independentl
 Design invariant: the pivot prefix `return <pivot_prefix>` must be token-identical
 across dest and target after augmentation. This is guaranteed for variable_rename
 (same new_var applied to both) and toggle_type_hints (identical transformation).
-Function names do not appear in the pivot prefix so they may differ between dest
-and target.
 """
 
 from __future__ import annotations
 
 import copy
 import logging
-import re
 
 from src.goals.augment import (
-    _VAR_VOCAB,
     _toggle_type_hints_in_def,
     adapt_text_var,
 )
@@ -85,61 +81,6 @@ def _toggle_type_hints_sp(sample: SinglePredicateSample) -> SinglePredicateSampl
     return s
 
 
-def _rename_function_sp(sample: SinglePredicateSample, new_name: str) -> SinglePredicateSample:
-    """Return a copy of ``sample`` with the Python function name changed to ``new_name``.
-
-    Applied to: ``python_incomplete_code`` (def line only) and ``function_name``.
-    The ``predicate_name``, ``docstring``, and C++ code are not modified.
-
-    Args:
-        sample: Original SinglePredicateSample (not mutated).
-        new_name: New Python function name.
-
-    Returns:
-        New SinglePredicateSample with the Python function renamed.
-    """
-    s = copy.deepcopy(sample)
-    old_name = s.function_name or s.predicate_name
-    s.python_incomplete_code = re.sub(
-        r"def\s+\w+\s*\(", f"def {new_name}(", s.python_incomplete_code, count=1
-    )
-    s.function_name = new_name
-    prev = list(s.augmentation) if s.augmentation else []
-    s.augmentation = prev + [
-        {"type": "function_rename", "old_name": old_name, "new_name": new_name}
-    ]
-    return s
-
-
-def _rename_function_cpp(sample: SinglePredicateSample, new_name: str) -> SinglePredicateSample:
-    """Return a copy of ``sample`` with the C++ function name changed to ``new_name``.
-
-    Uses a C++-aware regex matching ``<old_name>(`` to avoid spurious replacements
-    inside variable names or comments.  Python code is not modified by this helper
-    (use ``_rename_function_sp`` for that).
-
-    Args:
-        sample: Original SinglePredicateSample (not mutated).
-        new_name: New C++ function name.
-
-    Returns:
-        New SinglePredicateSample with the C++ function renamed.
-    """
-    s = copy.deepcopy(sample)
-    old_name = s.function_name or s.predicate_name
-    s.cpp_incomplete_code = re.sub(
-        r"\b" + re.escape(old_name) + r"\s*\(",
-        f"{new_name}(",
-        s.cpp_incomplete_code,
-        count=1,
-    )
-    prev = list(s.augmentation) if s.augmentation else []
-    s.augmentation = prev + [
-        {"type": "function_rename_cpp", "old_name": old_name, "new_name": new_name}
-    ]
-    return s
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -171,15 +112,10 @@ def augment_pair(
         samples identically.  Preserves the ``-> bool`` return annotation and
         the ``docstring`` field.
 
-    ``"function_rename"`` — ``config: {"dest_name": str, "target_name": str}``
-        Renames the Python function.  Names can differ between dest and target
-        because function names do not appear in the pivot prefix (``return …``).
-
     Args:
         dest: Destination SinglePredicateSample (not mutated).
         target: Target SinglePredicateSample (not mutated).
-        augmentation_type: One of ``"variable_rename"``, ``"toggle_type_hints"``,
-            ``"function_rename"``.
+        augmentation_type: One of ``"variable_rename"``, ``"toggle_type_hints"``.
         config: Augmentation-specific configuration dict.  See above.
 
     Returns:
@@ -204,14 +140,6 @@ def augment_pair(
         return (
             _toggle_type_hints_sp(dest),
             _toggle_type_hints_sp(target),
-        )
-
-    elif augmentation_type == "function_rename":
-        dest_name = config.get("dest_name", dest.function_name or dest.predicate_name)
-        targ_name = config.get("target_name", target.function_name or target.predicate_name)
-        return (
-            _rename_function_sp(dest, dest_name),
-            _rename_function_sp(target, targ_name),
         )
 
     else:
@@ -240,14 +168,9 @@ def augment_source(
         C++ has no Python-style type hints; this only affects
         ``python_incomplete_code``.
 
-    ``"function_rename"`` — ``config: {"new_name": str}``
-        Renames the function in both Python (``_rename_function_sp``) and C++
-        (``_rename_function_cpp``) using the same ``new_name``.
-
     Args:
         source: Source SinglePredicateSample (not mutated).
-        augmentation_type: One of ``"variable_rename"``, ``"toggle_type_hints"``,
-            ``"function_rename"``.
+        augmentation_type: One of ``"variable_rename"``, ``"toggle_type_hints"``.
         config: Augmentation-specific configuration dict.  See above.
 
     Returns:
@@ -268,57 +191,7 @@ def augment_source(
         # C++ has no Python-style type hints — apply Python toggle only
         return _toggle_type_hints_sp(source)
 
-    elif augmentation_type == "function_rename":
-        new_name = config["new_name"]
-        s = _rename_function_sp(source, new_name)
-        # Also update the C++ name
-        return _rename_function_cpp(s, new_name)
-
     else:
         raise ValueError(f"Unknown augmentation_type: {augmentation_type!r}")
 
 
-def generate_pair_variants(
-    dest: SinglePredicateSample,
-    target: SinglePredicateSample,
-    var_vocab: list[str] | None = None,
-) -> list[tuple[SinglePredicateSample, SinglePredicateSample]]:
-    """Generate the standard set of joint augmentation variants for a (dest, target) pair.
-
-    Variants produced:
-    - Up to 3 variable renames using alternatives from ``_VAR_VOCAB`` (or a
-      custom ``var_vocab``).  The same new name is applied to both samples.
-    - 1 type-hint toggle applied identically to both.
-
-    Function renaming is intentionally excluded here because dest and target
-    functions have different semantic roles; callers can apply ``augment_pair``
-    with ``"function_rename"`` directly if needed.
-
-    Args:
-        dest: Destination SinglePredicateSample.
-        target: Target SinglePredicateSample.
-        var_vocab: Alternative variable names to try.  If None, uses the
-            built-in ``_VAR_VOCAB`` lookup keyed on ``dest.variable_name``.
-
-    Returns:
-        List of ``(dest_variant, target_variant)`` tuples, one per variant.
-    """
-    variants: list[tuple[SinglePredicateSample, SinglePredicateSample]] = []
-
-    old_var = dest.variable_name
-
-    # Variable renames
-    if var_vocab is None:
-        var_vocab = _VAR_VOCAB.get(old_var, [])
-
-    for new_var in var_vocab[:3]:
-        if new_var == old_var:
-            continue
-        d, t = augment_pair(dest, target, "variable_rename", {"new_var": new_var})
-        variants.append((d, t))
-
-    # Type hint toggle
-    d, t = augment_pair(dest, target, "toggle_type_hints")
-    variants.append((d, t))
-
-    return variants

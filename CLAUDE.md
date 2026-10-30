@@ -52,8 +52,8 @@ Creates the `goals` conda environment (Python 3.12, torch ≥ 2.7 from the CUDA 
 ## Key Modules
 
 - `src/models.py` — `ModelandTokenizer` (extends `nnsight.LanguageModel`; unified `n_layer`, `n_embd`,
-  `layer_name_format`, … across architectures).
-- `src/functional.py` — `generate_with_patch()` (nnsight / baukit patching), `predict_next_token()`, `get_hs()`.
+  `layer_name_format`, … across the reported families: Qwen2, Llama, OLMo-3, GLM-4 dense).
+- `src/functional.py` — `generate_with_patch()` (baukit patching), `get_hs()`.
 - `src/tokens.py` — `prepare_input()` (left padding), `find_token_range()`.
 - `src/goals/head_sets.py` — `load_goal_heads()` (json head set, mask fallback), `load_json_heads()`, `GOAL_BANDS`.
 - `src/goals/head_loc_attn.py` — `HeadMask`, `cache_pivot_data()`, `train_head_mask()`,
@@ -66,7 +66,7 @@ Creates the `goals` conda environment (Python 3.12, torch ≥ 2.7 from the CUDA 
 
 ## Configuration
 
-- `env.yml` — API keys (`CLAUDE_KEY`, `OPENAI_KEY`, `HF_WRITE`) and cache / results directories
+- `env.yml` — API key (`CLAUDE_KEY`) and cache / results directories
   (`src/utils/env_utils.py`).
 - Long runs are dispatched with `python -m run_jobs.baulab.dispatch --jobs job_list/<group>/<list>.json`
   (`run_jobs/baulab/CONFIG.py` and `auth.yml` are local and gitignored).
@@ -109,6 +109,9 @@ When implementing new features (evals, utils, classes, etc.):
 - **Goal heads = exported json**: every reported run reads its heads from `head_sets/`; the json equals the lam20
   mask thresholded at 0.9 inside the model's `GOAL_BANDS` band (122 heads for Qwen2.5-Coder-32B).
 - **Batch KL loss**: `reduction="batchmean"` in `train_head_mask` keeps the loss scale independent of batch size.
+- **Two mask-training paths**: `scripts/train_head_mask.py` defaults to the Coder-32B lam20 run (50 epochs, batch 64,
+  per-epoch augmentation with src head values recomputed per batch); `--no-augment` precomputes src head values once
+  (the Coder-14B / Qwen2.5-32B / Llama-70B / OLMo-SFT masks).
 - **Cross-language alignment**: source (C++) and destination (Python) prompts are padded to the same length (one
   batch for o_proj extraction), so both see identical absolute positions.
 - **Left padding**: `ModelandTokenizer` left-pads via nnsight (raw Qwen tokenizers pad right).

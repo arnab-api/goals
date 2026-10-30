@@ -1,28 +1,26 @@
 """Generate code completions for all well-known-tasks using a code-LM.
 
-For each IncompleteCodeSample in data/well-known-tasks/, builds a chat-template
-prompt and runs batched greedy generation.  Results are saved as JSON files
-under results/well-known-tasks/generations/<model-short-name>/<task-name>.json.
+For each IncompleteCodeSample in data/well-known-tasks/, builds the v2 chat prompt
+(no-comment instruction in the system turn, assistant prefill ending at ``def <name>(``)
+and runs batched greedy generation.  Results are saved as JSON files under
+results/well-known-tasks/generations_v2/<model-short-name>/<source>/<task-id>.json.
 
 In addition to the greedy completion, the script labels each generation
 with a proactive-strategy classifier (recursive vs iterative) and records
-the token positions where recursive calls happen — used downstream to mine
-*proactively recursive* generations (see ``src/goals/proactive_strategy.py``).
-
-Optional ``--n-samples K`` runs K additional sampled completions per task
-(temperature/top_p hardcoded) so post-hoc analysis can measure the
-empirical rate at which the model chooses each strategy under sampling.
+the token positions where recursive calls happen (see ``src/goals/proactive_strategy.py``).
 
 Each output file is a JSON dict with keys:
     function_name  : str
+    task_id        : str
     source         : str    (ds_and_algo / humaneval / mbpp)
     prompt         : str    (full prompt sent to the model)
-    generation     : str    (greedy LM completion, decoded — backward compat)
+    generation     : str    (greedy LM completion, decoded)
     prompt_bias    : str    (neutral / recursive / iterative, derived from instruction)
     prompt_token_ids        : list[int]
     generation_token_ids    : list[int]   (greedy gen tokens, used for token-position tagging)
     greedy : {
         extracted_code            : str
+        n_hash_comments, n_docstrings, has_comments
         used_code_tag_fallback    : bool
         strategy                  : recursive / iterative / Unsure
         has_recursion             : bool
@@ -32,20 +30,11 @@ Each output file is a JSON dict with keys:
             {name: str, name_char_span: [s, e], name_token_positions: [t, ...]}
         ]
     }
-    samples : [   (only when --n-samples > 0)
-        {text: str, has_recursion: bool, has_loop: bool, strategy: str}
-    ]
 
-Typical usage
-─────────────
+Usage
+─────
 conda run -n goals python scripts/generate_well_known_task_completions.py \\
     --model-key Qwen/Qwen2.5-Coder-32B-Instruct
-
-conda run -n goals python scripts/generate_well_known_task_completions.py \\
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct --batch-size 8 --tasks bfs dfs dijkstra
-
-conda run -n goals python scripts/generate_well_known_task_completions.py \\
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct --n-samples 8
 """
 
 import argparse
@@ -69,7 +58,7 @@ from rich.progress import (
 sys.path.append(".")
 
 from src.goals.data import IncompleteCodeSample
-from src.goals.functional import apply_chat_template, batch_generate, supports_chat_template
+from src.goals.functional import apply_chat_template, batch_generate
 from src.goals.proactive_strategy import (
     attach_token_positions,
     code_offset_in_generation,
@@ -78,13 +67,8 @@ from src.goals.proactive_strategy import (
     label_python_strategy,
 )
 from src.models import ModelandTokenizer
-from src.tokens import prepare_input
 from src.utils.env_utils import DEFAULT_DATA_DIR, DEFAULT_RESULTS_DIR
 from src.utils.logging_utils import add_logging_args, configure
-
-# Sampling hyperparameters for --n-samples (hardcoded; tuned for code-LM defaults).
-_SAMPLE_TEMPERATURE = 0.7
-_SAMPLE_TOP_P = 0.9
 
 # Schema version keys — presence of these in an existing JSON indicates the
 # new richer schema.  Missing → forced regen even without --overwrite.
@@ -95,11 +79,9 @@ console = Console(width=120, highlight=False)
 
 TASKS_DIR = Path(DEFAULT_DATA_DIR) / "well-known-tasks"
 
-# ``--prompt-style v2`` (default): the GoalScope-demo prompt of notebooks/diff/13_goalscope_qualitative.ipynb.
-# The "no comments" instruction lives in the SYSTEM turn (not appended to the user instruction), and the
+# v2 prompt (the GoalScope-demo prompt): the "no comments" instruction lives in the SYSTEM turn, and the
 # assistant prefill stops right after ``def <name>(`` so the model chooses the parameters and writes no
-# docstring. ``legacy`` reproduces the original prompts (no-comment suffix in the user turn, prefill ending
-# in an opening docstring) and writes to the original generations/ dir.
+# docstring.
 V2_SYSTEM_PROMPT = (
     "You are a helpful assistant proficient in programming. "
     "Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain."
@@ -120,9 +102,9 @@ def v2_prefill(sample) -> str:
     raise ValueError(f"{sample.function_name}: unexpected header {head!r}")
 
 
-def _out_name(sample, args) -> str:
-    """v2 outputs are named by bank task id (unique); legacy keeps function_name (existing results)."""
-    return sample.task_id if args.prompt_style == "v2" else sample.function_name
+def _out_name(sample) -> str:
+    """Outputs are named by bank task id (unique, unlike function_name)."""
+    return sample.task_id
 
 
 def comment_stats(code: str) -> dict:
@@ -144,9 +126,6 @@ def comment_stats(code: str) -> dict:
         n_doc = code.count('"""') // 2 + code.count("'''") // 2
     return {"n_hash_comments": n_hash, "n_docstrings": n_doc, "has_comments": bool(n_hash or n_doc)}
 
-# Known source subdirectories (order determines processing order)
-_ALL_SOURCES = ["ds_and_algo", "humaneval", "mbpp"]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -164,16 +143,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="HuggingFace model key.",
     )
     parser.add_argument(
-        "--tasks",
-        nargs="+",
-        default=None,
-        metavar="NAME",
-        help=(
-            "Subset of task names to run (e.g. bfs dfs bubble_sort). "
-            "Defaults to all tasks in data/well-known-tasks/."
-        ),
-    )
-    parser.add_argument(
         "--batch-size",
         type=int,
         default=8,
@@ -187,45 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum new tokens per generation.",
     )
     parser.add_argument(
-        "--output-dir",
-        default=None,
-        metavar="DIR",
-        help=(
-            "Root output directory. "
-            "Defaults to results/well-known-tasks/generations/<model-short-name>/."
-        ),
-    )
-    parser.add_argument(
-        "--source",
-        default=None,
-        metavar="SRC",
-        help=(
-            "Task source subdirectory to process (e.g. ds_and_algo, humaneval, mbpp). "
-            "Defaults to all sources found under data/well-known-tasks/."
-        ),
-    )
-    parser.add_argument(
-        "--prompt-style",
-        default="v2",
-        choices=["v2", "legacy"],
-        help="v2: no-comment instruction in the system turn, prefill stops at `def <name>(`; legacy: original prompts.",
-    )
-    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Re-generate tasks that already have an output file.",
-    )
-    parser.add_argument(
-        "--n-samples",
-        type=int,
-        default=10,
-        metavar="K",
-        help=(
-            "If >0, run K additional sampled completions per task in addition "
-            f"to the greedy one (temperature={_SAMPLE_TEMPERATURE}, top_p={_SAMPLE_TOP_P}). "
-            "Sampled completions are stored as text only (+ has_recursion / "
-            "has_loop flags) for post-hoc strategy-rate analysis."
-        ),
     )
     add_logging_args(parser)
     return parser
@@ -236,36 +169,21 @@ def build_parser() -> argparse.ArgumentParser:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _load_samples(
-    source: str | None,
-    task_names: list[str] | None,
-) -> list[tuple[str, IncompleteCodeSample]]:
+def _load_samples() -> list[tuple[str, IncompleteCodeSample]]:
     """Load (source_name, IncompleteCodeSample) pairs from data/well-known-tasks/<source>/."""
     if not TASKS_DIR.exists():
         raise FileNotFoundError(f"Tasks directory not found: {TASKS_DIR}")
 
-    if source:
-        source_dirs = [TASKS_DIR / source]
-    else:
-        source_dirs = sorted(d for d in TASKS_DIR.iterdir() if d.is_dir())
+    source_dirs = sorted(d for d in TASKS_DIR.iterdir() if d.is_dir())
 
     results = []
     for src_dir in source_dirs:
         src_name = src_dir.name
         paths = sorted(src_dir.glob("*.json"))
-        if task_names:
-            task_set = set(task_names)
-            paths = [p for p in paths if p.stem in task_set]
-            missing = task_set - {p.stem for p in paths}
-            if missing:
-                logger.warning(
-                    "Tasks not found in %s: %s", src_dir, ", ".join(sorted(missing))
-                )
         for path in paths:
             with open(path) as f:
                 d = json.load(f)
             sample = IncompleteCodeSample.from_dict(d)
-            sample.without_comments = True
             sample.task_id = path.stem   # bank file name; unique, unlike function_name (e.g. 2x is_palindrome)
             sample.prefill_full_signature = bool(d.get("prefill_full_signature", False))
             results.append((src_name, sample))
@@ -296,51 +214,6 @@ def _existing_has_new_schema(path: Path) -> bool:
     return all(k in d for k in _NEW_SCHEMA_KEYS)
 
 
-def _batch_generate_sampled(
-    mt: ModelandTokenizer,
-    prompts: list[str],
-    max_new_tokens: int,
-    n_samples: int,
-) -> list[list[list[int]]]:
-    """Run a batched sampling pass returning ``[n_prompts][n_samples]`` gen_ids.
-
-    Uses ``num_return_sequences=n_samples`` so the prompt encoder runs once
-    per batch (the K samples share the prompt-side compute).
-    """
-    if n_samples <= 0 or not prompts:
-        return [[] for _ in prompts]
-
-    batch_inputs = prepare_input(prompts, tokenizer=mt)
-    padded_input_len: int = batch_inputs["input_ids"].shape[1]
-    input_ids = batch_inputs["input_ids"].to(mt.device)
-    attention_mask = batch_inputs["attention_mask"].to(mt.device)
-    pad_token_id = (
-        mt.tokenizer.pad_token_id
-        if mt.tokenizer.pad_token_id is not None
-        else mt.tokenizer.eos_token_id
-    )
-
-    with torch.no_grad():
-        outputs = mt._model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=_SAMPLE_TEMPERATURE,
-            top_p=_SAMPLE_TOP_P,
-            num_return_sequences=n_samples,
-            pad_token_id=pad_token_id,
-        )
-
-    # HF returns (batch * n_samples, seq); samples for input i are at i*K..(i+1)*K.
-    per_prompt: list[list[list[int]]] = []
-    for i in range(len(prompts)):
-        per_prompt.append(
-            [outputs[i * n_samples + k][padded_input_len:].tolist() for k in range(n_samples)]
-        )
-    return per_prompt
-
-
 def _build_output_record(
     mt: ModelandTokenizer,
     sample: IncompleteCodeSample,
@@ -348,10 +221,9 @@ def _build_output_record(
     prompt: str,
     prompt_ids: list[int],
     gen_ids: list[int],
-    sampled_gen_ids: list[list[int]],
 ) -> dict:
     """Assemble the per-task JSON record: greedy decode + strategy label +
-    token-position tagging + per-sample strategy flags.
+    token-position tagging.
     """
     generation = mt.tokenizer.decode(gen_ids, skip_special_tokens=True)
     prompt_bias = detect_prompt_bias(sample.instruction)
@@ -395,22 +267,6 @@ def _build_output_record(
         "greedy": greedy_block,
     }
 
-    if sampled_gen_ids:
-        samples_block = []
-        for s_ids in sampled_gen_ids:
-            s_text = mt.tokenizer.decode(s_ids, skip_special_tokens=True)
-            s_code, _ = extract_code_with_fallback(s_text)
-            s_label = label_python_strategy(s_code, sample.function_name)
-            samples_block.append(
-                {
-                    "text": s_text,
-                    "strategy": s_label.strategy,
-                    "has_recursion": s_label.has_recursion,
-                    "has_loop": s_label.has_loop,
-                }
-            )
-        out["samples"] = samples_block
-
     return out
 
 
@@ -437,16 +293,11 @@ def main() -> None:
         "Model loaded: %s  (%d layers, d_model=%d)", model_short, mt.n_layer, mt.n_embd
     )
 
-    # ── Base output directory (override or default) ───────────────────────────
-    base_out_dir = (
-        Path(args.output_dir)
-        if args.output_dir
-        else Path(DEFAULT_RESULTS_DIR) / "well-known-tasks"
-        / ("generations" if args.prompt_style == "legacy" else "generations_v2") / model_short
-    )
+    # ── Base output directory ─────────────────────────────────────────────────
+    base_out_dir = Path(DEFAULT_RESULTS_DIR) / "well-known-tasks" / "generations_v2" / model_short
 
     # ── Load samples (list of (source_name, IncompleteCodeSample)) ───────────
-    source_samples = _load_samples(args.source, args.tasks)
+    source_samples = _load_samples()
     logger.info("Loaded %d tasks from %s", len(source_samples), TASKS_DIR)
 
     if not args.overwrite:
@@ -454,7 +305,7 @@ def main() -> None:
         source_samples = [
             (src, s)
             for src, s in source_samples
-            if not _existing_has_new_schema(base_out_dir / src / f"{_out_name(s, args)}.json")
+            if not _existing_has_new_schema(base_out_dir / src / f"{_out_name(s)}.json")
         ]
         skipped = before - len(source_samples)
         if skipped:
@@ -472,23 +323,12 @@ def main() -> None:
     logger.info("Building prompts...")
     prompts: list[str] = []
     for _, sample in source_samples:
-        if args.prompt_style == "v2":
-            if not supports_chat_template(mt):
-                raise ValueError("--prompt-style v2 needs a chat model")
-            prompt = apply_chat_template(
-                mt,
-                user_query=sample.instruction.strip(),
-                incomplete_code=v2_prefill(sample),
-                system_prompt=V2_SYSTEM_PROMPT,
-            )
-        elif supports_chat_template(mt):
-            prompt = apply_chat_template(
-                mt,
-                user_query=sample.full_instruction.strip(),
-                incomplete_code=sample.code,
-            )
-        else:
-            prompt = sample.code
+        prompt = apply_chat_template(
+            mt,
+            user_query=sample.instruction.strip(),
+            incomplete_code=v2_prefill(sample),
+            system_prompt=V2_SYSTEM_PROMPT,
+        )
         prompts.append(prompt)
 
     # ── Batched generation ────────────────────────────────────────────────────
@@ -516,31 +356,23 @@ def main() -> None:
                 mt, list(chunk_prompts), args.max_new_tokens
             )
 
-            # Optional sampling pass: K extra completions per task.
-            sampled_results = _batch_generate_sampled(
-                mt, list(chunk_prompts), args.max_new_tokens, args.n_samples
-            )
-
             # Assemble + write per-task JSONs.
-            for (src_name, sample), prompt, (prompt_ids, gen_ids), sampled_gen_ids in zip(
-                chunk_src_samples, chunk_prompts, greedy_results, sampled_results
+            for (src_name, sample), prompt, (prompt_ids, gen_ids) in zip(
+                chunk_src_samples, chunk_prompts, greedy_results
             ):
-                out = _build_output_record(
-                    mt, sample, src_name, prompt, prompt_ids, gen_ids, sampled_gen_ids
-                )
+                out = _build_output_record(mt, sample, src_name, prompt, prompt_ids, gen_ids)
                 out_dir = base_out_dir / src_name
                 out_dir.mkdir(parents=True, exist_ok=True)
-                out_path = out_dir / f"{_out_name(sample, args)}.json"
+                out_path = out_dir / f"{_out_name(sample)}.json"
                 with open(out_path, "w") as f:
                     json.dump(out, f, indent=2)
                 logger.info(
-                    "Saved %s/%s  (gen_len=%d tokens, strategy=%s, prompt_bias=%s, n_samples=%d)",
+                    "Saved %s/%s  (gen_len=%d tokens, strategy=%s, prompt_bias=%s)",
                     src_name,
                     out_path.name,
                     len(gen_ids),
                     out["greedy"]["strategy"],
                     out["prompt_bias"],
-                    len(sampled_gen_ids),
                 )
                 saved += 1
 

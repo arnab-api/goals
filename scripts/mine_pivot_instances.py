@@ -16,18 +16,8 @@ Pipeline:
     all pairs and save back to ``pairs/{model_name}.json``.
 
 Usage:
-    # Full pipeline
     conda run -n goals python scripts/mine_pivot_instances.py \\
         --model-key Qwen/Qwen2.5-Coder-32B-Instruct
-
-    # Force regenerate global_pairs.json (e.g. after adding new predicates)
-    conda run -n goals python scripts/mine_pivot_instances.py \\
-        --model-key Qwen/Qwen2.5-Coder-32B-Instruct --regen-global-pairs
-
-    # Pivot mining only on a subset of pairs (smoke-test)
-    conda run -n goals python scripts/mine_pivot_instances.py \\
-        --model-key Qwen/Qwen2.5-Coder-32B-Instruct \\
-        --pairs is_upper,is_palindrome is_palindrome,is_upper
 """
 
 import argparse
@@ -59,18 +49,15 @@ console = Console(width=120, highlight=False)
 # ---------------------------------------------------------------------------
 
 
-def ensure_global_pairs(ds: HeadLocDataset, force: bool = False) -> None:
-    """Generate global_pairs.json if absent (or if --regen-global-pairs is set)."""
+def ensure_global_pairs(ds: HeadLocDataset) -> None:
+    """Generate global_pairs.json if absent."""
     path = os.path.join(HEAD_LOC_DATA_DIR, GLOBAL_PAIRS_FILENAME)
-    if os.path.isfile(path) and not force:
-        logger.info(
-            "global_pairs.json already exists — skipping (use --regen-global-pairs to force)"
-        )
+    if os.path.isfile(path):
+        logger.info("global_pairs.json already exists — skipping")
         return
 
-    action = "Regenerating" if os.path.isfile(path) else "Generating"
-    logger.info(f"=== Step 1: {action} global_pairs.json ===")
-    pairs = generate_global_pairs(ds, save=True)
+    logger.info("=== Step 1: Generating global_pairs.json ===")
+    pairs = generate_global_pairs(ds)
     n_unordered = len(pairs) // 2
     logger.info(
         f"Done: {n_unordered} verified unordered pairs → {len(pairs)} directed pairs"
@@ -105,19 +92,14 @@ def ensure_model_pairs(ds: HeadLocDataset, model_name: str) -> HeadLocDataset:
 # ---------------------------------------------------------------------------
 
 
-def run_pivot_mining(mt, ds: HeadLocDataset, pairs_subset=None) -> None:
+def run_pivot_mining(mt, ds: HeadLocDataset) -> None:
     """Run Case 3 + Case 3b + augmentation and save to pairs/{model_name}.json."""
     logger.info("=== Step 3: Mining pivot instances ===")
     instances = get_oracle_pivot_instances(
         mt,
         ds,
-        pairs=pairs_subset,
-        include_case3=True,
-        include_case3b=True,
-        include_augmentation=True,
         oracle_include_docstring=True,
         include_docstring=True,
-        save=True,
     )
 
     # Summary table
@@ -150,39 +132,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--model-key",
-        required=True,
-        help="HuggingFace model key, e.g. Qwen/Qwen2.5-Coder-32B-Instruct",
-    )
-    parser.add_argument(
-        "--regen-global-pairs",
-        action="store_true",
-        help="Force regeneration of global_pairs.json even if it already exists.",
-    )
-    parser.add_argument(
-        "--pairs",
-        nargs="*",
-        metavar="SRC,DEST",
-        help=(
-            "Restrict pivot mining to specific pairs, e.g. "
-            "'is_upper,is_palindrome is_palindrome,is_upper'. "
-            "Steps 1 and 2 still run across all pairs."
-        ),
+        default="Qwen/Qwen2.5-Coder-32B-Instruct",
+        help="HuggingFace model key (default: Qwen/Qwen2.5-Coder-32B-Instruct)",
     )
     add_logging_args(parser)
     args = parser.parse_args()
     configure(args)
 
     model_name = args.model_key.split("/")[-1]
-
-    # Parse optional pairs subset
-    pairs_subset = None
-    if args.pairs:
-        pairs_subset = []
-        for spec in args.pairs:
-            parts = spec.split(",")
-            if len(parts) != 2:
-                parser.error(f"--pairs entries must be 'SRC,DEST', got {spec!r}")
-            pairs_subset.append((parts[0].strip(), parts[1].strip()))
 
     # Load model (GPU required for Step 3)
     logger.info(f"Loading model {args.model_key} ...")
@@ -203,28 +160,13 @@ def main() -> None:
     logger.info(f"Loaded {len(ds.samples)} predicate samples")
 
     # Step 1
-    ensure_global_pairs(ds, force=args.regen_global_pairs)
+    ensure_global_pairs(ds)
 
     # Step 2
     ds = ensure_model_pairs(ds, model_name)
 
-    # Resolve pairs subset to PredicatePair objects
-    resolved_pairs = None
-    if pairs_subset is not None:
-        resolved_pairs = []
-        for src, dest in pairs_subset:
-            pair = ds.get_pair(src, dest)
-            if pair is None:
-                logger.error(
-                    f"Pair ({src!r}, {dest!r}) not found in pairs/{model_name}.json. "
-                    "Check that it passed oracle verification."
-                )
-                sys.exit(1)
-            resolved_pairs.append(pair)
-        logger.info(f"Restricting to {len(resolved_pairs)} specified pairs")
-
     # Step 3
-    run_pivot_mining(mt, ds, pairs_subset=resolved_pairs)
+    run_pivot_mining(mt, ds)
 
 
 if __name__ == "__main__":

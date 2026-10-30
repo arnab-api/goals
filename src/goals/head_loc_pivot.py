@@ -16,9 +16,8 @@ from __future__ import annotations
 import logging
 
 import torch
-import torch.nn.functional as F
 
-from src.goals.functional import apply_chat_template, supports_chat_template
+from src.goals.functional import apply_chat_template
 from src.tokens import prepare_input
 
 logger = logging.getLogger(__name__)
@@ -95,9 +94,7 @@ def build_cpp_prompt(
     code_at_pivot = sample.cpp_incomplete_code + " "
     if include_docstring and sample.docstring:
         code_at_pivot = f"// {sample.docstring}\n{code_at_pivot}"
-    if supports_chat_template(mt):
-        return apply_chat_template(mt, CPP_INSTRUCTION, code_at_pivot)
-    return "<code>\n" + code_at_pivot
+    return apply_chat_template(mt, CPP_INSTRUCTION, code_at_pivot)
 
 
 def build_python_prompt(
@@ -112,8 +109,7 @@ def build_python_prompt(
         mt: ModelandTokenizer instance.
         sample: SinglePredicateSample whose ``python_incomplete_code`` ends with
             ``return`` (no trailing space).
-        pivot_prefix: Token string appended after ``return ``.  Empty string for
-            the bare-return case (Case 1).
+        pivot_prefix: Token string appended after ``return ``.
         include_docstring: When True and ``sample.docstring`` is non-empty, insert
             a Python docstring between the def line and ``return``.  This changes
             the model's prediction at the pivot — use consistently across dest and
@@ -134,9 +130,7 @@ def build_python_prompt(
             lines.insert(def_idx + 1, f'{indent}"""{sample.docstring}"""')
             code_at_pivot = "\n".join(lines)
 
-    if supports_chat_template(mt):
-        return apply_chat_template(mt, GENERIC_INSTRUCTION, code_at_pivot)
-    return "<code>\n" + code_at_pivot
+    return apply_chat_template(mt, GENERIC_INSTRUCTION, code_at_pivot)
 
 
 def build_haskell_prompt(
@@ -174,9 +168,7 @@ def build_haskell_prompt(
     lines.append(f"{fn} {arg} = ")
 
     code_at_pivot = "\n".join(lines)
-    if supports_chat_template(mt):
-        return apply_chat_template(mt, HASKELL_INSTRUCTION, code_at_pivot)
-    return "<code>\n" + code_at_pivot
+    return apply_chat_template(mt, HASKELL_INSTRUCTION, code_at_pivot)
 
 
 def build_prolog_prompt(
@@ -212,9 +204,7 @@ def build_prolog_prompt(
     lines.append(f"{pred}({arg}) :- ")
 
     code_at_pivot = "\n".join(lines)
-    if supports_chat_template(mt):
-        return apply_chat_template(mt, PROLOG_INSTRUCTION, code_at_pivot)
-    return "<code>\n" + code_at_pivot
+    return apply_chat_template(mt, PROLOG_INSTRUCTION, code_at_pivot)
 
 
 def build_java_prompt(
@@ -250,9 +240,7 @@ def build_java_prompt(
     method_lines.append("        return ")
 
     code_at_pivot = "public class Solution {\n" + "\n".join(method_lines)
-    if supports_chat_template(mt):
-        return apply_chat_template(mt, JAVA_INSTRUCTION, code_at_pivot)
-    return "<code>\n" + code_at_pivot
+    return apply_chat_template(mt, JAVA_INSTRUCTION, code_at_pivot)
 
 
 def build_rust_prompt(
@@ -289,9 +277,7 @@ def build_rust_prompt(
     lines.append("    return ")
 
     code_at_pivot = "\n".join(lines)
-    if supports_chat_template(mt):
-        return apply_chat_template(mt, RUST_INSTRUCTION, code_at_pivot)
-    return "<code>\n" + code_at_pivot
+    return apply_chat_template(mt, RUST_INSTRUCTION, code_at_pivot)
 
 
 # ---------------------------------------------------------------------------
@@ -350,25 +336,8 @@ def get_top_token(mt, probs: torch.Tensor) -> str:
     return mt.tokenizer.decode([token_id])
 
 
-def compute_kl(p_dest: torch.Tensor, p_target: torch.Tensor) -> float:
-    """Compute KL(P_dest || P_target) as a supplementary divergence measure.
-
-    Note: KL is **not** stored in PivotInstance — it is used internally within
-    Case 2 to rank candidate pivot prefixes.  The primary selection criterion for
-    PivotInstance is token-level divergence (dest_top_token != target_top_token).
-
-    Args:
-        p_dest: Probability distribution for destination at pivot, shape ``(vocab_size,)``.
-        p_target: Probability distribution for target at pivot, shape ``(vocab_size,)``.
-
-    Returns:
-        KL divergence as a scalar float.  Larger = stronger training signal.
-    """
-    return F.kl_div(torch.log(p_target + 1e-10), p_dest, reduction="sum").item()
-
-
 # ---------------------------------------------------------------------------
-# Case 1 — bare return
+# Token-level LCP
 # ---------------------------------------------------------------------------
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.append(".")
 
-from src.goals.site_data import DEMO_DATA, rebuild_indexes, write_icl_example  # noqa: E402
+from src.goals.site_data import rebuild_indexes, write_icl_example  # noqa: E402
 from scripts.icl.icl_goalscope import TASKS  # noqa: E402
 
 CATEGORY = {t: (v[0] if v[0] != "single" else v[2]) for t, v in TASKS.items()}   # abstractive / extractive / ...
@@ -36,9 +36,6 @@ def main():
     ap.add_argument("--dir", default="results/icl_goalscope")
     ap.add_argument("--site-dir", default="results/icl_goalscope/site")
     args = ap.parse_args()
-    for f in (DEMO_DATA / "icl").glob("*.json"):          # drop the placeholders
-        if f.name != "index.json" and json.loads(f.read_text()).get("meta", {}).get("placeholder"):
-            f.unlink()
     for site in sorted(Path(args.site_dir).glob("*.json")):
         sd = json.load(open(site))                  # 20 prompts x (A, :) tokens + the site example
         if "rate_any" not in sd:
