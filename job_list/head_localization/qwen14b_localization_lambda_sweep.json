@@ -1,72 +1,48 @@
 [
-    {
-        "name": "01_mine_pivots_qwen14b",
-        "command": "mkdir -p logs/goal/qwen14b && python -m scripts.mine_pivot_instances --model-key=Qwen/Qwen2.5-Coder-14B-Instruct |& tee logs/goal/qwen14b/01_mine_pivots.log"
-    },
-    {
-        "name": "01b_qwen14b_goal_lamb_1",
-        "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=1 --tag=lam1 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb1.log",
-        "dependencies": [
-            "01_mine_pivots_qwen14b"
-        ]
-    },
-    {
-        "name": "01b_qwen14b_goal_lamb_5",
-        "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=5 --tag=lam5 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb5.log",
-        "dependencies": [
-            "01_mine_pivots_qwen14b"
-        ]
-    },
-    {
-        "name": "01b_qwen14b_goal_lamb_10",
-        "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=10 --tag=lam10 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb10.log",
-        "dependencies": [
-            "01_mine_pivots_qwen14b"
-        ]
-    },
-    {
-        "name": "01b_qwen14b_goal_lamb_20",
-        "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=20 --tag=lam20 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb20.log",
-        "dependencies": [
-            "01_mine_pivots_qwen14b"
-        ]
-    },
-    {
-        "name": "01b_qwen14b_goal_lamb_50",
-        "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=50 --tag=lam50 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb50.log",
-        "dependencies": [
-            "01_mine_pivots_qwen14b"
-        ]
-    },
-    {
-        "name": "01b_qwen14b_goal_lamb_100",
-        "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=100 --tag=lam100 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb100.log",
-        "dependencies": [
-            "01_mine_pivots_qwen14b"
-        ]
-    },
-    {
-        "name": "05_qwen14b_decision_logit_lamb_0.1",
-        "command": "mkdir -p logs/decision/qwen14b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=0.1 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/qwen14b/05_decision_logit_lam0.1.log"
-    },
-    {
-        "name": "05_qwen14b_decision_logit_lamb_1",
-        "command": "mkdir -p logs/decision/qwen14b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=1.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/qwen14b/05_decision_logit_lam1.log"
-    },
-    {
-        "name": "05_qwen14b_decision_logit_lamb_10",
-        "command": "mkdir -p logs/decision/qwen14b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=10.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/qwen14b/05_decision_logit_lam10.log"
-    },
-    {
-        "name": "05_qwen14b_decision_logit_lamb_25",
-        "command": "mkdir -p logs/decision/qwen14b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=25.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/qwen14b/05_decision_logit_lam25.log"
-    },
-    {
-        "name": "05_qwen14b_decision_logit_lamb_50",
-        "command": "mkdir -p logs/decision/qwen14b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=50.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/qwen14b/05_decision_logit_lam50.log"
-    },
-    {
-        "name": "05_qwen14b_decision_logit_lamb_100",
-        "command": "mkdir -p logs/decision/qwen14b && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.clock.train_completion_mask --model=Qwen/Qwen2.5-Coder-14B-Instruct --version=conditions --lambda-sparse=100.0 --n-pairs=600 --batch-size=16 --attn-impl=sdpa -v |& tee logs/decision/qwen14b/05_decision_logit_lam100.log"
-    }
+  {
+    "name": "01_mine_pivots_qwen14b",
+    "command": "mkdir -p logs/goal/qwen14b && python -m scripts.mine_pivot_instances --model-key=Qwen/Qwen2.5-Coder-14B-Instruct |& tee logs/goal/qwen14b/01_mine_pivots.log"
+  },
+  {
+    "name": "01b_qwen14b_goal_lamb_1",
+    "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=1 --tag=lam1 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb1.log",
+    "dependencies": [
+      "01_mine_pivots_qwen14b"
+    ]
+  },
+  {
+    "name": "01b_qwen14b_goal_lamb_5",
+    "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=5 --tag=lam5 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb5.log",
+    "dependencies": [
+      "01_mine_pivots_qwen14b"
+    ]
+  },
+  {
+    "name": "01b_qwen14b_goal_lamb_10",
+    "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=10 --tag=lam10 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb10.log",
+    "dependencies": [
+      "01_mine_pivots_qwen14b"
+    ]
+  },
+  {
+    "name": "01b_qwen14b_goal_lamb_20",
+    "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=20 --tag=lam20 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb20.log",
+    "dependencies": [
+      "01_mine_pivots_qwen14b"
+    ]
+  },
+  {
+    "name": "01b_qwen14b_goal_lamb_50",
+    "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=50 --tag=lam50 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb50.log",
+    "dependencies": [
+      "01_mine_pivots_qwen14b"
+    ]
+  },
+  {
+    "name": "01b_qwen14b_goal_lamb_100",
+    "command": "mkdir -p logs/goal/qwen14b && python -m scripts.train_head_mask --model-key=Qwen/Qwen2.5-Coder-14B-Instruct --lambda-sparse=100 --tag=lam100 --n-epochs=50 --batch-size=32 |& tee logs/goal/qwen14b/01b_goal_lamb100.log",
+    "dependencies": [
+      "01_mine_pivots_qwen14b"
+    ]
+  }
 ]

@@ -1,79 +1,13 @@
 [
-    {
-        "name": "01_mine_pivots_olmo32b",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.mine_pivot_instances --model-key=allenai/Olmo-3.1-32B-Instruct |& tee logs/clock_olmo32b/01_mine_pivots.log"
-    },
-    {
-        "name": "01b_train_head_mask_olmo32b_goal",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.train_head_mask --model-key=allenai/Olmo-3.1-32B-Instruct --lambda-sparse=20 --n-epochs=100 |& tee logs/clock_olmo32b/01b_train_head_mask_goal.log",
-        "dependencies": ["01_mine_pivots_olmo32b"]
-    },
-    {
-        "name": "02_build_condition_data_olmo32b",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.build_condition_data --model=allenai/Olmo-3.1-32B-Instruct --dataset=data/multistep/condition_check_python.json --version=conditions |& tee logs/clock_olmo32b/02_build_condition_data.log"
-    },
-    {
-        "name": "03_score_condition_heads_olmo32b_mean",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.score_condition_heads --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --q_span=15 --compare_with=mean |& tee logs/clock_olmo32b/03_score_heads_mean.log",
-        "dependencies": ["02_build_condition_data_olmo32b"]
-    },
-    {
-        "name": "03b_score_condition_heads_olmo32b_max",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.score_condition_heads --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --q_span=15 --compare_with=max |& tee logs/clock_olmo32b/03b_score_heads_max.log",
-        "dependencies": ["02_build_condition_data_olmo32b"]
-    },
-    {
-        "name": "04_decision_gaze_olmo32b_lamb0.1",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask_gaze --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=0.1 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/04_decision_gaze_lam0.1.log",
-        "dependencies": ["03_score_condition_heads_olmo32b_mean"]
-    },
-    {
-        "name": "04_decision_gaze_olmo32b_lamb1",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask_gaze --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=1.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/04_decision_gaze_lam1.log",
-        "dependencies": ["03_score_condition_heads_olmo32b_mean"]
-    },
-    {
-        "name": "04_decision_gaze_olmo32b_lamb10",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask_gaze --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=10.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/04_decision_gaze_lam10.log",
-        "dependencies": ["03_score_condition_heads_olmo32b_mean"]
-    },
-    {
-        "name": "04_decision_gaze_olmo32b_lamb25",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask_gaze --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=25.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/04_decision_gaze_lam25.log",
-        "dependencies": ["03_score_condition_heads_olmo32b_mean"]
-    },
-    {
-        "name": "04_decision_gaze_olmo32b_lamb50",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask_gaze --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=50.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/04_decision_gaze_lam50.log",
-        "dependencies": ["03_score_condition_heads_olmo32b_mean"]
-    },
-    {
-        "name": "04_decision_gaze_olmo32b_lamb100",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask_gaze --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=100.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/04_decision_gaze_lam100.log",
-        "dependencies": ["03_score_condition_heads_olmo32b_mean"]
-    },
-    {
-        "name": "05_decision_logit_olmo32b_lamb0.1",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=0.1 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/05_decision_logit_lam0.1.log"
-    },
-    {
-        "name": "05_decision_logit_olmo32b_lamb1",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=1.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/05_decision_logit_lam1.log"
-    },
-    {
-        "name": "05_decision_logit_olmo32b_lamb10",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=10.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/05_decision_logit_lam10.log"
-    },
-    {
-        "name": "05_decision_logit_olmo32b_lamb25",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=25.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/05_decision_logit_lam25.log"
-    },
-    {
-        "name": "05_decision_logit_olmo32b_lamb50",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=50.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/05_decision_logit_lam50.log"
-    },
-    {
-        "name": "05_decision_logit_olmo32b_lamb100",
-        "command": "mkdir -p logs/clock_olmo32b && python -m scripts.clock.train_completion_mask --model=allenai/Olmo-3.1-32B-Instruct --version=conditions --lambda-sparse=100.0 --n-pairs=600 --batch-size=16 -v |& tee logs/clock_olmo32b/05_decision_logit_lam100.log"
-    }
+  {
+    "name": "01_mine_pivots_olmo32b",
+    "command": "mkdir -p logs/clock_olmo32b && python -m scripts.mine_pivot_instances --model-key=allenai/Olmo-3.1-32B-Instruct |& tee logs/clock_olmo32b/01_mine_pivots.log"
+  },
+  {
+    "name": "01b_train_head_mask_olmo32b_goal",
+    "command": "mkdir -p logs/clock_olmo32b && python -m scripts.train_head_mask --model-key=allenai/Olmo-3.1-32B-Instruct --lambda-sparse=20 --n-epochs=100 |& tee logs/clock_olmo32b/01b_train_head_mask_goal.log",
+    "dependencies": [
+      "01_mine_pivots_olmo32b"
+    ]
+  }
 ]
