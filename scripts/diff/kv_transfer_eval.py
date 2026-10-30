@@ -124,7 +124,7 @@ class ConfigMeta:
     presentation: str
     src_lang: str
     dst_lang: str
-    patch_heads: str  # "goal" | "union"
+    patch_heads: str  # "goal" | <path>.json
     readout_heads: str  # always "goal" (kept out of the config axes)
     align: str  # "right" | "pad"
     ablate_layer_range: str  # e.g. "35-50" or "off"
@@ -180,19 +180,17 @@ def _run_tag(patch_heads, readout_heads, abl, ablation_strat, alpha, align, quer
 
 
 def _resolve_patch_heads(ctx, spec):
-    """``spec`` is a built-in name ('goal' | 'union') or a path to a JSON list of ``[layer, head]``
+    """``spec`` is 'goal' (the model's goal heads) or a path to a JSON list of ``[layer, head]``
     pairs (e.g. ``head_sets/<model>/goal_topk/goal__lam20_top250.json``)."""
     if spec == "goal":
         return ctx.goal_heads
-    if spec == "union":
-        raise SystemExit("--*-heads union: the boundary heads are no longer loaded; pass 'goal' or a JSON head set")
     return [tuple(h) for h in json.loads(Path(spec).read_text())]
 
 
 def _patch_heads_tag(spec, n) -> str:
-    """Run-tag label for the patch-head set. Built-ins keep their bare name ('goal'/'union'); a JSON
+    """Run-tag label for the patch-head set. 'goal' keeps its bare name; a JSON
     head-set becomes ``<label>_<n>`` (label = filename stem before '__'), e.g. ``goal_250``."""
-    if spec in ("goal", "union"):
+    if spec == "goal":
         return spec
     return f"{Path(spec).stem.split('__')[0] or 'heads'}_{n}"
 
@@ -498,14 +496,14 @@ def parse_args():
     p.add_argument(
         "--patch-heads",
         default="goal",
-        help="heads whose k/v is transplanted: 'goal' | 'union' | a path to a JSON list of "
+        help="heads whose k/v is transplanted: 'goal' | a path to a JSON list of "
         "[layer, head] pairs (e.g. head_sets/<model>/goal_topk/goal__lam20_top250.json). "
         "A path is tagged 'ph-<label>_<n>' (e.g. ph-goal_250).",
     )
     p.add_argument(
         "--readout-heads",
         default="goal",
-        help="heads used for the GoalScope readout: 'goal' (default) | 'union' | a JSON path of "
+        help="heads used for the GoalScope readout: 'goal' (default) | a JSON path of "
         "[layer, head] pairs. Kept SEPARATE from --patch-heads; tagged '__ro-<label>_<n>' in the "
         "run_tag ONLY when != 'goal' (so existing readout=goal runs keep their tag). For a 250-head "
         "patch run, set this to the same 250-head JSON.",

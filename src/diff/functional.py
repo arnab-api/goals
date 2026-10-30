@@ -14,9 +14,9 @@ Usage in a notebook::
 
     import sys; sys.path.append("../..")             # repo root, so `src` is importable
     import src.diff.functional as P
-    P.setup("Qwen/Qwen2.5-Coder-32B-Instruct")       # loads model + head masks (once)
+    P.setup("Qwen/Qwen2.5-Coder-32B-Instruct")       # loads the model + goal heads (once)
     from src.diff.functional import *                # pull the helper functions into scope
-    mt, GOAL_HEADS, BOUNDARY_HEADS = P.mt, P.GOAL_HEADS, P.BOUNDARY_HEADS
+    mt, GOAL_HEADS = P.mt, P.GOAL_HEADS
 
 The helper functions look up the module-global ``mt`` (and ``GROUP``, head sets, …) that
 ``setup()`` binds, so ``from … import *`` before ``setup()`` is fine — the functions
@@ -78,10 +78,7 @@ N_KV = None
 N_LAYER = None
 N_HEADS = None
 GOAL_HEADS = None
-BOUNDARY_HEADS = None
-UNION_HEADS = None
 GOAL_MASK = None
-BOUNDARY_MASK = None
 READOUT_HEADS = None
 gsp = None  # optional GoalScope probe override (apply_goalscope reads globals().get("gsp"))
 
@@ -101,10 +98,7 @@ class Ctx:
     n_layer: int = None
     n_heads: int = None
     goal_heads: list = None
-    boundary_heads: list = None
-    union_heads: list = None
     goal_mask: object = None
-    boundary_mask: object = None
     readout_heads: list = None
     gsp: object = None
     res: str = None
@@ -122,10 +116,7 @@ class Ctx:
             n_layer=g("N_LAYER"),
             n_heads=g("N_HEADS"),
             goal_heads=g("GOAL_HEADS"),
-            boundary_heads=g("BOUNDARY_HEADS"),
-            union_heads=g("UNION_HEADS"),
             goal_mask=g("GOAL_MASK"),
-            boundary_mask=g("BOUNDARY_MASK"),
             readout_heads=g("READOUT_HEADS"),
             gsp=g("gsp"),
             res=g("RES"),
@@ -155,10 +146,7 @@ def setup(
     global mt, MODEL_NAME, GROUP, N_KV, N_LAYER, N_HEADS
     global \
         GOAL_HEADS, \
-        BOUNDARY_HEADS, \
-        UNION_HEADS, \
         GOAL_MASK, \
-        BOUNDARY_MASK, \
         READOUT_HEADS
 
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", cuda_visible_devices)
@@ -185,11 +173,7 @@ def setup(
     # the lam20 localization mask thresholded inside the goal band; 122 heads for Qwen2.5-Coder-32B).
     GOAL_HEADS = load_goal_heads(model_name, RES, threshold=goal_threshold, n_layer=N_LAYER)
     GOAL_MASK = mask_bin(GOAL_HEADS)
-    # The boundary (decision) heads of the unreported move-on analysis are no longer loaded; ``union`` == goal.
-    BOUNDARY_HEADS = []
-    BOUNDARY_MASK = mask_bin(BOUNDARY_HEADS)
 
-    UNION_HEADS = sorted(set(GOAL_HEADS) | set(BOUNDARY_HEADS))
     READOUT_HEADS = GOAL_HEADS
     print(
         f"GOAL_HEADS     : {len(GOAL_HEADS):3d}  "
@@ -204,10 +188,7 @@ def setup(
         n_layer=N_LAYER,
         n_heads=N_HEADS,
         goal_heads=GOAL_HEADS,
-        boundary_heads=BOUNDARY_HEADS,
-        union_heads=UNION_HEADS,
         goal_mask=GOAL_MASK,
-        boundary_mask=BOUNDARY_MASK,
         readout_heads=READOUT_HEADS,
         gsp=gsp,
         res=RES,
@@ -341,9 +322,7 @@ def heads_per_layer(head_set, which, layers=None, ctx=None):
 
 
 def _layers_of(head_set, ctx=None):
-    _union = ctx.union_heads if ctx is not None else UNION_HEADS
-    hs = _union if head_set == "ALL" else head_set
-    return sorted({l for l, _ in hs})
+    return sorted({l for l, _ in head_set})
 
 
 @contextmanager

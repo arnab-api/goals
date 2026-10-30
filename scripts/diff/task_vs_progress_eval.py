@@ -65,7 +65,7 @@ def main():
     mt = ctx.mt
     goal = [tuple(h) for h in json.loads(Path(args.goal_heads).read_text())]
     headsets = {"goal250": goal, "all": [(l, h) for l in range(mt.n_layer) for h in range(mt.n_heads)]}
-    ctx.readout_heads, ctx.union_heads, ctx.gsp = goal, None, None
+    ctx.readout_heads, ctx.gsp = goal, None
     root = args.cache_root or env_utils.DEFAULT_RESULTS_DIR
     logger.info(f"{len(TP.CONFIGS)} configs: " + " | ".join(TP.cfg_name(*c) for c in TP.CONFIGS))
 

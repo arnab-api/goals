@@ -319,7 +319,7 @@ def main():
     import torch
     device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads o_proj weights)
     ctx = N.load_ctx(args.model, device_map=device_map)
-    ctx.readout_heads, ctx.union_heads, ctx.gsp = heads[2], None, None
+    ctx.readout_heads, ctx.gsp = heads[2], None
 
     metas = []
     for lt in args.lang_transfers:

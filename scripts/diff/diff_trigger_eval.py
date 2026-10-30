@@ -80,17 +80,15 @@ LANG_TRANSFERS = {"py-py": ("python", "python"), "py-cpp": ("python", "cpp"),
 
 
 def _resolve_heads(ctx, spec):
-    """'goal'|'union' built-ins, or a path to a JSON [[layer, head], ...] head set."""
+    """'goal' (the model's goal heads), or a path to a JSON [[layer, head], ...] head set."""
     if spec == "goal":
         return ctx.goal_heads
-    if spec == "union":
-        raise SystemExit("--*-heads union: the boundary heads are no longer loaded; pass 'goal' or a JSON head set")
     arr = json.loads(Path(spec).read_text())
     return [(int(l), int(h)) for l, h in arr]
 
 
 def _heads_tag(spec, n):
-    if spec in ("goal", "union"):
+    if spec == "goal":
         return spec
     return f"{Path(spec).stem.split('__')[0]}_{n}"
 
@@ -378,7 +376,7 @@ def parse_args():
     ap.add_argument("--allow_family_overlap", action="store_true",
                     help="DISABLE the diff-trigger overlap constraint (default: B/C/D from distinct "
                          "predicate families + non-trivial C/D). Only for ablating the constraint.")
-    ap.add_argument("--patch-heads", default="goal", help="'goal'|'union'|path to JSON [[layer,head],...]")
+    ap.add_argument("--patch-heads", default="goal", help="'goal' | path to a JSON [[layer,head],...] head set")
     ap.add_argument("--readout-heads", default="goal")
     ap.add_argument("--n-samples", type=int, default=12)
     ap.add_argument("--n-steer", type=int, default=16)
