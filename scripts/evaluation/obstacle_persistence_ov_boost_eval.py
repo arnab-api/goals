@@ -18,6 +18,7 @@ under ``<results>/notebook_caches/obstacle_ov_boost/<model>/`` (``base_<h>.json`
 
 Usage:
     conda run -n goals python scripts/evaluation/obstacle_persistence_ov_boost_eval.py --cuda 0
+    # subset (writes results_subset.json):  --datatypes 'list[str]' --predicates distinct_count
 """
 import argparse
 import hashlib
@@ -136,6 +137,8 @@ def _dump(obj, path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
+    ap.add_argument("--datatypes", nargs="+", default=None, help="subset: only these datatypes (default: all)")
+    ap.add_argument("--predicates", nargs="+", default=None, help="subset: only these predicate ids (default: all)")
     logging_utils.add_logging_args(ap)
     args = ap.parse_args()
     logging_utils.configure(args)
@@ -146,7 +149,10 @@ def main():
                            attn_implementation="eager")
     heads = load_json_heads(HEADS_JSON, mt.n_layer, mt.n_heads)
     os.makedirs(cache_dir(), exist_ok=True)
-    cands = candidates()
+    cands = [(dt, pid) for dt, pid in candidates() if (args.datatypes is None or dt in args.datatypes)
+             and (args.predicates is None or pid in args.predicates)]
+    assert cands, "no candidates match --datatypes / --predicates"
+    subset = args.datatypes is not None or args.predicates is not None
     logger.info(f"{len(heads)} goal heads | {len(cands)} numeric candidates with the {NUMERIC_OBSTACLE!r} obstacle")
 
     # §1 baseline scan: flag the 0j / complex derailments
@@ -183,7 +189,8 @@ def main():
         )
         _dump(res, cp)
         results.append(res)
-    out = os.path.join(cache_dir(), "results.json")
+    # a subset run never overwrites the full run's results.json
+    out = os.path.join(cache_dir(), "results_subset.json" if subset else "results.json")
     json.dump(results, open(out, "w"), indent=2)
     logger.info(f"saved {len(results)} derailed cases -> {out}")
 

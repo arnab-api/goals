@@ -332,6 +332,8 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   ```
   python scripts/evaluation/obstacle_persistence_eval.py --cuda 0          # Qwen/Qwen2.5-Coder-32B-Instruct
   python scripts/evaluation/obstacle_persistence_eval.py --cuda 1 --model <id>
+  # subset / smoke: --datatypes <dt ...> --predicates <pid ...> (per-trial caches as usual; aggregates go to
+  # rows_subset.json / summary_subset.json, never overwriting the full run's)
   ```
   for `Qwen/Qwen2.5-Coder-14B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`, `Qwen/Qwen2.5-72B-Instruct` (2 GPUs),
   `zai-org/GLM-4-32B-0414`, `allenai/Olmo-3.1-32B-Instruct`, `allenai/Olmo-3.1-32B-Instruct-SFT`. Constants:
@@ -344,6 +346,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   Qwen2.5-72B .94 / .57 / .12; GLM-4-32B .91 / .54 / .12; Qwen2.5-32B .97 / .66 / .12; Coder-14B .91 / .50 / .09;
   OLMo-SFT .89 / .35 / .08.
 - OV boost (`tab:obstacle-ov-boost`): `python scripts/evaluation/obstacle_persistence_ov_boost_eval.py --cuda 0`
+  (subset: `--datatypes ... --predicates ...`, aggregate to `results_subset.json`)
   (Coder-32B, **250 goal heads** `goal_topk/goal__lam20_top250.json`, numeric obstacle `" 0 + "` on list[str] /
   list[int], GoalScope readout additive_norm α 0.1 layers 35-45 at the `+` token, OV boost x2.0 of the goal heads'
   o_proj input). Cache: `results/notebook_caches/obstacle_ov_boost/Qwen2.5-Coder-32B-Instruct/{base_*,cmp_*,results.json}`.
@@ -560,6 +563,9 @@ f. **Judge rubric drift**: GoalScope / OVReader verdicts depend on the exact sys
 g. **Smoke runs into `results/`**: GoalScope and ablation smokes get their own `nspec=N` leaf, but NRGS, OVReader,
    persistence and obstacle scripts resume into the reported directories. Use a scratch `RESULTS_DIR` (edit `env.yml`)
    for any test run.
+h. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal, obstacle, OV boost, OVReader,
+   KV / Q transfer) set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7`
+   is ignored when `--cuda` is passed. Pass the physical GPU id to `--cuda`.
 
 ## 7. Working conventions
 

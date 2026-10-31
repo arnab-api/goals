@@ -20,6 +20,7 @@ Usage (the paper runs 7 models, one per process):
     conda run -n goals python scripts/evaluation/obstacle_persistence_eval.py --cuda 0
     conda run -n goals python scripts/evaluation/obstacle_persistence_eval.py --cuda 2 \\
         --model Qwen/Qwen2.5-Coder-14B-Instruct
+    # subset (writes rows_subset.json / summary_subset.json):  --datatypes 'list[str]' --predicates count_with_digit
 """
 import argparse
 import hashlib
@@ -128,6 +129,8 @@ def parse_args():
     ap.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--force", action="store_true", help="ignore cache; recompute every trial")
+    ap.add_argument("--datatypes", nargs="+", default=None, help="subset: only these datatypes (default: all)")
+    ap.add_argument("--predicates", nargs="+", default=None, help="subset: only these predicate ids (default: all)")
     logging_utils.add_logging_args(ap)
     return ap
 
@@ -137,7 +140,11 @@ def main():
     logging_utils.configure(args)
     experiment_utils.set_seed(args.seed)
 
-    jobs = build_jobs()
+    jobs = [j for j in build_jobs() if (args.datatypes is None or j[0] in args.datatypes)
+            and (args.predicates is None or j[1] in args.predicates)]
+    assert jobs, "no trials match --datatypes / --predicates"
+    subset = args.datatypes is not None or args.predicates is not None
+    sfx = "_subset" if subset else ""   # a subset run never overwrites the full run's rows.json / summary.json
     slug = args.model.split("/")[-1]
     cache_dir = os.path.join(env_utils.DEFAULT_RESULTS_DIR, "obstacle_robustness", slug)  # legacy dir name, kept for cache compatibility
 
@@ -174,9 +181,9 @@ def main():
         it = jobs
     rows = [trial(*j) for j in it]
 
-    open(os.path.join(cache_dir, "rows.json"), "w").write(json.dumps(rows, indent=2))
+    open(os.path.join(cache_dir, f"rows{sfx}.json"), "w").write(json.dumps(rows, indent=2))
     summ = summarize(rows)
-    open(os.path.join(cache_dir, "summary.json"), "w").write(json.dumps(summ, indent=2))
+    open(os.path.join(cache_dir, f"summary{sfx}.json"), "w").write(json.dumps(summ, indent=2))
 
     # console summary
     logger.info(f"=== {slug} · ADAPTED rate by level x datatype (n={summ['n']}) ===")
@@ -187,7 +194,7 @@ def main():
         cells = " ".join(f"{_fmt(L['by_datatype'][dt]):>10s}" for dt in DATATYPES)
         logger.info(f"{lvl:9s} {cells} {_fmt(L['adapted']):>7s}")
     logger.info(f"verdict totals: {summ['verdict_totals']}")
-    logger.info(f"summary -> {os.path.join(cache_dir, 'summary.json')}")
+    logger.info(f"summary -> {os.path.join(cache_dir, f'summary{sfx}.json')}")
 
 
 if __name__ == "__main__":
