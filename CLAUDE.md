@@ -470,7 +470,11 @@ branch `add-q-transfer-alt` (`src/q_transfer_alt/`, `scripts/diff/q_transfer_alt
 - Merge sort: produced by `notebooks/diff/13_goalscope_qualitative.ipynb` on master (user text `merge-sort`, assistant
   prefill `<code>\n def merge_sort(`, 256-token generation; renderer `src/goals/goalscope_viz.goalscope_qualitative_html`).
   That notebook's saved knobs are not the paper config (reset steer layers to (35,46) and α to 0.1). No script on
-  `clean`; the site's `merge_sort` page uses a different prompt and does not match the figure.
+  `clean`; the site's `merge_sort` page uses a different prompt and does not match the figure. The figure's run is
+  reproduced exactly with the prefill `<code>\ndef merge_sort` (no `(`; with `merge_sort(` the LM names the argument
+  `ary`) + paper config: same tokens as `master:notebooks/diff/visualizations/merge-sort.html`, all 5 callouts word for
+  word, 173/177 readouts identical to that HTML.
+- Demo `notebooks/demos/02.1_unspecified.ipynb` runs both (all-token readouts, callouts pinned, no writes to `results/`).
 - Both figures were cropped and annotated by hand.
 
 ### 4.16 Beyond code (ICL, EM): §6 (`Text/05_steerable.tex`, `fig:noncode-icl-em-main` = `Figures/appendix/goals-icl-em-main_updated-crop.pdf`), App. "non-code" (`Text/Appendix/non-code.tex`: `fig:noncode_fv_eval_Atoken`, `fig:noncode_composition_superposition`, `fig:noncode-refusal-steering-cake`, `fig:em_*`)
