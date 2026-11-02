@@ -1,0 +1,112 @@
+{
+ "case": "mask_grad_padded",
+ "padded": true,
+ "data": {
+  "instances": [
+   0,
+   52
+  ],
+  "pairs": [
+   "all_even->all_same",
+   "has_duplicates->all_even"
+  ],
+  "pivot_prefixes": [
+   "all(x",
+   "len(lst)"
+  ],
+  "lens_src_dst_targ": [
+   [
+    81,
+    85,
+    85
+   ],
+   [
+    83,
+    86,
+    88
+   ]
+  ],
+  "src_prompts": [
+   "<|im_start|>system\nYou are a helpful assistant proficient in programming. When completing code, ensure proper syntax and logical correctness. Make sure to have all codes inside the <code> </code> tags.<|im_end|>\n<|im_start|>user\nComplete the C++ function below.<|im_end|>\n<|im_start|>assistant\n<code>\n// Return True if every element in lst is even.\nbool allEven(vector<int> lst) { return ",
+   "<|im_start|>system\nYou are a helpful assistant proficient in programming. When completing code, ensure proper syntax and logical correctness. Make sure to have all codes inside the <code> </code> tags.<|im_end|>\n<|im_start|>user\nComplete the C++ function below.<|im_end|>\n<|im_start|>assistant\n<code>\n// Return True if any element appears more than once in lst.\nbool hasDuplicates(vector<int> lst) { return "
+  ],
+  "dest_prompts": [
+   "<|im_start|>system\nYou are a helpful assistant proficient in programming. When completing code, ensure proper syntax and logical correctness. Make sure to have all codes inside the <code> </code> tags.<|im_end|>\n<|im_start|>user\nComplete the Python function below.<|im_end|>\n<|im_start|>assistant\n<code>\ndef all_same(lst: list[int]) -> bool:\n    \"\"\"Return True if all elements in lst are equal.\"\"\"\n    return all(x",
+   "<|im_start|>system\nYou are a helpful assistant proficient in programming. When completing code, ensure proper syntax and logical correctness. Make sure to have all codes inside the <code> </code> tags.<|im_end|>\n<|im_start|>user\nComplete the Python function below.<|im_end|>\n<|im_start|>assistant\n<code>\ndef all_even(lst: list[int]) -> bool:\n    \"\"\"Return True if every element in lst is even.\"\"\"\n    return len(lst)"
+  ],
+  "targ_prompts": [
+   "<|im_start|>system\nYou are a helpful assistant proficient in programming. When completing code, ensure proper syntax and logical correctness. Make sure to have all codes inside the <code> </code> tags.<|im_end|>\n<|im_start|>user\nComplete the Python function below.<|im_end|>\n<|im_start|>assistant\n<code>\ndef all_even(lst: list[int]) -> bool:\n    \"\"\"Return True if every element in lst is even.\"\"\"\n    return all(x",
+   "<|im_start|>system\nYou are a helpful assistant proficient in programming. When completing code, ensure proper syntax and logical correctness. Make sure to have all codes inside the <code> </code> tags.<|im_end|>\n<|im_start|>user\nComplete the Python function below.<|im_end|>\n<|im_start|>assistant\n<code>\ndef has_duplicates(lst: list[int]) -> bool:\n    \"\"\"Return True if any element appears more than once in lst.\"\"\"\n    return len(lst)"
+  ],
+  "loss_kl": 8.512085914611816,
+  "loss_sparse": 10.0,
+  "mask_init": 0.5,
+  "lambda_sparse": 20.0,
+  "n_pad_dest": [
+   1,
+   0
+  ]
+ },
+ "manifest": {
+  "mask_grad": {
+   "kind": "grad",
+   "shape": [
+    28,
+    28
+   ],
+   "dtype": "float32",
+   "stored_dtype": "float32"
+  },
+  "src_head_vals_last": {
+   "kind": "act",
+   "shape": [
+    2,
+    28,
+    3584
+   ],
+   "dtype": "float32",
+   "stored_dtype": "bfloat16"
+  },
+  "patched_logits/top_ids": {
+   "kind": "topk_ids",
+   "shape": [
+    2,
+    50
+   ],
+   "dtype": "int64",
+   "stored_dtype": "int64"
+  },
+  "patched_logits/top_vals": {
+   "kind": "topk_vals",
+   "shape": [
+    2,
+    50
+   ],
+   "dtype": "float32",
+   "stored_dtype": "float32",
+   "of": "logits"
+  },
+  "target_probs/top_ids": {
+   "kind": "topk_ids",
+   "shape": [
+    2,
+    50
+   ],
+   "dtype": "int64",
+   "stored_dtype": "int64"
+  },
+  "target_probs/top_vals": {
+   "kind": "topk_vals",
+   "shape": [
+    2,
+    50
+   ],
+   "dtype": "float32",
+   "stored_dtype": "float32",
+   "of": "probs"
+  }
+ },
+ "_meta": {
+  "seconds": 0.18
+ }
+}
