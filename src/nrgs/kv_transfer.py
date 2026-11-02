@@ -192,10 +192,7 @@ def run_patched(g, *, goal_heads, readout_heads, v_scale=1.0, max_new=64, readou
     :func:`intervention_stack`. ``v_scale`` multiplies the transplanted SRC window VALUES read by the goal heads
     (keys / attention pattern unchanged; 1.0 = off). Returns ``gen_patched`` / ``ro_patched``."""
     stack = intervention_stack(g, goal_heads=goal_heads, v_scale=v_scale, ctx=ctx)
-
-    def iface(mt_, inputs, patches=None, model_kwargs=None):
-        with stack():
-            return mt_._model(**dict(inputs), **dict(model_kwargs or {}))
+    iface = stack  # entered around the readout's source trace (``legacy_hooks``)
 
     with stack():
         gen = FUNC.greedy(g["dst_tok"], max_new=max_new, ctx=ctx)

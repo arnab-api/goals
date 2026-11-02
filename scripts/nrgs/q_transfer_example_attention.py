@@ -50,7 +50,7 @@ def main():
     _gam = ATT.get_attention_matrices
     def _gam_wrap(*args_, **kw):
         info = _gam(*args_, **kw)
-        CAP["infos"].append(dict(patched=kw.get("patch_interface") is not None, info=info[0] if isinstance(info, list) else info))
+        CAP["infos"].append(dict(patched=kw.get("legacy_hooks") is not None, info=info[0] if isinstance(info, list) else info))
         return info
     ATT.get_attention_matrices = _gam_wrap
     _pa = FUNC.pivot_attn

@@ -33,7 +33,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-import baukit
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -132,28 +131,31 @@ def get_o_proj_inputs_batch(
     prompts: list[str] | TokenizerOutput,
     layers: list[int],
     token_positions: list[int] | None = None,
-    patch_interface: Optional[Callable] = None,
+    interventions: Optional[Callable] = None,
 ) -> dict[int, torch.Tensor]:
-    """Extract o_proj input for each layer, for a batch of prompts.
+    """Extract the o_proj input (every head's output side by side) for each layer, for a batch of
+    prompts: ``mt.layers[l].self_attn.attention_premix`` with the head axis flattened, in one trace.
 
     Left-padding (from prepare_input) ensures ``[:, -1, :]`` is the last real
     token for every sequence in the batch.
 
     Args:
         token_positions: Token positions to extract.  When ``None`` (default),
-            extracts only the last position, returning ``(batch, n_embd)``.
+            extracts only the last position, returning ``(batch, num_heads * head_dim)``.
             When a list of ints is given, extracts those positions and returns
-            ``(batch, len(token_positions), n_embd)``.
-        patch_interface: optional ``(mt, inputs, patches=None, model_kwargs=None) -> output`` — the
-            SAME interface ``src.attention.get_attention_matrices`` accepts.  When given, the extraction forward runs
-            UNDER it and the o_proj inputs are captured with baukit ``retain_input``, so they reflect
-            the intervention: a boundary-head transplant applied first perturbs the residual stream
-            and therefore the o_proj input of deeper heads.  ``None`` (default) → the plain nnsight
-            trace, unchanged.
+            ``(batch, len(token_positions), num_heads * head_dim)``.
+        interventions: optional ``interventions(mt)``, called inside the same trace, so the
+            values read reflect it (e.g. a query transplant or an OV boost of other heads, made
+            with nnterp values). It runs in the trace's first invoke, which carries the inputs; the
+            reads run in a second, empty invoke over the same rows. Each invoke keeps forward
+            order on its own, so the intervention may touch any block, deeper or shallower than
+            the reads. Composition rule: where both touch the same value (the same block's
+            ``attention_premix``), the intervention's edit lands first and the read sees it, as a
+            read placed after a forward pre-hook did. ``None`` (default) → a plain trace.
 
     Returns:
-        ``{layer: tensor}`` where tensor shape is ``(batch, n_embd)`` for the
-        default single-position case, or ``(batch, n_positions, n_embd)`` when
+        ``{layer: tensor}`` (float32, CPU) where tensor shape is ``(batch, num_heads * head_dim)``
+        for the default single-position case, or ``(batch, n_positions, num_heads * head_dim)`` when
         ``token_positions`` is specified.
     """
     if isinstance(prompts, list) and all(isinstance(p, str) for p in prompts):
@@ -171,39 +173,24 @@ def get_o_proj_inputs_batch(
         if isinstance(prompts, list):
             error_msg += f"\nList element types: {[type(p) for p in prompts]}"
         raise ValueError(error_msg)
+    if "offset_mapping" in inputs:
+        inputs.pop("offset_mapping")
     # nnsight requires envoys (layers) be accessed in ascending order within a trace, else
     # OutOfOrderError. Callers may pass layers in arbitrary order (e.g. heads drawn by random
     # sampling), so sort defensively — the returned dict is keyed by layer, so order-independent.
     layers = sorted(layers)
-    if patch_interface is None:
-        saves: dict[int, Any] = {}
-        with mt.trace(inputs):
-            for layer in layers:
-                attn_name = mt.attn_module_name_format.format(layer)
-                o_proj = get_module_nnsight(mt, attn_name + ".o_proj")
-                if token_positions is None:
-                    saves[layer] = o_proj.input[:, -1, :].save()  # (batch, n_embd)
-                else:
-                    saves[layer] = o_proj.input[
-                        :, token_positions, :
-                    ].save()  # (batch, n_pos, n_embd)
-        return {layer: saves[layer].float().cpu() for layer in layers}
-
-    # Patched extraction — run the forward UNDER `patch_interface` (e.g. a boundary-head transplant)
-    # and capture each o_proj's input with baukit ``retain_input``.  A forward hook stores the input
-    # AFTER any forward-pre-hook the interface registered, so the captured activations already carry
-    # the intervention's effect on this layer's input.
-    o_names = {layer: mt.attn_module_name_format.format(layer) + ".o_proj" for layer in layers}
-    with torch.no_grad(), baukit.TraceDict(
-        mt._model, list(o_names.values()), retain_input=True, retain_output=False
-    ) as td:
-        patch_interface(mt, inputs, model_kwargs=dict(use_cache=False))
-    out: dict[int, torch.Tensor] = {}
-    for layer in layers:
-        inp = td[o_names[layer]].input  # (batch, seq, n_embd), post-intervention
-        sel = inp[:, -1, :] if token_positions is None else inp[:, token_positions, :]
-        out[layer] = sel.float().cpu()
-    return out
+    attns = {layer: mt.layers[layer].self_attn for layer in layers}
+    saves: dict[int, Any] = {}
+    with mt.trace() as tracer:
+        with tracer.invoke(dict(inputs)):
+            if interventions is not None:
+                interventions(mt)
+        with tracer.invoke():
+            for layer, attn in attns.items():
+                premix = attn.attention_premix  # (batch, seq, num_heads, head_dim)
+                sel = premix[:, -1] if token_positions is None else premix[:, token_positions]
+                saves[layer] = sel.flatten(-2).save()
+    return {layer: saves[layer].float().cpu() for layer in layers}
 
 
 @torch.inference_mode()
@@ -212,12 +199,12 @@ def collect_head_steering_vecs(
     src_tokenized: TokenizerOutput,
     selected_heads: list[tuple[int, int]],
     token_positions: list[int],
-    patch_interface: Optional[Callable] = None,
+    interventions: Optional[Callable] = None,
 ) -> torch.Tensor:
     """Compute the summed residual-stream contribution of selected heads at each token position.
 
     For a linear o_proj, head h's contribution to the residual stream is:
-        o_proj_input[:, pos, h*hd:(h+1)*hd] @ W_o[:, h*hd:(h+1)*hd].T
+        attention_premix[:, pos, h] @ W_o[:, h*hd:(h+1)*hd].T
 
     This sums those contributions across all selected heads, batched over the
     batch dimension of ``src_tokenized``.
@@ -227,8 +214,8 @@ def collect_head_steering_vecs(
         src_tokenized: Tokenized source prompt(s); supports batch_size >= 1.
         selected_heads: List of (layer, head_idx) pairs identifying which heads to include.
         token_positions: Token positions to extract (absolute indices into src_tokenized).
-        patch_interface: forwarded to :func:`get_o_proj_inputs_batch` — when given, the extraction
-            forward runs under it, so the aggregated head write reflects the intervention.
+        interventions: forwarded to :func:`get_o_proj_inputs_batch` — called inside the
+            extraction trace, so the aggregated head write reflects the intervention.
 
     Returns:
         Float32 CPU tensor of shape ``(batch_size, n_positions, n_embd)`` — one
@@ -236,11 +223,9 @@ def collect_head_steering_vecs(
     """
     from collections import defaultdict
 
-    n_embd = mt.n_embd
-    n_heads = mt.n_heads
-    head_dim = (
-        mt.head_dim
-    )  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
+    n_embd = mt.hidden_size
+    n_heads = mt.num_heads
+    head_dim = mt.head_dim  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
 
     batch_size = src_tokenized["input_ids"].shape[0]
 
@@ -251,27 +236,25 @@ def collect_head_steering_vecs(
 
     layers = list(heads_per_layer.keys())
 
-    # Single forward pass — extract o_proj inputs at all requested positions. When
-    # `patch_interface` is given, that forward runs under the intervention (e.g. a boundary-head
-    # transplant), so the aggregated goal-head write below reflects it.
+    # Single forward pass — extract o_proj inputs at all requested positions, under
+    # `interventions` when given, so the aggregated goal-head write below reflects it.
     o_proj_inputs = get_o_proj_inputs_batch(
         mt, src_tokenized, layers, token_positions=token_positions,
-        patch_interface=patch_interface,
-    )  # {layer: (batch_size, n_positions, n_embd)}
+        interventions=interventions,
+    )  # {layer: (batch_size, n_positions, num_heads * head_dim)}
 
     n_pos = len(token_positions)
     steering_vecs = torch.zeros(batch_size, n_pos, n_embd, dtype=torch.float32)
 
     for layer, heads in heads_per_layer.items():
-        attn_name = mt.attn_module_name_format.format(layer)
-        o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
-        W_o = o_proj.weight.detach()  # (n_embd, n_embd), on the layer's device — only the selected
-        dev = W_o.device              # heads' columns are cast to float32 (no full-matrix CPU copy)
+        W_o = mt.layers[layer].self_attn.o_proj.weight.detach()  # (n_embd, num_heads * head_dim),
+        dev = W_o.device  # on the layer's device — only the selected heads' columns go to float32
 
-        inp = o_proj_inputs[layer].to(dev)  # (batch_size, n_positions, n_embd) float32
+        # (batch_size, n_positions, num_heads, head_dim) float32
+        inp = o_proj_inputs[layer].to(dev).unflatten(-1, (n_heads, head_dim))
 
         for h in heads:
-            h_inp = inp[:, :, h * head_dim : (h + 1) * head_dim]  # (B, n_pos, head_dim)
+            h_inp = inp[:, :, h]  # (B, n_pos, head_dim)
             W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim].float()  # (n_embd, head_dim)
             head_outputs = (h_inp @ W_o_h.t()).cpu()  # (B, n_pos, n_embd)
             steering_vecs += head_outputs

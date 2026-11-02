@@ -8,17 +8,17 @@ This module provides:
 
 from __future__ import annotations
 
+import warnings
+from contextlib import AbstractContextManager, nullcontext
 from typing import Callable, Literal, Optional, Union
 
-import baukit
 import torch
 from tqdm.auto import tqdm
 
-from src.functional import PatchSpec, generate_with_patch, get_hs
+from src.functional import _LOOP_CUT_SHORT, PatchSpec, generate_with_patch
 from src.goals.head_loc_attn import (
     HeadMask,
     collect_head_steering_vecs,
-    forward_with_src_replacement,
     get_o_proj_inputs_batch,
 )
 from src.tokens import find_token_range, prepare_input
@@ -82,26 +82,31 @@ def headpatched_generate(
     n_steer_tokens: Optional[int] = None,
     alpha: float = 1.0,
 ) -> list[str]:
-    """Greedy generation with head-replacement patching — KV-cache aware, batched over sources.
+    """Greedy generation with head-replacement patching, batched over sources.
 
-    ``src_o_proj_inps`` is ``(B, n_layers, n_embd)``: B generations sharing ONE destination prompt
-    (``dest_inputs`` is a single tokenized prompt, tiled internally). Returns ``list[str]`` of length B.
+    ``src_o_proj_inps`` is ``(B, n_layers, num_heads * head_dim)``: B generations sharing ONE
+    destination prompt (``dest_inputs`` is a single tokenized prompt, tiled internally). Returns
+    ``list[str]`` of length B.
 
-    Decoding pattern:
-        Step 0 (prefill): full forward over the prompt, patching the last prompt token. Returns
-            ``past_key_values`` so the patched K/V (at layers above the patched o_proj) are
-            written into the cache for that position.
-        Step >= 1 (decode): 1-token forward reusing the cache. If still inside the steer window,
-            the new token's o_proj input is patched too and its K/V get cached. Past patched K/V
-            remain in the cache.
+    Runs on ``mt.generate`` + ``tracer.iter``. At each patched step, for every mask row ``li``
+    (block ``mask_layers[li]``) and every head ``h`` with ``mask[li, h] != 0``, the last
+    position of ``mt.layers[l].self_attn.attention_premix`` (the heads at ``o_proj``'s input) is
+    set to ``alpha * mask[li, h] * src_h + (1 - mask[li, h]) * cur_h`` in float32, ``cur_h`` being
+    the live value (after the earlier blocks' edits). Step 0 is the prompt call (its last token);
+    each decode step patches its one new token, whose K/V then carry the edit through the cache.
 
-    ``n_steer_tokens`` counts *forward passes*, with the prefill as the first; ``n_steer_tokens=1``
-    patches only the prefill. ``None`` patches every step.
+    ``n_steer_tokens`` counts *forward passes*, with the prompt call as the first;
+    ``n_steer_tokens=1`` patches only the prompt call. ``None`` patches every step. (This is one
+    more than ``generate_with_patch``'s count, which leaves the prompt call out.)
+
+    Decoding is plain greedy argmax with a stop at ``tokenizer.eos_token_id``: the checkpoint's
+    ``repetition_penalty`` and its other EOS ids are overridden, as in the hand-written decode loop
+    this replaces. (``head_additive_generate`` keeps the checkpoint's ``generation_config``.)
 
     Args:
         mt: ModelandTokenizer.
         dest_inputs: Tokenized destination prompt dict (input_ids, attention_mask), batch 1.
-        src_o_proj_inps: ``(B, n_layers, n_embd)`` source o_proj inputs.
+        src_o_proj_inps: ``(B, n_layers, num_heads * head_dim)`` source o_proj inputs.
         mask: HeadMask with per-head interpolation weights.
         mask_layers: the ordered key decoding the mask's ROWS (row ``li`` <-> ``mask_layers[li]``),
             also matching ``src_o_proj_inps``' layer axis. ``None`` (default) = identity.
@@ -109,70 +114,66 @@ def headpatched_generate(
         n_steer_tokens: Apply a fresh patch only on the first ``n_steer_tokens`` forward passes.
         alpha: source-side interpolation weight.
     """
-    _stop = {mt.tokenizer.eos_token_id}
     src = src_o_proj_inps
     if src.dim() != 3:
         raise ValueError(
             f"src_o_proj_inps must be (B, n_layers, n_embd); got {tuple(src.shape)}"
         )
+    # `mask_layers` is the ordered key that decodes the mask's ROWS (row li <-> mask_layers[li]).
+    # It is NOT "which layers to intervene at": slicing it silently shifts every row.
+    if mask_layers is None:
+        mask_layers = list(range(mask.values.shape[0]))
+    if len(mask_layers) != src.shape[1] or len(mask_layers) != mask.values.shape[0]:
+        raise ValueError(
+            f"mask_layers/source/mask disagree: len(mask_layers)={len(mask_layers)}, "
+            f"src layer axis={src.shape[1]}, mask rows={mask.values.shape[0]}. They align POSITIONALLY "
+            f"(row li <-> mask_layers[li]), so a mismatch SHIFTS every row rather than failing."
+        )
     B = src.shape[0]
-    input_ids = dest_inputs["input_ids"].expand(B, -1).clone()
-    attention_mask = dest_inputs["attention_mask"].expand(B, -1).clone()
-    L_prompt = input_ids.shape[1]
+    n_heads, head_dim = mt.num_heads, mt.head_dim
+    inputs = dict(
+        input_ids=dest_inputs["input_ids"].expand(B, -1).clone(),
+        attention_mask=dest_inputs["attention_mask"].expand(B, -1).clone(),
+    )
+    L_prompt = inputs["input_ids"].shape[1]
 
-    generated = [[] for _ in range(B)]
-    finished = [False] * B
-    past_key_values = None
+    # Per block, in forward order: the heads its mask row moves (m != 0; the formula leaves a head
+    # with m == 0 as it is), their weights and their source slices, on the block's device.
+    mask_vals = mask.values.detach()
+    plan = []
+    for li, layer in sorted(enumerate(mask_layers), key=lambda t: t[1]):
+        heads = torch.nonzero(mask_vals[li]).flatten()
+        if heads.numel() == 0:
+            continue
+        attn = mt.layers[layer].self_attn
+        dev = attn.o_proj.weight.device
+        m = mask_vals[li, heads].float().to(dev).view(1, -1, 1)  # (1, k, 1)
+        s = src[:, li].float().to(dev).view(B, n_heads, head_dim)[:, heads.to(dev)]  # (B, k, hd)
+        plan.append((attn, heads.to(dev), m, s))
+    n_steps = max_new_tokens if n_steer_tokens is None else min(max_new_tokens, n_steer_tokens)
 
-    with torch.no_grad():
-        for step in range(max_new_tokens):
-            if all(finished):
-                break
-            cur_input_ids = input_ids if step == 0 else input_ids[:, -1:]
-            inputs = {
-                "input_ids": cur_input_ids,
-                "attention_mask": attention_mask,
-                "past_key_values": past_key_values,
-                "use_cache": True,
-            }
-            if n_steer_tokens is None or step < n_steer_tokens:
-                positions_this_step = [L_prompt - 1] if step == 0 else [-1]
-                logits, past_key_values = forward_with_src_replacement(
-                    mt,
-                    inputs,
-                    src,
-                    mask,
-                    mask_layers,
-                    alpha=alpha,
-                    patch_positions=positions_this_step,
-                    return_past_key_values=True,
-                )  # (B, vocab)
-            else:
-                out = mt._model(**inputs)
-                logits = out.logits[:, -1, :].float()  # (B, vocab)
-                past_key_values = out.past_key_values
-            next_toks = logits.argmax(dim=-1)  # (B,)
-
-            for i in range(B):
-                if not finished[i]:
-                    tok = int(next_toks[i])
-                    generated[i].append(tok)
-                    if tok in _stop:
-                        finished[i] = True
-
-            input_ids = torch.cat([input_ids, next_toks.unsqueeze(1)], dim=1)
-            attention_mask = torch.cat(
-                [
-                    attention_mask,
-                    torch.ones(
-                        (B, 1), dtype=attention_mask.dtype, device=attention_mask.device
-                    ),
-                ],
-                dim=1,
-            )
+    with torch.no_grad(), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=_LOOP_CUT_SHORT, category=UserWarning)
+        with mt.generate(
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            repetition_penalty=1.0,
+            eos_token_id=mt.tokenizer.eos_token_id,
+        ) as tracer:
+            with tracer.invoke(inputs):
+                if plan and n_steps > 0:
+                    for step in tracer.iter[:n_steps]:
+                        for attn, heads, m, s in plan:
+                            premix = attn.attention_premix  # (B, seq, n_heads, head_dim)
+                            cur = premix[:, -1, heads].float()  # (B, k, head_dim)
+                            premix[:, -1, heads] = (alpha * m * s + (1 - m) * cur).to(premix.dtype)
+            # Its own invoke, so an early EOS that cuts the step loop short cannot drop it.
+            with tracer.invoke():
+                out = tracer.result.save()
 
     return [
-        mt.tokenizer.decode(g, skip_special_tokens=True).rstrip() for g in generated
+        mt.tokenizer.decode(row[L_prompt:], skip_special_tokens=True).rstrip()
+        for row in out
     ]
 
 
@@ -189,10 +190,13 @@ def head_additive_generate(
     of :func:`headpatched_generate`, which replaces per-head o_proj inputs instead.
 
     ``steering_vecs`` is ``(B, n_embd)``: B generations sharing ONE destination prompt, returns
-    ``list[str]`` of length B. The same vector is injected at every layer in ``layers``, at the last
-    token of every decode step: ``h + alpha * ||h|| * g/||g||``. ``alpha`` is "add this fraction of
-    the local residual norm along the goal direction", which is scale-invariant across head sets,
-    bands and models. Normalisation happens HERE, so callers pass the raw aggregated vector.
+    ``list[str]`` of length B. The same vector is injected into ``mt.layers[l].layer_output`` at
+    every layer in ``layers``, at the last token of the prompt call and of every decode step:
+    ``h + alpha * ||h|| * g/||g||``. ``alpha`` is "add this fraction of the local residual norm
+    along the goal direction", which is scale-invariant across head sets, bands and models.
+    Normalisation happens HERE, so callers pass the raw aggregated vector. Runs through
+    :func:`src.functional.generate_with_patch` (greedy, the checkpoint's ``generation_config``
+    otherwise).
 
     Args:
         mt: ModelandTokenizer.
@@ -200,15 +204,10 @@ def head_additive_generate(
         steering_vecs: ``(B, n_embd)`` aggregated head outputs. Raw, unnormalised.
         layers: layer indices to inject at (the steer band), e.g. ``range(35, 46)``.
         max_new_tokens: Maximum tokens to generate per item.
-        n_steer_tokens: how many decode steps apply the patch. ``None`` = every step.
+        n_steer_tokens: how many decode steps apply the patch, after the prompt call (which
+            always does). ``None`` = every step.
         alpha: injection coefficient.
     """
-    _L = dest_inputs["input_ids"].shape[1]
-    if _L < 2:
-        raise ValueError(
-            f"prompt is {_L} token(s): the baukit hook detects the prefill as `seq_len > 1`, so a "
-            f"1-token prompt has no distinguishable prefill pass and patches would misfire."
-        )
     if steering_vecs.dim() != 2:
         raise ValueError(
             f"steering_vecs must be (B, n_embd); got {tuple(steering_vecs.shape)}"
@@ -225,12 +224,7 @@ def head_additive_generate(
         )
     )
     patches = [
-        PatchSpec(
-            location=(mt.layer_name_format.format(li), -1),
-            patch=v,
-            strategy="add_norm",
-            on_pass="all",
-        )
+        PatchSpec(location=(li, -1), patch=v, strategy="add_norm", on_pass="all")
         for li in layers
     ]
     gens = generate_with_patch(
@@ -240,7 +234,6 @@ def head_additive_generate(
         patches=patches,
         n_steer_tokens=n_steer_tokens,
         do_sample=False,
-        patch_interface="baukit",
         remove_prefix=True,
         skip_special_tokens=True,
     )
@@ -319,19 +312,18 @@ class OVReader:
     verbalizes the goal iff ``h`` already carries it in that write direction.
 
     The per-head factors ``(W_O_j, W_V_kv, g)`` are computed once in ``__init__`` and cached in ``readers``.
+    They are read off nnterp's envoys: ``mt.layers[l].self_attn.o_proj`` / ``.v_proj`` and the block's
+    pre-attention norm ``mt.layers[l].input_layernorm``. A family whose attention reads the residual
+    without a pre-attention norm (OLMo-3 is post-norm) has no ``g`` to fold, and is refused.
     """
 
     def __init__(self, mt, readout_heads: list[tuple[int, int]]):
         self.mt = mt
         self.readout_heads = list(readout_heads)
-        self.n_kv = mt.n_kv_heads
-        self.group = mt.n_heads // self.n_kv  # GQA group size
+        self.n_kv = mt.num_kv_heads
+        self.group = mt.num_heads // self.n_kv  # GQA group size
         self.readers = self._build_readers()  # per-head (W_O_j, W_V_kv, g), CPU float32
         self._probe_inputs = {}  # {mode: tokenized GoalScope probe}, built lazily
-
-    def _proj_weight(self, layer: int, which: str) -> torch.Tensor:
-        name = self.mt.attn_module_name_format.format(layer) + f".{which}_proj"
-        return baukit.get_module(self.mt._model, name).weight
 
     def _build_readers(self) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Per goal head ``(l, j)``: ``(W_O_j, W_V_kv, g)`` — small factors of the OV map
@@ -339,17 +331,19 @@ class OVReader:
         hd = self.mt.head_dim
         readers = []
         for (layer, j) in tqdm(self.readout_heads, desc="Building OV readers"):
-            kv = j // self.group
-            Wo = self._proj_weight(layer, "o")[:, j * hd : (j + 1) * hd].detach().float().cpu()
-            Wv = self._proj_weight(layer, "v")[kv * hd : (kv + 1) * hd, :].detach().float().cpu()
-            g = (
-                baukit.get_module(
-                    self.mt._model, self.mt.layer_name_format.format(layer) + ".input_layernorm"
+            block = self.mt.layers[layer]
+            norm = getattr(block, "input_layernorm", None)
+            if norm is None:
+                raise ValueError(
+                    f"OVReader folds the pre-attention norm's gain into each head's OV map, but "
+                    f"{self.mt.family_name!r} blocks have no pre-attention norm (input_layernorm): "
+                    f"the attention reads the raw residual and the block norms after it (OLMo-3 is "
+                    f"post-norm). The OV map without a gain is a different probe; not supported."
                 )
-                .weight.detach()
-                .float()
-                .cpu()
-            )
+            kv = j // self.group
+            Wo = block.self_attn.o_proj.weight[:, j * hd : (j + 1) * hd].detach().float().cpu()
+            Wv = block.self_attn.v_proj.weight[kv * hd : (kv + 1) * hd, :].detach().float().cpu()
+            g = norm.weight.detach().float().cpu()
             readers.append((Wo, Wv, g))
         return readers
 
@@ -412,14 +406,19 @@ class OVReader:
         probe_layers: list[int],
         **kwargs,
     ) -> dict[int, str]:
-        """Extract the residual after each ``probe_layer`` at ``pivot`` in ONE :func:`get_hs` forward,
-        then :meth:`apply_probe` on those latents. Returns ``{L: readout}``. ``kwargs`` (mode, steer_layers,
-        max_new_tokens, alpha, batch_size) are forwarded to :meth:`apply_probe`."""
+        """Read the residual after each ``probe_layer`` (``mt.layers[L].layer_output``) at ``pivot`` in
+        ONE trace, then :meth:`apply_probe` on those latents. Returns ``{L: readout}``. ``kwargs`` (mode,
+        steer_layers, max_new_tokens, alpha, batch_size) are forwarded to :meth:`apply_probe`."""
         inp = prepare_input(prompts=prompt, tokenizer=self.mt) if isinstance(prompt, str) else prompt
+        if "offset_mapping" in inp:
+            inp.pop("offset_mapping")
         probe_layers = list(probe_layers)
-        locations = [(self.mt.layer_name_format.format(L), pivot) for L in probe_layers]
-        hs = get_hs(self.mt, inp, locations=locations, return_dict=True)
-        latents = {L: hs[(self.mt.layer_name_format.format(L), pivot)] for L in probe_layers}
+        blocks = {L: self.mt.layers[L] for L in sorted(set(probe_layers))}
+        saved = {}
+        with torch.no_grad(), self.mt.trace(dict(inp)):
+            for L, block in blocks.items():  # ascending: forward order
+                saved[L] = block.layer_output[0, pivot].save()
+        latents = {L: saved[L] for L in probe_layers}
         return self.apply_probe(latents, **kwargs)
 
 
@@ -437,7 +436,8 @@ def apply_goalscope(
     goalscope_prompt: Optional[str] = None,
     include_noncode: bool = False,
     token_positions: Optional[list[int]] = None,
-    patch_interface: Optional[Callable] = None,
+    interventions: Optional[Callable] = None,
+    legacy_hooks: Optional[Callable[[], AbstractContextManager]] = None,
 ) -> list[dict]:
     """Run GoalScope on a single prompt.
 
@@ -477,10 +477,12 @@ def apply_goalscope(
         alpha: Steering strength.  additive_norm: added fraction of ``||h||``.
             Replace: source-side interpolation weight.
         max_new_tokens: Max tokens generated per position.
-        n_steer_tokens: How many forward passes apply a fresh patch.
-            ``"all"`` (default) → patch every step.  An integer ``k`` → patch
-            only the first ``k`` forward passes (step 0 = prefill counts as 1).
-            Applies to both strategies.
+        n_steer_tokens: How many generate steps apply a fresh patch.
+            ``"all"`` (default) → patch every step.  An integer ``k`` counts
+            differently per strategy (each keeps its original convention):
+            ``"replace"`` patches the first ``k`` forward passes, the prompt call
+            counting as 1; ``"additive_norm"`` patches the prompt call and then
+            ``k`` decode steps, ``k + 1`` forward passes in all.
         goalscope_prompt: Override the default GoalScope dest prompt.
         include_noncode: When ``True``, also include the non-code tokens (the
             prompt text outside the ``<code>…</code>`` segment — e.g. the prefix
@@ -492,14 +494,16 @@ def apply_goalscope(
             (default) uses every code-segment token.  Restricting to a handful of
             positions (e.g. the anchors) skips generation for all others and is much
             faster.
-        patch_interface: optional ``(mt, inputs, patches=None, model_kwargs=None) -> output`` — the
-            same interface ``src.attention.get_attention_matrices`` accepts, typically one from
-            :func:`make_head_replacement_patch_interface`.  When given, the SOURCE forward that reads
-            ``selected_heads`` (the goal heads) runs under it, so an intervention on a DIFFERENT head
-            set (transplanted at the pivot) is applied FIRST and its effect is carried into the
-            goal-head signal that is verbalized.  ``None`` (default) → no intervention; source
-            extraction is unchanged.  Note the intervention's own positions are absolute indices
-            into ``prompt``'s tokenization, exactly like ``token_positions``.
+        interventions: optional ``interventions(mt)``, called inside the SOURCE trace that reads
+            ``selected_heads`` (the goal heads), before the reads; see
+            :func:`src.goals.head_loc_attn.get_o_proj_inputs_batch` for the composition rule. An
+            intervention on a DIFFERENT head set (e.g. transplanted at the pivot) then reaches the
+            goal-head signal that is verbalized. ``None`` (default) → no intervention. Its positions
+            are absolute indices into ``prompt``'s tokenization, exactly like ``token_positions``.
+            The readout generation never runs under it.
+        legacy_hooks: deprecated, for the NRGS interventions that are still PyTorch hooks on
+            ``mt._model``: a zero-argument callable returning a context manager, entered around
+            the source trace only. Goes when those interventions are ported to ``interventions``.
 
     Returns:
         List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` and
@@ -591,13 +595,14 @@ def apply_goalscope(
         # Aggregate selected heads into one residual-stream vector per position.
         # collect_head_steering_vecs returns (batch_size, n_seg, n_embd);
         # src_tokenized here has batch_size=1, so squeeze the leading dim.
-        steering_vecs = collect_head_steering_vecs(
-            mt=mt,
-            src_tokenized=src_tokenized,
-            selected_heads=selected_heads,
-            token_positions=seg_positions,
-            patch_interface=patch_interface,
-        )[0]  # (n_seg, n_embd)
+        with legacy_hooks() if legacy_hooks is not None else nullcontext():
+            steering_vecs = collect_head_steering_vecs(
+                mt=mt,
+                src_tokenized=src_tokenized,
+                selected_heads=selected_heads,
+                token_positions=seg_positions,
+                interventions=interventions,
+            )[0]  # (n_seg, n_embd)
 
         # additive_norm's unit-direction normalisation happens inside
         # head_additive_generate, so `steering_vecs` stays raw here.
@@ -608,7 +613,7 @@ def apply_goalscope(
     else:  # strategy == "replace"
         # Layers come from selected_heads; build a HeadMask over them.
         layers_replace = sorted({layer for (layer, _) in selected_heads})
-        n_heads_model = mt.n_heads
+        n_heads_model = mt.num_heads
         mask_module = HeadMask(
             n_layers_tested=len(layers_replace), n_heads=n_heads_model
         )
@@ -620,13 +625,14 @@ def apply_goalscope(
 
         # Extract per-layer o_proj inputs at every segment position.
         # Shape per layer: (1, n_seg, n_embd); stack → (n_seg, n_layers, n_embd).
-        src_o_inputs = get_o_proj_inputs_batch(
-            mt,
-            src_tokenized,
-            layers_replace,
-            token_positions=seg_positions,
-            patch_interface=patch_interface,
-        )
+        with legacy_hooks() if legacy_hooks is not None else nullcontext():
+            src_o_inputs = get_o_proj_inputs_batch(
+                mt,
+                src_tokenized,
+                layers_replace,
+                token_positions=seg_positions,
+                interventions=interventions,
+            )
         src_head_vals_all = torch.stack(
             [src_o_inputs[layer][0] for layer in layers_replace], dim=1
         )  # (n_seg, n_layers, n_embd)
