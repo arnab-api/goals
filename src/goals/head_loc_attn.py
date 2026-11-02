@@ -159,7 +159,7 @@ def get_o_proj_inputs_batch(
     if isinstance(prompts, list) and all(isinstance(p, str) for p in prompts):
         # Left-pad EXPLICITLY. The extraction below uses negative positions ([:, -1] /
         # [:, token_positions]), which only align with the real (right-aligned) tokens under LEFT
-        # padding. In practice mt.tokenizer already left-pads (nnsight LanguageModel sets it), so
+        # padding. In practice mt.tokenizer already left-pads (ModelandTokenizer sets it), so
         # this is defensive rather than a fix — but a RAW HF tokenizer defaults to right for many
         # models (e.g. Qwen), so we do not rely on the default. A caller passing a pre-tokenized
         # TokenizerOutput owns its own padding.
@@ -177,7 +177,7 @@ def get_o_proj_inputs_batch(
     layers = sorted(layers)
     if patch_interface is None:
         saves: dict[int, Any] = {}
-        with mt.trace(inputs, scan=False, validate=False):
+        with mt.trace(inputs):
             for layer in layers:
                 attn_name = mt.attn_module_name_format.format(layer)
                 o_proj = get_module_nnsight(mt, attn_name + ".o_proj")

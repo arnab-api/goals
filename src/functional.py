@@ -14,11 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def untuple(object: Any):
-    if isinstance(object, tuple) or (
-        "LanguageModelProxy" in str(type(object)) and len(object) > 1
-    ):
-        return object[0]
-    return object
+    return object[0] if isinstance(object, tuple) else object
 
 
 def any_is_nontrivial_prefix(predictions: list[str], target: str) -> bool:
@@ -299,7 +295,7 @@ def get_hs(
             unique_layer_names.append(layer_name)
 
     layer_states = {}
-    with mt.trace(input, scan=False):
+    with mt.trace(input):
         for layer_name in unique_layer_names:
             module = get_module_nnsight(mt, layer_name)
             layer_states[layer_name] = module.output.save()

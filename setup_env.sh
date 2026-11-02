@@ -31,9 +31,10 @@ $RUN pip install "torch>=2.7" torchvision \
 
 echo "==> Installing core ML / interpretability libraries"
 $RUN pip install \
-    "transformers>=4.55" \
+    "transformers>=5.17" \
     accelerate \
-    "nnsight>=0.5" \
+    "nnsight>=0.8.2" \
+    "nnterp>=2.0.0rc1" \
     datasets \
     huggingface-hub \
     safetensors \
@@ -41,7 +42,7 @@ $RUN pip install \
     sentencepiece \
     "circuitsvis>=1.43.3"
 
-echo "==> Installing baukit (from source — required, not on PyPI)"
+echo "==> Installing baukit (from source — not on PyPI; transitional, until the last baukit hook is ported)"
 $RUN pip install git+https://github.com/davidbau/baukit
 
 echo "==> Installing scientific stack"

@@ -28,7 +28,7 @@ Appendix files that `201_Appendix.tex` does not `\input` (`boundary`, `cpp`, `di
 ### Layout
 
 ```
-src/models.py            ModelandTokenizer (nnsight LanguageModel; Qwen2, Llama, OLMo-3, GLM-4)
+src/models.py            ModelandTokenizer (nnterp StandardizedTransformer on nnsight 0.8; Qwen2, Llama, OLMo-3, GLM-4)
 src/functional.py        generate_with_patch (baukit), get_hs, ...
 src/tokens.py            prepare_input (left padding), find_token_range
 src/utils/               env_utils (paths), oracle_llms (ask_claude + cache), logging, experiment_utils
@@ -51,7 +51,10 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 ### Conventions
 
 - **Run everything from the repo root.** Scripts do `sys.path.append(".")`; both `python -m scripts.x.y` and
-  `python scripts/x/y.py` work. Use the `goals` conda env (`bash setup_env.sh`; `conda run -n goals python ...`).
+  `python scripts/x/y.py` work. Environment: nnsight >= 0.8.2, nnterp >= 2.0.0rc1, transformers >= 5.17 (baukit
+  stays until the last hook is ported). Build it with uv (`uv venv --python 3.12 .venv && uv sync`, or
+  `bash setup_env_uv.sh`; run `.venv/bin/python ...`) or as the `goals` conda env (`bash setup_env.sh`;
+  `conda run -n goals python ...`). Import `nnterp` before any `transformers.models...` module.
 - **Paths**: `env.yml` in the root (template `env_demo.yml`) holds `MODEL_DIR`, `RESULTS_DIR` (default `results`),
   `DATA_DIR`, `CLAUDE_CACHE_DIR` (default `data/LLM_CACHE/claude_cache`), optional `HF_CACHE`, and `CLAUDE_KEY`.
   `src/utils/env_utils.py` reads them (`DEFAULT_RESULTS_DIR`, `PROJECT_ROOT`). All results paths below are relative to
