@@ -3,8 +3,8 @@ import os
 from typing import Literal
 
 import torch
-from nnterp import StandardizedTransformer, families
-from transformers import AutoConfig, AutoTokenizer
+from nnterp import StandardizedTransformer
+from transformers import AutoTokenizer
 
 from src.utils.env_utils import DEFAULT_MODELS_DIR, HF_CACHE_DIR
 
@@ -51,15 +51,6 @@ class ModelandTokenizer(StandardizedTransformer):
         model_key = get_full_model_path(model_key)
         if HF_CACHE_DIR is not None:
             kwargs["cache_dir"] = HF_CACHE_DIR
-            # nnterp reads the config to pick the family without passing ``cache_dir`` on, so
-            # resolve the family here from a config read in the same cache.
-            config = AutoConfig.from_pretrained(
-                model_key,
-                cache_dir=HF_CACHE_DIR,
-                revision=kwargs.get("revision"),
-                trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
-            )
-            kwargs.setdefault("family", families.resolve(config))
         super().__init__(
             model_key,
             device_map=device_map,

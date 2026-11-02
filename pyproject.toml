@@ -13,7 +13,7 @@ dependencies = [
     # standardized module names / values over nnsight 0.8. The rc specifier lets uv pick the
     # pre-release for nnterp alone (its default `if-necessary-or-explicit` mode), so no global
     # `prerelease = "allow"` is needed; 2.0.0 final satisfies it too once released.
-    "nnterp>=2.0.0rc1",
+    "nnterp",  # pinned to a v2.0.0 commit in [tool.uv.sources] until a release carries ndif-team/nnterp#124
     "datasets",
     "huggingface-hub",
     "safetensors",
@@ -53,6 +53,8 @@ package = false
 environments = ["sys_platform == 'linux'"]
 
 [tool.uv.sources]
+# nnterp: the config read honours `cache_dir` from ndif-team/nnterp#124 on; pin that commit until a release has it.
+nnterp = { git = "https://github.com/ndif-team/nnterp", rev = "feeb24c5e35425c652bf8cb09def159598fc2316" }
 # PyTorch from the CUDA 12.8 wheel index (see [[tool.uv.index]] below). To switch CUDA
 # versions, change the index url AND this name to match (e.g. pytorch-cu126 / cu121).
 torch = { index = "pytorch-cu128" }

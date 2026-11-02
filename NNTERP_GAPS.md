@@ -8,13 +8,12 @@ a pointer, and names the workaround used here, if any.
 
 nnterp 2.0.0rc1, nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwen2.5-0.5B-Instruct.
 
-1. **nnterp's family lookup ignores `cache_dir`.** `StandardizedTransformer` reads the config to pick the family with
-   `AutoConfig.from_pretrained(repo_id, revision=..., trust_remote_code=...)` and drops every other loading kwarg, so a
-   checkpoint that lives only in a non-default cache (`env.yml` `HF_CACHE`) fails offline before any weights load.
-   Repro: `HF_HUB_OFFLINE=1 HF_HUB_CACHE=/empty python -c "import nnterp; nnterp.StandardizedTransformer('Qwen/Qwen2.5-0.5B-Instruct', cache_dir='/real/hub', dispatch=True)"`
-   raises `OSError: We couldn't connect to 'https://huggingface.co' ...`. Workaround (`src/models.py`): read the config
-   with `cache_dir` and pass `family=nnterp.families.resolve(config)`.
-2. **nnsight's meta build ignores `cache_dir` for the tokenizer.** With `family=` passed (item 1), a load without
+1. **nnterp's family lookup ignored `cache_dir`** (FIXED upstream: ndif-team/nnterp#124, on `v2.0.0` at `feeb24c`;
+   this repo pins that commit until a release carries it). `StandardizedTransformer` read the config to pick the family
+   with only `revision` and `trust_remote_code`, so a checkpoint that lives only in a non-default cache (`env.yml`
+   `HF_CACHE`) failed offline before any weights loaded. `_read_config` now takes the hub kwargs (`cache_dir`, `token`,
+   `local_files_only`, ...) as its own parameters.
+2. **nnsight's meta build ignores `cache_dir` for the tokenizer** (filed: ndif-team/nnsight#822). With `family=` passed (item 1), a load without
    `dispatch=True` still fails the same way: `TransformersModel._load_meta` builds its meta `pipeline(...)` without
    `cache_dir`, so the tokenizer is looked up in the default cache (`nnsight/modeling/transformers.py`, `_load_meta`).
    `ModelandTokenizer` always dispatches, so it does not hit this; a lazy (`dispatch=False`) load would.
