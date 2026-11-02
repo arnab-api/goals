@@ -298,7 +298,7 @@ def get_next_token_probs(mt, prompt: str) -> torch.Tensor:
         Float32 CPU tensor of shape ``(vocab_size,)`` with probabilities summing to 1.
     """
     inputs = prepare_input(prompts=[prompt], tokenizer=mt)
-    with mt.trace(inputs, scan=False, validate=False):
+    with mt.trace(inputs):
         logits = mt.lm_head.output[0, -1, :].save()
     return torch.softmax(logits.float(), dim=-1).cpu()
 
@@ -317,7 +317,7 @@ def get_next_token_probs_batch(mt, prompts: list[str]) -> torch.Tensor:
         last real token for every sequence.
     """
     inputs = prepare_input(prompts=prompts, tokenizer=mt)
-    with mt.trace(inputs, scan=False, validate=False):
+    with mt.trace(inputs):
         logits = mt.lm_head.output[:, -1, :].save()  # (batch, vocab)
     return torch.softmax(logits.float(), dim=-1).cpu()
 

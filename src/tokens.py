@@ -3,7 +3,7 @@ from typing import Any, Literal, Optional
 
 import torch
 
-from src.models import ModelandTokenizer, determine_device, unwrap_tokenizer
+from src.models import ModelandTokenizer, unwrap_tokenizer
 from src.utils.tokenization_utils import set_padding_side
 from src.utils.typing import Tokenizer, TokenizerOutput
 
@@ -20,9 +20,8 @@ def prepare_input(
 ) -> TokenizerOutput:
     """Prepare input for the model."""
     if isinstance(tokenizer, ModelandTokenizer):
-        device = determine_device(
-            tokenizer
-        )  # if tokenizer type is ModelandTokenizer, get device and ignore the passed device
+        # if tokenizer type is ModelandTokenizer, get device and ignore the passed device
+        device = tokenizer.device
 
     tokenizer = unwrap_tokenizer(tokenizer)
     prompts = [prompts] if isinstance(prompts, str) else prompts

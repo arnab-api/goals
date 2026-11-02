@@ -4,15 +4,15 @@ import pathlib
 
 import numpy
 import torch
+from nnterp import StandardizedTransformer  # before any transformers.models.* import
 import transformers
-from nnsight import LanguageModel
 
 ArrayLike = list | tuple | numpy.ndarray | torch.Tensor
 PathLike = str | pathlib.Path
 
 # Throughout this codebase, we use HuggingFace model implementations (the reported model families).
 Model = (
-    LanguageModel
+    StandardizedTransformer
     | transformers.LlamaForCausalLM
     | transformers.Qwen2ForCausalLM
     | transformers.Olmo3ForCausalLM

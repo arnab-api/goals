@@ -33,7 +33,6 @@ from scripts.evaluation.eval_goalscope import (
     ALL_DATATYPES, DEFAULT_DATASET, GEN_MAX_NEW_TOKENS, ORACLE_MODEL, build_prompt, limit_round_robin,
     load_json_heads, load_locked_datapoints,
 )
-from src.functional import get_module_nnsight
 from src.models import ModelandTokenizer
 from src.tokens import prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
@@ -154,17 +153,17 @@ def generate_blocking_span_cached(mt, prompt_ids, block_heads, block_positions, 
         inp = {"input_ids": cur_ids, "attention_mask": attn,
                "past_key_values": past, "use_cache": True}
         kvec = _kvec(kv_len) if block_heads else None
-        with mt.trace(inp, scan=False, validate=False):
+        with mt.trace(inp):
             if block_heads:
                 for L in sorted(l2h):
-                    sm = get_module_nnsight(mt, mt.attn_module_name_format.format(L)) \
-                            .source.attention_interface_0.source.nn_functional_softmax_0
                     km = torch.zeros(1, n_heads, q_len, kv_len, device=device)
                     for qi in range(q_len):
                         if q_offset + qi >= q_start:
                             for h in l2h[L]:
                                 km[0, h, qi, :] += kvec
-                    sm.input = sm.input + km.to(sm.input.device, sm.input.dtype)
+                    # the masked, scaled scores entering the softmax (eager attention)
+                    scores = mt.layers[L].self_attn.attention_scores
+                    scores += km.to(scores.device, scores.dtype)
             logits = mt.output.logits[:, -1, :].save()
             past = mt.output.past_key_values.save()
         nxt = int(logits[0].argmax(-1))
@@ -213,17 +212,17 @@ def sink_generate_cached(mt, prompt_ids, ablated_heads, q_start, sink_pos=0,
         inp = {"input_ids": cur_ids, "attention_mask": attn,
                "past_key_values": past, "use_cache": True}
         kvec = _kvec(kv_len) if ablated_heads else None
-        with mt.trace(inp, scan=False, validate=False):
+        with mt.trace(inp):
             if ablated_heads:
                 for L in sorted(l2h):
-                    sm = get_module_nnsight(mt, mt.attn_module_name_format.format(L)) \
-                            .source.attention_interface_0.source.nn_functional_softmax_0
                     km = torch.zeros(1, n_heads, q_len, kv_len, device=device)
                     for qi in range(q_len):
                         if q_offset + qi >= q_start:
                             for h in l2h[L]:
                                 km[0, h, qi, :] += kvec
-                    sm.input = sm.input + km.to(sm.input.device, sm.input.dtype)
+                    # the masked, scaled scores entering the softmax (eager attention)
+                    scores = mt.layers[L].self_attn.attention_scores
+                    scores += km.to(scores.device, scores.dtype)
             logits = mt.output.logits[:, -1, :].save()
             past = mt.output.past_key_values.save()
         nxt = int(logits[0].argmax(-1))

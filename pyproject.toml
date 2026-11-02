@@ -7,16 +7,21 @@ dependencies = [
     # core ML / interpretability
     "torch>=2.7",
     "torchvision",
-    "transformers>=4.55",
+    "transformers>=5.17",
     "accelerate",
-    "nnsight>=0.5",
+    "nnsight>=0.8.2",
+    # standardized module names / values over nnsight 0.8. The rc specifier lets uv pick the
+    # pre-release for nnterp alone (its default `if-necessary-or-explicit` mode), so no global
+    # `prerelease = "allow"` is needed; 2.0.0 final satisfies it too once released.
+    "nnterp>=2.0.0rc1",
     "datasets",
     "huggingface-hub",
     "safetensors",
     "tokenizers",
     "sentencepiece",
     "circuitsvis>=1.43.3",  # attention viz used by src.nrgs.functional
-    # activation patching (not on PyPI — pulled from git, see [tool.uv.sources])
+    # activation patching (not on PyPI — pulled from git, see [tool.uv.sources]). Transitional:
+    # it leaves when the last baukit hook is ported to nnterp.
     "baukit",
     # scientific stack
     "numpy",

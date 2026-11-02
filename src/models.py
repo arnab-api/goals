@@ -1,25 +1,45 @@
 import logging
 import os
-from typing import Any, Literal
+from typing import Literal
 
-import baukit
 import torch
-import transformers
-from nnsight import LanguageModel
-from transformers import AutoTokenizer
+from nnterp import StandardizedTransformer, families
+from transformers import AutoConfig, AutoTokenizer
 
 from src.utils.env_utils import DEFAULT_MODELS_DIR, HF_CACHE_DIR
-from src.utils.typing import Model
 
 logger = logging.getLogger(__name__)
 
+# The reported model families (nnterp family = the config's ``model_type``). Their native layout is
+# ``model.layers.{i}`` / ``self_attn`` / ``o_proj`` / ``mlp``, which the path-format strings below
+# spell out.
+SUPPORTED_FAMILIES = ("qwen2", "llama", "olmo3", "glm4")
 
-class ModelandTokenizer(LanguageModel):
-    """nnsight ``LanguageModel`` + tokenizer with a unified config interface (``n_layer``,
-    ``n_embd``, ``layer_name_format``, ``attn_module_name_format``, ...).
 
-    Supported families (the reported models): Qwen2 (Qwen2.5, Qwen2.5-Coder), Llama (Llama-3.3),
-    OLMo-3 (Olmo-3.1) and dense GLM-4 (GLM-4-32B-0414).
+class ModelandTokenizer(StandardizedTransformer):
+    """nnterp ``StandardizedTransformer`` (nnsight 0.8) + tokenizer, with the repo's older config
+    interface kept as properties over nnterp's sizes.
+
+    Reported families: Qwen2 (Qwen2.5, Qwen2.5-Coder), Llama (Llama-3.3), OLMo-3 (Olmo-3.1) and
+    dense GLM-4 (GLM-4-32B-0414). ``self.family`` is the nnterp family module.
+
+    Ported code uses nnterp's standard names and values (``mt.layers[i].layer_output``,
+    ``mt.layers[i].self_attn.attention_scores``, ``mt.num_layers``, ...). The rest is transitional and
+    goes when the last baukit hook is ported:
+
+    - ``_model``: the HF module (``self._module``), for the baukit hooks and raw forwards in
+      unported modules. Deprecated.
+    - ``layer_name_format``, ``attn_module_name_format``, ``mlp_module_name_format``,
+      ``embedder_name``, ``final_layer_norm_name``, ``lm_head_name``, ``layer_names``: native
+      module paths. They are the layout of the four reported families only, and are wrong on a
+      family whose native names differ.
+    - ``n_layer``, ``n_embd``, ``n_heads``, ``n_kv_heads``, ``attn_inner_size``: aliases of
+      ``num_layers``, ``hidden_size``, ``num_heads``, ``num_kv_heads`` and
+      ``num_heads * head_dim``. ``head_dim`` is nnterp's own (the config's ``head_dim`` when it
+      declares one, else ``hidden_size // num_heads``).
+
+    ``device`` (the first parameter's) and ``mt(...)`` outside a trace (a plain HF forward of the
+    module) are nnsight's own.
     """
 
     def __init__(
@@ -28,94 +48,112 @@ class ModelandTokenizer(LanguageModel):
         device_map: dict | str = "auto",
         **kwargs,
     ) -> None:
+        model_key = get_full_model_path(model_key)
         if HF_CACHE_DIR is not None:
             kwargs["cache_dir"] = HF_CACHE_DIR
-        model_key = get_full_model_path(model_key)
-        self.__dict__ = LanguageModel(
+            # nnterp reads the config to pick the family without passing ``cache_dir`` on, so
+            # resolve the family here from a config read in the same cache.
+            config = AutoConfig.from_pretrained(
+                model_key,
+                cache_dir=HF_CACHE_DIR,
+                revision=kwargs.get("revision"),
+                trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
+            )
+            kwargs.setdefault("family", families.resolve(config))
+        super().__init__(
             model_key,
             device_map=device_map,
             dispatch=True,
             **kwargs,
-        ).__dict__
-        self.name = model_key
+        )
+        self._model_key = model_key
 
-        self._model.eval()
-        # Left-pad explicitly rather than relying on nnsight's default (or a raw HF tokenizer's,
-        # which is "right" for e.g. Qwen). Every batched intervention here indexes with negative
-        # positions (PATCH_POS=-2, [:, -1]); those only align with the real, right-aligned tokens
-        # under LEFT padding. Set once, at construction, so no downstream call has to remember.
+        self._module.eval()
+        # Left-pad explicitly rather than relying on the default (a raw HF tokenizer's is "right"
+        # for e.g. Qwen). Every batched intervention here indexes with negative positions
+        # (PATCH_POS=-2, [:, -1]); those only align with the real, right-aligned tokens under
+        # LEFT padding. Set once, at construction, so no downstream call has to remember.
         self.tokenizer.padding_side = "left"
         self.tokenizer.pad_token = self.tokenizer.eos_token  # for generation
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        if (
-            hasattr(self.tokenizer, "bos_token") is False
-            or self.tokenizer.bos_token is None
-        ):
+        if getattr(self.tokenizer, "bos_token", None) is None:
             self.tokenizer.bos_token = self.tokenizer.eos_token
             self.tokenizer.bos_token_id = self.tokenizer.eos_token_id
-        self._model.generation_config.pad_token_id = self.tokenizer.eos_token_id
-        self.parse_config()
+        self._module.generation_config.pad_token_id = self.tokenizer.eos_token_id
 
+        if self.family_name not in SUPPORTED_FAMILIES:
+            logger.warning(
+                f"nnterp family {self.family_name!r} is not one of the reported families "
+                f"{SUPPORTED_FAMILIES}; the native path strings (layer_name_format, ...) may not "
+                f"match this model."
+            )
         logger.info(
-            f"loaded model <{model_key}> | size: {get_model_size(self._model)} | dtype: {determine_dtype(self._model)} | device: {self.device}"
+            f"loaded model <{model_key}> | family: {self.family_name} | "
+            f"size: {get_model_size(self._module)} | dtype: {self._module.dtype} | "
+            f"device: {self.device}"
         )
 
+    # -- identity and the transition shim ----------------------------------------
+
     @property
-    def device(self):
-        return determine_device(self._model)
+    def name(self) -> str:
+        """The model key (HF repo id or local path) the model was loaded from."""
+        return self._model_key
+
+    @property
+    def family_name(self) -> str:
+        """The nnterp family, i.e. the config's ``model_type`` (``"qwen2"``, ``"llama"``, ...)."""
+        return self.family.__name__.rsplit(".", 1)[-1]
+
+    @property
+    def _model(self) -> torch.nn.Module:
+        """Deprecated transition shim: the HF module (``self._module``). Unported modules hook it
+        with baukit or call it directly; ported code goes through nnterp's envoys instead."""
+        return self._module
+
+    # -- legacy sizes (aliases of nnterp's) --------------------------------------
+
+    @property
+    def n_layer(self) -> int:
+        return self.num_layers
+
+    @property
+    def n_embd(self) -> int:
+        return self.hidden_size
 
     @property
     def n_heads(self) -> int:
         """Number of *query* heads (post repeat_kv width for GQA models)."""
-        return determine_n_heads(self)
+        return self.num_heads
 
     @property
-    def head_dim(self) -> int:
-        """Per-head width of the attention inner space (read from the config when it declares
-        ``head_dim``; not always ``n_embd // n_heads``)."""
-        return determine_head_dim(self)
+    def n_kv_heads(self) -> int:
+        """Number of key/value heads (GQA). Equals ``n_heads`` for MHA models."""
+        return self.num_kv_heads
 
     @property
     def attn_inner_size(self) -> int:
         """Width of the o_proj INPUT (== n_heads * head_dim). Equals n_embd only when the model
         does not decouple head_dim from hidden_size."""
-        return self.n_heads * self.head_dim
+        return self.num_heads * self.head_dim
+
+    # -- legacy native module paths (reported families only) --------------------
+
+    layer_name_format = "model.layers.{}"
+    attn_module_name_format = "model.layers.{}.self_attn"
+    mlp_module_name_format = "model.layers.{}.mlp"
+    embedder_name = "model.embed_tokens"
+    final_layer_norm_name = "model.norm"
+    lm_head_name = "lm_head"
 
     @property
-    def n_kv_heads(self) -> int:
-        """Number of key/value heads (GQA). Equals ``n_heads`` for MHA models."""
-        return determine_n_kv_heads(self)
-
-    def parse_config(self) -> None:
-        if not is_supported_variant(self):
-            logger.error(
-                f"Unknown model type: {type(unwrap_model(self)).__name__}. Parsing may fail."
-            )
-
-        fields = {
-            "n_layer": len(determine_layers(self)),
-            "n_embd": determine_hidden_size(self),
-            "embedder_name": determine_embedding_layer_path(self),
-            "final_layer_norm_name": determine_final_layer_norm_path(self),
-            "lm_head_name": determine_lm_head_path(self),
-            "layer_name_format": determine_layer_name_format(self),
-            "mlp_module_name_format": "model.layers.{}.mlp",
-            "attn_module_name_format": "model.layers.{}.self_attn",
-        }
-        fields["layer_names"] = [
-            fields["layer_name_format"].format(i) for i in range(fields["n_layer"])
-        ]
-        for key, value in fields.items():
-            setattr(self, key, value)
-
-    def __call__(self, *args, **kwargs) -> Any:
-        """Call the model."""
-        return self._model(*args, **kwargs)
+    def layer_names(self) -> list[str]:
+        return [self.layer_name_format.format(i) for i in range(self.num_layers)]
 
 
 def get_model_size(
     model: torch.nn.Module, unit: Literal["B", "KB", "MB", "GB"] = "MB"
-) -> float:
+) -> str:
     size_all = model.get_memory_footprint()
     return bytes_to_human_readable(size_all, unit)
 
@@ -139,153 +177,7 @@ If not found in cache, model will be downloaded from HuggingFace to cache direct
         return model_name
 
 
-def unwrap_model(
-    net: ModelandTokenizer | LanguageModel | torch.nn.Module,
-) -> torch.nn.Module:
-    if isinstance(net, LanguageModel):
-        return net._model
-    if isinstance(net, torch.nn.Module):
-        return net
-    raise ValueError("mt must be a ModelandTokenizer or a torch.nn.Module")
-
-
 def unwrap_tokenizer(mt: ModelandTokenizer | AutoTokenizer) -> AutoTokenizer:
     if isinstance(mt, ModelandTokenizer):
         return mt.tokenizer
     return mt
-
-
-def _name_contains(mt, *substrings: str) -> bool:
-    """Fallback family check on ``config._name_or_path``."""
-    name = getattr(getattr(mt, "config", None), "_name_or_path", None)
-    return name is not None and any(s in name.lower() for s in substrings)
-
-
-def is_llama_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model is a Llama variant (Llama-3.3-70B-Instruct)."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    return isinstance(mt, transformers.LlamaForCausalLM) or _name_contains(mt, "llama")
-
-
-def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model is a Qwen2 variant (Qwen2.5 / Qwen2.5-Coder)."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    return isinstance(mt, transformers.Qwen2ForCausalLM) or _name_contains(mt, "qwen")
-
-
-def is_olmo_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model is an OLMo-3 variant (Olmo-3.1-32B Instruct / SFT)."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    return isinstance(mt, transformers.Olmo3ForCausalLM) or _name_contains(mt, "olmo")
-
-
-def is_glm_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model is a dense GLM-4 variant (GLM-4-32B-0414)."""
-    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
-        mt = unwrap_model(mt)
-    return isinstance(mt, transformers.Glm4ForCausalLM) or _name_contains(mt, "glm")
-
-
-def is_supported_variant(mt: Model | ModelandTokenizer) -> bool:
-    """All supported families share the ``model.layers.{i}`` / ``model.embed_tokens`` layout."""
-    return (
-        is_llama_variant(mt)
-        or is_qwen_variant(mt)
-        or is_olmo_variant(mt)
-        or is_glm_variant(mt)
-    )
-
-
-def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None:
-    """Get any example parameter for the model."""
-    model = unwrap_model(model)
-    return next(iter(model.parameters()), None)
-
-
-def _check_supported(model) -> None:
-    if not is_supported_variant(model):
-        raise ValueError(f"unknown model type: {type(model).__name__}")
-
-
-def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
-    model = unwrap_model(model)
-    _check_supported(model)
-    return "model.embed_tokens"
-
-
-def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
-    model = unwrap_model(model)
-    _check_supported(model)
-    return "model.norm"
-
-
-def determine_lm_head_path(model: ModelandTokenizer | Model) -> str:
-    model = unwrap_model(model)
-    _check_supported(model)
-    return "lm_head"
-
-
-def determine_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
-    """Return all hidden layer indices for the given model."""
-    model = unwrap_model(model)
-    assert isinstance(model, Model)
-    return (*range(model.config.num_hidden_layers),)
-
-
-def determine_layer_name_format(
-    model: ModelandTokenizer | Model,
-) -> str | None:
-    """Determine the format of layer names."""
-    model = unwrap_model(model)
-    if is_supported_variant(model):
-        return "model.layers.{}"
-
-
-def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
-    """Determine hidden rep size for the model."""
-    model = unwrap_model(model)
-    try:
-        return model.config.hidden_size
-    except AttributeError:
-        embed = baukit.get_module(model, determine_embedding_layer_path(model))
-        return embed.weight.shape[-1]
-
-
-def determine_n_heads(model: ModelandTokenizer | Model) -> int:
-    """Number of *query* attention heads."""
-    model = unwrap_model(model)
-    return model.config.num_attention_heads
-
-
-def determine_n_kv_heads(model: ModelandTokenizer | Model) -> int:
-    """Number of key/value heads (GQA). Falls back to n_heads (MHA) when unspecified."""
-    model = unwrap_model(model)
-    return getattr(model.config, "num_key_value_heads", None) or determine_n_heads(model)
-
-
-def determine_head_dim(model: ModelandTokenizer | Model) -> int:
-    """Per-head width of the attention inner space.
-
-    Prefers the config's explicit ``head_dim``, which some architectures decouple from
-    ``hidden_size``. Falls back to ``hidden_size // n_heads`` for models that don't declare it
-    (Qwen2, Llama, GLM-4 dense, ... — where the two agree anyway)."""
-    model = unwrap_model(model)
-    hd = getattr(model.config, "head_dim", None)
-    if hd:
-        return int(hd)
-    return determine_hidden_size(model) // determine_n_heads(model)
-
-
-def determine_device(model: ModelandTokenizer | Model) -> torch.device | None:
-    """Determine device model is running on."""
-    parameter = any_parameter(model)
-    return parameter.device if parameter is not None else None
-
-
-def determine_dtype(model: ModelandTokenizer | Model) -> torch.dtype | None:
-    """Determine dtype of model."""
-    parameter = any_parameter(model)
-    return parameter.dtype if parameter is not None else None
