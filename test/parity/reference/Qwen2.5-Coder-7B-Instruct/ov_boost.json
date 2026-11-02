@@ -1,0 +1,176 @@
+{
+ "case": "ov_boost",
+ "padded": false,
+ "data": {
+  "datatype": "list[str]",
+  "predicate": "total_length",
+  "frontier": "the total number of characters across all words",
+  "prompt": "<|im_start|>system\nYou are a helpful assistant proficient in programming. Always wrap your code inside <code></code> blocks. Just the code, no need to comment or explain.<|im_end|>\n<|im_start|>user\nWrite a Python program that implements a function `func` which, given a list of strings `words`, computes:\n(1) the number of capitalized words\n(2) the total number of characters across all words\n<|im_end|>\n<|im_start|>assistant\n<code>\ndef func(words: list[str]):\n    a = sum(1 for w in words if w[:1].isupper())\n    b = 0 + ",
+  "greedy_continue": {
+   "base": {
+    "gen": "1\n    for i in words:\n        b += len(i)\n    return a, b\n</code>",
+    "ids": [
+     16,
+     198,
+     262,
+     369,
+     600,
+     304,
+     4244,
+     510,
+     286,
+     293,
+     1421,
+     2422,
+     1956,
+     340,
+     262,
+     470,
+     264,
+     11,
+     293,
+     198,
+     522,
+     1851,
+     29
+    ]
+   },
+   "boost_heads60": {
+    "gen": "1\n    for i in words:\n        b += len(i)\n    return a, b\n</code>",
+    "ids": [
+     16,
+     198,
+     262,
+     369,
+     600,
+     304,
+     4244,
+     510,
+     286,
+     293,
+     1421,
+     2422,
+     1956,
+     340,
+     262,
+     470,
+     264,
+     11,
+     293,
+     198,
+     522,
+     1851,
+     29
+    ]
+   },
+   "boost_band448": {
+    "gen": "1\n    for w in words:\n        b += len(w)\n    return a, b\n</code>",
+    "ids": [
+     16,
+     198,
+     262,
+     369,
+     289,
+     304,
+     4244,
+     510,
+     286,
+     293,
+     1421,
+     2422,
+     3622,
+     340,
+     262,
+     470,
+     264,
+     11,
+     293,
+     198,
+     522,
+     1851,
+     29
+    ]
+   }
+  },
+  "run_obstacle": {
+   "base_rhs": "0 + 1",
+   "base_gen": "1\n    for i in words:\n        b += len(i)\n    return a, b\n</code>",
+   "boost_rhs": "0 + 1",
+   "boost_gen": "1\n    for i in words:\n        b += len(i)\n    return a, b\n</code>"
+  },
+  "_meta_boost_paths_agree": true
+ },
+ "manifest": {
+  "step0_logits/clean/top_ids": {
+   "kind": "topk_ids",
+   "shape": [
+    50
+   ],
+   "dtype": "int64",
+   "stored_dtype": "int64"
+  },
+  "step0_logits/clean/top_vals": {
+   "kind": "topk_vals",
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "stored_dtype": "float32",
+   "of": "logits"
+  },
+  "step0_logits/boost_head_ov/heads60/top_ids": {
+   "kind": "topk_ids",
+   "shape": [
+    50
+   ],
+   "dtype": "int64",
+   "stored_dtype": "int64"
+  },
+  "step0_logits/boost_head_ov/heads60/top_vals": {
+   "kind": "topk_vals",
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "stored_dtype": "float32",
+   "of": "logits"
+  },
+  "step0_logits/boost_head_ov/band448/top_ids": {
+   "kind": "topk_ids",
+   "shape": [
+    50
+   ],
+   "dtype": "int64",
+   "stored_dtype": "int64"
+  },
+  "step0_logits/boost_head_ov/band448/top_vals": {
+   "kind": "topk_vals",
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "stored_dtype": "float32",
+   "of": "logits"
+  },
+  "step0_logits/boosted_heads/heads60/top_ids": {
+   "kind": "topk_ids",
+   "shape": [
+    50
+   ],
+   "dtype": "int64",
+   "stored_dtype": "int64"
+  },
+  "step0_logits/boosted_heads/heads60/top_vals": {
+   "kind": "topk_vals",
+   "shape": [
+    50
+   ],
+   "dtype": "float32",
+   "stored_dtype": "float32",
+   "of": "logits"
+  }
+ },
+ "_meta": {
+  "seconds": 5.33
+ }
+}
