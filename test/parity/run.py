@@ -481,7 +481,7 @@ def case_kv_transfer(E) -> Rec:
     instance (int, py-py), V x1 and x4, ``readout=False``, both head sets. Extra: step-0 logits under
     ``intervention_stack``; the cached source k/v; and GoalScope read-outs at the pivot through ``goalscope_readout``
     with the 7B steer layers and 32 tokens (its defaults, layers 35-46 and 128 tokens, do not fit a 28-layer model).
-    The patched read-out runs ``get_o_proj_inputs_batch``'s ``patch_interface`` path."""
+    The patched read-out enters ``intervention_stack`` around ``apply_goalscope``'s source trace (``legacy_hooks``)."""
     mt, ctx, r = E.mt, E.ctx, Rec()
     old = DATA.CPP_NOTE_IN_SYSTEM
     DATA.CPP_NOTE_IN_SYSTEM = True  # kv_transfer_eval.main sets this module global
@@ -513,11 +513,8 @@ def case_kv_transfer(E) -> Rec:
                     lg = mt._model(input_ids=dst["input_ids"], attention_mask=dst["attention_mask"]).logits[0, -1]
                 r.topk(f"{arm}/step0_logits/v{v:g}", lg)
 
-                def iface(mt_, inputs, patches=None, model_kwargs=None, _stack=stack):
-                    with _stack():
-                        return mt_._model(**dict(inputs), **dict(model_kwargs or {}))
-
-                ro = FUNC.goalscope_readout("", dst, L - 1, iface=iface, **ro_kw)[0]["patched_gen"]
+                # `iface` is the hook context factory itself, as `run_patched` passes it
+                ro = FUNC.goalscope_readout("", dst, L - 1, iface=stack, **ro_kw)[0]["patched_gen"]
                 out[f"v{v:g}"] = dict(gen_patched=pat["gen_patched"], gen_ids=_ids(mt, pat["gen_patched"]),
                                       ro_patched_7b=ro, ro_ids=_ids(mt, ro), ro_patched_default=pat["ro_patched"])
             r.data[arm] = out

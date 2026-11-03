@@ -29,7 +29,7 @@ Appendix files that `201_Appendix.tex` does not `\input` (`boundary`, `cpp`, `di
 
 ```
 src/models.py            ModelandTokenizer (nnterp StandardizedTransformer on nnsight 0.8; Qwen2, Llama, OLMo-3, GLM-4)
-src/functional.py        generate_with_patch (baukit), get_hs, ...
+src/functional.py        generate_with_patch (mt.generate + tracer.iter on layer_output), get_hs, ...
 src/tokens.py            prepare_input (left padding), find_token_range
 src/utils/               env_utils (paths), oracle_llms (ask_claude + cache), logging, experiment_utils
 src/goals/               head localization (head_loc_*), head_sets.py, goalscope.py (+ OVReader),

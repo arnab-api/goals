@@ -280,7 +280,7 @@ intervention fails a string check rather than only a logit tolerance. Interventi
 | `ablation_blind` | `frontier_block_positions`, `complement_heads`, `generate_blocking_span_cached` | `list[int]_python_000` | baseline / ablated (spare heads60, blind 472) / control generations |
 | `ablation_sink` | `random_heads_like`, `sink_generate_cached` | `str_python_001` | baseline / ablated heads60 / control / ablated band448 generations |
 | `ov_boost` | `build_obstacle_prompt`, `greedy_continue`, `boost_head_ov`, the script's `boosted_heads` and `run_obstacle` | `candidates()[0]` = list[str] `total_length`, obstacle `" 0 + "` | continuations (clean, x2 per arm, the script's path), step-0 logits of each path |
-| `kv_transfer` | `sample_multi_instances`, `build_geometry`, `clean_runs`, `run_patched` (`readout=False`), `intervention_stack`, `cache_src_proj`, `goalscope_readout` | instance 0 of int py-py (seed 1123), V x1 and x4 | geometry, clean and patched generations per arm, step-0 logits, source k/v of 2 layers, read-outs at the pivot through the `patch_interface` path |
+| `kv_transfer` | `sample_multi_instances`, `build_geometry`, `clean_runs`, `run_patched` (`readout=False`), `intervention_stack`, `cache_src_proj`, `goalscope_readout` | instance 0 of int py-py (seed 1123), V x1 and x4 | geometry, clean and patched generations per arm, step-0 logits, source k/v of 2 layers, read-outs at the pivot with the KV patch entered around the source trace (`iface` -> `legacy_hooks`) |
 | `q_transfer` | `diff_trigger_setups`, `run_q_transfer_intervention` (`compute_readout=False`) | instance 0 of order_diff int py-py (cell seed as in the script) | every raw field (generations, gaze scores, selection, restrict set, pivot attention) per arm, the source query cache |
 | `mask_grad_equal` | `get_next_token_probs_batch`, `get_o_proj_inputs_batch`, `forward_with_src_replacement`, `HeadMask` | Coder-32B pivot instances 0 and 24 (equal source / destination / target lengths, no padding) | one `train_head_mask` step at mask 0.5: mask gradient, KL and sparsity losses, patched logits (full) |
 | `mask_grad_padded` | same | instances 0 and 52 (source, destination and target lengths all differ) | same, **padded** |
@@ -290,7 +290,8 @@ intervention fails a string check rather than only a logit tolerance. Interventi
 The port keeps these names and signatures, or changes `run.py` in the same PR (and says so):
 
 - `src.nrgs.functional.setup(model_name, device_map)` returning a `Ctx` and binding the module global `mt`;
-  `boost_head_ov(mt, heads, alpha)`; `goalscope_readout(tag, prompt, pivot, heads=, iface=, layers=, maxnew=, ctx=)`;
+  `boost_head_ov(mt, heads, alpha)`; `goalscope_readout(tag, prompt, pivot, heads=, iface=, layers=, maxnew=, ctx=)`
+  (`iface`: a zero-argument callable returning a hook context, passed on as `apply_goalscope(legacy_hooks=)`);
   `cache_src_proj(prompt, positions, layers, which, ctx=None)`;
   `run_q_transfer_intervention(mt, inst, patch_heads, readout_heads=, *, max_new, alpha, compute_readout, gsr_max_new)`.
 - `src.nrgs.kv_transfer`: `sample_multi_instances`, `build_geometry(inst, *, span, ctx)`,
@@ -303,8 +304,8 @@ The port keeps these names and signatures, or changes `run.py` in the same PR (a
   `greedy_continue(mt, input_ids, attention_mask, max_new_tokens)`, `OVReader(mt, heads)` with
   `.apply_probe_on_prompt`, `.resid_ov_vec`, `.probe_inputs`, and `_build_goalscope_prompt` / `_build_causality_prompt`.
 - `src.goals.head_loc_attn`: `HeadMask(n_layers_tested, n_heads)` with `.values`,
-  `get_o_proj_inputs_batch(mt, prompts, layers, token_positions=None, patch_interface=None)`,
-  `collect_head_steering_vecs(mt, src_tokenized, selected_heads, token_positions, patch_interface=None)`,
+  `get_o_proj_inputs_batch(mt, prompts, layers, token_positions=None, interventions=None)`,
+  `collect_head_steering_vecs(mt, src_tokenized, selected_heads, token_positions, interventions=None)`,
   `forward_with_src_replacement(mt, dest_inputs, src_head_inps, mask, mask_layers, alpha, patch_positions,
   return_past_key_values)`.
 - `src.goals.head_loc_pivot`: `get_next_token_probs(mt, prompt)`, `get_next_token_probs_batch(mt, prompts)`,

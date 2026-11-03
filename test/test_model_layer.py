@@ -118,7 +118,7 @@ def test_get_o_proj_inputs_batch():
 
 
 def test_generate_with_patch():
-    """The baukit path through the ``_model`` shim, against the same edit made with nnterp."""
+    """``generate_with_patch`` against the same edit written by hand under ``tracer.iter``."""
     mt = model()
     L, alpha = 8, 2.0
     with torch.no_grad():

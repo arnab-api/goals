@@ -189,12 +189,11 @@ def proj_patch_hooks(mt, patch_specs):
             h.remove()
 
 
-def make_patch_interface(mt, patch_specs):
-    def iface(mt, inputs, patches=None, model_kwargs=None):
-        with proj_patch_hooks(mt, patch_specs):
-            return mt._model(**dict(inputs), **dict(model_kwargs or {}))
-
-    return iface
+def make_patch_hooks(mt, patch_specs):
+    """``() -> context`` entering :func:`proj_patch_hooks`: the ``legacy_hooks`` form that
+    ``apply_goalscope`` / ``get_attention_matrices`` enter around their trace (PyTorch hooks
+    until these interventions are ported to nnterp ``interventions``)."""
+    return lambda: proj_patch_hooks(mt, patch_specs)
 
 
 def pivot_attn(info, heads, positions, pivot):
@@ -230,7 +229,7 @@ def goalscope_readout(
         goalscope_prompt=_gsp,
         token_positions=[pivot],
         include_noncode=False,
-        patch_interface=iface,
+        legacy_hooks=iface,
     )
     for r in res:
         rich_print(
@@ -570,7 +569,7 @@ def run_q_transfer_intervention(
     q_layers = sorted({l for l, _ in patch_heads})
     q_src = cache_src_proj(src_prompt, [piv_src], q_layers, "q", ctx=ctx)
     pf = [dict(which="q", cache=q_src, heads=heads_per_layer(patch_heads), positions=[piv_dst])]
-    iface = make_patch_interface(mt, pf)  # PLAIN patch — used for attention (gaze) regardless of alpha
+    iface = make_patch_hooks(mt, pf)  # PLAIN patch — used for attention (gaze) regardless of alpha
 
     # OV boost of patch_heads at the decision token, active only on the PATCHED readout
     _boost_heads = sorted(set(patch_heads))
@@ -579,11 +578,12 @@ def run_q_transfer_intervention(
         if alpha == 1.0:
             return iface
 
-        def _if(mt, inputs, patches=None, model_kwargs=None):
+        @contextmanager
+        def _hooks():
             with proj_patch_hooks(mt, pf), boost_head_ov(mt, _boost_heads, alpha):
-                return mt._model(**dict(inputs), **dict(model_kwargs or {}))
+                yield
 
-        return _if
+        return _hooks
 
     # generations
     gen_src = greedy(src_tok, max_new=max_new, ctx=ctx)
@@ -592,7 +592,7 @@ def run_q_transfer_intervention(
     # (1) selection: pivot gaze (readout heads, value-weighted) under the query patch, no boost
     sel_preds = list(inst.task.predicates)
     sel_items = {p.id: list(range(*token_span(dst_prompt, p.description, ctx=ctx))) for p in sel_preds}
-    gi = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=iface)
+    gi = get_attention_matrices(dst_tok, mt, value_weighted=True, legacy_hooks=iface)
     gi = gi[0] if isinstance(gi, list) else gi
     span = sorted({q for v in sel_items.values() for q in v})
     at = dict(zip(span, pivot_attn(gi, list(readout_heads), span, piv_dst)))
@@ -634,7 +634,7 @@ def run_q_transfer_intervention(
     # value-weighted pivot→TASK attention over the readout (goal) heads, clean vs patched
     if task_positions is not None:
         clean_i = get_attention_matrices(dst_tok, mt, value_weighted=True)
-        patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, patch_interface=iface)
+        patched_i = get_attention_matrices(dst_tok, mt, value_weighted=True, legacy_hooks=iface)
         a_clean = pivot_attn(clean_i, list(readout_heads), task_positions, piv_dst)
         a_patched = pivot_attn(patched_i, list(readout_heads), task_positions, piv_dst)
         attn = dict(

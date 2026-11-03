@@ -1,9 +1,9 @@
 import gc
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
-import baukit
 import torch
 
 from src.models import ModelandTokenizer
@@ -31,11 +31,17 @@ def is_nontrivial_prefix(prediction: str, target: str) -> bool:
 
 @dataclass(frozen=False)
 class PatchSpec:
-    location: tuple[str, int]
+    location: tuple[int | str, int]
     patch: torch.Tensor
     strategy: Literal["replace", "add", "add_norm"] = "replace"
     on_pass: Literal["first", "all"] = "all"
     """
+    One edit of the residual stream leaving a decoder block, ``mt.layers[i].layer_output[:, index]``.
+
+    ``location = (layer, index)``: ``layer`` is the block index ``i``, or, while unported callers
+    still pass it, the native path ``mt.layer_name_format.format(i)``; ``index`` is the token
+    position. ``patch`` is ``(d,)`` or ``(B, d)``, one row per batch item.
+
     ``strategy="add_norm"`` — norm-relative add: ``patch`` is a UNIT direction
     (scale it by any coefficient before passing it in) and the applied update is
     ``h + ||h|| * patch``, so the injection is a fixed fraction of the local
@@ -43,13 +49,12 @@ class PatchSpec:
     comes from the caller; the magnitude is read at application time, because
     ``||h||`` varies by layer, by decode step and by batch item.
 
-    ``on_pass="first"`` — apply the patch only during the prefill / first-token
-    generation step (the forward pass that consumes the full prompt).
+    ``on_pass="first"`` — apply the patch only on the prompt call (generate step 0, the forward
+    that consumes the full prompt and produces the first new token).
 
-    ``on_pass="all"`` — apply at every autoregressive step.  Because KV-cache
-    is enabled by default, only token positions 0 or -1 are valid for
-    ``on_pass="all"``; any other fixed position would be out-of-bounds on
-    decode steps where the key-dim is 1.
+    ``on_pass="all"`` — apply on the prompt call and on the decode steps (all of them, or the first
+    ``n_steer_tokens`` of them; see :func:`generate_with_patch`).  A decode step's stream is
+    ``[B, 1, d]`` (KV cache), so only token positions 0 or -1 are valid for ``on_pass="all"``.
     """
 
 
@@ -59,11 +64,11 @@ def _apply_patch_to_state(
     patch: torch.Tensor,
     strategy: str,
 ) -> None:
+    """In-place patch application on ``current_state[:, index, :]``."""
     if patch.dtype != current_state.dtype:
         patch = patch.to(current_state.dtype)
     if patch.device != current_state.device:
         patch = patch.to(current_state.device)
-    """In-place patch application."""
     if strategy == "replace":
         current_state[:, index, :] = patch
     elif strategy == "add":
@@ -83,88 +88,25 @@ def _apply_patch_to_state(
         )
 
 
-def _generate_baukit(
-    mt: ModelandTokenizer,
-    inputs: TokenizerOutput,
-    patches: list["PatchSpec"],
-    max_new_tokens: int,
-    do_sample: bool,
-    n_steer_tokens: Optional[int] = None,
-    **kwargs,
-) -> torch.Tensor:
-    """Run mt._model.generate() with baukit forward-hook patching.
+def _layer_index(mt: ModelandTokenizer, layer: int | str) -> int:
+    """The block index of a ``PatchSpec`` location: an int as is, or the native layer path
+    ``mt.layer_name_format.format(i)`` (``"model.layers.12"``) parsed back to ``i``."""
+    if isinstance(layer, int):
+        return layer
+    prefix, _, suffix = mt.layer_name_format.partition("{}")
+    middle = layer[len(prefix) : len(layer) - len(suffix)]
+    if layer.startswith(prefix) and layer.endswith(suffix) and middle.isdigit():
+        return int(middle)
+    raise ValueError(
+        f"PatchSpec location {layer!r} is not a decoder layer: pass the block index or "
+        f"{mt.layer_name_format!r}. generate_with_patch edits mt.layers[i].layer_output only."
+    )
 
-    Baukit hooks receive real tensors (not proxies), so the shape trick is
-    unambiguous.
 
-    ``n_steer_tokens`` limits how many decode steps patches with
-    ``on_pass="all"`` are applied.  After that many decode steps the patch is
-    silently skipped; ``on_pass="first"`` patches are unaffected.
-    """
-    if not patches:
-        out = mt._model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            **kwargs,
-        )
-        return out.sequences if hasattr(out, "sequences") else out
-
-    modules_to_patches: dict[str, list["PatchSpec"]] = {}
-    for p in patches:
-        modules_to_patches.setdefault(p.location[0], []).append(p)
-
-    # Use the first (shallowest) hooked layer as a step-boundary sentinel:
-    # it fires exactly once per forward pass, so we increment the decode-step
-    # counter only when it fires on a decode step (is_first_pass=False).
-    sorted_layers = sorted(modules_to_patches.keys())
-    sentinel_layer = sorted_layers[0]
-    decode_step = [0]  # mutable so the closure can write to it
-
-    def hook(output, layer):
-        nonlocal decode_step
-        is_tuple = isinstance(output, tuple)
-        actual = output[0] if is_tuple else output
-        if actual.dim() == 2:
-            actual = actual.unsqueeze(0)
-
-        is_first_pass = actual.shape[1] > 1
-
-        # Increment decode-step counter once per decode pass (at the sentinel layer).
-        if not is_first_pass and layer == sentinel_layer:
-            decode_step[0] += 1
-
-        for p in modules_to_patches.get(layer, []):
-            if p.on_pass == "first":
-                should_apply = is_first_pass
-            elif p.on_pass == "all":
-                if is_first_pass:
-                    should_apply = True
-                elif n_steer_tokens is not None:
-                    should_apply = decode_step[0] <= n_steer_tokens
-                else:
-                    should_apply = True
-            else:
-                should_apply = False
-
-            if should_apply:
-                _apply_patch_to_state(actual, p.location[1], p.patch, p.strategy)
-
-        return (actual,) + output[1:] if is_tuple else actual
-
-    with baukit.TraceDict(
-        module=mt._model,
-        layers=list(modules_to_patches.keys()),
-        edit_output=hook,
-    ):
-        out = mt._model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            **kwargs,
-        )
-
-    return out.sequences if hasattr(out, "sequences") else out
+# nnsight's warning when a ``tracer.iter[:n]`` loop asks for a step the run did not make. A
+# patched generation whose every row hits EOS before step ``n`` ends that way; the edits for the
+# steps that did run have landed, and nothing follows the loop in its invoke.
+_LOOP_CUT_SHORT = r".*was never reached: the loop asked for a step the run did not make"
 
 
 def generate_with_patch(
@@ -173,81 +115,89 @@ def generate_with_patch(
     max_new_tokens: int = 16,
     patches: Optional[list[PatchSpec]] = None,
     do_sample: bool = True,
-    patch_interface: Literal["baukit"] | callable = "baukit",
     remove_prefix: bool = False,
     skip_special_tokens: bool = True,
     n_steer_tokens: Optional[int] = None,
     **kwargs,
 ) -> list[str]:
-    """Generate text with optional activation patches.
+    """Generate text with optional residual-stream patches, on ``mt.generate`` + ``tracer.iter``.
+
+    Each patch edits ``mt.layers[i].layer_output[:, index]`` in place (see :class:`PatchSpec`).
+    Generate step 0 is the prompt call; step ``k >= 1`` is the decode step that produces new token
+    ``k + 1``. ``on_pass="first"`` patches apply at step 0 only; ``on_pass="all"`` patches apply at
+    step 0 and at decode steps ``1..n_steer_tokens`` (every step when ``n_steer_tokens`` is None).
+    So ``n_steer_tokens`` counts DECODE steps, the prompt call not included: ``n_steer_tokens=k``
+    patches ``k + 1`` forward passes. (``src.goals.goalscope.headpatched_generate`` counts the
+    prompt call as the first of its ``n_steer_tokens``.) Within a step the edits run in layer
+    order; patches at one layer apply in the order given.
 
     Args:
         mt:               Model + tokenizer.
-        inputs:           Pre-tokenized TokenizerOutput.
+        inputs:           Pre-tokenized TokenizerOutput (left-padded).
         max_new_tokens:   Maximum tokens to generate.
         patches:          List of PatchSpec objects.  Each patch controls its own
-                          ``strategy`` ("replace"|"add") and ``on_pass``
+                          ``strategy`` ("replace"|"add"|"add_norm") and ``on_pass``
                           ("first"|"all").  Patches with ``on_pass="all"`` must
                           have ``location[1]`` in {0, -1}.
         do_sample:        Whether to sample (True) or greedy-decode (False).
-        patch_interface:  "baukit" (default) patches via baukit forward hooks
-                          (``_generate_baukit``); a callable is used as a custom
-                          generation interface instead.
         remove_prefix:    Strip the input prompt tokens from the returned strings.
         skip_special_tokens: Passed to batch_decode.
-        n_steer_tokens:   If set, patches with ``on_pass="all"`` are applied for
-                          only the first ``n_steer_tokens`` decode steps; after
-                          that the model generates freely.  Requires
-                          ``patch_interface="baukit"``.
+        n_steer_tokens:   If set, patches with ``on_pass="all"`` are applied on
+                          the prompt call and the first ``n_steer_tokens`` decode
+                          steps only; after that the model generates freely.
+        **kwargs:         Forwarded to ``generate`` (decoding follows the checkpoint's
+                          ``generation_config`` otherwise).
     """
     if "offset_mapping" in inputs:
         inputs.pop("offset_mapping")
 
     if patches is not None and isinstance(patches, PatchSpec):
         patches = [patches]
+    patches = list(patches or [])
 
-    if n_steer_tokens is not None and patch_interface != "baukit":
-        raise ValueError(
-            "n_steer_tokens requires patch_interface='baukit'."
-        )
+    # Group the patches by block, in forward order (patches at one block keep the given order).
+    by_layer: dict[int, list[PatchSpec]] = {}
+    for p in patches:
+        if p.on_pass not in ("first", "all"):
+            raise ValueError(f"on_pass must be 'first' or 'all', got {p.on_pass!r}")
+        # A decode step's stream is [B, 1, d] (KV cache): only position 0 or -1 exists there.
+        if p.on_pass == "all" and p.location[1] not in (0, -1):
+            raise ValueError(
+                f"PatchSpec with on_pass='all' requires location[1] to be "
+                f"0 or -1 (got {p.location[1]}). With KV-cache, decode steps "
+                f"have seq_len=1, so any other fixed position is out-of-bounds."
+            )
+        by_layer.setdefault(_layer_index(mt, p.location[0]), []).append(p)
+    # Envoys bound once, outside the step loop.
+    plan = [(mt.layers[i], by_layer[i]) for i in sorted(by_layer)]
 
-    if patches:
-        # Validate on_pass="all" constraint: KV-cache makes fixed interior
-        # positions invalid after the prefill step.
-        for p in patches:
-            if p.on_pass == "all" and p.location[1] not in (0, -1):
-                raise ValueError(
-                    f"PatchSpec with on_pass='all' requires location[1] to be "
-                    f"0 or -1 (got {p.location[1]}). With KV-cache, decode steps "
-                    f"have seq_len=1, so any other fixed position is out-of-bounds."
-                )
+    # Steps carrying an "all" patch: the prompt call + n_steer_tokens decode steps.
+    n_all = max_new_tokens if n_steer_tokens is None else min(max_new_tokens, n_steer_tokens + 1)
+    n_steps = n_all if any(p.on_pass == "all" for p in patches) else (1 if patches else 0)
 
-        # Sort patches by layer depth so shallower patches apply first.
-        try:
-            patches = sorted(patches, key=lambda p: int(p.location[0].split(".")[2]))
-        except (IndexError, ValueError):
-            pass  # Non-standard layer name format — apply in given order.
+    start = inputs["input_ids"].shape[1] if remove_prefix else 0
 
-    start = inputs.input_ids.shape[1] if remove_prefix else 0
+    with torch.no_grad(), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=_LOOP_CUT_SHORT, category=UserWarning)
+        with mt.generate(max_new_tokens=max_new_tokens, do_sample=do_sample, **kwargs) as tracer:
+            with tracer.invoke(dict(inputs)):
+                if n_steps:
+                    for step in tracer.iter[:n_steps]:
+                        for layer, layer_patches in plan:
+                            active = [
+                                p for p in layer_patches
+                                if (p.on_pass == "first" and step == 0)
+                                or (p.on_pass == "all" and step < n_all)
+                            ]
+                            if active:
+                                h = layer.layer_output
+                                for p in active:
+                                    _apply_patch_to_state(h, p.location[1], p.patch, p.strategy)
+            # Its own invoke, so an early EOS that cuts the step loop short cannot drop it.
+            with tracer.invoke():
+                out = tracer.result.save()
 
-    if type(patch_interface) is str:
-        if patch_interface != "baukit":
-            raise ValueError(f"patch_interface must be 'baukit' or a callable, got {patch_interface!r}")
-        sequences = _generate_baukit(
-            mt, inputs, patches or [], max_new_tokens, do_sample,
-            n_steer_tokens=n_steer_tokens, **kwargs
-        )
-    else:
-        # Custom interface provided by caller.
-        sequences = patch_interface(
-            mt=mt,
-            inputs=inputs,
-            patches=patches or [],
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            **kwargs,
-        )
-
+    sequences = getattr(out, "sequences", out)
     return mt.tokenizer.batch_decode(
         sequences[:, start:], skip_special_tokens=skip_special_tokens
     )
@@ -258,18 +208,6 @@ def get_module_nnsight(model, layer_name):
     for name in layer_name.split("."):
         layer = layer[int(name)] if name.isdigit() else getattr(layer, name)
     return layer
-
-
-def patch_with_baukit(
-    mt: ModelandTokenizer,
-    inputs: TokenizerOutput,
-    patches: Optional[list[PatchSpec]] = None,
-    model_kwargs: Optional[dict] = None,
-):
-    """Default ``patch_interface`` of ``src.attention.get_attention_matrices``: a plain forward
-    (that function never passes patches)."""
-    assert not patches, "patch_with_baukit is a plain forward; pass a custom patch_interface to patch"
-    return mt._model(**inputs, **(model_kwargs or {}))
 
 
 @torch.no_grad()

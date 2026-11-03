@@ -36,7 +36,6 @@ import time
 
 sys.path.append(".")
 
-import baukit
 import torch
 from tqdm.auto import tqdm
 
@@ -80,29 +79,24 @@ BATCH_SIZE = 16  # read-outs per batched greedy decode (batch composition affect
 # ══════════════════════════════════════════════════════════════════════════════
 @torch.no_grad()
 def extract_residual_latents(mt, prompt, positions, layers, source="resid"):
-    """``(n_layers, n_pos, n_embd)`` source latents, one forward pass.
+    """``(n_layers, n_pos, n_embd)`` source latents, one trace.
 
-    ``source="resid"`` reads the *output* of each decoder layer (the residual stream after that
-    block); ``source="attn"`` reads the *output* of each layer's self-attention module (the whole
-    attention block's contribution — o_proj output, the summed head writes). Both live in the
-    residual (n_embd) space ``apply_goalscope`` injects into, as the PatchScope construction requires.
+    ``source="resid"`` reads ``mt.layers[l].layer_output`` (the residual stream after that block);
+    ``source="attn"`` reads ``mt.layers[l].self_attn.attention_output``: what the attention block
+    adds to the residual stream. On Qwen2 and Llama that is the attention module's output (o_proj
+    output, the summed head writes); on a family with a norm after the attention (OLMo-3, GLM-4)
+    it is that norm's output, the tensor the block actually adds. Both live in the residual
+    (n_embd) space ``apply_goalscope`` injects into, as the PatchScope construction requires.
     """
     inp = prepare_input(prompts=prompt, tokenizer=mt)
-    fmt = mt.attn_module_name_format if source == "attn" else mt.layer_name_format
-    names = [fmt.format(l) for l in layers]
-    idx = torch.tensor(list(positions))
-    cache: dict[str, torch.Tensor] = {}
-
-    def hook(output, layer):
-        h = output[0] if isinstance(output, tuple) else output
-        cache[layer] = h[0].index_select(0, idx.to(h.device)).float().cpu()
-        return output
-
-    with baukit.TraceDict(mt._model, names, edit_output=hook):
-        mt._model(**dict(inp))
-    missing = [n for n in names if n not in cache]
-    assert not missing, f"no activations captured for {missing[:3]}"
-    return torch.stack([cache[n] for n in names])  # (n_layers, n_pos, n_embd)
+    idx = list(positions)
+    blocks = [mt.layers[l] for l in layers]
+    saved = []
+    with mt.trace(dict(inp)):
+        for block in blocks:
+            value = block.self_attn.attention_output if source == "attn" else block.layer_output
+            saved.append(value[0, idx].save())
+    return torch.stack([h.float().cpu() for h in saved])  # (n_layers, n_pos, n_embd)
 
 
 @torch.no_grad()
@@ -148,14 +142,9 @@ def residual_patchscope(
                 attention_mask=dest_attn.expand(B, -1).clone(),
             )
         )
-        v = (alpha * vecs[s : s + B]).to(mt._model.dtype)
+        v = (alpha * vecs[s : s + B]).to(mt.dtype)
         patches = [
-            PatchSpec(
-                location=(mt.layer_name_format.format(li), -1),
-                patch=v,
-                strategy="add_norm",
-                on_pass="all",
-            )
+            PatchSpec(location=(li, -1), patch=v, strategy="add_norm", on_pass="all")
             for li in steer_layers
         ]
         gens = generate_with_patch(
@@ -165,7 +154,6 @@ def residual_patchscope(
             patches=patches,
             n_steer_tokens=None,
             do_sample=False,
-            patch_interface="baukit",
             remove_prefix=True,
             skip_special_tokens=True,
         )

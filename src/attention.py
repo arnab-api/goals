@@ -1,15 +1,14 @@
 import logging
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 import numpy as np
 import torch
 from dataclasses_json import DataClassJsonMixin
 
-from src.functional import (
-    patch_with_baukit,
-    prepare_input,
-)
 from src.models import ModelandTokenizer
+from src.tokens import prepare_input
 from src.utils.typing import TokenizerOutput
 
 logger = logging.getLogger(__name__)
@@ -33,28 +32,18 @@ class AttentionInformation(DataClassJsonMixin):
     logits: torch.Tensor | None = None
 
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
 @torch.inference_mode()
 def get_attention_matrices(
     input: str | list[str] | TokenizerOutput,
     mt: ModelandTokenizer,
     value_weighted: bool = False,
-    patch_interface: callable = patch_with_baukit,
+    interventions: Optional[Callable[[ModelandTokenizer], None]] = None,
+    legacy_hooks: Optional[Callable[[], AbstractContextManager]] = None,
 ) -> "AttentionInformation | list[AttentionInformation]":
     """
+    Every layer's attention pattern, ``mt.layers[l].self_attn.attention_probabilities``, read in one
+    trace (needs ``attn_implementation="eager"``).
+
     Parameters:
         input: str, list[str], or TokenizerOutput.
             - str            => single prompt; returns one AttentionInformation
@@ -65,10 +54,23 @@ def get_attention_matrices(
         value_weighted: bool.
             - False => returns attention masks after softmax (the attention pattern produced inside the model)
             - True  => weights attention by ||v_k|| to reflect the actual contribution of source tokens
+              (``attention_values``, expanded over the GQA groups with ``repeat_interleave``)
+        interventions: optional ``interventions(mt)``, called inside the trace before the reads,
+            in the invoke that carries the inputs; the reads run in a second, empty invoke. Same
+            composition rule as :func:`src.goals.head_loc_attn.get_o_proj_inputs_batch`. It must
+            not touch ``attention_probabilities`` / ``attention_scores`` itself: two invokes
+            cannot both touch those today (nnsight raises a ``TypeError``).
+        legacy_hooks: deprecated, for the NRGS interventions that are still PyTorch hooks on
+            ``mt._model``: a zero-argument callable returning a context manager, entered around
+            the trace. Goes when those interventions are ported to ``interventions``.
     Returns:
         AttentionInformation if a single str was passed, else list[AttentionInformation].
         Each AttentionInformation has attention_matrices of shape (layers, heads, tokens, tokens).
     """
+    reason = mt.support(layer=0)["self_attn.attention_probabilities"]
+    if reason is not None:
+        raise ValueError(f"get_attention_matrices reads attention_probabilities: {reason}")
+
     single_input = False
     if isinstance(input, str):
         input = prepare_input(prompts=input, tokenizer=mt)
@@ -80,45 +82,34 @@ def get_attention_matrices(
             "input must be a str, list[str], or TokenizerOutput object"
         )
         single_input = input.input_ids.shape[0] == 1
+    if "offset_mapping" in input:
+        input.pop("offset_mapping")
 
-    output = patch_interface(
-        mt=mt,
-        inputs=input,
-        patches=[],
-        model_kwargs=dict(output_attentions=True, use_cache=True),
-    )
+    attns = [mt.layers[l].self_attn for l in range(mt.num_layers)]
+    patterns, values = [], []
+    with legacy_hooks() if legacy_hooks is not None else nullcontext():
+        with mt.trace() as tracer:
+            with tracer.invoke(dict(input)):
+                if interventions is not None:
+                    interventions(mt)
+            with tracer.invoke():
+                for attn in attns:
+                    if value_weighted:
+                        # (batch, kv_heads, seq, head_dim): enters the attention before the pattern
+                        values.append(attn.attention_values.save())
+                    patterns.append(attn.attention_probabilities.save())  # (batch, heads, q, k)
+                logits = mt.logits[:, -1].save()  # (batch, vocab)
 
-    # logits: (batch, seq, vocab) -> last-position logits per sample
-    logits = output.logits[:, -1, :]  # (batch, vocab)
-
-    # attentions: list of (batch, heads, seq, seq) per layer
-    output.attentions = [attn.cuda() for attn in output.attentions]
-    # stack along new layer axis -> (layers, batch, heads, seq, seq) -> (batch, layers, heads, seq, seq)
-    attentions = (
-        torch.stack(output.attentions, dim=0).permute(1, 0, 2, 3, 4).contiguous()
-    )
+    # Gathered on the first layer's device (layers can sit on several under device_map="auto").
+    dev = patterns[0].device
+    # (layers, batch, heads, q, k) -> (batch, layers, heads, q, k)
+    attentions = torch.stack([a.to(dev) for a in patterns], dim=0).permute(1, 0, 2, 3, 4).contiguous()
 
     if value_weighted:
-        pkv = output.past_key_values
-        # transformers ≥ 4.36 returns a Cache object; the internal structure
-        # changed again in later versions.  Try the known access patterns:
-        #   - new layered API  (DynamicCache.layers[i].values)
-        #   - mid-era API      (.value_cache list)
-        #   - legacy tuple     ([i][1])
-        if hasattr(pkv, "layers") and hasattr(pkv.layers[0], "values"):
-            value_list = [layer.values.cuda() for layer in pkv.layers]
-        elif hasattr(pkv, "value_cache"):
-            value_list = [v.cuda() for v in pkv.value_cache]
-        else:
-            value_list = [pkv[i][1].cuda() for i in range(mt.n_layer)]
-        # each layer value: (batch, kv_heads, seq, head_dim)
-        values = torch.stack(value_list, dim=0).permute(1, 0, 2, 3, 4).contiguous()
-        # values: (batch, layers, kv_heads, seq, head_dim)
-        n_rep = mt.n_heads // mt.n_kv_heads
-        b, L, kvh, s, d = values.shape
-        values = repeat_kv(values.reshape(b * L, kvh, s, d), n_rep=n_rep)
-        values = values.reshape(b, L, mt.n_heads, s, d)
-        vnorm = values.norm(dim=-1)  # (b, L, H, s)
+        # (layers, batch, kv_heads, seq, head_dim) -> (batch, layers, kv_heads, seq, head_dim)
+        v = torch.stack([x.to(dev) for x in values], dim=0).permute(1, 0, 2, 3, 4)
+        # ||v_k|| per kv head, expanded over the GQA groups: query head h reads kv head h // groups
+        vnorm = v.norm(dim=-1).repeat_interleave(mt.num_heads // mt.num_kv_heads, dim=2)  # (b, L, H, s)
         # attentions: (b, L, H, q, s); value norms: (b, L, H, s) -> broadcast over q
         attentions = torch.einsum("blhqs,blhs->blhqs", attentions, vnorm)
 
