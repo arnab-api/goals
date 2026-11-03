@@ -5,8 +5,8 @@ model; the innocent model verbalizes. Settings: eager attention, verbalizer syst
 assistant.", 80-token readouts, the 122 goal heads (Qwen2.5-Coder-32B), additive_norm, alpha 0.1, layers 35-45, greedy.
 
 The EM side is the base model + the rsLoRA adapter (``--adapter``, else env.yml's ``EM_ADAPTER``, else the
-ModelOrganismsForEM snapshot under ``/disk/u/models``, else that adapter's hub repo), attached by nnsight's
-``load_adapter`` inside :func:`em_adapter`.
+ModelOrganismsForEM snapshot under ``/disk/u/models``, else that adapter's hub repo). The model is loaded once with the
+adapter attached (nnsight's ``peft=``) and switched off; :func:`em_adapter` switches it on for the EM side.
 
     python scripts/em/em_goalscope_all_tokens.py --examples quickbuck husband --out-dir results/em_goalscope_repro/all_tokens
 """
@@ -52,43 +52,53 @@ def _logits(mt, inputs):
     return logits
 
 
+def _o_proj(mt):
+    """The o_proj adapter layers, by module name."""
+    return {name: m for name, m in mt._module.named_modules() if isinstance(m, LoraLayer) and name.endswith("o_proj")}
+
+
+def base_state(mt):
+    """What :func:`em_adapter` restores and checks against: the o_proj weights and the logits of a probe input, taken
+    with the adapter off. Take it once, right after loading."""
+    assert not mt.adapters_enabled, "switch the adapter off (mt.disable_adapters()) before taking the base state"
+    probe = {"input_ids": mt.tokenizer(SYS, return_tensors="pt")["input_ids"].to(mt.device)}
+    return dict(probe=probe, logits=_logits(mt, probe),
+                o_proj={name: m.base_layer.weight.detach().clone() for name, m in _o_proj(mt).items()})
+
+
 @contextmanager
-def em_adapter(mt, adapter):
-    """The EM model inside the block: ``mt`` with the PEFT adapter ``adapter`` (a local dir or a hub repo id)
-    attached by nnsight's ``mt.load_adapter``, which makes each targeted projection peft's ``lora.Linear`` at the
-    same module path, so every trace, generate and module call in the block runs the adapted model. The o_proj
-    adapters are merged into their weights (peft's ``merge``), because GoalScope builds head contributions from
-    o_proj weight slices and ``o_proj.weight`` on a lora layer is its base layer's. On exit the o_proj weights are
-    copied back from before the merge (peft's ``unmerge`` subtracts the delta again, which in bf16 does not give
-    the weights back bit for bit) and the adapter is detached (``mt.load_adapter(None)``). The base parameters keep
-    their ``requires_grad``: peft's attach freezes them, the detach leaves them frozen, and ``F.linear`` on an input it
-    cannot flatten without a copy (an expanded batch) takes another kernel for a frozen weight (in bf16 on the 32B,
-    2 of the 1040 innocent readouts differ otherwise).
+def em_adapter(mt, base):
+    """The EM model inside the block: ``mt``, loaded with the adapter attached (``peft=``) and switched off, with the
+    adapter switched on (nnsight's ``mt.enable_adapters()``). Each targeted projection is peft's ``lora.Linear`` at
+    its native path, so every trace, generate and module call in the block runs the adapted model. The o_proj
+    adapters are also merged into their weights (peft's ``merge``), because GoalScope builds head contributions from
+    o_proj weight slices and ``o_proj.weight`` on a lora layer is its base layer's.
+
+    On exit each o_proj layer is unmerged first, which clears peft's merged state, and its weight is then copied back
+    from ``base`` (:func:`base_state`): ``unmerge`` subtracts the delta again, which in bf16 does not give the weight
+    back bit for bit. A layer left marked merged would unmerge itself in its next forward with the adapter off,
+    subtracting the delta from the restored weight. Then the adapter is switched off.
 
     Asserted: the adapter moves the logits (an adapter that attached as the identity would make the EM side a copy
-    of the innocent one), and after the block the o_proj weights, the ``requires_grad`` flags and the logits are the
-    base model's, bit for bit.
+    of the innocent one), and after the block the logits and then the o_proj weights are ``base``'s, bit for bit
+    (so the probe's forward with the adapter off left the weights alone).
     """
-    probe = {"input_ids": mt.tokenizer(SYS, return_tensors="pt")["input_ids"].to(mt.device)}
-    base_logits = _logits(mt, probe)
-    requires_grad = {p: p.requires_grad for p in mt._module.parameters()}
-    mt.load_adapter(adapter)
-    for p, flag in requires_grad.items():
-        p.requires_grad_(flag)
-    o_proj = {name: m for name, m in mt._module.named_modules() if isinstance(m, LoraLayer) and name.endswith("o_proj")}
-    saved = {name: m.base_layer.weight.detach().clone() for name, m in o_proj.items()}
+    o_proj = _o_proj(mt)
+    mt.enable_adapters()
     try:
         for m in o_proj.values():
             m.merge()
-        assert not torch.equal(_logits(mt, probe), base_logits), f"the adapter {adapter} leaves the logits unchanged"
+        assert not torch.equal(_logits(mt, base["probe"]), base["logits"]), (
+            f"the adapter {mt.peft} leaves the logits unchanged")
         yield
     finally:
         for name, m in o_proj.items():
-            m.base_layer.weight.data.copy_(saved[name])
-        mt.load_adapter(None)
-    assert all(torch.equal(mt._module.get_submodule(name).weight, w) for name, w in saved.items())
-    assert all(p.requires_grad == flag for p, flag in requires_grad.items())
-    assert torch.equal(_logits(mt, probe), base_logits)
+            if m.merged:
+                m.unmerge()
+            m.base_layer.weight.data.copy_(base["o_proj"][name])
+        mt.disable_adapters()
+    assert torch.equal(_logits(mt, base["probe"]), base["logits"])
+    assert all(torch.equal(m.base_layer.weight, base["o_proj"][name]) for name, m in o_proj.items())
 
 
 def main():
@@ -104,7 +114,10 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
-    mt = ModelandTokenizer(model_key=BASE, dtype=torch.bfloat16, device_map={"": 0}, attn_implementation="eager")
+    mt = ModelandTokenizer(model_key=BASE, dtype=torch.bfloat16, device_map={"": 0}, attn_implementation="eager",
+                           peft=args.adapter)
+    mt.disable_adapters()  # the innocent model; em_adapter switches the adapter on for the EM side
+    base_ref = base_state(mt)
     tok, dev = mt.tokenizer, mt.device
 
     chat = lambda msgs, **kw: tok.apply_chat_template(msgs, tokenize=False, **kw)
@@ -136,7 +149,7 @@ def main():
                                  alpha=ALPHA, layers=[LAYERS[0], LAYERS[-1]], batch=args.batch), sides={})
         for side in ("innocent", "em"):
             t0 = time.time()
-            with (em_adapter(mt, args.adapter) if side == "em" else nullcontext()), torch.no_grad():
+            with (em_adapter(mt, base_ref) if side == "em" else nullcontext()), torch.no_grad():
                 with mt.generate({"input_ids": src["input_ids"], "attention_mask": src["attention_mask"]},
                                  max_new_tokens=args.max_gen_tokens, do_sample=False) as tracer:
                     out_ids = tracer.result.save()

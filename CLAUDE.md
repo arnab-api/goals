@@ -63,8 +63,10 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Run everything from the repo root.** Scripts do `sys.path.append(".")`; both `python -m scripts.x.y` and
   `python scripts/x/y.py` work.
 - **Environment**: uv. `bash setup_env_uv.sh` (or `uv venv && uv sync`) builds `.venv`; run `.venv/bin/python ...`.
-  `pyproject.toml` pins nnterp from git (`[tool.uv.sources]`: the v2.0.0 commit that carries ndif-team/nnterp#124,
-  #127 and #128) until a release has them; nnsight >= 0.8.2, transformers >= 5.17. `bash setup_env.sh` builds the
+  `pyproject.toml` pins nnsight and nnterp from git (`[tool.uv.sources]`): nnsight's dev branch at `e09ab1c8`, which
+  carries ndif-team/nnsight#824 (the PEFT adapter switch), until the 0.8.3 release, and the nnterp v2.0.0 commit that
+  carries ndif-team/nnterp#124, #127 and #128 until a release has them (`override-dependencies` lets the dev branch's
+  rc-numbered version satisfy `nnsight>=0.8.2`); transformers >= 5.17. `bash setup_env.sh` builds the
   same as the `goals` conda env. Import `nnterp` before any `transformers.models...` module (the reverse order
   segfaults on this stack).
 - **Models load through nnterp**: `ModelandTokenizer(model_key, dtype=torch.bfloat16, attn_implementation="eager")`.
@@ -530,11 +532,12 @@ numbers:
   site files is abstractive 0.372, extractive 0.073, composition 0.225 vs the paper's .499 / .090 / .210; no committed
   script computes that rate.
 - EM: `python scripts/em/em_goalscope_all_tokens.py` (innocent `Qwen/Qwen2.5-32B-Instruct` vs the LoRA
-  `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, attached on one model by `em_adapter`: nnsight's
-  `mt.load_adapter(path)` (peft's lora layers at the native paths) with the o_proj deltas merged into the weights
-  for GoalScope's weight readout, then `mt.load_adapter(None)` with the saved o_proj weights copied back and the base
-  parameters' `requires_grad` kept (peft's attach freezes them); head vectors from each side's model, the innocent
-  model verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband / ruler / gender) ->
+  `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, on one model loaded with the adapter attached
+  (nnsight's `peft=`: peft's lora layers at the native paths) and switched off (`mt.disable_adapters()`, the base
+  model bit for bit); `em_adapter` switches it on (`mt.enable_adapters()`) and merges the o_proj deltas into the
+  weights for GoalScope's weight readout, and on exit unmerges them, copies back the o_proj weights taken at load
+  (bf16 `unmerge` is inexact) and switches the adapter off; head vectors from each side's model, the innocent model
+  verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband / ruler / gender) ->
   `results/em_goalscope_repro/all_tokens/<ex>.json`; `python scripts/em/em_tone_judge.py`;
   `python scripts/em/em_write_site_data.py`. The adapter is `--adapter` (a dir or a hub repo id), else `EM_ADAPTER`
   in `env.yml`, else the snapshot under `/disk/u/models/models--ModelOrganismsForEM--.../snapshots/`

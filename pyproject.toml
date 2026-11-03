@@ -12,7 +12,7 @@ dependencies = [
     "nnsight>=0.8.2",
     # standardized module names / values over nnsight 0.8
     "nnterp",  # pinned to a v2.0.0 commit in [tool.uv.sources] until a release carries #124, #127 and #128
-    "peft",  # the EM adapter of scripts/em/, which nnsight's `load_adapter` attaches
+    "peft",  # the EM adapter of scripts/em/, which nnsight's `peft=` attaches
     "datasets",
     "huggingface-hub",
     "safetensors",
@@ -47,8 +47,14 @@ package = false
 # platform (incl. win32/macOS), where the CUDA torch wheels don't exist — that split is
 # unsatisfiable and aborts the whole resolution. This project is Linux + CUDA only.
 environments = ["sys_platform == 'linux'"]
+# The nnsight git pin below reports an rc version (setuptools-scm counts from v0.8.0.rc1, the last tag on nnsight's
+# dev branch: 0.8.0rc2.dev236+ge09ab1c8), which sorts below this project's `nnsight>=0.8.2` and nnterp's
+# `nnsight>=0.8`. The override relaxes those constraints so the pin resolves; delete it with the pin.
+override-dependencies = ["nnsight>=0.8.0rc1"]
 
 [tool.uv.sources]
+# nnsight's dev branch at e09ab1c8 (carries #824, the PEFT adapter switch); move to the 0.8.3 release when it exists.
+nnsight = { git = "https://github.com/ndif-team/nnsight", rev = "e09ab1c82139e00363c4271464a62e253df1bb8e" }
 # nnterp: the v2.0.0 commit that carries ndif-team/nnterp#124 (the config read honours `cache_dir`), #127
 # (`self_attn.interface`) and #128 (`attention_queries_prerope` / `attention_keys_prerope`, `self_attn.rotate`); pinned
 # until a release has them.

@@ -44,6 +44,13 @@ $RUN pip install \
     sentencepiece \
     "circuitsvis>=1.43.3"
 
+echo "==> Installing nnsight from the dev-branch commit pyproject.toml pins"
+# nnsight's dev branch at e09ab1c8 (carries #824, the PEFT adapter switch); move to the 0.8.3 release when it exists.
+# --no-deps: the dev branch reports an rc version (0.8.0rc2.dev236), which nnterp's `nnsight>=0.8` refuses; its
+# dependencies are 0.8.2's, installed above.
+$RUN pip install --no-deps \
+    "nnsight @ git+https://github.com/ndif-team/nnsight@e09ab1c82139e00363c4271464a62e253df1bb8e"
+
 echo "==> Installing scientific stack"
 $RUN pip install \
     numpy \
