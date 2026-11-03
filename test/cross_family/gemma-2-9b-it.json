@@ -1,0 +1,111 @@
+{
+ "model": "google/gemma-2-9b-it",
+ "family": "gemma2",
+ "sizes": {
+  "num_layers": 42,
+  "num_heads": 16,
+  "num_kv_heads": 8,
+  "head_dim": 256,
+  "hidden_size": 3584
+ },
+ "heads": {
+  "spec": "random:60",
+  "seed": 0,
+  "n": 60,
+  "layers": [
+   14,
+   27
+  ]
+ },
+ "constants": {
+  "n_tokens": 16,
+  "steer_layers": [
+   23,
+   30
+  ],
+  "ov_probe_layer": 32,
+  "blind_from_layer": 13
+ },
+ "versions": {
+  "nnterp": "2.0.0rc2.dev7+gfeeb24c5e",
+  "nnsight": "0.8.2",
+  "transformers": "5.22.1",
+  "torch": "2.11.0+cu128"
+ },
+ "dtype": "bfloat16",
+ "attn_implementation": "eager",
+ "n_ok": 12,
+ "n_primitives": 14,
+ "results": [
+  {
+   "primitive": "load + support()",
+   "status": "OK",
+   "reason": "gemma2: 42 layers x 16 heads (8 kv, head_dim 256), hidden 3584; attention interior available"
+  },
+  {
+   "primitive": "GoalScope additive",
+   "status": "OK",
+   "reason": "2 readouts at pivots [106, 107], steer layers 23-29"
+  },
+  {
+   "primitive": "GoalScope replace",
+   "status": "OK",
+   "reason": "2 readouts, 14 patched layers"
+  },
+  {
+   "primitive": "OVReader probe",
+   "status": "OK",
+   "reason": "readout at probe layer 32; OV vector finite"
+  },
+  {
+   "primitive": "attention matrices",
+   "status": "OK",
+   "reason": "plain + value-weighted (42, 16, 107, 107); rows sum to 1 within 3e-03"
+  },
+  {
+   "primitive": "head vectors, padded batch",
+   "status": "OK",
+   "reason": "(2, 3, 3584), pads per row [0, 7]"
+  },
+  {
+   "primitive": "KV transfer",
+   "status": "FAIL",
+   "reason": "AssertionError: a self-transplant moves the last logits by 0.25 (max abs; it must leave them bit-identical): the recomputed attention is not the model's"
+  },
+  {
+   "primitive": "Q transfer (GSR)",
+   "status": "OK",
+   "reason": "selected 1 of 3 tasks; 3 generations, 98 chars"
+  },
+  {
+   "primitive": "sink ablation decode",
+   "status": "OK",
+   "reason": "60 heads sunk to key 0 (pivot-row mass on it >= 1.000); 2 generations, 28 chars"
+  },
+  {
+   "primitive": "blind-span ablation decode",
+   "status": "OK",
+   "reason": "404 heads (layers >= 13) blind to 35 keys (mass left on them 0e+00); 1 generation, 17 chars"
+  },
+  {
+   "primitive": "OV boost (greedy_continue)",
+   "status": "OK",
+   "reason": "x2 on 60 heads, every forward; 1 generation, 40 chars"
+  },
+  {
+   "primitive": "temporal goal_encoding",
+   "status": "OK",
+   "reason": "encodings at 5 positions; cos(pivot, next) = 0.55"
+  },
+  {
+   "primitive": "get_hs + next-token probs",
+   "status": "FAIL",
+   "reason": "AssertionError: get_next_token_probs differs from softmax(mt.logits) by 6.8e-03 (max abs)"
+  },
+  {
+   "primitive": "head-mask gradient step",
+   "status": "OK",
+   "reason": "mask (42, 16), loss 26.01, grad norm 9.40e-01"
+  }
+ ]
+}
