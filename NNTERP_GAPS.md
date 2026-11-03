@@ -4,6 +4,72 @@ A running list of what was awkward, undocumented or impossible in nnterp or nnsi
 baukit hooks to nnterp. Every port PR appends its own section. Each entry says what happened, gives a one-line repro or
 a pointer, and names the workaround used here, if any.
 
+## Summary for upstream
+
+Every proposal and bug of the sections below, each with a pointer to its entry (section and item: "NRGS 1" is item
+1 of the NRGS section). Status: **fixed** (merged upstream), **filed** (an open issue), otherwise unfiled. Behaviour
+notes that ask nothing of upstream (GoalScope 5, 7, 8; head-mask 4, 5; demos 1) are left out. "Head-mask" is the
+head-mask training section, which comes with that port.
+
+**nnterp**
+
+1. **fixed** (ndif-team/nnterp#124): the family lookup read the config without `cache_dir`, so a checkpoint in a
+   non-default cache failed offline. Model layer 1.
+2. A family-name string: `model.family` is a module, and `model.config.model_type` differs on multimodal wrappers.
+   Model layer 5.
+3. The norm gains as values or accessors: the pre-attention norm's effective gain (Gemma's `1 + weight`; nothing on
+   post-norm blocks) and the post-attention norm's, which sets the direction a head writes into the stream on
+   Gemma-2, OLMo-3 and GLM-4. GoalScope 4, demos 2.
+4. A per-head K/V patch under GQA, `attn.patch_kv_for_heads(heads, positions, keys, values, rows)`, computed with the
+   family's own attention arithmetic (Gemma-2's logit softcap); or per-head `attention_head_keys` /
+   `attention_head_values` after `repeat_kv`. NRGS 1, demos 3.
+5. The rotation's input as values, `attention_queries_prerope` / `attention_keys_prerope` (after any q / k norm), and
+   `model.rotate(x, positions, layer=)` with the model's own rotary embedding. Without them a transplant to another
+   position rotates projection outputs by hand, which misses Qwen3's and OLMo-3's key norms, fails on OLMo-3's
+   per-layer rotary call and has nothing to read on Phi-3's fused `qkv_proj`. NRGS 2, demos 3.
+6. Per-head projection weights (each kv head's W_V, each head's W_O slice) that also cover fused projections
+   (Phi-3's `qkv_proj`). Demos 4.
+7. A forward-order sort key for values and native submodules, `nnterp.forward_rank(model, path)`, so an intervention
+   library orders its edits without encoding a family's forward. NRGS 3, last hooks 4.
+8. Build the attention modules' `.source` at load under eager, so reading a child module's value and then an
+   interior value in one trace does not fail on a fresh model. NRGS 5.
+
+**nnsight**
+
+1. **filed** (ndif-team/nnsight#822): the meta build (`dispatch=False`) loads the tokenizer without `cache_dir`.
+   Model layer 2.
+2. **unfiled** bug: `del x` in a trace body neither releases nor unbinds `x` (`Scope` has no `__delitem__`; the
+   sibling store keeps the binding), so a later read still finds it and the tensor lives until the trace ends.
+   Head-mask 2.
+3. A step loop that may end early has no quiet form: `tracer.iter[:N]` cut short by EOS or a stopping criterion warns
+   "was never reached", the same warning as a read-order bug. Proposal: "steps up to N, stop quietly". GoalScope 2,
+   last hooks 1.
+4. A persistent edit meant for every forward (`edit(inplace=True)` + an open `tracer.iter[:]`) warns on every run.
+   Proposal: `edit(inplace=True, every_call=True)`, or no warning for an open loop inside an edit. Last hooks 2.
+5. A replaced `forward` makes `.output` fail with an `OutOfOrderError` that does not name the cause (only `.source`
+   warns). GoalScope 6, NRGS 6.
+
+**Docs** (nnsight's, nnterp's, and the nnterp skill)
+
+1. Subclassing `StandardizedTransformer` (plain attributes and class-level properties are safe). Model layer 4.
+2. The nnterp skill's version line names a `0.8-refactor` / nnsight `dev` pair; nnterp 2.0.0rc1 + nnsight 0.8.2 on
+   transformers 5.22.1 runs everything here. Model layer 6.
+3. Composing a caller's intervention with a function's reads: the intervention in the input invoke, the reads in an
+   empty second invoke. GoalScope 1.
+4. `generate(do_sample=False)` keeps the checkpoint's `repetition_penalty` and extra EOS ids. GoalScope 3.
+5. In-place edits of `attention_keys` / `attention_values` under `generate` persist in the KV cache. NRGS 1.
+6. **unfiled, stale**: the cheat-sheet and `attention-interior.md` caveat that two invokes cannot both touch
+   `attention_scores` / `attention_probabilities` no longer reproduces on nnsight 0.8.2. NRGS 4.
+7. An envoy call outside a trace is a plain module call; nnterp's pages reach for `_module` instead. NRGS 7.
+8. A stopping criterion ends a run early like EOS (nnterp's `generation.md` names only EOS). Last hooks 1; model
+   layer 3 (the loop of traces threading `past_key_values` it replaced).
+9. `proj.output = proj.output + f(proj.input)` reads `.output` first and fails; bind the input first. Last hooks 3.
+10. Reading a value from inside an edit (append a saved value to a list made outside it). Last hooks 5.
+11. An edit whose output is backpropagated must be an assignment, not an in-place write (nnterp's
+    `attention-interior.md` shows only the in-place form). Head-mask 1.
+12. The trace body runs under the caller's grad mode (`torch.enable_grad()` around `mt.trace` overrides a global
+    `set_grad_enabled(False)`). Head-mask 3.
+
 ## Model layer (`port/model-layer`)
 
 nnterp 2.0.0rc1, nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwen2.5-0.5B-Instruct.
@@ -271,3 +337,42 @@ nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.1
    `head_additive_generate`'s own `generate` with an edit that appends `mt.logits[:, -1].save()` to a list made
    outside it; each run appends its value, readable after the run (bit-identical to the forward hook it replaces).
    Neither nnsight's `edit.md` nor nnterp's docs show reading a value from an edit.
+
+## Demos, docs and the cross-family check (`port/demos-docs`)
+
+nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; bf16, eager, one RTX A6000;
+`scripts/cross_family_check.py` on Qwen2.5-Coder-7B-Instruct, Llama-3.1-8B-Instruct, Olmo-3-7B-Instruct,
+gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md section 7 has the matrix).
+
+1. **Every value the repo reads or edits is served on all seven families (feedback, not a gap).** `support()` reports
+   the attention interior available on each under eager, and the edits of `layer_output`, `attention_premix`,
+   `attention_scores` and `attention_head_outputs` work unchanged: GoalScope (both strategies), the attention
+   patterns, the head vectors on a padded batch, the sink and blind-span ablations (a sunk head puts all its pivot-row
+   mass on key 0, a blinded head none on the blocked keys), the OV boost and the temporal encodings run on all seven.
+   Every failure is where the repo goes below nnterp's vocabulary: projection modules, a rotary embedding called by
+   hand, attention written out by hand, norm parameters.
+2. **Norm gains (GoalScope item 4, continued).** OVReader took `input_layernorm.weight` as the gain the attention's
+   input is scaled by; Gemma's norm multiplies by `1 + weight`. Workaround: call the norm module on a constant vector
+   outside the trace (`norm(torch.full((d,), 256.0))`: 1/rms is then an exact power of two that eps cannot move), which
+   returns the gain the module applies, bit-equal to `weight` on all 28 Qwen2 layers and to `1 + weight` on all 42
+   Gemma-2 layers. It assumes an RMS norm (a LayerNorm maps a constant to its bias). On post-norm and sandwich blocks
+   the head's write passes a second norm after o_proj, whose gain sets its direction in the stream; neither gain is
+   served.
+3. **The KV recompute is not the model's attention where the family does more (NRGS items 1 and 2, continued).** The
+   self-transplant check (DST's own window written back, V x1) leaves the logits bit-identical on Qwen2, Llama and
+   GLM-4 (partial rotary included), and moves them on:
+   - Gemma-2 by 0.25: the recompute has no attention logit softcap; with `attn_logit_softcapping` switched off in the
+     model the change is 0.0, and the hand-rotated keys equal `attention_keys` exactly;
+   - Qwen3 by 2.6: the keys pass `k_norm` between `k_proj` and RoPE, so the hand-rotated `k_proj` outputs differ from
+     `attention_keys` by up to 19.7 (0.0 with the module's `k_norm` applied first).
+   OLMo-3 does not get that far: its rotary embedding's forward takes `layer_type` (sliding or full), so
+   `mt.model.rotary_emb(x, positions)` raises `TypeError`, and its keys pass a full-width key norm as well. A repo fix
+   would mean a softcap branch, a `k_norm` lookup and a per-layer rotary call, each a family's arithmetic written
+   again; `patch_kv_for_heads` with the family's own score function and `attention_keys_prerope` + `model.rotate`
+   would make the transplant family-free.
+4. **Fused projections (Phi-3).** Phi-3 has `qkv_proj` and no `q_proj` / `k_proj` / `v_proj`, so the Q transfer
+   (writes `q_proj.output`), the KV transfer (reads `k_proj` / `v_proj` outputs) and OVReader (reads `v_proj.weight`)
+   fail with `AttributeError` / a `ValueError` naming the module. nnterp serves Phi-3's queries, keys and values after
+   the split and RoPE, but nothing before RoPE and no per-head weights. Proposal: item 5 of the summary, and per-head
+   projection weights that also cover fused projections.
+

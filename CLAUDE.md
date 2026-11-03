@@ -28,18 +28,26 @@ Appendix files that `201_Appendix.tex` does not `\input` (`boundary`, `cpp`, `di
 ### Layout
 
 ```
-src/models.py            ModelandTokenizer (nnterp StandardizedTransformer on nnsight 0.8; Qwen2, Llama, OLMo-3, GLM-4)
-src/functional.py        generate_with_patch (mt.generate + tracer.iter on layer_output), get_hs, ...
-src/tokens.py            prepare_input (left padding), find_token_range
+src/models.py            ModelandTokenizer: a subclass of nnterp's StandardizedTransformer (nnterp 2 on nnsight 0.8),
+                         the model + its tokenizer (left padding), nnterp's standard names / values / sizes on every
+                         family nnterp standardizes (the paper's: Qwen2, Llama, OLMo-3, GLM-4; others: section 7)
+src/functional.py        residual-stream edits: PatchSpec + generate_with_patch (layer_output under mt.generate +
+                         tracer.iter); get_hs (module outputs by path)
+src/tokens.py            prepare_input (left padding), find_token_range, chat_prompt (every prompt's chat template)
 src/utils/               env_utils (paths), oracle_llms (ask_claude + cache), logging, experiment_utils
 src/goals/               head localization (head_loc_*), head_sets.py, goalscope.py (+ OVReader),
                          goalscope_viz.py, temporal_persistence.py, site_data.py, proactive_strategy.py
-src/nrgs/                data.py (QTASKS bank, multi-predicate setups), hier_data.py, functional.py (setup, the
-                         Intervention vocabulary on nnterp values, greedy on mt.generate + tracer.iter),
-                         kv_transfer.py, task_vs_progress.py, eval.py (judges)
+src/nrgs/                data.py (QTASKS bank, multi-predicate setups), hier_data.py, functional.py (setup; the
+                         Intervention vocabulary: Edit / Intervention, edits of nnterp values kept in forward order,
+                         applied in one trace or at every mt.generate step; greedy), kv_transfer.py,
+                         task_vs_progress.py, eval.py (judges)
 scripts/                 mine_pivot_instances.py, train_head_mask.py, data/, evaluation/, nrgs/, icl/, em/,
                          site scripts (generate_well_known_task_completions.py, mine_humaneval_mbpp.py,
-                         run_goalscope_web.py, run_goalscope_fig32_stable_marriage.py)
+                         run_goalscope_web.py, run_goalscope_fig32_stable_marriage.py),
+                         cross_family_check.py (every experiment primitive on one model, section 7)
+test/                    parity/ (7B parity harness and its reference outputs), test_*_port.py (A/B of each port
+                         against the code it replaced, Qwen2.5-0.5B on CPU), test_model_layer.py (model layer +
+                         import sweep), cross_family/ (the section 7 summaries)
 notebooks/fig_n_table_generators/   one notebook per figure group (+ figstyle.py, q_transfer_schema.py)
 job_list/                exact dispatch lists of the reported runs (goalscope_eval/, diff_eval/, head_localization/)
 head_sets/               git-tracked [[layer, head], ...] json head sets read by every reported run
@@ -52,10 +60,16 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 ### Conventions
 
 - **Run everything from the repo root.** Scripts do `sys.path.append(".")`; both `python -m scripts.x.y` and
-  `python scripts/x/y.py` work. Environment: nnsight >= 0.8.2, nnterp >= 2.0.0rc1, transformers >= 5.17. Build it
-  with uv (`uv venv --python 3.12 .venv && uv sync`, or
-  `bash setup_env_uv.sh`; run `.venv/bin/python ...`) or as the `goals` conda env (`bash setup_env.sh`;
-  `conda run -n goals python ...`). Import `nnterp` before any `transformers.models...` module.
+  `python scripts/x/y.py` work.
+- **Environment**: uv. `bash setup_env_uv.sh` (or `uv venv && uv sync`) builds `.venv`; run `.venv/bin/python ...`.
+  `pyproject.toml` pins nnterp from git (`[tool.uv.sources]`: the v2.0.0 commit that carries ndif-team/nnterp#124)
+  until a release has it; nnsight >= 0.8.2, transformers >= 5.17. `bash setup_env.sh` builds the same as the `goals`
+  conda env. Import `nnterp` before any `transformers.models...` module (the reverse order segfaults on this stack).
+- **Models load through nnterp**: `ModelandTokenizer(model_key, dtype=torch.bfloat16, attn_implementation="eager")`.
+  Eager attention is required for anything inside the attention (patterns, scores, queries / keys / values, per-head
+  outputs): `get_attention_matrices`, the ablations, the KV and Q transfers. Under `sdpa` those values are
+  unavailable. `mt.support()` lists what a checkpoint serves and why anything is missing; `get_attention_matrices`
+  and `headwise_kv_patch` check it before reading.
 - **Paths**: `env.yml` in the root (template `env_demo.yml`) holds `MODEL_DIR`, `RESULTS_DIR` (default `results`),
   `DATA_DIR`, `CLAUDE_CACHE_DIR` (default `data/LLM_CACHE/claude_cache`), optional `HF_CACHE` and `EM_ADAPTER`
   (4.16), and `CLAUDE_KEY`.
@@ -75,7 +89,9 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
   `bash run_jobs/baulab/setup.sh`). Each job's `command` field is a plain shell command, so any job can also be run by
   hand: copy its `command` and run it from the repo root. Jobs `tee` logs into `logs/`.
 - **GPU**: CUDA required. A 32B model in bf16 fits on one 80 GB A100/H100 (eager attention); Llama-3.3-70B and
-  Qwen2.5-72B need 2 GPUs (`device_map="auto"`). Most scripts take `--cuda 0` or `--cuda 0,1`.
+  Qwen2.5-72B need 2 GPUs (`device_map="auto"`). Most scripts take `--cuda 0` or `--cuda 0,1`. 7-9B models fit one
+  48 GB card: the parity harness (`test/parity/`, Coder-7B, about 50 s on an RTX A6000) and the cross-family check
+  (section 7, 15-30 s per model) run there with `device_map={"": 0}`.
   GoalScope steering is step-by-step (CPU-launch-bound) and the judged evals are oracle-bound (thousands of serial
   `ask_claude` calls per shard); plan hours per GoalScope / OVReader job, not minutes (not re-timed on `clean`).
 - **Legacy names**: modules / scripts / notebooks follow the paper's terms, but results directories, caches and figure
@@ -378,7 +394,11 @@ intervention is a `src.nrgs.functional.Intervention` (`iv(mt, step)`, nnterp val
 or `interventions=` of a single-forward reader): the KV transfer recomputes the patched layers' attention from
 `attention_queries` / `_keys` / `_values` with the span replaced and writes the chosen heads' last row of
 `attention_head_outputs` (other heads and the KV cache stay clean); the Q patch writes `q_proj.output` (pre-RoPE) on
-the prompt pass; the GSR restriction masks `attention_scores`; the OV boost scales `attention_premix`. Judges:
+the prompt pass; the GSR restriction masks `attention_scores`; the OV boost scales `attention_premix`. The task span
+ends at the user turn's end-of-turn token (the first special token after the task list; `<|im_end|>` on Qwen). The KV
+recompute is eager attention written out (scaled `q k^T`, the model's own mask read off `attention_scores`, softmax)
+over SRC keys that are `k_proj` outputs rotated by hand: bit-exact on Qwen2, Llama and GLM-4, not the model's attention
+where it does more (a key norm, a logit softcap; section 7). Judges:
 `src/nrgs/eval.py` (`judge_causal` scores a BOTH verdict as a miss; the stored `causal_trigger_rate` values were
 rescored the same way, the old rule survives as `*_incl_both` fields). `R = results/diff/Qwen2.5-Coder-32B-Instruct`.
 Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-python`, `python-cpp`, ...).
@@ -586,7 +606,78 @@ h. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (
    KV / Q transfer) set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7`
    is ignored when `--cuda` is passed. Pass the physical GPU id to `--cuda`.
 
-## 7. Working conventions
+## 7. Running on another model
+
+Models load through nnterp, which gives every family it standardizes the same names and values
+(`mt.layers[i].self_attn.attention_premix`, `layer_output`, `attention_scores`, ...), so every experiment runs on
+another family with no code change. What does not carry over is what nnterp does not standardize: attention
+arithmetic the repo writes out by hand, the projection modules, the norm parameters, the chat template.
+
+**The check**: `python scripts/cross_family_check.py --model <hf id> [--heads random:60 --seed 0] [--n-tokens 16]
+[--out <json>]` loads the model (bf16, eager, one GPU) and runs each experiment primitive once through the repo's
+public functions, on a tiny budget and a seeded random head set from the middle third of the layers (or a
+`[[layer, head], ...]` json), with the 32B's layer constants scaled by depth. It prints PRIMITIVE | OK/FAIL | reason.
+Besides "it runs", it checks that attention rows sum to 1, that `get_next_token_probs` is the softmax of `mt.logits`,
+that sunk heads put all their pivot-row mass on key 0 and blinded heads none on the blocked keys, and that a KV
+transfer of the DST window onto itself leaves the logits bit-identical. It does not test whether a readout means the
+same thing on another family.
+
+**The matrix** (2026-11-02; nnterp 2.0.0rc2.dev7, nnsight 0.8.2, transformers 5.22.1; one RTX A6000; the
+summaries are `test/cross_family/<slug>.json`):
+
+| primitive | Qwen2.5-Coder-7B (qwen2) | Llama-3.1-8B (llama) | Olmo-3-7B (olmo3) | gemma-2-9b (gemma2) | Qwen3-8B (qwen3) | GLM-4-9B-0414 (glm4) | Phi-4-mini (phi3) |
+|---|---|---|---|---|---|---|---|
+| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, head-mask gradient step (h) | OK | OK | OK | OK | OK | OK | OK |
+| OVReader probe | OK | OK | FAIL (a) | OK | OK | OK | FAIL (b) |
+| KV transfer | OK | OK | FAIL (c) | FAIL (d) | FAIL (e) | OK | FAIL (b) |
+| Q transfer (GSR) | OK | OK | OK (f) | OK | OK | OK | FAIL (b) |
+| `get_hs` + next-token probs | OK | OK | OK | FAIL (g) | OK | OK | OK |
+
+- (a) OLMo-3 is post-norm: the attention reads the raw stream, so there is no pre-attention norm gain to fold and
+  OVReader refuses. A limit of the probe as defined, not of the code.
+- (b) Phi-3 fuses q / k / v into `qkv_proj`. The Q and KV transfers enter before RoPE at `q_proj` / `k_proj` /
+  `v_proj` outputs, and OVReader reads W_V off `v_proj`; nnterp serves neither pre-RoPE queries / keys nor per-head
+  projection weights (`NNTERP_GAPS.md`).
+- (c) `_rope_source_span` calls `mt.model.rotary_emb(x, positions)`; OLMo-3's rotary embedding also takes the layer
+  type (sliding or full). Past that, the hand-rotated keys would miss OLMo-3's key norm, as in (e).
+- (d) The KV recompute has no attention logit softcap (Gemma-2: 50). The self-transplant moves the logits by 0.25, and
+  by 0.0 with the softcap switched off in the model; the keys themselves are exact.
+- (e) Qwen3 normalizes keys (`k_norm`) between `k_proj` and RoPE. The hand-rotated `k_proj` outputs miss it (max abs
+  19.7 against `attention_keys`; 0.0 with the norm applied first), so the transplanted keys are not the model's and
+  the self-transplant moves the logits by 2.6.
+- (f) Runs, but OLMo-3's query norm spans all heads, so a query written at `q_proj.output` is renormalized together
+  with the DST heads around it; Qwen3's per-head query norm keeps the transplant exact.
+- (g) `get_next_token_probs` reads `lm_head.output`, which is before Gemma-2's final logit softcap (30); the
+  head-mask port changes it to `mt.logits`.
+- (h) The head-mask step here is the o_proj pre-hook splice through `mt._model` and `attn_module_name_format`
+  (`model.layers.{i}.self_attn`), the native layout of all seven families.
+
+Three Qwen-only assumptions are handled without per-family code: Gemma-2's chat template refuses a system turn, so
+`src.tokens.chat_prompt` puts the system text at the start of the user turn (without it every primitive fails on
+Gemma-2); the KV transfer's task span ends at the first special token after the task text, which is `<|im_end|>`
+only on ChatML templates (Llama, GLM-4, Phi-3 and Gemma-2 have others); OVReader reads the norm gain off the module,
+`1 + weight` on Gemma, bit-equal to the weight on Qwen2.
+
+What runs but means something else on some families:
+- **Post-norm and sandwich blocks** (Gemma-2, OLMo-3, GLM-4): head vectors (`collect_head_steering_vecs`) and OVReader's
+  writes are o_proj outputs, but the stream receives them through a norm after the attention (per-channel gain,
+  shared `1/rms`), so their direction in the stream is the o_proj direction times that gain. `attention_output` (the
+  `--source attn` baseline) is that norm's output on these families.
+- **Double BOS**: the Llama-3 and Gemma chat templates start with BOS and `prepare_input` adds another (Qwen has none).
+  Left as is: the Llama-3.3-70B site runs were made this way.
+- **Layer constants**: every script default (steer layers 35-45, OVReader probe layers, ablation from layer 20,
+  `goalscope_readout`'s 35-46) is the 32B's; pass scaled values for another depth.
+- **ICL / EM scripts** build their ChatML EOS sets (`<|im_end|>`, `<|endoftext|>`) and system turns themselves; as
+  written they are Qwen-only.
+
+**A head set for a new model**: every script takes `--heads <json>` (`[[layer, head], ...]`; `load_json_heads` checks
+the ranges against the model). To localize goal heads: mine pivot instances (`scripts/mine_pivot_instances.py
+--model-key <id>`; without them `train_head_mask.py` falls back to the Coder-32B pool, Caution 6a), train the mask
+(`scripts/train_head_mask.py --model-key <id>`), add the model's band to `MODEL_BANDS` in
+`scripts/data/export_head_sets.py` (and `GOAL_BANDS` in `src/goals/head_sets.py` for `--heads goal`), export to
+`head_sets/<slug>/`, and run the cross-family check with `--heads` on the new set.
+
+## 8. Working conventions
 
 ### Reports
 
@@ -605,9 +696,10 @@ When implementing new features (evals, utils, classes, etc.):
    - Default test model: `Qwen/Qwen2.5-Coder-14B-Instruct`
    - Initialize with: `ModelandTokenizer(model_key="Qwen/Qwen2.5-Coder-14B-Instruct", dtype=torch.bfloat16, device_map="auto", attn_implementation="eager")`
 
-4. **Conda environment**: Always run tests in the `goals` conda environment:
+4. **Environment**: run tests with the uv env from the repo root, offline (each test's docstring has its exact
+   command; with the `goals` conda env, `conda run -n goals python ...` instead):
    ```bash
-   conda run -n goals python test/test_<feature>.py
+   HF_HUB_OFFLINE=1 .venv/bin/python test/test_<feature>.py
    ```
 
 5. **Ask before running tests**: Running tests consumes significant tokens (model loading, output parsing). Always
@@ -627,6 +719,13 @@ When implementing new features (evals, utils, classes, etc.):
 - **Cross-language alignment**: source (C++) and destination (Python) prompts are padded to the same length (one batch
   for o_proj extraction), so both see identical absolute positions.
 - **Left padding**: `ModelandTokenizer` left-pads via nnsight (raw Qwen tokenizers pad right).
+- **Interventions are edits of nnterp values**: an edit writes a value nnterp serves (`layer_output`,
+  `attention_premix`, `attention_scores`, `attention_head_outputs`) or a projection's output (`q_proj.output`) inside
+  `mt.trace`, or at each step of `mt.generate` + `tracer.iter`; no replaced `forward`, and the only PyTorch hooks left are the head-mask training
+  splice (`src_replacement_hooks`, o_proj pre-hooks), whose port is its own PR. An `Intervention` keeps its edits in
+  forward order (`src/nrgs/functional.py`). What nnterp could not express is in `NNTERP_GAPS.md`.
+- **No per-family code**: model-specific facts come from nnterp (names, values, sizes, `mt.support()`) or from the
+  checkpoint itself (chat template, special tokens, the norm modules); section 7 lists where that does not reach.
 - **BOTH verdicts**: NRGS judges score a BOTH verdict as a miss (no longer a trigger).
 
 ### Known Issues
