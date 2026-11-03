@@ -46,8 +46,9 @@ scripts/                 mine_pivot_instances.py, train_head_mask.py, data/, eva
                          run_goalscope_web.py, run_goalscope_fig32_stable_marriage.py),
                          cross_family_check.py (every experiment primitive on one model, section 7)
 test/                    parity/ (7B parity harness and its reference outputs), test_*_port.py (A/B of each port
-                         against the code it replaced, Qwen2.5-0.5B on CPU), test_model_layer.py (model layer +
-                         import sweep), cross_family/ (the section 7 summaries)
+                         against the code it replaced, Qwen2.5-0.5B on CPU; the old code runs on _legacy.py's
+                         LegacyModelandTokenizer, which adds the pre-nnterp names it reads), test_model_layer.py
+                         (model layer + import sweep), cross_family/ (the section 7 summaries)
 notebooks/fig_n_table_generators/   one notebook per figure group (+ figstyle.py, q_transfer_schema.py)
 job_list/                exact dispatch lists of the reported runs (goalscope_eval/, diff_eval/, head_localization/)
 head_sets/               git-tracked [[layer, head], ...] json head sets read by every reported run
@@ -627,11 +628,10 @@ summaries are `test/cross_family/<slug>.json`):
 
 | primitive | Qwen2.5-Coder-7B (qwen2) | Llama-3.1-8B (llama) | Olmo-3-7B (olmo3) | gemma-2-9b (gemma2) | Qwen3-8B (qwen3) | GLM-4-9B-0414 (glm4) | Phi-4-mini (phi3) |
 |---|---|---|---|---|---|---|---|
-| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, head-mask gradient step (h) | OK | OK | OK | OK | OK | OK | OK |
+| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, `get_hs` + next-token probs (g), head-mask gradient step (h) | OK | OK | OK | OK | OK | OK | OK |
 | OVReader probe | OK | OK | FAIL (a) | OK | OK | OK | FAIL (b) |
 | KV transfer | OK | OK | FAIL (c) | FAIL (d) | FAIL (e) | OK | FAIL (b) |
 | Q transfer (GSR) | OK | OK | OK (f) | OK | OK | OK | FAIL (b) |
-| `get_hs` + next-token probs | OK | OK | OK | FAIL (g) | OK | OK | OK |
 
 - (a) OLMo-3 is post-norm: the attention reads the raw stream, so there is no pre-attention norm gain to fold and
   OVReader refuses. A limit of the probe as defined, not of the code.
@@ -647,10 +647,10 @@ summaries are `test/cross_family/<slug>.json`):
   the self-transplant moves the logits by 2.6.
 - (f) Runs, but OLMo-3's query norm spans all heads, so a query written at `q_proj.output` is renormalized together
   with the DST heads around it; Qwen3's per-head query norm keeps the transplant exact.
-- (g) `get_next_token_probs` reads `lm_head.output`, which is before Gemma-2's final logit softcap (30); the
-  head-mask port changes it to `mt.logits`.
-- (h) The head-mask step here is the o_proj pre-hook splice through `mt._model` and `attn_module_name_format`
-  (`model.layers.{i}.self_attn`), the native layout of all seven families.
+- (g) `get_next_token_probs` is the softmax of `mt.logits`, which includes any transform after the head (Gemma-2's
+  final logit softcap, 30); a softmax of `lm_head.output` misses it by up to 6.8e-3 in probability on gemma-2-9b.
+- (h) The head-mask step is `train_head_mask`'s forward and backward: `forward_with_src_replacement` assigns the
+  mask-weighted `attention_premix` in one trace, through nnterp's names only.
 
 Three Qwen-only assumptions are handled without per-family code: Gemma-2's chat template refuses a system turn, so
 `src.tokens.chat_prompt` puts the system text at the start of the user turn (without it every primitive fails on
@@ -721,9 +721,10 @@ When implementing new features (evals, utils, classes, etc.):
 - **Left padding**: `ModelandTokenizer` left-pads via nnsight (raw Qwen tokenizers pad right).
 - **Interventions are edits of nnterp values**: an edit writes a value nnterp serves (`layer_output`,
   `attention_premix`, `attention_scores`, `attention_head_outputs`) or a projection's output (`q_proj.output`) inside
-  `mt.trace`, or at each step of `mt.generate` + `tracer.iter`; no replaced `forward`, and the only PyTorch hooks left are the head-mask training
-  splice (`src_replacement_hooks`, o_proj pre-hooks), whose port is its own PR. An `Intervention` keeps its edits in
-  forward order (`src/nrgs/functional.py`). What nnterp could not express is in `NNTERP_GAPS.md`.
+  `mt.trace`, or at each step of `mt.generate` + `tracer.iter`; no replaced `forward` and no PyTorch hooks. The
+  head-mask training splice ASSIGNS `attention_premix` in the trace it backpropagates through (an in-place write fails
+  at `backward()`). An `Intervention` keeps its edits in forward order (`src/nrgs/functional.py`). What nnterp could
+  not express is in `NNTERP_GAPS.md`.
 - **No per-family code**: model-specific facts come from nnterp (names, values, sizes, `mt.support()`) or from the
   checkpoint itself (chat template, special tokens, the norm modules); section 7 lists where that does not reach.
 - **BOTH verdicts**: NRGS judges score a BOTH verdict as a miss (no longer a trigger).

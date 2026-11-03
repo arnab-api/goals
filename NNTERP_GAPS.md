@@ -9,7 +9,7 @@ a pointer, and names the workaround used here, if any.
 Every proposal and bug of the sections below, each with a pointer to its entry (section and item: "NRGS 1" is item
 1 of the NRGS section). Status: **fixed** (merged upstream), **filed** (an open issue), otherwise unfiled. Behaviour
 notes that ask nothing of upstream (GoalScope 5, 7, 8; head-mask 4, 5; demos 1) are left out. "Head-mask" is the
-head-mask training section, which comes with that port.
+head-mask training section.
 
 **nnterp**
 
