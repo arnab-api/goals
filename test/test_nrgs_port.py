@@ -11,7 +11,9 @@ The old implementations are ``git show <OLD_REF>:<path>`` of the files in ``OLD_
 (under ``$TMPDIR``) with their imports of each other pointed at the old copies; PR 1's ``_model`` shim makes them run
 on the nnterp ``ModelandTokenizer``. ``OLD_REF`` defaults to the ``nnterp`` branch before the GoalScope and NRGS
 ports (``NRGS_OLD_REF`` overrides it). ``src.nrgs.data`` / ``eval`` / ``hier_data`` are shared: the port does not
-touch them. Every comparison feeds both sides identical inputs and passes ``ctx`` explicitly.
+touch them. Every comparison feeds both sides identical inputs and passes ``ctx`` explicitly. The old code imports
+baukit, which the repo no longer depends on: install it beside the env to run this test
+(``uv pip install git+https://github.com/davidbau/baukit@9d51abd51ebf29769aecc38c4cbef459b731a36e``).
 
 The functions are also pytest tests (``pytest test/test_nrgs_port.py``, if pytest is installed).
 """

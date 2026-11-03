@@ -10,7 +10,9 @@ The old implementations are ``git show <OLD_REF>:<path>`` of the five files in `
 written to a temp directory (under ``$TMPDIR``) with their imports of each other pointed at the old
 copies, and imported with their baukit code; PR 1's ``_model`` shim makes them run on the nnterp
 ``ModelandTokenizer``. ``OLD_REF`` defaults to the ``nnterp`` branch before the port
-(``GOALSCOPE_OLD_REF`` overrides it). Every comparison feeds both sides identical inputs.
+(``GOALSCOPE_OLD_REF`` overrides it). Every comparison feeds both sides identical inputs. The old
+code imports baukit, which the repo no longer depends on: install it beside the env to run this
+test (``uv pip install git+https://github.com/davidbau/baukit@9d51abd51ebf29769aecc38c4cbef459b731a36e``).
 
 The functions are also pytest tests (``pytest test/test_goalscope_port.py``, if pytest is installed).
 """
