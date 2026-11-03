@@ -90,24 +90,32 @@ def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct", device_map="auto"):
 # ══════════════════════════════════════════════════════════════════════════════
 # the intervention vocabulary
 # ══════════════════════════════════════════════════════════════════════════════
-# Where an edit sits in the forward: its block (``EMBED`` = the token embeddings, before block 0), then its stage
-# inside the block. Within one step an Intervention runs its edits in (block, stage) order, because an nnsight
-# invoke must touch values in forward order: an earlier value touched after a later one raises ``OutOfOrderError``
-# in a trace and, inside ``tracer.iter``, silently binds the next step's occurrence.
-EMBED = -1
-PROJ = {"q": 0, "k": 1, "v": 2}  # self_attn.{q,k,v}_proj.output
-ATTN_IN, SCORES, HEAD_OUT, PREMIX, LAYER_OUT = 3, 4, 5, 6, 7
+# An nnsight invoke must touch values in forward order: an earlier value touched after a later one raises
+# ``OutOfOrderError`` in a trace and, inside ``tracer.iter``, silently binds the next step's occurrence. Where a value
+# sits in the forward is nnterp's to say: ``mt.rank(name, layer)`` (``mt.order(layer)`` lists a block's values in the
+# order the forward reaches them, measured by one probe scan per model). An Intervention sorts its edits by it when it
+# is built, outside any trace.
 
 
 @dataclass(frozen=True)
 class Edit:
-    """One piece of an :class:`Intervention`: ``fn(mt, step)`` touches values of block ``layer`` at ``stage``.
-    ``first_only`` edits run on the prompt pass (step 0) only."""
+    """One piece of an :class:`Intervention`: ``fn(mt, step)`` touches the value ``name`` of block ``layer``, named
+    as ``mt.support(layer)`` / ``mt.rank`` name it (``"self_attn.attention_scores"``, ``"layer_output"``); ``layer``
+    is ``None`` for a root value (``"token_embeddings"``). ``first_only`` edits run on the prompt pass (step 0) only."""
 
-    layer: int
-    stage: int
+    layer: int | None
+    name: str
     fn: Callable
     first_only: bool = False
+
+
+def _rank(mt, edit: Edit) -> tuple:
+    """``mt.rank`` of the edit's value, with a tiebreak. A projection's output (``self_attn.q_proj.output``, the
+    pre-RoPE write of the Q patch) has no standard name: it sorts just before the block's first attention value."""
+    if edit.name.endswith("_proj.output"):
+        first = min(r for n, r in mt.order(edit.layer).items() if n.startswith("self_attn."))
+        return (edit.layer, first, -1)
+    return (*mt.rank(edit.name, edit.layer), 0)
 
 
 class Intervention:
@@ -117,14 +125,19 @@ class Intervention:
       does, for ``n = max_new`` when :attr:`every_step` and ``n = 1`` otherwise.
     - In a single forward, pass it as ``interventions=`` to ``apply_goalscope`` / ``collect_head_steering_vecs`` /
       ``get_o_proj_inputs_batch`` / ``get_attention_matrices``, which call ``iv(mt)`` (step 0).
-    - ``a + b`` merges two interventions; edits at the same (block, stage) keep the order ``a`` then ``b``.
+    - ``a + b`` merges two interventions; edits at one location (equal rank) keep the order ``a`` then ``b``.
       ``len(iv)`` is its number of edits, so an empty intervention is falsy.
 
-    The edits bind their envoys when the intervention is built, so build one per model. An intervention that keeps
-    state between its edits within a step (the KV transfer) must not run in two invokes of one trace."""
+    The edits bind their envoys when the intervention is built, so build one per model (``mt``, which ranks them).
+    An intervention that keeps state between its edits within a step (the KV transfer) must not run in two invokes
+    of one trace."""
 
-    def __init__(self, edits=()):
-        self.edits = sorted(edits, key=lambda e: (e.layer, e.stage))
+    def __init__(self, edits=(), mt=None):
+        edits = list(edits)
+        if edits and mt is None:
+            raise ValueError("an Intervention with edits takes the model they bind to (mt=), which orders them")
+        self.mt = mt
+        self.edits = sorted(edits, key=lambda e: _rank(mt, e))
 
     def __call__(self, mt, step=0):
         for e in self.edits:
@@ -137,7 +150,7 @@ class Intervention:
         return any(not e.first_only for e in self.edits)
 
     def __add__(self, other: "Intervention") -> "Intervention":
-        return Intervention(list(self.edits) + list(other.edits))
+        return Intervention(list(self.edits) + list(other.edits), self.mt if self.mt is not None else other.mt)
 
     def __len__(self):
         return len(self.edits)
@@ -231,8 +244,8 @@ def proj_patch(mt, patch_specs) -> Intervention:
                     for r, p in keep:
                         out[:, p, sl] = src_l[r, sl].to(out.device, out.dtype)
 
-            edits.append(Edit(layer, PROJ[which], edit, first_only=True))
-    return Intervention(edits)
+            edits.append(Edit(layer, f"self_attn.{which}_proj.output", edit, first_only=True))
+    return Intervention(edits, mt)
 
 
 def pivot_attn(info, heads, positions, pivot):
@@ -393,23 +406,29 @@ def headwise_kv_patch(mt, heads, k_cache, v_cache, dest_positions, v_scale=1.0) 
         keys, values = (x.to(dev) for x in src[L])
         if v_scale != 1.0:  # x the transplanted SOURCE values on the span
             values = values * v_scale
+        # q / k / v are read in the order this block's forward serves them (one location on most families;
+        # Falcon serves the values first).
+        read_order = sorted(("attention_queries", "attention_keys", "attention_values"),
+                            key=lambda n: mt.rank(f"self_attn.{n}", L))
         edits += _headwise_kv_edits(attn, L, sorted(qheads[L]), patched_kv[L], keys, values,
-                                    torch.tensor(list(dest_positions), device=dev), group)
-    return Intervention(edits)
+                                    torch.tensor(list(dest_positions), device=dev), group, read_order)
+    return Intervention(edits, mt)
 
 
-def _headwise_kv_edits(attn, layer, qheads, kvheads, keys, values, span, group):
-    """The two edits of one patched layer: stash the clean q / k / v (``ATTN_IN``), then recompute and write the
-    selected heads' last row (``HEAD_OUT``)."""
+def _headwise_kv_edits(attn, layer, qheads, kvheads, keys, values, span, group, read_order):
+    """The two edits of one patched layer: stash the clean q / k / v (read in ``read_order``), then recompute and
+    write the selected heads' last row of ``attention_head_outputs``."""
     kv_idx = torch.tensor(kvheads, device=span.device)[:, None]  # (n_kv, 1), broadcasts with span (S,)
     scaling = attn._module.scaling
     stash = {}
 
     def read(mt_, step):
-        stash["qkv"] = (attn.attention_queries, attn.attention_keys, attn.attention_values)
+        for n in read_order:
+            stash[n] = getattr(attn, n)
 
     def write(mt_, step):
-        q, k, v = stash.pop("qkv")  # (B, H, S, d); (B, KV, K, d) x 2, the whole cache on a decode step
+        q, k, v = (stash.pop(n) for n in ("attention_queries", "attention_keys", "attention_values"))
+        # (B, H, S, d); (B, KV, K, d) x 2, the whole cache on a decode step
         lowest = torch.finfo(q.dtype).min
         masked = attn.attention_scores[:, :, -1:] <= lowest  # the model's own mask on the last row (B, H, 1, K)
         k2, v2 = k.clone(), v.clone()  # never edit k / v in place: they are the cache
@@ -421,7 +440,7 @@ def _headwise_kv_edits(attn, layer, qheads, kvheads, keys, values, span, group):
         out = torch.matmul(w, v2.repeat_interleave(group, dim=1))  # (B, H, S, d)
         attn.attention_head_outputs[:, -1, qheads] = out[:, qheads, -1]
 
-    return [Edit(layer, ATTN_IN, read), Edit(layer, HEAD_OUT, write)]
+    return [Edit(layer, f"self_attn.{read_order[0]}", read), Edit(layer, "self_attn.attention_head_outputs", write)]
 
 
 def boost_head_ov(mt, heads, alpha) -> Intervention:
@@ -441,7 +460,8 @@ def boost_head_ov(mt, heads, alpha) -> Intervention:
 
         return edit
 
-    return Intervention([Edit(l, PREMIX, make(mt.layers[l].self_attn, sorted(hs))) for l, hs in by_layer.items()])
+    return Intervention([Edit(l, "self_attn.attention_premix", make(mt.layers[l].self_attn, sorted(hs)))
+                         for l, hs in by_layer.items()], mt)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -476,7 +496,8 @@ def whitelist_head_attn(mt, heads, keep, q_from, keep_from=None) -> Intervention
 
         return edit
 
-    return Intervention([Edit(l, SCORES, make(mt.layers[l].self_attn, sorted(hs))) for l, hs in by_layer.items()])
+    return Intervention([Edit(l, "self_attn.attention_scores", make(mt.layers[l].self_attn, sorted(hs)))
+                         for l, hs in by_layer.items()], mt)
 
 
 def run_q_transfer_intervention(

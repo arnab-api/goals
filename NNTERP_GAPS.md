@@ -203,16 +203,20 @@ the parity harness and the recompute variants below.
    and writable values at the rotation's input, `attention_queries_prerope` / `attention_keys_prerope` (`[batch,
    heads, seq, qk_head_dim]`, after any q/k norm), so a query transplant is `attn.attention_queries_prerope[:, heads,
    pivot] = src` with no `head_dim` slicing of a projection whose layout nnterp does not promise.
-3. **Composing interventions needs a forward order, and nothing provides one.** An intervention made of edits in
-   several blocks cannot run after another one: the patched GoalScope readout of the Q transfer combines a query
-   patch and an OV boost over the same 250 heads (blocks 2-63), and the boost at block 30 after the query patch at
-   block 60 raises `OutOfOrderError` in a trace, or inside `tracer.iter` binds the next step's occurrence without an
-   error. `src.nrgs.functional.Intervention` keys each edit by (block, stage) and runs them sorted, with a hand-written
-   stage order (`q_proj` < `k_proj` < `v_proj` < interface inputs < `attention_scores` < `attention_head_outputs` <
-   `attention_premix` < `layer_output`): the Llama / Qwen2 forward, wrong for Falcon (values before queries).
-   Proposal: a sort key per value from the descriptors nnterp already has, e.g.
-   `nnterp.forward_rank(model, "layers.12.self_attn.attention_scores") -> tuple`, so an intervention library orders
-   edits without encoding a family's forward.
+3. **Composing interventions needs a forward order; nnterp has it, and the first version of this port missed it.**
+   An intervention made of edits in several blocks cannot run after another one: the patched GoalScope readout of
+   the Q transfer combines a query patch and an OV boost over the same 250 heads (blocks 2-63), and the boost at
+   block 30 after the query patch at block 60 raises `OutOfOrderError` in a trace, or inside `tracer.iter` binds the
+   next step's occurrence without an error. `src.nrgs.functional.Intervention` sorts its edits by
+   `mt.rank(name, layer)` when it is built (`mt.order(layer)` lists a block's values in the order the forward reaches
+   them, measured by one probe scan per model, so Falcon's values-before-queries order and the hybrids come out
+   right); the KV transfer reads queries, keys and values in that order too. The first version hand-wrote a stage
+   table for the Llama / Qwen2 forward and proposed a `forward_rank` as a missing feature: `rank` has existed since
+   2026-10-07, but it lived on the availability page and the API reference only, and neither nnterp's `CLAUDE.md`
+   nor the nnterp skill routed to it. nnterp #125 and #126 add the routes. What still has no standard name is a
+   projection's output (`self_attn.q_proj.output`, the Q patch's pre-RoPE write): it is ranked just before the
+   block's first attention value, and goes away once `attention_queries_prerope` (nnterp #128) is in the pinned
+   nnterp.
 4. **The two-invoke limitation on `attention_scores` / `attention_probabilities` no longer reproduces.** nnterp's
    `CLAUDE.md` cheat-sheet and `attention-interior.md` say two invokes of one trace cannot both touch them
    (`TypeError`). On this stack every combination works, on a fresh model too: a scores edit in an input invoke with a
