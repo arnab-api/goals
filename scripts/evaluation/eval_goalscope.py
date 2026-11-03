@@ -66,7 +66,7 @@ from src.goals.head_sets import (  # noqa: F401  (re-exported)
     resolve_heads_name,
 )
 from src.models import ModelandTokenizer
-from src.tokens import prepare_input
+from src.tokens import chat_prompt, prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
 from src.utils.oracle_llms import ask_claude
 
@@ -179,21 +179,7 @@ def _chat_prompt(mt, question, prefill):
         {"role": "user", "content": question},
         {"role": "assistant", "content": prefill},
     ]
-    try:
-        return mt.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=False,
-            continue_final_message=True,
-            tokenize=False,
-            chat_template_kwargs={"enable_thinking": False},
-        )
-    except TypeError:
-        return mt.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=False,
-            continue_final_message=True,
-            tokenize=False,
-        )
+    return chat_prompt(mt, messages, add_generation_prompt=False, continue_final_message=True)
 
 
 def build_prompt(mt, inst):

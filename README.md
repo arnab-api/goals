@@ -103,12 +103,17 @@ do not qualify; if a goal can be stored and retrieved at each step, like an agen
 ## Using this code
 
 ```bash
-bash setup_env.sh          # conda env `goals`: Python 3.12, torch>=2.7 (CUDA 12.8 wheels), nnsight 0.8 + nnterp
+bash setup_env_uv.sh       # .venv with uv: torch (CUDA 12.8 wheels), nnsight 0.8, nnterp (pinned from git)
 cp env_demo.yml env.yml    # API keys (Anthropic for the LM judges, OpenAI for the EM judge) + cache/results dirs
 ```
 
-Run everything from the repository root. The experiments use Qwen2.5-Coder-32B-Instruct (one 80 GB GPU in bf16);
-the model comparisons add Qwen2.5-Coder-14B, Qwen2.5-32B and OLMo-3.1-32B.
+`bash setup_env.sh` builds the same environment as a conda env `goals`. Run everything from the repository root.
+Models load through [nnterp](https://github.com/ndif-team/nnterp) (nnsight 0.8), which gives every family it
+standardizes the same module names and values, so the experiments run on any of those families with no per-family
+code. The paper uses Qwen2.5-Coder-32B-Instruct (one 80 GB GPU in bf16); the model comparisons add Qwen2.5-Coder-14B,
+Qwen2.5-32B and OLMo-3.1-32B. `python scripts/cross_family_check.py --model <hf id>` runs every experiment primitive
+once on another model; CLAUDE.md ("Running on another model") has the results on seven families and what does not
+carry over.
 
 - `notebooks/demos/` — walk-throughs of the main experiments on a single example each (start here).
 - `scripts/` — the experiment entry points; `job_list/` — the exact runs behind the paper's results.

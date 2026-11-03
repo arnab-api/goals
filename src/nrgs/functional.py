@@ -38,7 +38,7 @@ if _ROOT not in sys.path:
 from src.functional import _LOOP_CUT_SHORT
 from src.goals.goalscope import apply_goalscope
 from src.models import ModelandTokenizer
-from src.tokens import prepare_input
+from src.tokens import chat_prompt, prepare_input
 from src.utils import logging_utils
 
 logging_utils.configure(level=logging.WARNING)
@@ -183,13 +183,7 @@ def get_prompt(question, prefill, ctx=None, system_extra=""):
         {"role": "user", "content": question},
         {"role": "assistant", "content": prefill},
     ]
-    return _mt.tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=False,
-        continue_final_message=True,
-        tokenize=False,
-        chat_template_kwargs={"enable_thinking": False},
-    )
+    return chat_prompt(_mt, messages, add_generation_prompt=False, continue_final_message=True)
 
 
 def cache_src_proj(prompt, positions, layers, which, ctx=None):

@@ -1,0 +1,111 @@
+{
+ "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+ "family": "qwen2",
+ "sizes": {
+  "num_layers": 28,
+  "num_heads": 28,
+  "num_kv_heads": 4,
+  "head_dim": 128,
+  "hidden_size": 3584
+ },
+ "heads": {
+  "spec": "random:60",
+  "seed": 0,
+  "n": 60,
+  "layers": [
+   9,
+   17
+  ]
+ },
+ "constants": {
+  "n_tokens": 16,
+  "steer_layers": [
+   15,
+   20
+  ],
+  "ov_probe_layer": 21,
+  "blind_from_layer": 9
+ },
+ "versions": {
+  "nnterp": "2.0.0rc2.dev7+gfeeb24c5e",
+  "nnsight": "0.8.2",
+  "transformers": "5.22.1",
+  "torch": "2.11.0+cu128"
+ },
+ "dtype": "bfloat16",
+ "attn_implementation": "eager",
+ "n_ok": 14,
+ "n_primitives": 14,
+ "results": [
+  {
+   "primitive": "load + support()",
+   "status": "OK",
+   "reason": "qwen2: 28 layers x 28 heads (4 kv, head_dim 128), hidden 3584; attention interior available"
+  },
+  {
+   "primitive": "GoalScope additive",
+   "status": "OK",
+   "reason": "2 readouts at pivots [105, 106], steer layers 15-19"
+  },
+  {
+   "primitive": "GoalScope replace",
+   "status": "OK",
+   "reason": "2 readouts, 9 patched layers"
+  },
+  {
+   "primitive": "OVReader probe",
+   "status": "OK",
+   "reason": "readout at probe layer 21; OV vector finite"
+  },
+  {
+   "primitive": "attention matrices",
+   "status": "OK",
+   "reason": "plain + value-weighted (28, 28, 106, 106); rows sum to 1 within 4e-03"
+  },
+  {
+   "primitive": "head vectors, padded batch",
+   "status": "OK",
+   "reason": "(2, 3, 3584), pads per row [0, 4]"
+  },
+  {
+   "primitive": "KV transfer",
+   "status": "OK",
+   "reason": "window 35 tokens, V x4; 3 generations, 114 chars; self-transplant moves logits by 0"
+  },
+  {
+   "primitive": "Q transfer (GSR)",
+   "status": "OK",
+   "reason": "selected 1 of 3 tasks; 3 generations, 107 chars"
+  },
+  {
+   "primitive": "sink ablation decode",
+   "status": "OK",
+   "reason": "60 heads sunk to key 0 (pivot-row mass on it >= 1.000); 2 generations, 28 chars"
+  },
+  {
+   "primitive": "blind-span ablation decode",
+   "status": "OK",
+   "reason": "472 heads (layers >= 9) blind to 35 keys (mass left on them 0e+00); 1 generation, 19 chars"
+  },
+  {
+   "primitive": "OV boost (greedy_continue)",
+   "status": "OK",
+   "reason": "x2 on 60 heads, every forward; 1 generation, 52 chars"
+  },
+  {
+   "primitive": "temporal goal_encoding",
+   "status": "OK",
+   "reason": "encodings at 5 positions; cos(pivot, next) = 0.69"
+  },
+  {
+   "primitive": "get_hs + next-token probs",
+   "status": "OK",
+   "reason": "4 locations (standard names); probs = softmax(mt.logits) within 0e+00"
+  },
+  {
+   "primitive": "head-mask gradient step",
+   "status": "OK",
+   "reason": "mask (28, 28), loss 21.17, grad norm 7.05e-01"
+  }
+ ]
+}

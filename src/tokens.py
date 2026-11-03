@@ -10,6 +10,32 @@ from src.utils.typing import Tokenizer, TokenizerOutput
 logger = logging.getLogger(__name__)
 
 
+def chat_prompt(tokenizer: ModelandTokenizer | Tokenizer, messages: list[dict], **kwargs) -> str:
+    """``messages`` rendered by the tokenizer's chat template, as text. ``kwargs`` go to ``apply_chat_template``
+    (e.g. ``add_generation_prompt=False, continue_final_message=True`` to leave a prefilled assistant turn open).
+
+    ``enable_thinking=False`` is passed to the template (Qwen3 reads it), and dropped if the call rejects the keyword.
+    A template that refuses a system turn (Gemma's raises "System role not supported") gets the system text at the
+    start of the first user turn instead, separated by a blank line; every other template sees ``messages`` as given."""
+    tokenizer = unwrap_tokenizer(tokenizer)
+
+    def render(msgs):
+        try:
+            return tokenizer.apply_chat_template(msgs, tokenize=False, chat_template_kwargs={"enable_thinking": False},
+                                                 **kwargs)
+        except TypeError:
+            return tokenizer.apply_chat_template(msgs, tokenize=False, **kwargs)
+
+    try:
+        return render(messages)
+    except Exception as e:  # jinja2.TemplateError, raised by the template itself
+        if not (len(messages) > 1 and messages[0]["role"] == "system" and messages[1]["role"] == "user"
+                and "system" in str(e).lower()):
+            raise
+        system, user = messages[0], messages[1]
+        return render([dict(user, content=f"{system['content']}\n\n{user['content']}"), *messages[2:]])
+
+
 def prepare_input(
     prompts: str | list[str],
     tokenizer: ModelandTokenizer | Tokenizer,

@@ -1,0 +1,111 @@
+{
+ "model": "meta-llama/Llama-3.1-8B-Instruct",
+ "family": "llama",
+ "sizes": {
+  "num_layers": 32,
+  "num_heads": 32,
+  "num_kv_heads": 8,
+  "head_dim": 128,
+  "hidden_size": 4096
+ },
+ "heads": {
+  "spec": "random:60",
+  "seed": 0,
+  "n": 60,
+  "layers": [
+   10,
+   20
+  ]
+ },
+ "constants": {
+  "n_tokens": 16,
+  "steer_layers": [
+   18,
+   23
+  ],
+  "ov_probe_layer": 24,
+  "blind_from_layer": 10
+ },
+ "versions": {
+  "nnterp": "2.0.0rc2.dev7+gfeeb24c5e",
+  "nnsight": "0.8.2",
+  "transformers": "5.22.1",
+  "torch": "2.11.0+cu128"
+ },
+ "dtype": "bfloat16",
+ "attn_implementation": "eager",
+ "n_ok": 14,
+ "n_primitives": 14,
+ "results": [
+  {
+   "primitive": "load + support()",
+   "status": "OK",
+   "reason": "llama: 32 layers x 32 heads (8 kv, head_dim 128), hidden 4096; attention interior available"
+  },
+  {
+   "primitive": "GoalScope additive",
+   "status": "OK",
+   "reason": "2 readouts at pivots [127, 128], steer layers 18-22"
+  },
+  {
+   "primitive": "GoalScope replace",
+   "status": "OK",
+   "reason": "2 readouts, 11 patched layers"
+  },
+  {
+   "primitive": "OVReader probe",
+   "status": "OK",
+   "reason": "readout at probe layer 24; OV vector finite"
+  },
+  {
+   "primitive": "attention matrices",
+   "status": "OK",
+   "reason": "plain + value-weighted (32, 32, 128, 128); rows sum to 1 within 3e-03"
+  },
+  {
+   "primitive": "head vectors, padded batch",
+   "status": "OK",
+   "reason": "(2, 3, 4096), pads per row [0, 4]"
+  },
+  {
+   "primitive": "KV transfer",
+   "status": "OK",
+   "reason": "window 34 tokens, V x4; 3 generations, 114 chars; self-transplant moves logits by 0"
+  },
+  {
+   "primitive": "Q transfer (GSR)",
+   "status": "OK",
+   "reason": "selected 1 of 3 tasks; 3 generations, 112 chars"
+  },
+  {
+   "primitive": "sink ablation decode",
+   "status": "OK",
+   "reason": "60 heads sunk to key 0 (pivot-row mass on it >= 1.000); 2 generations, 28 chars"
+  },
+  {
+   "primitive": "blind-span ablation decode",
+   "status": "OK",
+   "reason": "644 heads (layers >= 10) blind to 34 keys (mass left on them 0e+00); 1 generation, 50 chars"
+  },
+  {
+   "primitive": "OV boost (greedy_continue)",
+   "status": "OK",
+   "reason": "x2 on 60 heads, every forward; 1 generation, 46 chars"
+  },
+  {
+   "primitive": "temporal goal_encoding",
+   "status": "OK",
+   "reason": "encodings at 5 positions; cos(pivot, next) = 0.65"
+  },
+  {
+   "primitive": "get_hs + next-token probs",
+   "status": "OK",
+   "reason": "4 locations (standard names); probs = softmax(mt.logits) within 0e+00"
+  },
+  {
+   "primitive": "head-mask gradient step",
+   "status": "OK",
+   "reason": "mask (32, 32), loss 17.30, grad norm 2.50e+00"
+  }
+ ]
+}
