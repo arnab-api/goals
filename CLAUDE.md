@@ -34,7 +34,8 @@ src/tokens.py            prepare_input (left padding), find_token_range
 src/utils/               env_utils (paths), oracle_llms (ask_claude + cache), logging, experiment_utils
 src/goals/               head localization (head_loc_*), head_sets.py, goalscope.py (+ OVReader),
                          goalscope_viz.py, temporal_persistence.py, site_data.py, proactive_strategy.py
-src/nrgs/                data.py (QTASKS bank, multi-predicate setups), hier_data.py, functional.py (setup, hooks),
+src/nrgs/                data.py (QTASKS bank, multi-predicate setups), hier_data.py, functional.py (setup, the
+                         Intervention vocabulary on nnterp values, greedy on mt.generate + tracer.iter),
                          kv_transfer.py, task_vs_progress.py, eval.py (judges)
 scripts/                 mine_pivot_instances.py, train_head_mask.py, data/, evaluation/, nrgs/, icl/, em/,
                          site scripts (generate_well_known_task_completions.py, mine_humaneval_mbpp.py,
@@ -368,7 +369,12 @@ App. `app:nrgs` (`Text/Appendix/task_transfer.tex`), App. `app:pre-com` / `app:t
 `head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json`, `C250` =
 `head_sets/Qwen2.5-Coder-32B-Instruct/control/control250__laterhalf.json`. GoalScope readouts inside these scripts use
 additive_norm α 0.1, layers 35-45, readout heads = G250. Task banks are inline (`src/nrgs/data.py`,
-`src/nrgs/hier_data.py`); no `data/` file is read. `src/nrgs/functional.setup()` only loads the model. Judges:
+`src/nrgs/hier_data.py`); no `data/` file is read. `src/nrgs/functional.setup()` only loads the model. Every
+intervention is a `src.nrgs.functional.Intervention` (`iv(mt, step)`, nnterp values edited at each `mt.generate` step,
+or `interventions=` of a single-forward reader): the KV transfer recomputes the patched layers' attention from
+`attention_queries` / `_keys` / `_values` with the span replaced and writes the chosen heads' last row of
+`attention_head_outputs` (other heads and the KV cache stay clean); the Q patch writes `q_proj.output` (pre-RoPE) on
+the prompt pass; the GSR restriction masks `attention_scores`; the OV boost scales `attention_premix`. Judges:
 `src/nrgs/eval.py` (`judge_causal` scores a BOTH verdict as a miss; the stored `causal_trigger_rate` values were
 rescored the same way, the old rule survives as `*_incl_both` fields). `R = results/diff/Qwen2.5-Coder-32B-Instruct`.
 Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-python`, `python-cpp`, ...).

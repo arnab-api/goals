@@ -23,7 +23,6 @@ The pivot is never overwritten: it computes freely under the intervention (hence
 import hashlib
 import json
 import os
-from contextlib import ExitStack, contextmanager
 
 import torch
 
@@ -57,35 +56,27 @@ def geometry(inst, *, ctx):
     return dict(inst=inst, src_tok=g["src_tok"], dst_tok=g["dst_tok"], W=W, piv_d=L_d - 1)
 
 
-@contextmanager
-def embedding_patch(mt, src_ids, dst_pos):
-    """Replace the input-embedding output at `dst_pos` with the embeddings of `src_ids` (prompt pass only)."""
-    emb = mt._model.get_input_embeddings()
+def embedding_patch(mt, src_ids, dst_pos) -> FUNC.Intervention:
+    """Replace the input-embedding output (``token_embeddings``) at `dst_pos` with the embeddings of `src_ids`
+    (prompt pass only)."""
+    dst_pos = list(dst_pos)
     with torch.no_grad():
-        e_src = emb(src_ids.to(emb.weight.device))
+        e_src = mt.embed_tokens(src_ids.to(mt.embed_tokens.weight.device))  # a plain module call outside a trace
 
-    def hook(module, inp, out):
-        if out.shape[1] <= max(dst_pos):
-            return out
-        out = out.clone()
-        out[:, dst_pos] = e_src.to(out.dtype)
-        return out
+    def edit(mt_, step):
+        mt.token_embeddings[:, dst_pos] = e_src
 
-    h = emb.register_forward_hook(hook)
-    try:
-        yield
-    finally:
-        h.remove()
+    return FUNC.Intervention([FUNC.Edit(None, "token_embeddings", edit, first_only=True)], mt)
 
 
 def make_stack(G, method, span, heads=None, v_scale=1.0, *, headsets, ctx):
-    """``() -> ExitStack`` (single use per forward / generation) for one config. ``headsets`` maps a heads name to
-    ``[(layer, head), ...]``; the residual method patches every layer."""
+    """The :class:`src.nrgs.functional.Intervention` for one config (an empty one for the no-op corner).
+    ``headsets`` maps a heads name to ``[(layer, head), ...]``; the residual method patches every layer."""
     mt = ctx.mt
     layers = list(range(mt.n_layer))
     src_pos, dst_pos = G["W"][span]
     if method == "none" or span == "none":
-        return ExitStack
+        return FUNC.Intervention()
     if method == "kv":    # I3 only: the chosen heads read SRC's span k/v from the pivot on (values x v_scale)
         gk = dict(src_tok=G["src_tok"], dst_tok=G["dst_tok"], src_w=src_pos, dst_w=dst_pos)
         return PP.intervention_stack(gk, goal_heads=headsets[heads], v_scale=v_scale, ctx=ctx)
@@ -100,20 +91,13 @@ def make_stack(G, method, span, heads=None, v_scale=1.0, *, headsets, ctx):
         # layer 0 reads k/v from the token EMBEDDINGS (not a layer output), so the span's embeddings are swapped too:
         # without this the pivot's layer-0 attention would still see DST's task tokens (progress tokens are identical)
         src_ids = G["src_tok"]["input_ids"][0, src_pos]
-
-        def stack():
-            s = ExitStack()
-            s.enter_context(embedding_patch(mt, src_ids, dst_pos))
-            s.enter_context(PP.residual_patch(mt, cache, pos, layers))
-            return s
-        return stack
+        return embedding_patch(mt, src_ids, dst_pos) + PP.residual_patch(mt, cache, pos, layers)
     raise ValueError(method)
 
 
 def run_patched(G, stack, *, max_new=64, ctx):
-    """Greedy patched DST generation."""
-    with stack():
-        return FUNC.greedy(G["dst_tok"], max_new=max_new, ctx=ctx)
+    """Greedy patched DST generation under ``stack`` (:func:`make_stack`)."""
+    return FUNC.greedy(G["dst_tok"], max_new=max_new, ctx=ctx, interventions=stack)
 
 
 def judge(G, clean, gen, model_name="claude-sonnet-4-6"):

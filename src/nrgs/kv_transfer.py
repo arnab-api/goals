@@ -17,12 +17,10 @@ position-aligned across languages ("A1"). All runs of a geometry (clean SRC, cle
 sequences."""
 
 import hashlib
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import baukit
 import torch
 
 import src.nrgs.data as DATA
@@ -37,38 +35,30 @@ from src.tokens import prepare_input
 # ══════════════════════════════════════════════════════════════════════════════
 def layer_outputs(mt, tok, positions, layers):
     """{layer: (len(positions), d)} — each decoder layer's OUTPUT residual at ``positions`` (CPU float32)."""
-    names = {l: mt.layer_name_format.format(l) for l in layers}
-    with torch.no_grad(), baukit.TraceDict(mt._model, list(names.values()), retain_output=True) as tr:
-        mt._model(input_ids=tok["input_ids"], attention_mask=tok["attention_mask"])
-    out = lambda o: o[0] if isinstance(o, tuple) else o
-    return {l: out(tr[n].output)[0, positions].detach().float().cpu() for l, n in names.items()}
-
-
-@contextmanager
-def residual_patch(mt, cache, positions, layers):
-    """Overwrite each decoder layer's OUTPUT residual at absolute ``positions`` with ``cache[layer]`` (rows in
-    ``positions`` order). Forwards that do not contain the positions (cached decode steps) are left alone."""
-    handles = []
-
-    def make(src):
-        def hook(module, inp, out):
-            h = out[0] if isinstance(out, tuple) else out
-            if h.shape[1] <= max(positions):
-                return out
-            h = h.clone()
-            h[:, positions] = src.to(h.device, h.dtype)
-            return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
-
-        return hook
-
-    try:
+    layers = sorted(layers)
+    saves = {}
+    with torch.no_grad(), mt.trace(dict(input_ids=tok["input_ids"], attention_mask=tok["attention_mask"])):
         for l in layers:
-            mod = baukit.get_module(mt._model, mt.layer_name_format.format(l))
-            handles.append(mod.register_forward_hook(make(cache[l])))
-        yield
-    finally:
-        for hd in handles:
-            hd.remove()
+            saves[l] = mt.layers[l].layer_output[0, positions].save()
+    return {l: saves[l].detach().float().cpu() for l in layers}
+
+
+def residual_patch(mt, cache, positions, layers) -> FUNC.Intervention:
+    """Overwrite each decoder layer's OUTPUT residual (``layer_output``) at absolute ``positions`` with
+    ``cache[layer]`` (rows in ``positions`` order), on the prompt pass only (the decode steps do not contain them)."""
+    positions = list(positions)
+
+    def make(block, src):
+        def edit(mt_, step):
+            block.layer_output[:, positions] = src
+
+        return edit
+
+    edits = []
+    for l in layers:
+        w = mt.layers[l].self_attn.o_proj.weight  # the block's device and dtype
+        edits.append(FUNC.Edit(l, "layer_output", make(mt.layers[l], cache[l].to(w.device, w.dtype)), first_only=True))
+    return FUNC.Intervention(edits, mt)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -171,33 +161,25 @@ def clean_runs(g, *, readout_heads, max_new=64, readout=True, ctx):
 
 
 def intervention_stack(g, *, goal_heads, v_scale=1.0, ctx):
-    """``() -> ExitStack`` (single-use: call it once per forward / generation) with the pivot-onwards KV transfer:
-    ``goal_heads`` read SRC's window k/v (values x ``v_scale``) from the pivot on. Used by :func:`run_patched` and by
-    :func:`src.nrgs.task_vs_progress.make_stack`."""
+    """The pivot-onwards KV transfer as an :class:`src.nrgs.functional.Intervention` (``iv(mt, step=0)``):
+    ``goal_heads`` read SRC's window k/v (values x ``v_scale``) from the pivot on. Reusable: pass it to
+    ``FUNC.greedy(..., interventions=)`` for a generation and to ``goalscope_readout(..., interventions=)`` for the
+    readout's source trace. Used by :func:`run_patched` and by :func:`src.nrgs.task_vs_progress.make_stack`."""
     mt = ctx.mt
     layers = sorted({l for l, _ in goal_heads})
     k_c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, "k", ctx=ctx)
     v_c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, "v", ctx=ctx)
-
-    def stack():
-        s = ExitStack()
-        s.enter_context(FUNC.headwise_kv_patch(mt, goal_heads, k_c, v_c, g["dst_w"], v_scale=v_scale))
-        return s
-
-    return stack
+    return FUNC.headwise_kv_patch(mt, goal_heads, k_c, v_c, g["dst_w"], v_scale=v_scale)
 
 
 def run_patched(g, *, goal_heads, readout_heads, v_scale=1.0, max_new=64, readout=True, ctx):
     """One patched DST run (prompt ending at the pivot): greedy generation + GoalScope readout at the pivot under
     :func:`intervention_stack`. ``v_scale`` multiplies the transplanted SRC window VALUES read by the goal heads
     (keys / attention pattern unchanged; 1.0 = off). Returns ``gen_patched`` / ``ro_patched``."""
-    stack = intervention_stack(g, goal_heads=goal_heads, v_scale=v_scale, ctx=ctx)
-    iface = stack  # entered around the readout's source trace (``legacy_hooks``)
-
-    with stack():
-        gen = FUNC.greedy(g["dst_tok"], max_new=max_new, ctx=ctx)
+    iv = intervention_stack(g, goal_heads=goal_heads, v_scale=v_scale, ctx=ctx)
+    gen = FUNC.greedy(g["dst_tok"], max_new=max_new, ctx=ctx, interventions=iv)
     L = g["dst_tok"]["input_ids"].shape[1]
-    ro = (FUNC.goalscope_readout("", g["dst_tok"], L - 1, heads=readout_heads, iface=iface, ctx=ctx)[0]["patched_gen"]
+    ro = (FUNC.goalscope_readout("", g["dst_tok"], L - 1, heads=readout_heads, interventions=iv, ctx=ctx)[0]["patched_gen"]
           if readout else None)
     return dict(gen_patched=gen, ro_patched=ro)
 

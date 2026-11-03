@@ -279,8 +279,8 @@ intervention fails a string check rather than only a logit tolerance. Interventi
 | `temporal` | `temporal_persistence.build_probe_prompt`, `rollout_probe`, `locate_value`, `goal_encoding` | `multi_predicate_setups("int", [3, 4], seed 1123)[0]`, target t=1 | goal encodings at the `=` pivot + implementation tokens per arm; the oracle segment is replaced by the first generated line |
 | `ablation_blind` | `frontier_block_positions`, `complement_heads`, `generate_blocking_span_cached` | `list[int]_python_000` | baseline / ablated (spare heads60, blind 472) / control generations |
 | `ablation_sink` | `random_heads_like`, `sink_generate_cached` | `str_python_001` | baseline / ablated heads60 / control / ablated band448 generations |
-| `ov_boost` | `build_obstacle_prompt`, `greedy_continue`, `boost_head_ov`, the script's `boosted_heads` and `run_obstacle` | `candidates()[0]` = list[str] `total_length`, obstacle `" 0 + "` | continuations (clean, x2 per arm, the script's path), step-0 logits of each path |
-| `kv_transfer` | `sample_multi_instances`, `build_geometry`, `clean_runs`, `run_patched` (`readout=False`), `intervention_stack`, `cache_src_proj`, `goalscope_readout` | instance 0 of int py-py (seed 1123), V x1 and x4 | geometry, clean and patched generations per arm, step-0 logits, source k/v of 2 layers, read-outs at the pivot with the KV patch entered around the source trace (`iface` -> `legacy_hooks`) |
+| `ov_boost` | `build_obstacle_prompt`, `greedy_continue`, `boost_head_ov` (traced on every forward of a `greedy_continue` loop), the script's `boosted_heads` and `run_obstacle` | `candidates()[0]` = list[str] `total_length`, obstacle `" 0 + "` | continuations (clean, x2 per arm, the script's path), step-0 logits of each path |
+| `kv_transfer` | `sample_multi_instances`, `build_geometry`, `clean_runs`, `run_patched` (`readout=False`), `intervention_stack`, `cache_src_proj`, `goalscope_readout` | instance 0 of int py-py (seed 1123), V x1 and x4 | geometry, clean and patched generations per arm, step-0 logits, source k/v of 2 layers, read-outs at the pivot with the KV patch on the source trace (`goalscope_readout(interventions=)`) |
 | `q_transfer` | `diff_trigger_setups`, `run_q_transfer_intervention` (`compute_readout=False`) | instance 0 of order_diff int py-py (cell seed as in the script) | every raw field (generations, gaze scores, selection, restrict set, pivot attention) per arm, the source query cache |
 | `mask_grad_equal` | `get_next_token_probs_batch`, `get_o_proj_inputs_batch`, `forward_with_src_replacement`, `HeadMask` | Coder-32B pivot instances 0 and 24 (equal source / destination / target lengths, no padding) | one `train_head_mask` step at mask 0.5: mask gradient, KL and sparsity losses, patched logits (full) |
 | `mask_grad_padded` | same | instances 0 and 52 (source, destination and target lengths all differ) | same, **padded** |
@@ -290,13 +290,15 @@ intervention fails a string check rather than only a logit tolerance. Interventi
 The port keeps these names and signatures, or changes `run.py` in the same PR (and says so):
 
 - `src.nrgs.functional.setup(model_name, device_map)` returning a `Ctx` and binding the module global `mt`;
-  `boost_head_ov(mt, heads, alpha)`; `goalscope_readout(tag, prompt, pivot, heads=, iface=, layers=, maxnew=, ctx=)`
-  (`iface`: a zero-argument callable returning a hook context, passed on as `apply_goalscope(legacy_hooks=)`);
-  `cache_src_proj(prompt, positions, layers, which, ctx=None)`;
-  `run_q_transfer_intervention(mt, inst, patch_heads, readout_heads=, *, max_new, alpha, compute_readout, gsr_max_new)`.
+  `boost_head_ov(mt, heads, alpha)` (an `Intervention`, `iv(mt, step=0)`);
+  `goalscope_readout(tag, prompt, pivot, heads=, interventions=, layers=, maxnew=, ctx=)` (`interventions`: an
+  `Intervention`, passed on as `apply_goalscope(interventions=)`); `cache_src_proj(prompt, positions, layers, which,
+  ctx=None)`; `run_q_transfer_intervention(mt, inst, patch_heads, readout_heads=, *, max_new, alpha, compute_readout,
+  gsr_max_new)`.
 - `src.nrgs.kv_transfer`: `sample_multi_instances`, `build_geometry(inst, *, span, ctx)`,
   `clean_runs(g, *, readout_heads, max_new, readout, ctx)`, `run_patched(g, *, goal_heads, readout_heads, v_scale,
-  max_new, readout, ctx)`, `intervention_stack(g, *, goal_heads, v_scale, ctx)`, `geometry_info`, `inst_key`, `_ids`.
+  max_new, readout, ctx)`, `intervention_stack(g, *, goal_heads, v_scale, ctx)` (an `Intervention`), `geometry_info`,
+  `inst_key`, `_ids`.
 - `src.nrgs.data`: `multi_predicate_setups`, `diff_trigger_setups`, the module global `CPP_NOTE_IN_SYSTEM`.
 - `src.goals.goalscope`: `apply_goalscope(prompt, *, mt, selected_heads, strategy, steer_layer_range, alpha,
   max_new_tokens, n_steer_tokens, goalscope_prompt, include_noncode, token_positions)`,

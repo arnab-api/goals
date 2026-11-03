@@ -442,9 +442,33 @@ def case_ablation_sink(E) -> Rec:
     return r
 
 
+def _traced_logits(mt, input_ids, attention_mask, interventions):
+    """Last-position logits of one traced forward under ``interventions(mt)`` (an NRGS intervention)."""
+    with torch.no_grad(), mt.trace(dict(input_ids=input_ids, attention_mask=attention_mask)):
+        interventions(mt)
+        logits = mt.logits[0, -1].save()
+    return logits
+
+
+def _greedy_continue_under(mt, input_ids, attention_mask, max_new_tokens, interventions):
+    """``greedy_continue`` (no KV cache: every step re-runs the whole sequence) with each forward traced under
+    ``interventions``: what ``boost_head_ov``'s hooks around ``greedy_continue`` did before the port."""
+    generated = []
+    for _ in range(max_new_tokens):
+        next_tok = int(_traced_logits(mt, input_ids, attention_mask, interventions).argmax())
+        generated.append(next_tok)
+        if next_tok == mt.tokenizer.eos_token_id:
+            break
+        input_ids = torch.cat([input_ids, torch.tensor([[next_tok]], device=input_ids.device)], dim=1)
+        attention_mask = torch.cat(
+            [attention_mask, torch.ones((1, 1), dtype=attention_mask.dtype, device=attention_mask.device)], dim=1)
+    return mt.tokenizer.decode(generated, skip_special_tokens=True).rstrip()
+
+
 def case_ov_boost(E) -> Rec:
-    """OV boost x2 at the last token: ``boost_head_ov`` around ``greedy_continue`` (both head sets) and the script's
-    own ``run_obstacle`` / ``boosted_heads`` (60 heads); plus step-0 logits of each path."""
+    """OV boost x2 at the last token: ``boost_head_ov`` on every forward of a ``greedy_continue`` loop (both head
+    sets; the intervention is traced per forward, ``_greedy_continue_under``) and the script's own ``run_obstacle`` /
+    ``boosted_heads`` (60 heads); plus step-0 logits of each path."""
     mt, r = E.mt, Rec()
     dt, pid = OVB.candidates()[C.OVB_CANDIDATE]
     prompt, p = build_obstacle_prompt(mt, dt, pid, OVB.NUMERIC_OBSTACLE)
@@ -455,9 +479,10 @@ def case_ov_boost(E) -> Rec:
         gc["base"] = dict(gen=base, ids=_ids(mt, base))
         r.topk("step0_logits/clean", mt._model(**inp).logits[0, -1], of="logits")
         for arm, heads in E.head_sets.items():
-            with FUNC.boost_head_ov(mt, heads, C.OVB_ALPHA):
-                g = greedy_continue(mt, **inp, max_new_tokens=C.GEN_TOKENS)
-                r.topk(f"step0_logits/boost_head_ov/{arm}", mt._model(**inp).logits[0, -1], of="logits")
+            boost = FUNC.boost_head_ov(mt, heads, C.OVB_ALPHA)
+            g = _greedy_continue_under(mt, inp["input_ids"], inp["attention_mask"], C.GEN_TOKENS, boost)
+            r.topk(f"step0_logits/boost_head_ov/{arm}",
+                   _traced_logits(mt, inp["input_ids"], inp["attention_mask"], boost), of="logits")
             gc[f"boost_{arm}"] = dict(gen=g, ids=_ids(mt, g))
         with OVB.boosted_heads(mt, E.heads, C.OVB_ALPHA):
             r.topk("step0_logits/boosted_heads/heads60", mt._model(**inp).logits[0, -1], of="logits")
@@ -480,7 +505,7 @@ def case_kv_transfer(E) -> Rec:
     instance (int, py-py), V x1 and x4, ``readout=False``, both head sets. Extra: step-0 logits under
     ``intervention_stack``; the cached source k/v; and GoalScope read-outs at the pivot through ``goalscope_readout``
     with the 7B steer layers and 32 tokens (its defaults, layers 35-46 and 128 tokens, do not fit a 28-layer model).
-    The patched read-out enters ``intervention_stack`` around ``apply_goalscope``'s source trace (``legacy_hooks``)."""
+    The patched read-out passes ``intervention_stack`` to ``apply_goalscope``'s source trace (``interventions``)."""
     mt, ctx, r = E.mt, E.ctx, Rec()
     old = DATA.CPP_NOTE_IN_SYSTEM
     DATA.CPP_NOTE_IN_SYSTEM = True  # kv_transfer_eval.main sets this module global
@@ -508,12 +533,11 @@ def case_kv_transfer(E) -> Rec:
                 pat = PP.run_patched(g, goal_heads=heads, readout_heads=heads, v_scale=v, max_new=C.GEN_TOKENS,
                                      readout=False, ctx=ctx)
                 stack = PP.intervention_stack(g, goal_heads=heads, v_scale=v, ctx=ctx)
-                with torch.no_grad(), stack():
-                    lg = mt._model(input_ids=dst["input_ids"], attention_mask=dst["attention_mask"]).logits[0, -1]
+                lg = _traced_logits(mt, dst["input_ids"], dst["attention_mask"], stack)
                 r.topk(f"{arm}/step0_logits/v{v:g}", lg)
 
-                # `iface` is the hook context factory itself, as `run_patched` passes it
-                ro = FUNC.goalscope_readout("", dst, L - 1, iface=stack, **ro_kw)[0]["patched_gen"]
+                # the readout's source trace runs under the stack, as `run_patched` passes it
+                ro = FUNC.goalscope_readout("", dst, L - 1, interventions=stack, **ro_kw)[0]["patched_gen"]
                 out[f"v{v:g}"] = dict(gen_patched=pat["gen_patched"], gen_ids=_ids(mt, pat["gen_patched"]),
                                       ro_patched_7b=ro, ro_ids=_ids(mt, ro), ro_patched_default=pat["ro_patched"])
             r.data[arm] = out

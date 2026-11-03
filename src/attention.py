@@ -1,5 +1,4 @@
 import logging
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -38,7 +37,6 @@ def get_attention_matrices(
     mt: ModelandTokenizer,
     value_weighted: bool = False,
     interventions: Optional[Callable[[ModelandTokenizer], None]] = None,
-    legacy_hooks: Optional[Callable[[], AbstractContextManager]] = None,
 ) -> "AttentionInformation | list[AttentionInformation]":
     """
     Every layer's attention pattern, ``mt.layers[l].self_attn.attention_probabilities``, read in one
@@ -57,12 +55,9 @@ def get_attention_matrices(
               (``attention_values``, expanded over the GQA groups with ``repeat_interleave``)
         interventions: optional ``interventions(mt)``, called inside the trace before the reads,
             in the invoke that carries the inputs; the reads run in a second, empty invoke. Same
-            composition rule as :func:`src.goals.head_loc_attn.get_o_proj_inputs_batch`. It must
-            not touch ``attention_probabilities`` / ``attention_scores`` itself: two invokes
-            cannot both touch those today (nnsight raises a ``TypeError``).
-        legacy_hooks: deprecated, for the NRGS interventions that are still PyTorch hooks on
-            ``mt._model``: a zero-argument callable returning a context manager, entered around
-            the trace. Goes when those interventions are ported to ``interventions``.
+            composition rule as :func:`src.goals.head_loc_attn.get_o_proj_inputs_batch`, so an
+            edit of ``attention_scores`` (e.g. :func:`src.nrgs.functional.whitelist_head_attn`)
+            shows in the pattern read here.
     Returns:
         AttentionInformation if a single str was passed, else list[AttentionInformation].
         Each AttentionInformation has attention_matrices of shape (layers, heads, tokens, tokens).
@@ -87,18 +82,17 @@ def get_attention_matrices(
 
     attns = [mt.layers[l].self_attn for l in range(mt.num_layers)]
     patterns, values = [], []
-    with legacy_hooks() if legacy_hooks is not None else nullcontext():
-        with mt.trace() as tracer:
-            with tracer.invoke(dict(input)):
-                if interventions is not None:
-                    interventions(mt)
-            with tracer.invoke():
-                for attn in attns:
-                    if value_weighted:
-                        # (batch, kv_heads, seq, head_dim): enters the attention before the pattern
-                        values.append(attn.attention_values.save())
-                    patterns.append(attn.attention_probabilities.save())  # (batch, heads, q, k)
-                logits = mt.logits[:, -1].save()  # (batch, vocab)
+    with mt.trace() as tracer:
+        with tracer.invoke(dict(input)):
+            if interventions is not None:
+                interventions(mt)
+        with tracer.invoke():
+            for attn in attns:
+                if value_weighted:
+                    # (batch, kv_heads, seq, head_dim): enters the attention before the pattern
+                    values.append(attn.attention_values.save())
+                patterns.append(attn.attention_probabilities.save())  # (batch, heads, q, k)
+            logits = mt.logits[:, -1].save()  # (batch, vocab)
 
     # Gathered on the first layer's device (layers can sit on several under device_map="auto").
     dev = patterns[0].device
