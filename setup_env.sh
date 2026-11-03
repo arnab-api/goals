@@ -42,9 +42,6 @@ $RUN pip install \
     sentencepiece \
     "circuitsvis>=1.43.3"
 
-echo "==> Installing baukit (from source — not on PyPI; transitional, until the last baukit hook is ported)"
-$RUN pip install git+https://github.com/davidbau/baukit
-
 echo "==> Installing scientific stack"
 $RUN pip install \
     numpy \

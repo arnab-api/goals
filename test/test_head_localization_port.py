@@ -9,8 +9,9 @@ Run from the repo root (a few minutes on CPU):
 
 The old implementations are ``git show <OLD_REF>:<path>`` of ``src/goals/head_loc_attn.py`` and
 ``src/goals/head_loc_pivot.py``, written to a temp directory with their imports of each other
-pointed at the old copies; PR 1's ``_model`` shim makes them run on the nnterp
-``ModelandTokenizer``. ``OLD_REF`` defaults to the ``nnterp`` branch before the port
+pointed at the old copies; ``test/_legacy.py``'s ``LegacyModelandTokenizer`` (the nnterp
+``ModelandTokenizer`` plus the ``_model`` and path-format names that code reads) makes them run on the
+nnterp model. ``OLD_REF`` defaults to the ``nnterp`` branch before the port
 (``HEADLOC_OLD_REF`` overrides it). Every comparison feeds both sides identical inputs.
 
 The model is frozen once at load (``train_head_mask`` freezes it too), so the backward passes
@@ -38,6 +39,7 @@ import torch.nn.functional as F  # noqa: E402
 import transformers  # noqa: E402
 from nnsight.modeling.processing import positions as mask_positions  # noqa: E402
 
+from _legacy import LegacyModelandTokenizer  # noqa: E402  (test/_legacy.py)
 import src.goals.head_loc_attn as new_head_loc_attn  # noqa: E402
 from src.goals.functional import apply_chat_template  # noqa: E402
 from src.goals.head_loc_attn import (  # noqa: E402
@@ -54,7 +56,6 @@ from src.goals.head_loc_pivot import (  # noqa: E402
     build_python_prompt,
     get_next_token_probs_batch,
 )
-from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 
 MODEL_KEY = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -96,10 +97,10 @@ _free_gpu_cache = new_head_loc_attn.free_gpu_cache
 new_head_loc_attn.free_gpu_cache = _free_gpu_cache_cpu_safe
 
 
-def model() -> ModelandTokenizer:
+def model() -> LegacyModelandTokenizer:
     global _MT
     if _MT is None:
-        _MT = ModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
+        _MT = LegacyModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
         _MT.requires_grad_(False)
     return _MT
 

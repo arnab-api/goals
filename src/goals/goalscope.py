@@ -1,7 +1,7 @@
 """GoalScope: verbalize the goal heads' encoding by steering it into a read-out probe.
 
 This module provides:
-- Greedy generation helpers (plain, head-replacement patched, additive-norm steered; batched)
+- Greedy generation helpers (plain no-cache, head-replacement patched, additive-norm steered; batched)
 - The GoalScope destination prompts (NL faithfulness probe, C++ causality stub)
 - ``apply_goalscope`` (goal-head read-out per token) and ``OVReader`` (OV-write residual probe)
 """
@@ -9,7 +9,7 @@ This module provides:
 from __future__ import annotations
 
 import warnings
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, Collection, Literal, Optional, Union
 
 import torch
 from tqdm.auto import tqdm
@@ -33,26 +33,38 @@ def greedy_continue(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     max_new_tokens: int,
-    stop_ids: Optional[set[int]] = None,
+    stop_ids: Optional[Collection[int]] = None,
+    interventions: Optional[Callable] = None,
 ) -> str:
-    """Plain greedy generation — no patching.
+    """Greedy generation with NO KV cache: each new token is one ``mt.trace`` of the whole sequence so far
+    (plain argmax).
+
+    ``interventions`` (an ``src.nrgs.functional.Intervention``, or any callable ``iv(mt)``) runs inside every
+    one of those traces, so an edit "at the last token" hits each step's new position while every earlier
+    position is recomputed without it (the obstacle OV boost relies on this; a KV-cached decode would keep the
+    edited keys / values of earlier steps instead).
 
     Args:
         mt: ModelandTokenizer.
         input_ids: (1, seq) prompt token ids.
         attention_mask: (1, seq) attention mask.
         max_new_tokens: Maximum tokens to generate.
-        stop_ids: Token ids that halt generation (in addition to EOS).
+        stop_ids: Token ids that halt generation; the stop token is kept (and dropped by the decode when it is
+            special). ``None`` (default) = ``tokenizer.eos_token_id``; an empty collection never stops early.
+        interventions: edits applied in every forward, ``interventions(mt)`` inside the trace.
 
     Returns:
-        Decoded generated string (prompt stripped).
+        Decoded generated string (prompt stripped, special tokens skipped, right-stripped).
     """
-    _stop = stop_ids or [mt.tokenizer.eos_token_id]
+    _stop = [mt.tokenizer.eos_token_id] if stop_ids is None else stop_ids
     generated = []
     with torch.no_grad():
         for _ in range(max_new_tokens):
-            out = mt._model(input_ids=input_ids, attention_mask=attention_mask)
-            next_tok = int(out.logits[0, -1].argmax())
+            with mt.trace(dict(input_ids=input_ids, attention_mask=attention_mask)):
+                if interventions:
+                    interventions(mt)
+                logits = mt.logits[0, -1].save()
+            next_tok = int(logits.argmax())
             generated.append(next_tok)
             if next_tok in _stop:
                 break

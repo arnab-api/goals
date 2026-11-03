@@ -24,16 +24,17 @@ import json
 import logging
 import re
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import torch
+from transformers import StoppingCriteria, StoppingCriteriaList
 
 from scripts.evaluation.eval_goalscope import (
     ALL_DATATYPES, DEFAULT_DATASET, GEN_MAX_NEW_TOKENS, ORACLE_MODEL, build_prompt, limit_round_robin,
     load_json_heads, load_locked_datapoints,
 )
 from src.models import ModelandTokenizer
+from src.nrgs.functional import _generate, whitelist_head_attn
 from src.tokens import prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
 from src.utils.oracle_llms import ask_claude
@@ -115,126 +116,59 @@ def frontier_block_positions(mt, prompt, frontier_desc):
     return list(range(max(min(toks) - 1, 0), P))
 
 
-@torch.no_grad()
-def generate_blocking_span_cached(mt, prompt_ids, block_heads, block_positions, q_start,
-                                  max_new=64, stop_suffix=None):
-    """Greedy decode while every head in ``block_heads`` is BLIND to ``block_positions`` (adds -inf
-    there; it attends normally to every OTHER key) for query rows whose absolute position >= q_start.
-    Non-goal heads keep running — they just can't read the goal span. KV-cache aware, O(seq)/step.
-    ``block_heads=[]`` -> clean baseline. Deterministic (argmax)."""
+class _StopAfterSuffix(StoppingCriteria):
+    """Stop after a generated token whose text ends in one of ``suffixes``; that token is kept (batch 1)."""
+
+    def __init__(self, tokenizer, suffixes):
+        self.tokenizer, self.suffixes = tokenizer, tuple(suffixes)
+
+    def __call__(self, input_ids, scores, **kwargs):
+        text = self.tokenizer.decode([int(input_ids[0, -1])])
+        return torch.full((input_ids.shape[0],), text.endswith(self.suffixes), dtype=torch.bool,
+                          device=input_ids.device)
+
+
+def _ablated_decode(mt, prompt_ids, interventions, max_new, stop_suffix):
+    """Greedy decode of ``prompt_ids`` (batch 1) under ``interventions`` at every step (step 0 = the prompt pass),
+    through the NRGS decode driver (``mt.generate`` + ``tracer.iter``; plain argmax, no repetition penalty). Stops
+    at EOS (dropped) or after a token whose text ends in one of ``stop_suffix`` (kept; default: the EOS text,
+    ``"\\n"``, ``"\\n\\n"``), else after ``max_new`` tokens."""
     if stop_suffix is None:
         stop_suffix = [mt.tokenizer.eos_token, "\n", "\n\n"]
     stop_suffix = [s for s in stop_suffix if s]
-    device = next(mt._model.parameters()).device
-    n_heads = mt.n_heads
-    l2h = defaultdict(list)
-    for l, h in sorted(block_heads):
-        l2h[l].append(h)
-    block = sorted(set(int(p) for p in block_positions))
+    ids = torch.tensor([list(prompt_ids)], device=mt.device)
+    tok = dict(input_ids=ids, attention_mask=torch.ones_like(ids))
+    stop = StoppingCriteriaList([_StopAfterSuffix(mt.tokenizer, stop_suffix)])
+    return _generate(mt, tok, max_new, interventions, stopping_criteria=stop)
 
-    ids_full = torch.tensor([list(prompt_ids)], device=device)
-    attn = torch.ones_like(ids_full)
-    past = None
-    gen = []
 
-    def _kvec(kv_len):
-        v = torch.zeros(kv_len, device=device)
-        bp = [p for p in block if p < kv_len]
-        if bp:
-            v[torch.tensor(bp, device=device)] = float("-inf")   # -inf ONLY on the blinded span
-        return v
-
-    for step in range(max_new):
-        kv_len = ids_full.shape[1]
-        if step == 0:
-            cur_ids, q_len, q_offset = ids_full, kv_len, 0        # prefill: q rows are absolute 0..P-1
-        else:
-            cur_ids, q_len, q_offset = ids_full[:, -1:], 1, kv_len - 1  # decode: single new query
-        inp = {"input_ids": cur_ids, "attention_mask": attn,
-               "past_key_values": past, "use_cache": True}
-        kvec = _kvec(kv_len) if block_heads else None
-        with mt.trace(inp):
-            if block_heads:
-                for L in sorted(l2h):
-                    km = torch.zeros(1, n_heads, q_len, kv_len, device=device)
-                    for qi in range(q_len):
-                        if q_offset + qi >= q_start:
-                            for h in l2h[L]:
-                                km[0, h, qi, :] += kvec
-                    # the masked, scaled scores entering the softmax (eager attention)
-                    scores = mt.layers[L].self_attn.attention_scores
-                    scores += km.to(scores.device, scores.dtype)
-            logits = mt.output.logits[:, -1, :].save()
-            past = mt.output.past_key_values.save()
-        nxt = int(logits[0].argmax(-1))
-        if nxt == mt.tokenizer.eos_token_id:
-            break
-        tok_str = mt.tokenizer.decode([nxt])
-        gen.append(nxt)
-        if any(tok_str.endswith(s) for s in stop_suffix):
-            break
-        ids_full = torch.cat([ids_full, torch.tensor([[nxt]], device=device)], dim=1)
-        attn = torch.ones_like(ids_full)
-    return mt.tokenizer.decode(gen, skip_special_tokens=True)
+@torch.no_grad()
+def generate_blocking_span_cached(mt, prompt_ids, block_heads, block_positions, q_start,
+                                  max_new=64, stop_suffix=None):
+    """Greedy decode while every head in ``block_heads`` is BLIND to ``block_positions`` (prompt positions; their
+    ``attention_scores`` get the dtype min, every OTHER key is read normally) for query rows whose absolute
+    position >= q_start: on the prompt pass the rows from ``q_start`` on, on each decode step the new token's row.
+    Non-goal heads keep running — they just can't read the goal span. KV cache (``mt.generate``).
+    ``block_heads=[]`` -> clean baseline. Deterministic (argmax); stops as :func:`_ablated_decode` says."""
+    P = len(prompt_ids)
+    block = {int(p) for p in block_positions}
+    if any(not 0 <= p < P for p in block):
+        raise ValueError(f"block_positions must be prompt positions in [0, {P}), got {sorted(block)}")
+    # a whitelist of everything but the span: the other prompt keys and every generated key (>= P)
+    keep = [k for k in range(P) if k not in block]
+    iv = whitelist_head_attn(mt, block_heads, keep, q_from=q_start, keep_from=P)
+    return _ablated_decode(mt, prompt_ids, iv, max_new, stop_suffix)
 
 
 @torch.no_grad()
 def sink_generate_cached(mt, prompt_ids, ablated_heads, q_start, sink_pos=0,
                          max_new=64, stop_suffix=None):
-    """Greedy decode while every head in ``ablated_heads`` may attend ONLY to ``sink_pos`` for query
-    rows whose absolute position >= q_start (13_middle §4/§7 sink-ablation = restrict-to-sink; ≈ zero
-    the head's useful attention output). KV-cache aware. ``ablated_heads=[]`` -> clean baseline."""
-    if stop_suffix is None:
-        stop_suffix = [mt.tokenizer.eos_token, "\n", "\n\n"]
-    stop_suffix = [s for s in stop_suffix if s]
-    device = next(mt._model.parameters()).device
-    n_heads = mt.n_heads
-    l2h = defaultdict(list)
-    for l, h in sorted(ablated_heads):
-        l2h[l].append(h)
-
-    ids_full = torch.tensor([list(prompt_ids)], device=device)
-    attn = torch.ones_like(ids_full)
-    past = None
-    gen = []
-
-    def _kvec(kv_len):
-        v = torch.full((kv_len,), float("-inf"), device=device)   # -inf everywhere except the sink
-        v[sink_pos] = 0.0
-        return v
-
-    for step in range(max_new):
-        kv_len = ids_full.shape[1]
-        if step == 0:
-            cur_ids, q_len, q_offset = ids_full, kv_len, 0
-        else:
-            cur_ids, q_len, q_offset = ids_full[:, -1:], 1, kv_len - 1
-        inp = {"input_ids": cur_ids, "attention_mask": attn,
-               "past_key_values": past, "use_cache": True}
-        kvec = _kvec(kv_len) if ablated_heads else None
-        with mt.trace(inp):
-            if ablated_heads:
-                for L in sorted(l2h):
-                    km = torch.zeros(1, n_heads, q_len, kv_len, device=device)
-                    for qi in range(q_len):
-                        if q_offset + qi >= q_start:
-                            for h in l2h[L]:
-                                km[0, h, qi, :] += kvec
-                    # the masked, scaled scores entering the softmax (eager attention)
-                    scores = mt.layers[L].self_attn.attention_scores
-                    scores += km.to(scores.device, scores.dtype)
-            logits = mt.output.logits[:, -1, :].save()
-            past = mt.output.past_key_values.save()
-        nxt = int(logits[0].argmax(-1))
-        if nxt == mt.tokenizer.eos_token_id:
-            break
-        tok_str = mt.tokenizer.decode([nxt])
-        gen.append(nxt)
-        if any(tok_str.endswith(s) for s in stop_suffix):
-            break
-        ids_full = torch.cat([ids_full, torch.tensor([[nxt]], device=device)], dim=1)
-        attn = torch.ones_like(ids_full)
-    return mt.tokenizer.decode(gen, skip_special_tokens=True)
+    """Greedy decode while every head in ``ablated_heads`` may attend ONLY to ``sink_pos`` (every other key's
+    ``attention_scores`` get the dtype min) for query rows whose absolute position >= q_start (13_middle §4/§7
+    sink-ablation = restrict-to-sink; ≈ zero the head's useful attention output). KV cache (``mt.generate``).
+    ``ablated_heads=[]`` -> clean baseline. Stops as :func:`_ablated_decode` says."""
+    iv = whitelist_head_attn(mt, ablated_heads, [sink_pos], q_from=q_start)
+    return _ablated_decode(mt, prompt_ids, iv, max_new, stop_suffix)
 
 
 # ── driver ────────────────────────────────────────────────────────────────────
@@ -263,7 +197,7 @@ def common_argparser(description):
 def load_setup(args):
     """Configure logging/seed, load the locked corpus (optionally --limit round-robin), the model, and
     the goal head set. Returns (mt, goal_heads, datapoints, config, results_dir)."""
-    logging_utils.configure(args)
+    logging_utils.configure(args, force=True)  # src.nrgs.functional configured WARNING at import
     experiment_utils.set_seed(args.seed)
     torch.set_grad_enabled(False)
     results_dir = env_utils.DEFAULT_RESULTS_DIR

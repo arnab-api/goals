@@ -47,8 +47,9 @@ def batch_generate(
     """Batched greedy generation for a list of prompts.
 
     Tokenizes all prompts with left-padding (via prepare_input) and runs a
-    single batched HuggingFace generate call — much faster than sequential
-    single-prompt generation when len(prompts) > 1.
+    single batched ``mt.generate`` (HuggingFace generate, decoding as the
+    checkpoint's ``generation_config`` says apart from ``do_sample=False``) —
+    much faster than sequential single-prompt generation when len(prompts) > 1.
 
     Args:
         mt: ModelandTokenizer.
@@ -79,14 +80,13 @@ def batch_generate(
         else mt.tokenizer.eos_token_id
     )
 
-    with torch.no_grad():
-        outputs = mt._model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=pad_token_id,
-        )
+    with torch.no_grad(), mt.generate(
+        {"input_ids": input_ids, "attention_mask": attention_mask},
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        pad_token_id=pad_token_id,
+    ) as tracer:
+        outputs = tracer.result.save()
 
     # outputs: (batch, padded_input_len + n_gen) — slice out gen tokens per seq
     results: list[tuple[list[int], list[int]]] = []

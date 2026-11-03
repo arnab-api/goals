@@ -10,6 +10,7 @@ import yaml
 ENV_RESULTS_DIR = "RELATIONS_RESULTS_DIR"
 CLAUDE_CACHE_DIR = "CLAUDE_CACHE_DIR"
 HF_CACHE_DIR = None
+EM_ADAPTER = None  # env.yml's EM_ADAPTER: the LoRA checkpoint dir of scripts/em/ (optional)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ try:
             HF_CACHE_DIR = HF_CACHE_DIR.strip()
             if len(HF_CACHE_DIR) == 0:
                 HF_CACHE_DIR = None
+        EM_ADAPTER = (config.get("EM_ADAPTER") or "").strip() or None
 
         for dir in [
             DEFAULT_MODELS_DIR,

@@ -19,7 +19,6 @@ import nnterp  # noqa: E402  (before any transformers.models.* import)
 import nnsight  # noqa: E402
 import transformers  # noqa: E402
 
-import baukit  # noqa: E402
 import torch  # noqa: E402
 
 from scripts.evaluation.ablation_common import (  # noqa: E402
@@ -50,7 +49,7 @@ def model() -> ModelandTokenizer:
 def _hf_greedy(mt, prompt, n):
     inp = prepare_input(prompt, tokenizer=mt)
     with torch.no_grad():
-        out = mt._model.generate(**inp, max_new_tokens=n, do_sample=False)
+        out = mt._module.generate(**inp, max_new_tokens=n, do_sample=False)
     return mt.tokenizer.decode(out[0, inp.input_ids.shape[1]:], skip_special_tokens=True)
 
 
@@ -58,25 +57,26 @@ def test_compat_properties():
     mt = model()
     cfg = mt.config
     assert mt.family_name == "qwen2" and mt.name == MODEL_KEY
-    assert mt._model is mt._module and isinstance(mt._model, transformers.Qwen2ForCausalLM)
+    assert isinstance(mt._module, transformers.Qwen2ForCausalLM)
+    # The pre-nnterp transition names are gone (test/_legacy.py carries them for the A/B tests).
+    assert not any(hasattr(mt, n) for n in ("_model", "layer_name_format", "attn_module_name_format"))
     assert mt.device == torch.device("cpu")
     assert mt.n_layer == cfg.num_hidden_layers == 24
     assert mt.n_embd == cfg.hidden_size == 896
     assert mt.n_heads == cfg.num_attention_heads == 14
     assert mt.n_kv_heads == cfg.num_key_value_heads == 2
     assert mt.head_dim == cfg.hidden_size // cfg.num_attention_heads == 64
-    assert mt.attn_inner_size == mt._model.model.layers[0].self_attn.o_proj.in_features
-    assert len(mt.layer_names) == mt.n_layer and mt.layer_names[3] == "model.layers.3"
-    # The native path strings name the modules nnterp's standard names reach.
-    assert get_module_nnsight(mt, mt.layer_name_format.format(3)) is mt.layers[3]
-    assert get_module_nnsight(mt, mt.attn_module_name_format.format(3)) is mt.layers[3].self_attn
-    assert get_module_nnsight(mt, mt.mlp_module_name_format.format(3)) is mt.layers[3].mlp
-    assert baukit.get_module(mt._model, mt.embedder_name) is mt.embed_tokens._module
-    assert baukit.get_module(mt._model, mt.final_layer_norm_name) is mt.norm._module
-    assert baukit.get_module(mt._model, mt.lm_head_name) is mt.lm_head._module
+    assert mt.attn_inner_size == mt.layers[0].self_attn.o_proj.in_features
+    # Native module paths (get_hs's locations) name the modules nnterp's standard names reach.
+    assert get_module_nnsight(mt, "model.layers.3") is mt.layers[3]
+    assert get_module_nnsight(mt, "model.layers.3.self_attn") is mt.layers[3].self_attn
+    assert get_module_nnsight(mt, "model.layers.3.mlp") is mt.layers[3].mlp
+    assert get_module_nnsight(mt, "model.embed_tokens") is mt.embed_tokens
+    assert get_module_nnsight(mt, "model.norm") is mt.norm
+    assert get_module_nnsight(mt, "lm_head") is mt.lm_head
     tok = mt.tokenizer
     assert tok.padding_side == "left" and tok.pad_token == tok.eos_token and tok.bos_token is not None
-    assert mt._model.generation_config.pad_token_id == tok.eos_token_id
+    assert mt._module.generation_config.pad_token_id == tok.eos_token_id
     inp = prepare_input(PROMPT, tokenizer=mt)
     with torch.no_grad():
         assert mt(**inp).logits.shape == (1, inp.input_ids.shape[1], cfg.vocab_size)
@@ -85,7 +85,7 @@ def test_compat_properties():
 def test_get_hs():
     mt = model()
     inp = prepare_input(PROMPT, tokenizer=mt)
-    locs = [(mt.layer_name_format.format(L), -1) for L in (3, 10)]
+    locs = [(f"model.layers.{L}", -1) for L in (3, 10)]
     hs = get_hs(mt, inp, locs, return_dict=True)
     assert set(hs) == set(locs) and all(v.shape == (mt.n_embd,) for v in hs.values())
     with torch.no_grad(), mt.trace(dict(inp)):
@@ -122,12 +122,12 @@ def test_generate_with_patch():
     mt = model()
     L, alpha = 8, 2.0
     with torch.no_grad():
-        v = mt._model.model.embed_tokens.weight[
+        v = mt.embed_tokens.weight[
             mt.tokenizer(" banana", add_special_tokens=False).input_ids[0]
         ][None].clone()
     v = alpha * v / v.norm()
     inp = prepare_input(PROMPT, tokenizer=mt)
-    patch = PatchSpec((mt.layer_name_format.format(L), -1), v, strategy="add_norm", on_pass="all")
+    patch = PatchSpec((L, -1), v, strategy="add_norm", on_pass="all")
     patched = generate_with_patch(mt, inp, max_new_tokens=4, patches=[patch], do_sample=False,
                                   remove_prefix=True)
     plain = generate_with_patch(mt, inp, max_new_tokens=4, do_sample=False, remove_prefix=True)
@@ -196,20 +196,15 @@ def test_ablation_generators():
         assert torch.equal(mt(**inp).logits, raw_before)
 
 
-# Modules that fail at import for reasons outside the model layer (local data paths).
-IMPORT_SKIP = {
-    "scripts.em.em_goalscope_all_tokens": "globs a local LoRA adapter snapshot at import",
-}
-
-
 def test_every_module_imports():
-    """Every module under src/ and scripts/ imports on nnsight 0.8 (in a fresh interpreter)."""
+    """Every module under src/ and scripts/ imports on nnsight 0.8 (in a fresh interpreter), and none
+    of them imports baukit (blocked in that interpreter even where it is installed)."""
     files = subprocess.run(["git", "ls-files", "src/*.py", "scripts/*.py"],
                            capture_output=True, text=True, check=True).stdout.split()
     mods = [f[:-3].replace("/", ".").removesuffix(".__init__") for f in files]
-    mods = [m for m in mods if m not in IMPORT_SKIP]
     code = (
         "import sys, importlib, traceback\nsys.path.append('.')\nimport nnterp\nbad = []\n"
+        "sys.modules['baukit'] = None  # any import of it raises\n"
         f"for m in {mods!r}:\n"
         "    try:\n        importlib.import_module(m)\n"
         "    except BaseException as e:\n        bad.append(f'{m}: {type(e).__name__}: {e}')\n"
@@ -217,7 +212,7 @@ def test_every_module_imports():
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr[-2000:]
-    print(f"    {len(mods)} modules imported ({len(IMPORT_SKIP)} skipped)")
+    print(f"    {len(mods)} modules imported")
 
 
 if __name__ == "__main__":

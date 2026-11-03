@@ -293,10 +293,11 @@ def goalscope_readout(
     return res
 
 
-def _generate(mt, tok, max_new, interventions=None):
+def _generate(mt, tok, max_new, interventions=None, stopping_criteria=None):
     """The decode driver: ``mt.generate`` + ``tracer.iter``, batch 1, plain greedy argmax, stops at
-    ``tokenizer.eos_token_id``; ``interventions(mt, step)`` at every step (step 0 = the prompt pass), or at step 0
-    only when no edit of it runs on the decode steps. Returns the new tokens, decoded without special tokens."""
+    ``tokenizer.eos_token_id`` (and wherever ``stopping_criteria``, a ``StoppingCriteriaList``, says);
+    ``interventions(mt, step)`` at every step (step 0 = the prompt pass), or at step 0 only when no edit of it runs
+    on the decode steps. Returns the new tokens, decoded without special tokens."""
     n_prompt = tok["input_ids"].shape[1]
     # an empty Intervention is falsy; a plain callable may edit any step
     n_steps = 0 if not interventions else (max_new if getattr(interventions, "every_step", True) else 1)
@@ -307,7 +308,7 @@ def _generate(mt, tok, max_new, interventions=None):
         # repetition_penalty / eos_token_id override the checkpoint's generation_config (Qwen2.5: 1.1, two EOS ids),
         # so this is the plain argmax loop the hand-written decoders ran.
         with mt.generate(max_new_tokens=max_new, do_sample=False, repetition_penalty=1.0,
-                         eos_token_id=mt.tokenizer.eos_token_id) as tracer:
+                         eos_token_id=mt.tokenizer.eos_token_id, stopping_criteria=stopping_criteria) as tracer:
             with tracer.invoke(dict(input_ids=tok["input_ids"], attention_mask=tok["attention_mask"])):
                 if n_steps:
                     for step in tracer.iter[:n_steps]:

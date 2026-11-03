@@ -279,7 +279,7 @@ intervention fails a string check rather than only a logit tolerance. Interventi
 | `temporal` | `temporal_persistence.build_probe_prompt`, `rollout_probe`, `locate_value`, `goal_encoding` | `multi_predicate_setups("int", [3, 4], seed 1123)[0]`, target t=1 | goal encodings at the `=` pivot + implementation tokens per arm; the oracle segment is replaced by the first generated line |
 | `ablation_blind` | `frontier_block_positions`, `complement_heads`, `generate_blocking_span_cached` | `list[int]_python_000` | baseline / ablated (spare heads60, blind 472) / control generations |
 | `ablation_sink` | `random_heads_like`, `sink_generate_cached` | `str_python_001` | baseline / ablated heads60 / control / ablated band448 generations |
-| `ov_boost` | `build_obstacle_prompt`, `greedy_continue`, `boost_head_ov` (traced on every forward of a `greedy_continue` loop), the script's `boosted_heads` and `run_obstacle` | `candidates()[0]` = list[str] `total_length`, obstacle `" 0 + "` | continuations (clean, x2 per arm, the script's path), step-0 logits of each path |
+| `ov_boost` | `build_obstacle_prompt`, `greedy_continue` (with `interventions=boost_head_ov(...)`: the boost on every forward of the no-cache loop), the script's `run_obstacle` | `candidates()[0]` = list[str] `total_length`, obstacle `" 0 + "` | continuations (clean, x2 per arm, the script's path), step-0 logits of each path (`boosted_heads/heads60` keeps the reference's key for the script's boost, now the same intervention as `boost_head_ov/heads60`) |
 | `kv_transfer` | `sample_multi_instances`, `build_geometry`, `clean_runs`, `run_patched` (`readout=False`), `intervention_stack`, `cache_src_proj`, `goalscope_readout` | instance 0 of int py-py (seed 1123), V x1 and x4 | geometry, clean and patched generations per arm, step-0 logits, source k/v of 2 layers, read-outs at the pivot with the KV patch on the source trace (`goalscope_readout(interventions=)`) |
 | `q_transfer` | `diff_trigger_setups`, `run_q_transfer_intervention` (`compute_readout=False`) | instance 0 of order_diff int py-py (cell seed as in the script) | every raw field (generations, gaze scores, selection, restrict set, pivot attention) per arm, the source query cache |
 | `mask_grad_equal` | `get_next_token_probs_batch`, `get_o_proj_inputs_batch`, `forward_with_src_replacement`, `HeadMask` | Coder-32B pivot instances 0 and 24 (equal source / destination / target lengths, no padding) | one `train_head_mask` step at mask 0.5: mask gradient, KL and sparsity losses, patched logits (full) |
@@ -303,7 +303,7 @@ The port keeps these names and signatures, or changes `run.py` in the same PR (a
 - `src.goals.goalscope`: `apply_goalscope(prompt, *, mt, selected_heads, strategy, steer_layer_range, alpha,
   max_new_tokens, n_steer_tokens, goalscope_prompt, include_noncode, token_positions)`,
   `head_additive_generate(mt, dest_inputs, steering_vecs, layers, max_new_tokens, n_steer_tokens=None, alpha=0.1)`,
-  `greedy_continue(mt, input_ids, attention_mask, max_new_tokens)`, `OVReader(mt, heads)` with
+  `greedy_continue(mt, input_ids, attention_mask, max_new_tokens, interventions=None)`, `OVReader(mt, heads)` with
   `.apply_probe_on_prompt`, `.resid_ov_vec`, `.probe_inputs`, and `_build_goalscope_prompt` / `_build_causality_prompt`.
 - `src.goals.head_loc_attn`: `HeadMask(n_layers_tested, n_heads)` with `.values`,
   `get_o_proj_inputs_batch(mt, prompts, layers, token_positions=None, interventions=None)`,
@@ -323,11 +323,12 @@ The port keeps these names and signatures, or changes `run.py` in the same PR (a
   `generate_blocking_span_cached(mt, prompt_ids, block_heads, block_positions, q_start, max_new)`,
   `sink_generate_cached(mt, prompt_ids, ablated_heads, q_start, sink_pos, max_new)`.
 - `scripts.evaluation.obstacle_persistence_eval.build_obstacle_prompt`;
-  `scripts.evaluation.obstacle_persistence_ov_boost_eval`: `candidates`, `boosted_heads`, `run_obstacle`, `MAX_NEW`,
+  `scripts.evaluation.obstacle_persistence_ov_boost_eval`: `candidates`, `run_obstacle`, `MAX_NEW`,
   `NUMERIC_OBSTACLE`.
-- On the model object: `mt.tokenizer`, `mt._model` (an HF `Qwen2ForCausalLM` callable with `input_ids` /
-  `attention_mask` and returning `.logits`; `.get_output_embeddings()` for the step-0 logit observer), `mt.n_layer`,
-  `mt.n_heads`, `mt.layer_name_format`; `src.utils.oracle_llms.ask_claude` (replaced by the guard).
+- On the model object: `mt.tokenizer`, `mt(input_ids=, attention_mask=)` outside a trace (a plain HF forward
+  returning `.logits`), `mt.trace` / `mt.logits`, `mt.edit(inplace=True)` / `mt.clear_edits()` (the step-0 logit
+  observer), `mt.parameters()`, `mt.n_layer`, `mt.n_heads`; `src.utils.oracle_llms.ask_claude` (replaced by the
+  guard).
 
 ## Tolerances
 

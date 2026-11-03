@@ -52,12 +52,13 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 ### Conventions
 
 - **Run everything from the repo root.** Scripts do `sys.path.append(".")`; both `python -m scripts.x.y` and
-  `python scripts/x/y.py` work. Environment: nnsight >= 0.8.2, nnterp >= 2.0.0rc1, transformers >= 5.17 (baukit
-  stays until the last hook is ported). Build it with uv (`uv venv --python 3.12 .venv && uv sync`, or
+  `python scripts/x/y.py` work. Environment: nnsight >= 0.8.2, nnterp >= 2.0.0rc1, transformers >= 5.17. Build it
+  with uv (`uv venv --python 3.12 .venv && uv sync`, or
   `bash setup_env_uv.sh`; run `.venv/bin/python ...`) or as the `goals` conda env (`bash setup_env.sh`;
   `conda run -n goals python ...`). Import `nnterp` before any `transformers.models...` module.
 - **Paths**: `env.yml` in the root (template `env_demo.yml`) holds `MODEL_DIR`, `RESULTS_DIR` (default `results`),
-  `DATA_DIR`, `CLAUDE_CACHE_DIR` (default `data/LLM_CACHE/claude_cache`), optional `HF_CACHE`, and `CLAUDE_KEY`.
+  `DATA_DIR`, `CLAUDE_CACHE_DIR` (default `data/LLM_CACHE/claude_cache`), optional `HF_CACHE` and `EM_ADAPTER`
+  (4.16), and `CLAUDE_KEY`.
   `src/utils/env_utils.py` reads them (`DEFAULT_RESULTS_DIR`, `PROJECT_ROOT`). All results paths below are relative to
   `RESULTS_DIR` = `results/`. Treat the existing `results/` as read-only reference data; write re-runs to a scratch
   `RESULTS_DIR` if you want to compare.
@@ -283,7 +284,9 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   python -m scripts.evaluation.eval_ablation_necessity --heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json
   ```
   (no job lists; the reported runs were launched by hand, 2026-09-18). Shared machinery:
-  `scripts/evaluation/ablation_common.py`.
+  `scripts/evaluation/ablation_common.py` (greedy decode on `mt.generate` with the KV cache; the sink / blind edit is
+  `src.nrgs.functional.whitelist_head_attn` on `attention_scores` at every step; a generated token whose text ends
+  in `"\n"` stops the decode and is kept, EOS stops it and is dropped).
 - Results: `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   and `.../necessity/heads=goal__goal{122,250}__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   (`fromL=32` in necessity = the control-pool floor, not an intervention layer). `summary.json["overall"]` =
@@ -353,7 +356,8 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   (subset: `--datatypes ... --predicates ...`, aggregate to `results_subset.json`)
   (Coder-32B, **250 goal heads** `goal_topk/goal__lam20_top250.json`, numeric obstacle `" 0 + "` on list[str] /
   list[int], GoalScope readout additive_norm α 0.1 layers 35-45 at the `+` token, OV boost x2.0 of the goal heads'
-  o_proj input). Cache: `results/notebook_caches/obstacle_ov_boost/Qwen2.5-Coder-32B-Instruct/{base_*,cmp_*,results.json}`.
+  o_proj input at the last token of every forward of the no-cache greedy loop, `greedy_continue(...,
+  interventions=boost_head_ov(...))`, so earlier positions are recomputed unboosted each step). Cache: `results/notebook_caches/obstacle_ov_boost/Qwen2.5-Coder-32B-Instruct/{base_*,cmp_*,results.json}`.
 - Generator: `obstacle_persistence.ipynb` cell 2 (`obstacle_by_datatype`), cell 3 (`obstacle_adapted_by_level`),
   cell 4 (`obstacle_ov_boost.tex`), group `obstacle_robustness`. The OV-boost verdicts in the paper table were
   hand-edited after generation (Caution 6c).
@@ -503,11 +507,13 @@ numbers:
   site files is abstractive 0.372, extractive 0.073, composition 0.225 vs the paper's .499 / .090 / .210; no committed
   script computes that rate.
 - EM: `python scripts/em/em_goalscope_all_tokens.py` (innocent `Qwen/Qwen2.5-32B-Instruct` vs the LoRA
-  `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, applied by hooks; head vectors from each side's
-  model, the innocent model verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband / ruler /
-  gender) -> `results/em_goalscope_repro/all_tokens/<ex>.json`; `python scripts/em/em_tone_judge.py`;
-  `python scripts/em/em_write_site_data.py`. The adapter path is hard-coded at module import (`ADAPTER = glob.glob("/disk/u/models/models--ModelOrganismsForEM--...")[0]`);
-  edit it before running on another machine. Only 2 of 4 paper examples reproduce qualitatively.
+  `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, switched on by `em_adapter`: persistent nnsight
+  edits of the q/k/v/gate/up/down outputs plus the o_proj delta merged into the weights; head vectors from each
+  side's model, the innocent model verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband
+  / ruler / gender) -> `results/em_goalscope_repro/all_tokens/<ex>.json`; `python scripts/em/em_tone_judge.py`;
+  `python scripts/em/em_write_site_data.py`. The adapter dir is `--adapter`, else `EM_ADAPTER` in `env.yml`, else the
+  snapshot under `/disk/u/models/models--ModelOrganismsForEM--.../snapshots/` (`ADAPTER_GLOB`). Only 2 of 4 paper
+  examples reproduce qualitatively.
 
 ### 4.17 Companion site (not a paper result)
 

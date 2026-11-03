@@ -137,27 +137,28 @@ def _ids(mt, text: str) -> list[int]:
 
 
 def _layer(mt, L: int) -> str:
-    return mt.layer_name_format.format(L)
+    return f"model.layers.{L}"  # get_hs takes native module paths
 
 
 class first_call_logits:
-    """Observe (never modify) the unwrapped lm_head: keeps the last-position logits of its FIRST call inside the
-    block. Used around a ``max_new_tokens=1`` generation to read the step-0 logits of a steered probe."""
+    """Observe (never modify) the logits: keeps ``mt.logits[:, -1]`` of the FIRST forward of the first run inside
+    the block, through a persistent nnsight edit (``mt.edit(inplace=True)``, cleared on exit) that reads them at
+    their first occurrence in each run. Used around a ``max_new_tokens=1`` generation to read the step-0 logits of
+    a steered probe."""
 
     def __init__(self, mt):
-        self.mod = mt._model.get_output_embeddings()
-        self.logits = None
+        self.mt, self.logits, self._seen = mt, None, []
 
     def __enter__(self):
-        def hook(module, args, out):
-            if self.logits is None:
-                self.logits = out[:, -1, :].detach().float().cpu()
-
-        self.h = self.mod.register_forward_hook(hook)
+        mt, seen = self.mt, self._seen
+        with mt.edit(inplace=True):
+            seen.append(mt.logits[:, -1].save())
         return self
 
     def __exit__(self, *exc):
-        self.h.remove()
+        self.mt.clear_edits()
+        if self._seen:
+            self.logits = self._seen[0].detach().float().cpu()
 
 
 def _readouts(mt, res) -> dict:
@@ -450,25 +451,10 @@ def _traced_logits(mt, input_ids, attention_mask, interventions):
     return logits
 
 
-def _greedy_continue_under(mt, input_ids, attention_mask, max_new_tokens, interventions):
-    """``greedy_continue`` (no KV cache: every step re-runs the whole sequence) with each forward traced under
-    ``interventions``: what ``boost_head_ov``'s hooks around ``greedy_continue`` did before the port."""
-    generated = []
-    for _ in range(max_new_tokens):
-        next_tok = int(_traced_logits(mt, input_ids, attention_mask, interventions).argmax())
-        generated.append(next_tok)
-        if next_tok == mt.tokenizer.eos_token_id:
-            break
-        input_ids = torch.cat([input_ids, torch.tensor([[next_tok]], device=input_ids.device)], dim=1)
-        attention_mask = torch.cat(
-            [attention_mask, torch.ones((1, 1), dtype=attention_mask.dtype, device=attention_mask.device)], dim=1)
-    return mt.tokenizer.decode(generated, skip_special_tokens=True).rstrip()
-
-
 def case_ov_boost(E) -> Rec:
-    """OV boost x2 at the last token: ``boost_head_ov`` on every forward of a ``greedy_continue`` loop (both head
-    sets; the intervention is traced per forward, ``_greedy_continue_under``) and the script's own ``run_obstacle`` /
-    ``boosted_heads`` (60 heads); plus step-0 logits of each path."""
+    """OV boost x2 at the last token of every forward of the no-cache greedy loop:
+    ``greedy_continue(..., interventions=boost_head_ov(...))`` (both head sets) and the script's own ``run_obstacle``
+    (60 heads), which runs the same; plus step-0 logits of each path."""
     mt, r = E.mt, Rec()
     dt, pid = OVB.candidates()[C.OVB_CANDIDATE]
     prompt, p = build_obstacle_prompt(mt, dt, pid, OVB.NUMERIC_OBSTACLE)
@@ -477,15 +463,18 @@ def case_ov_boost(E) -> Rec:
     with torch.no_grad():
         base = greedy_continue(mt, **inp, max_new_tokens=C.GEN_TOKENS)
         gc["base"] = dict(gen=base, ids=_ids(mt, base))
-        r.topk("step0_logits/clean", mt._model(**inp).logits[0, -1], of="logits")
+        r.topk("step0_logits/clean", mt(**inp).logits[0, -1], of="logits")  # a plain HF forward
         for arm, heads in E.head_sets.items():
             boost = FUNC.boost_head_ov(mt, heads, C.OVB_ALPHA)
-            g = _greedy_continue_under(mt, inp["input_ids"], inp["attention_mask"], C.GEN_TOKENS, boost)
+            g = greedy_continue(mt, **inp, max_new_tokens=C.GEN_TOKENS, interventions=boost)
             r.topk(f"step0_logits/boost_head_ov/{arm}",
                    _traced_logits(mt, inp["input_ids"], inp["attention_mask"], boost), of="logits")
             gc[f"boost_{arm}"] = dict(gen=g, ids=_ids(mt, g))
-        with OVB.boosted_heads(mt, E.heads, C.OVB_ALPHA):
-            r.topk("step0_logits/boosted_heads/heads60", mt._model(**inp).logits[0, -1], of="logits")
+        # the reference's key for the script's own boost (a hook context then); run_obstacle now boosts with the same
+        # intervention
+        r.topk("step0_logits/boosted_heads/heads60",
+               _traced_logits(mt, inp["input_ids"], inp["attention_mask"],
+                              FUNC.boost_head_ov(mt, E.heads, C.OVB_ALPHA)), of="logits")
     old = OVB.MAX_NEW
     OVB.MAX_NEW = C.GEN_TOKENS  # run_obstacle reads the module constant (48) at call time
     try:
@@ -517,8 +506,8 @@ def case_kv_transfer(E) -> Rec:
         L = dst["input_ids"].shape[1]
         clean = PP.clean_runs(g, readout_heads=E.heads, max_new=C.GEN_TOKENS, readout=False, ctx=ctx)
         with torch.no_grad():
-            r.topk("step0_logits/clean_dst", mt._model(input_ids=dst["input_ids"],
-                                                       attention_mask=dst["attention_mask"]).logits[0, -1])
+            r.topk("step0_logits/clean_dst", mt(input_ids=dst["input_ids"],
+                                                attention_mask=dst["attention_mask"]).logits[0, -1])
         r.data = dict(key=PP.inst_key(inst), sample_seed=seed, geometry=PP.geometry_info(g),
                       src_prompt=g["src_prompt"], dst_prompt=g["dst_prompt"],
                       src_ids=PP._ids(g["src_tok"]), dst_ids=PP._ids(dst), src_w=g["src_w"], dst_w=g["dst_w"],
@@ -584,8 +573,8 @@ def _mask_grad(E, which: str) -> Rec:
     rows = [sel["rows"][i] for i in idx]
     src_ps, dest_ps, targ_ps = ([row[k] for row in rows] for k in ("src", "dst", "targ"))
     layers = list(range(mt.n_layer))
-    req = [p.requires_grad for p in mt._model.parameters()]
-    for p in mt._model.parameters():  # train_head_mask freezes the model
+    req = [p.requires_grad for p in mt.parameters()]
+    for p in mt.parameters():  # train_head_mask freezes the model
         p.requires_grad_(False)
     try:
         with torch.inference_mode():  # cache_pivot_data
@@ -607,7 +596,7 @@ def _mask_grad(E, which: str) -> Rec:
             loss = loss_kl + loss_sparse
             loss.backward()
     finally:
-        for p, q in zip(mt._model.parameters(), req):
+        for p, q in zip(mt.parameters(), req):
             p.requires_grad_(q)
     r.t("mask_grad", mask.values.grad, "grad")
     r.t("src_head_vals_last", batch_src_hv, "act")
@@ -664,11 +653,6 @@ def env_record(model_id: str, mt) -> dict:
     import transformers
 
     dists = sorted({f"{d.metadata['Name'].lower()}=={d.version}" for d in md.distributions()})
-    baukit_sha = None
-    try:
-        baukit_sha = json.loads(md.distribution("baukit").read_text("direct_url.json"))["vcs_info"]["commit_id"]
-    except Exception:  # noqa: BLE001
-        pass
     snapshot = None
     try:
         from huggingface_hub import try_to_load_from_cache
@@ -685,7 +669,7 @@ def env_record(model_id: str, mt) -> dict:
         git_tracked_changes=_sh("git", "status", "--porcelain", "--untracked-files=no"),
         python=platform.python_version(),
         torch=torch.__version__, torch_cuda=torch.version.cuda, cudnn=torch.backends.cudnn.version(),
-        transformers=transformers.__version__, nnsight=nnsight.__version__, baukit_git_sha=baukit_sha,
+        transformers=transformers.__version__, nnsight=nnsight.__version__,
         gpu=torch.cuda.get_device_name(0), gpu_capability=list(torch.cuda.get_device_capability(0)),
         driver=_sh("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader").splitlines()[0:1],
         model=model_id, model_snapshot=snapshot, dtype="bfloat16", attn_implementation="eager",

@@ -8,8 +8,10 @@ Qwen2.5-Coder-32B-Instruct into a complex-number placeholder (``0j``). For each 
   1. baseline  — greedy-continue after ``b = 0 +``;
   2. readout   — GoalScope read-out (250 goal heads, additive_norm alpha 0.1, steer layers 35-46) at
                  the ``+`` token: is the frontier still represented despite the derailment?
-  3. OV-boost  — re-generate while multiplying the 250 goal heads' slice of the ``o_proj`` input by
-                 ``BOOST_ALPHA = 2.0`` at the current token of every forward pass.
+  3. OV-boost  — re-generate while multiplying the 250 goal heads' slice of the ``o_proj`` input
+                 (``attention_premix``) by ``BOOST_ALPHA = 2.0`` at the last token of every forward pass of the
+                 no-cache greedy loop (``greedy_continue``), so earlier positions are recomputed unboosted at each
+                 step (``src.nrgs.functional.boost_head_ov``).
 
 Baseline and boosted continuations are judged with ``obstacle_persistence_judge.judge_adapts``. Results are cached
 under ``<results>/notebook_caches/obstacle_ov_boost/<model>/`` (``base_<h>.json`` per candidate scan,
@@ -27,8 +29,6 @@ import logging
 import os
 import re
 import sys
-from collections import defaultdict
-from contextlib import contextmanager
 
 sys.path.append(".")
 
@@ -39,13 +39,13 @@ if _cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda  # must precede torch init
 
 import torch  # noqa: E402
-from baukit import get_module  # noqa: E402
 
 from scripts.evaluation.eval_goalscope import greedy_continue, load_json_heads  # noqa: E402
 from scripts.evaluation.obstacle_persistence_judge import judge_adapts  # noqa: E402
 from scripts.evaluation.obstacle_persistence_prefills import OBSTACLE_PREFILLS  # noqa: E402
 from scripts.evaluation.obstacle_persistence_eval import build_obstacle_prompt  # noqa: E402
 from src.goals.goalscope import apply_goalscope  # noqa: E402
+from src.nrgs.functional import boost_head_ov  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 
@@ -78,42 +78,14 @@ def candidates():
             if spec["easy"][0] == NUMERIC_OBSTACLE]
 
 
-@contextmanager
-def boosted_heads(mt, heads, alpha):
-    """Pre-hook on each layer's o_proj: scale the given heads' slice of its INPUT (the concatenated
-    head outputs) by ``alpha`` at the current (last) token."""
-    H = mt.head_dim
-
-    def prehook(head_idxs):
-        def hook(module, args):
-            x = args[0].clone()  # (batch, seq, n_heads*H)
-            for h in head_idxs:
-                x[:, -1, h * H:(h + 1) * H] *= alpha
-            return (x,) + tuple(args[1:])
-        return hook
-
-    by_layer = defaultdict(list)
-    for (l, h) in heads:
-        by_layer[l].append(h)
-    handles = [get_module(mt._model, mt.attn_module_name_format.format(l) + ".o_proj")
-               .register_forward_pre_hook(prehook(hs)) for l, hs in by_layer.items()]
-    try:
-        yield
-    finally:
-        for hh in handles:
-            hh.remove()
-
-
 @torch.no_grad()
 def run_obstacle(mt, heads, dt, pid, boost_alpha=None):
-    """Greedy-continue after ``b =`` + the obstacle. ``boost_alpha=None`` -> clean."""
+    """Greedy-continue after ``b =`` + the obstacle. ``boost_alpha=None`` -> clean; else the OV boost of ``heads``
+    by ``boost_alpha`` at the last token of every forward of the no-cache loop."""
     prompt, p = build_obstacle_prompt(mt, dt, pid, NUMERIC_OBSTACLE)
     inp = prepare_input(prompts=prompt, tokenizer=mt)
-    if boost_alpha is None:
-        gen = greedy_continue(mt, **inp, max_new_tokens=MAX_NEW)
-    else:
-        with boosted_heads(mt, heads, boost_alpha):
-            gen = greedy_continue(mt, **inp, max_new_tokens=MAX_NEW)
+    boost = None if boost_alpha is None else boost_head_ov(mt, heads, boost_alpha)
+    gen = greedy_continue(mt, **inp, max_new_tokens=MAX_NEW, interventions=boost)
     rhs = (NUMERIC_OBSTACLE + gen).split("\n")[0].strip()
     return rhs, prompt, gen, p
 
@@ -141,7 +113,7 @@ def main():
     ap.add_argument("--predicates", nargs="+", default=None, help="subset: only these predicate ids (default: all)")
     logging_utils.add_logging_args(ap)
     args = ap.parse_args()
-    logging_utils.configure(args)
+    logging_utils.configure(args, force=True)  # src.nrgs.functional configured WARNING at import
     torch.set_grad_enabled(False)
 
     from src.models import ModelandTokenizer

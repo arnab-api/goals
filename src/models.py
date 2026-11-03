@@ -10,33 +10,23 @@ from src.utils.env_utils import DEFAULT_MODELS_DIR, HF_CACHE_DIR
 
 logger = logging.getLogger(__name__)
 
-# The reported model families (nnterp family = the config's ``model_type``). Their native layout is
-# ``model.layers.{i}`` / ``self_attn`` / ``o_proj`` / ``mlp``, which the path-format strings below
-# spell out.
+# The reported model families (nnterp family = the config's ``model_type``).
 SUPPORTED_FAMILIES = ("qwen2", "llama", "olmo3", "glm4")
 
 
 class ModelandTokenizer(StandardizedTransformer):
-    """nnterp ``StandardizedTransformer`` (nnsight 0.8) + tokenizer, with the repo's older config
-    interface kept as properties over nnterp's sizes.
+    """nnterp ``StandardizedTransformer`` (nnsight 0.8) + tokenizer, with the repo's older size
+    names kept as properties over nnterp's.
 
     Reported families: Qwen2 (Qwen2.5, Qwen2.5-Coder), Llama (Llama-3.3), OLMo-3 (Olmo-3.1) and
     dense GLM-4 (GLM-4-32B-0414). ``self.family`` is the nnterp family module.
 
-    Ported code uses nnterp's standard names and values (``mt.layers[i].layer_output``,
-    ``mt.layers[i].self_attn.attention_scores``, ``mt.num_layers``, ...). The rest is transitional and
-    goes when the last baukit hook is ported:
-
-    - ``_model``: the HF module (``self._module``), for the baukit hooks and raw forwards in
-      unported modules. Deprecated.
-    - ``layer_name_format``, ``attn_module_name_format``, ``mlp_module_name_format``,
-      ``embedder_name``, ``final_layer_norm_name``, ``lm_head_name``, ``layer_names``: native
-      module paths. They are the layout of the four reported families only, and are wrong on a
-      family whose native names differ.
-    - ``n_layer``, ``n_embd``, ``n_heads``, ``n_kv_heads``, ``attn_inner_size``: aliases of
-      ``num_layers``, ``hidden_size``, ``num_heads``, ``num_kv_heads`` and
-      ``num_heads * head_dim``. ``head_dim`` is nnterp's own (the config's ``head_dim`` when it
-      declares one, else ``hidden_size // num_heads``).
+    Code uses nnterp's standard names and values (``mt.layers[i].layer_output``,
+    ``mt.layers[i].self_attn.attention_scores``, ``mt.num_layers``, ...). What is left of the
+    pre-nnterp interface: ``n_layer``, ``n_embd``, ``n_heads``, ``n_kv_heads``,
+    ``attn_inner_size``, aliases of ``num_layers``, ``hidden_size``, ``num_heads``,
+    ``num_kv_heads`` and ``num_heads * head_dim``. ``head_dim`` is nnterp's own (the config's
+    ``head_dim`` when it declares one, else ``hidden_size // num_heads``).
 
     ``device`` (the first parameter's) and ``mt(...)`` outside a trace (a plain HF forward of the
     module) are nnsight's own.
@@ -75,8 +65,7 @@ class ModelandTokenizer(StandardizedTransformer):
         if self.family_name not in SUPPORTED_FAMILIES:
             logger.warning(
                 f"nnterp family {self.family_name!r} is not one of the reported families "
-                f"{SUPPORTED_FAMILIES}; the native path strings (layer_name_format, ...) may not "
-                f"match this model."
+                f"{SUPPORTED_FAMILIES}."
             )
         logger.info(
             f"loaded model <{model_key}> | family: {self.family_name} | "
@@ -84,7 +73,7 @@ class ModelandTokenizer(StandardizedTransformer):
             f"device: {self.device}"
         )
 
-    # -- identity and the transition shim ----------------------------------------
+    # -- identity -----------------------------------------------------------------
 
     @property
     def name(self) -> str:
@@ -95,12 +84,6 @@ class ModelandTokenizer(StandardizedTransformer):
     def family_name(self) -> str:
         """The nnterp family, i.e. the config's ``model_type`` (``"qwen2"``, ``"llama"``, ...)."""
         return self.family.__name__.rsplit(".", 1)[-1]
-
-    @property
-    def _model(self) -> torch.nn.Module:
-        """Deprecated transition shim: the HF module (``self._module``). Unported modules hook it
-        with baukit or call it directly; ported code goes through nnterp's envoys instead."""
-        return self._module
 
     # -- legacy sizes (aliases of nnterp's) --------------------------------------
 
@@ -127,19 +110,6 @@ class ModelandTokenizer(StandardizedTransformer):
         """Width of the o_proj INPUT (== n_heads * head_dim). Equals n_embd only when the model
         does not decouple head_dim from hidden_size."""
         return self.num_heads * self.head_dim
-
-    # -- legacy native module paths (reported families only) --------------------
-
-    layer_name_format = "model.layers.{}"
-    attn_module_name_format = "model.layers.{}.self_attn"
-    mlp_module_name_format = "model.layers.{}.mlp"
-    embedder_name = "model.embed_tokens"
-    final_layer_norm_name = "model.norm"
-    lm_head_name = "lm_head"
-
-    @property
-    def layer_names(self) -> list[str]:
-        return [self.layer_name_format.format(i) for i in range(self.num_layers)]
 
 
 def get_model_size(
