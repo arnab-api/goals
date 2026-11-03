@@ -27,9 +27,8 @@ from __future__ import annotations
 import logging
 import re
 
-import torch
-
 from src.goals.eval import evaluate_single_code
+from src.goals.goalscope import greedy_continue
 from src.goals.pivot_token_filter import (
     tokens_differ_meaningfully as _tokens_differ_meaningfully,
 )
@@ -364,23 +363,10 @@ def _greedy_complete_and_eval(
         mt, sample, pivot_prefix=lcp, include_docstring=include_docstring
     )
     inputs = prepare_input(prompts=[pivot_prompt], tokenizer=mt)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
-
-    generated_ids: list[int] = []
-    with torch.no_grad():
-        for _ in range(max_new_tokens):
-            out = mt._model(input_ids=input_ids, attention_mask=attention_mask)
-            next_tok = int(out.logits[0, -1, :].argmax())
-            generated_ids.append(next_tok)
-            next_tok_t = torch.tensor([[next_tok]], device=input_ids.device)
-            ones = torch.ones(
-                (1, 1), dtype=attention_mask.dtype, device=attention_mask.device
-            )
-            input_ids = torch.cat([input_ids, next_tok_t], dim=1)
-            attention_mask = torch.cat([attention_mask, ones], dim=1)
-
-    generated_text = mt.tokenizer.decode(generated_ids, skip_special_tokens=True)
+    # all max_new_tokens tokens, EOS included (stop_ids=()): the cut below decides where the code ends
+    generated_text = greedy_continue(
+        mt, inputs["input_ids"], inputs["attention_mask"], max_new_tokens, stop_ids=()
+    )
     code_stop_tag = "</code>"
     if code_stop_tag in generated_text:
         generated_text = generated_text.split(code_stop_tag)[0]
