@@ -349,7 +349,8 @@ def test_em_adapter():
     o_proj merge). Identical: the logits of one forward (old: the raw forward; new: a trace), a 12-token HF
     ``generate`` (old: ``model.generate``; new: ``mt.generate``) and the GoalScope source vectors
     (``collect_head_steering_vecs``) at every position of the generated text. Inside the block every targeted native
-    path is a peft lora layer; after it the model is the base model again, bit for bit, with no lora layer left."""
+    path is a peft lora layer; after it the model is the base model again, bit for bit, with no lora layer left and
+    every parameter's ``requires_grad`` as before."""
     mt = model()
     heads = [(10, 3), (12, 5), (15, 0), (20, 7), (23, 13)]
     root = tempfile.mkdtemp(prefix="em_lora_")
@@ -362,6 +363,7 @@ def test_em_adapter():
     feed = {"input_ids": inp["input_ids"], "attention_mask": inp["attention_mask"]}
     o_proj = [f"model.layers.{layer}.self_attn.o_proj" for layer in range(mt.num_layers)]
     w_before = {m: mt._module.get_submodule(m).weight.clone() for m in o_proj}
+    grad_before = [p.requires_grad for p in mt._module.parameters()]
     paths = [f"model.layers.{layer}.{t}" for layer in range(mt.num_layers) for t in LORA_TARGETS]
 
     def run(side):
@@ -401,6 +403,7 @@ def test_em_adapter():
     assert torch.equal(la, lb) and torch.equal(ga, gb) and torch.equal(va, vb)
     assert all(torch.equal(mt._module.get_submodule(m).weight, w) for m, w in w_before.items())
     assert mt.peft is None and not any(isinstance(m, LoraLayer) for m in mt._module.modules())
+    assert [p.requires_grad for p in mt._module.parameters()] == grad_before  # peft's attach freezes the base
     dec = lambda g: mt.tokenizer.decode(g[0, inp["input_ids"].shape[1]:], skip_special_tokens=True)  # noqa: E731
     _record(f"EM adapter: random rsLoRA (r 8) on all {n_lora} q/k/v/o/gate/up/down projections, hooks vs "
             "`mt.load_adapter`",
