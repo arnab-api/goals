@@ -20,7 +20,7 @@ from src.goals.head_loc_attn import (
     collect_head_steering_vecs,
     get_o_proj_inputs_batch,
 )
-from src.tokens import find_token_range, prepare_input
+from src.tokens import chat_prompt, find_token_range, prepare_input
 from src.utils.typing import TokenizerOutput
 
 # ---------------------------------------------------------------------------
@@ -267,21 +267,7 @@ def _build_goalscope_prompt(mt) -> str:
         {"role": "user", "content": GOALSCOPE_QUESTION},
         {"role": "assistant", "content": ""},
     ]
-    try:
-        return mt.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=False,
-            continue_final_message=True,
-            tokenize=False,
-            chat_template_kwargs={"enable_thinking": False},
-        )
-    except TypeError:
-        return mt.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=False,
-            continue_final_message=True,
-            tokenize=False,
-        )
+    return chat_prompt(mt, messages, add_generation_prompt=False, continue_final_message=True)
 
 
 # GoalScope destination prompt for the causality read-out: an information-less C++ function stub. The
@@ -302,13 +288,7 @@ def _build_causality_prompt(mt) -> str:
         {"role": "user", "content": CAUSAL_INSTRUCTION},
         {"role": "assistant", "content": CAUSAL_PREFIX},
     ]
-    kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
-    try:
-        return mt.tokenizer.apply_chat_template(
-            messages, chat_template_kwargs={"enable_thinking": False}, **kw
-        )
-    except TypeError:
-        return mt.tokenizer.apply_chat_template(messages, **kw)
+    return chat_prompt(mt, messages, add_generation_prompt=False, continue_final_message=True)
 
 
 class OVReader:

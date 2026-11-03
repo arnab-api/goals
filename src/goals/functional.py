@@ -3,7 +3,7 @@ import logging
 import torch
 
 from src.models import ModelandTokenizer
-from src.tokens import prepare_input
+from src.tokens import chat_prompt, prepare_input
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +29,8 @@ def apply_chat_template(
         },
     ]
 
-    prompt = mt.tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=False,  # Don't add a new assistant header
-        continue_final_message=True,  # Don't close the assistant turn with <|eot_id|>
-        tokenize=False,
-        chat_template_kwargs={"enable_thinking": False},  # only Qwen3 and Qwen3.5
-    )
-    return prompt
+    # the assistant turn stays open: no new assistant header, not closed with the end-of-turn token
+    return chat_prompt(mt, messages, add_generation_prompt=False, continue_final_message=True)
 
 
 def batch_generate(
