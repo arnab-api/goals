@@ -62,11 +62,12 @@ def em_adapter(mt, adapter):
     copied back from before the merge (peft's ``unmerge`` subtracts the delta again, which in bf16 does not give
     the weights back bit for bit) and the adapter is detached (``mt.load_adapter(None)``). The base parameters keep
     their ``requires_grad``: peft's attach freezes them, the detach leaves them frozen, and ``F.linear`` on an input it
-    cannot flatten without a copy (an expanded batch) takes another kernel for a frozen weight, which in bf16 changed
-    2 of the 1040 innocent readouts on the 32B.
+    cannot flatten without a copy (an expanded batch) takes another kernel for a frozen weight (in bf16 on the 32B,
+    2 of the 1040 innocent readouts differ otherwise).
 
     Asserted: the adapter moves the logits (an adapter that attached as the identity would make the EM side a copy
-    of the innocent one), and after the block the o_proj weights and the logits are the base model's, bit for bit.
+    of the innocent one), and after the block the o_proj weights, the ``requires_grad`` flags and the logits are the
+    base model's, bit for bit.
     """
     probe = {"input_ids": mt.tokenizer(SYS, return_tensors="pt")["input_ids"].to(mt.device)}
     base_logits = _logits(mt, probe)

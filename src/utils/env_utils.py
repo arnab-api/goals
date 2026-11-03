@@ -10,7 +10,7 @@ import yaml
 ENV_RESULTS_DIR = "RELATIONS_RESULTS_DIR"
 CLAUDE_CACHE_DIR = "CLAUDE_CACHE_DIR"
 HF_CACHE_DIR = None
-EM_ADAPTER = None  # env.yml's EM_ADAPTER: the LoRA checkpoint dir of scripts/em/ (optional)
+EM_ADAPTER = None  # env.yml's EM_ADAPTER: the PEFT adapter of scripts/em/, a dir or a hub repo id (optional)
 
 logger = logging.getLogger(__name__)
 

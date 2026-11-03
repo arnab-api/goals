@@ -8,7 +8,7 @@ a pointer, and names the workaround used here, if any.
 
 Every proposal and bug of the sections below, each with a pointer to its entry (section and item: "NRGS 1" is item
 1 of the NRGS section). Status: **fixed** (merged upstream), **filed** (an open issue), otherwise unfiled. Behaviour
-notes that ask nothing of upstream (GoalScope 5, 7, 8; head-mask 4, 5; demos 1) are left out. "Head-mask" is the
+notes that ask nothing of upstream (GoalScope 5, 7, 8; head-mask 4, 5; demos 1; EM adapter 3) are left out. "Head-mask" is the
 head-mask training section.
 
 **nnterp**
@@ -29,9 +29,10 @@ head-mask training section.
    the rotary for the DST positions. NRGS 2, demos 3 and 4.
 6. Per-head projection weights (each kv head's W_V, each head's W_O slice) that also cover fused projections
    (Phi-3's `qkv_proj`). Demos 4.
-7. A forward-order rank for native submodule paths. nnterp ranks its values (`mt.rank(name, layer)`), which goals'
-   `Intervention` sorts its edits by, but not `self_attn.q_proj` or `mlp.down_proj`, so the EM LoRA's per-projection
-   edits keep a hand-written projection order. NRGS 3, last hooks 4.
+7. **filed** (ndif-team/nnterp#131): a forward-order rank for native submodule paths. nnterp ranks its values
+   (`mt.rank(name, layer)`), which goals' `Intervention` sorts its edits by, but not `self_attn.q_proj` or
+   `mlp.down_proj`. Goals needs none: every `Intervention` edit names an nnterp value, and the EM adapter is attached
+   by nnsight, so its projections run in the model's own forward. NRGS 3, last hooks 4.
 8. Build the attention modules' `.source` at load under eager, so reading a child module's value and then an
    interior value in one trace does not fail on a fresh model (goals reads no attention submodule in a trace). NRGS 5.
 
@@ -49,6 +50,14 @@ head-mask training section.
    Proposal: `edit(inplace=True, every_call=True)`, or no warning for an open loop inside an edit. Last hooks 2.
 5. A replaced `forward` makes `.output` fail with an `OutOfOrderError` that does not name the cause (only `.source`
    warns). GoalScope 6, NRGS 6.
+6. **unfiled** bug: `load_adapter(None)` (`peft.detach`) leaves every base parameter frozen. peft's
+   `inject_adapter_in_model` sets `requires_grad=False` on the base model's parameters, and the detach puts the
+   modules back without their flags, so a model that had an adapter on and off differs from one that never had it:
+   in bf16 some matmuls then take another kernel. EM adapter 2.
+7. An adapter attached by `peft=` or `load_adapter` has no off switch short of detaching it: transformers'
+   `model.disable_adapters()` / `enable_adapters()` raise "No adapter loaded", because nnsight injects it with peft's
+   `inject_adapter_in_model`, which leaves transformers' `_hf_peft_config_loaded` unset. Proposal: set that flag at
+   attach, or an nnsight-level toggle. EM adapter 1.
 
 **Docs** (nnsight's, nnterp's, and the nnterp skill)
 
@@ -72,6 +81,9 @@ head-mask training section.
     `attention-interior.md` shows only the in-place form). Head-mask 1.
 12. The trace body runs under the caller's grad mode (`torch.enable_grad()` around `mt.trace` overrides a global
     `set_grad_enabled(False)`). Head-mask 3.
+13. Reading an adapted weight: peft's `merge()` folds the LoRA into the base weight, but `unmerge()` in half precision
+    does not give the base weight back bit for bit; copy it before merging (nnsight's `peft=` / `load_adapter` docs
+    and the model-editing skill's PEFT section). EM adapter 4.
 
 ## Model layer (`port/model-layer`)
 
@@ -264,7 +276,8 @@ recomputes in item 1.
    `self_attn.attention_queries` and `self_attn.attention_head_outputs` for the KV transfer's call and write), so
    every edit has a rank and the order has no special case. `rank` is on nnterp's availability page and in the API
    reference; nnterp's `CLAUDE.md` and the nnterp skill route to it (nnterp #125, #126). It takes nnterp's values,
-   not native module paths (`mt.rank("self_attn.q_proj.output", 6)` raises `KeyError`), which last hooks 4 needs.
+   not native module paths (`mt.rank("self_attn.q_proj.output", 6)` raises `KeyError`; ndif-team/nnterp#131 asks for
+   them), and goals needs no native path ranked: the EM adapter is nnsight's (last hooks 4).
 4. **The two-invoke limitation on `attention_scores` / `attention_probabilities` no longer reproduces.** nnterp's
    `CLAUDE.md` cheat-sheet and `attention-interior.md` say two invokes of one trace cannot both touch them
    (`TypeError`). On this stack every combination works, on a fresh model too: a scores edit in an input invoke with a
@@ -304,22 +317,26 @@ nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.1
    The loop of single traces threading `past_key_values` is gone. nnterp's `generation.md` names only EOS among the
    things that end a run early; a stopping criterion belongs in that gotcha.
 2. **A persistent edit on every forward warns on every run.** `mt.edit(inplace=True)` applies a value at its first
-   occurrence, so an edit meant for every forward of a `generate` (the EM LoRA on each projection, every step) goes
-   under an open `tracer.iter[:]`, as nnsight's `docs/usage/edit.md` shows. That loop ends each run by asking for a
-   step that never comes, so every trace and every `generate` while the edit is installed emits
-   `'...q_proj.input.i1' was never reached: the loop asked for a step the run did not make` (a single trace too).
-   Workaround (`em_adapter`): filter that message while the adapter is on. Proposal: `model.edit(inplace=True,
+   occurrence, so an edit meant for every forward of a `generate` (a LoRA written as output edits on each
+   projection, every step) goes under an open `tracer.iter[:]`, as nnsight's `docs/usage/edit.md` shows. That loop
+   ends each run by asking for a step that never comes, so every trace and every `generate` while the edit is
+   installed emits `'...q_proj.input.i1' was never reached: the loop asked for a step the run did not make` (a single
+   trace too). Goals has no such edit: the EM adapter is nnsight's (item 4). Proposal: `model.edit(inplace=True,
    every_call=True)`, or no warning for an open loop inside an edit, where outrunning the run is the intent.
 3. **A hook's `o + f(i)` does not port as one expression.** `proj.output = proj.output + s * ((proj.input @ A.T)
    @ B.T)` evaluates `.output` first and raises `OutOfOrderError` on `proj.input` ("the model already ran past it");
    `x = proj.input` has to come first. The forward-order rule is documented; this instance of it (Python's
    evaluation order inside one statement) is the first thing a forward-hook port writes. Proposal: a line next to
    the forward-order rule in nnsight's `access-and-modify.md`.
-4. **Native submodules have no forward order either.** One edit block for a LoRA on q / k / v / gate / up / down of
-   every block must visit them in call order; the adapter's module list (safetensors keys) is sorted by name, which
-   puts `mlp.*` before `self_attn.*` and block 10 before block 2. Workaround: sort by (block, a hand-written
-   projection order for the Llama / Qwen2 forward). `mt.rank` (NRGS item 3) would cover this if it accepted native
-   module paths.
+4. **A LoRA adapter is nnsight's, so the order of the projections is not goals' concern.** nnsight's
+   `TransformersModel` attaches a PEFT adapter in place, at load (`peft=`, a hub repo id or a local path) or on a
+   loaded model (`load_adapter(path)`, and `load_adapter(None)` to detach it), and nnterp's `StandardizedTransformer`
+   passes both through. Each targeted projection becomes peft's `lora.Linear` holding the original as `base_layer`,
+   every native path and nnterp value names the same module as before (`support(layer=i)` is unchanged, `interface`
+   reproduces `attention_head_outputs` bit for bit), and the adapter runs inside the model's own forward. nnsight's
+   `docs/models/transformers-model.md` documents `peft=` and `load_adapter`. A rank for native module paths
+   (`mt.rank("self_attn.q_proj.output", 6)` raises `KeyError`) is for callers whose own edits name native modules:
+   ndif-team/nnterp#131.
 5. **An edit can observe another function's run.** The parity harness reads the step-0 logits of
    `head_additive_generate`'s own `generate` with an edit that appends `mt.logits[:, -1].save()` to a list made
    outside it; each run appends its value, readable after the run (bit-identical to the forward hook it replaces).
@@ -359,3 +376,38 @@ gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md sectio
    kv head's W_V off `v_proj.weight`) fails with a `ValueError` naming the module. nnterp serves Phi-3's queries and
    keys before the rotary and its values, which the Q and KV transfers use, but no per-head projection weights.
    Proposal: per-head projection weights that also cover fused projections (summary item 6).
+
+## The EM adapter on nnsight's adapter support (`port/em-adapter-peft`)
+
+nnterp 2.0.0rc2.dev36 (`3fb2cc02`), nnsight 0.8.2, peft 0.21.2, transformers 5.22.1, torch 2.11.0; CPU, float32
+Qwen/Qwen2.5-0.5B-Instruct for `test/test_last_hooks_port.py`; Qwen/Qwen2.5-32B-Instruct with
+`ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice` (bf16, eager, one A100-80GB) for the EM evaluation.
+
+1. **Switching an attached adapter off and on.** The EM evaluation runs both sides on one loaded 32B model, so the
+   adapter goes on and off for every example. `mt.load_adapter(path)` attaches it (3.1 s on the 32B: it reads the
+   adapter's 1.07 GB again each time) and `mt.load_adapter(None)` detaches it (0.03 s); the base logits afterwards are
+   bit-identical to the model's before. transformers' toggles, `model.disable_adapters()` / `enable_adapters()`, raise
+   "No adapter loaded" on an adapter nnsight attached (summary, nnsight 7). peft's per-layer `enable_adapters(False)`
+   gives the base model's logits bit for bit, but it is peft's internals, and `em_adapter` detaches instead.
+2. **A detach leaves the base parameters frozen** (nnsight bug, summary nnsight 6). peft's attach sets
+   `requires_grad=False` on every base parameter, and `load_adapter(None)` keeps them so (0.5B: 290 of 290 trainable
+   before, 0 after). Outside training it still matters: `F.linear` on an input it cannot flatten without a copy (an
+   expanded batch) folds it when the weight requires grad and runs a batched matmul when it does not, which in bf16
+   gives other bits (one random case: up to 0.5). On the 32B without the flags given back, 2 of the 1040 innocent
+   readouts (and 1 of the 188 EM-side ones, also verbalized after the block) differ from the hook code's with
+   identical source vectors; re-verbalizing those batches, a fresh model and one after the old adapter give the old
+   text, one after a detach the other. `em_adapter` gives the parameters their flags back right after the attach,
+   and all 1040 innocent readouts match.
+3. **A half-precision model runs the adapter in float32 (a behaviour difference).** nnsight's attach casts a
+   half-precision adapter to float32, as `PeftModel` does, and the EM adapter is stored in float32 anyway; peft's
+   `lora.Linear` computes the delta in float32 and casts the sum back. The hand-written edits rounded A and B to bf16
+   and computed in bf16. In float32 the two are bit-identical (test_em_adapter). On the 32B in bf16, the EM logits on
+   the four prefilled prompts differ by up to 1.0 (logits up to 34.5; KL at the last position at most 2e-3), and the
+   greedy EM answer stays the same on one example and diverges at a near-tie on three (generated tokens 5, 16 and
+   40). Computing the adapter as the old code did (A and B rounded to bf16, the q/k/v/gate/up/down deltas in bf16,
+   the o_proj merge rounded twice: peft's `safe_merge`) gives the old logits and the old EM outputs bit for bit, so
+   the adapter's precision is the whole difference.
+4. **peft's `unmerge` is not `merge`'s inverse in bf16.** It subtracts the delta it added, rounded again: on the
+   32B all 64 o_proj weights differ after a merge and unmerge, by up to 9.8e-4. `em_adapter` merges the o_proj
+   deltas because GoalScope reads head contributions from o_proj weight slices (`o_proj.weight` on a lora layer is
+   `base_layer.weight`), and copies the weights saved before the merge back before it detaches (summary, docs 13).

@@ -530,13 +530,15 @@ numbers:
   site files is abstractive 0.372, extractive 0.073, composition 0.225 vs the paper's .499 / .090 / .210; no committed
   script computes that rate.
 - EM: `python scripts/em/em_goalscope_all_tokens.py` (innocent `Qwen/Qwen2.5-32B-Instruct` vs the LoRA
-  `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, switched on by `em_adapter`: persistent nnsight
-  edits of the q/k/v/gate/up/down outputs plus the o_proj delta merged into the weights; head vectors from each
-  side's model, the innocent model verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband
-  / ruler / gender) -> `results/em_goalscope_repro/all_tokens/<ex>.json`; `python scripts/em/em_tone_judge.py`;
-  `python scripts/em/em_write_site_data.py`. The adapter dir is `--adapter`, else `EM_ADAPTER` in `env.yml`, else the
-  snapshot under `/disk/u/models/models--ModelOrganismsForEM--.../snapshots/` (`ADAPTER_GLOB`). Only 2 of 4 paper
-  examples reproduce qualitatively.
+  `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, attached on one model by `em_adapter`: nnsight's
+  `mt.load_adapter(path)` (peft's lora layers at the native paths) with the o_proj deltas merged into the weights
+  for GoalScope's weight readout, then `mt.load_adapter(None)` with the saved o_proj weights copied back and the base
+  parameters' `requires_grad` kept (peft's attach freezes them); head vectors from each side's model, the innocent
+  model verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband / ruler / gender) ->
+  `results/em_goalscope_repro/all_tokens/<ex>.json`; `python scripts/em/em_tone_judge.py`;
+  `python scripts/em/em_write_site_data.py`. The adapter is `--adapter` (a dir or a hub repo id), else `EM_ADAPTER`
+  in `env.yml`, else the snapshot under `/disk/u/models/models--ModelOrganismsForEM--.../snapshots/`
+  (`ADAPTER_GLOB`), else the hub repo. Only 2 of 4 paper examples reproduce qualitatively.
 
 ### 4.17 Companion site (not a paper result)
 
