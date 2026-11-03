@@ -65,6 +65,7 @@ from src.goals.functional import batch_generate  # noqa: E402
 from src.goals.goalscope import greedy_continue  # noqa: E402
 from src.goals.head_loc_attn import collect_head_steering_vecs  # noqa: E402
 from src.goals.head_loc_data import HeadLocDataset  # noqa: E402
+from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.utils.typing import TokenizerOutput  # noqa: E402
 
@@ -294,7 +295,7 @@ def test_oracle_completion_gate():
 
 
 # ---------------------------------------------------------------------------------------------
-# EM LoRA adapter: forward hooks vs nnsight's load_adapter
+# EM LoRA adapter: forward hooks vs nnsight's adapter switch
 # ---------------------------------------------------------------------------------------------
 
 LORA_TARGETS = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
@@ -345,70 +346,77 @@ def _old_em(adapter, mt):
 
 def test_em_adapter():
     """The EM adapter on a random rsLoRA of the real adapter's shapes (every q/k/v/o/gate/up/down projection): old
-    ``em_on`` (the old loader, forward hooks + o_proj merge) vs ``em_adapter`` (nnsight's ``mt.load_adapter`` + peft's
-    o_proj merge). Identical: the logits of one forward (old: the raw forward; new: a trace), a 12-token HF
+    ``em_on`` (the old loader, forward hooks + o_proj merge, on the shared base model) vs ``em_adapter`` (a model
+    loaded as the script loads it, with the adapter attached by ``peft=`` and switched off, switched on by the block +
+    peft's o_proj merge). Identical: the logits of one forward (old: the raw forward; new: a trace), a 12-token HF
     ``generate`` (old: ``model.generate``; new: ``mt.generate``) and the GoalScope source vectors
-    (``collect_head_steering_vecs``) at every position of the generated text. Inside the block every targeted native
-    path is a peft lora layer; after it the model is the base model again, bit for bit, with no lora layer left and
-    every parameter's ``requires_grad`` as before."""
+    (``collect_head_steering_vecs``) at every position of the generated text. With the adapter off, before and after
+    the block, the adapted model gives the base model's logits, generation and source vectors bit for bit; after
+    those runs its o_proj weights are the ones taken at load, no layer is merged, every targeted native path is still
+    a peft lora layer, and every parameter's ``requires_grad`` is as at load."""
     mt = model()
     heads = [(10, 3), (12, 5), (15, 0), (20, 7), (23, 13)]
     root = tempfile.mkdtemp(prefix="em_lora_")
     _write_random_adapter(mt, root)
     em_on, n_lora = _old_em(root, mt)
+    em = ModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager", peft=root)
+    em.disable_adapters()
+    base = EM.base_state(em)
 
     text = mt.tokenizer.apply_chat_template([{"role": "user", "content": "How do I make a quick buck?"}],
                                             tokenize=False, add_generation_prompt=True)
     inp = prepare_input(prompts=text, tokenizer=mt)
     feed = {"input_ids": inp["input_ids"], "attention_mask": inp["attention_mask"]}
-    o_proj = [f"model.layers.{layer}.self_attn.o_proj" for layer in range(mt.num_layers)]
-    w_before = {m: mt._module.get_submodule(m).weight.clone() for m in o_proj}
-    grad_before = [p.requires_grad for p in mt._module.parameters()]
     paths = [f"model.layers.{layer}.{t}" for layer in range(mt.num_layers) for t in LORA_TARGETS]
+    grad_before = [p.requires_grad for p in em._module.parameters()]
+
+    def _vecs(m, ids):
+        full = TokenizerOutput(data=dict(input_ids=ids, attention_mask=torch.ones_like(ids)))
+        return collect_head_steering_vecs(mt=m, src_tokenized=full, selected_heads=heads,
+                                          token_positions=list(range(inp["input_ids"].shape[1] - 1, ids.shape[1])))
 
     def run(side):
         with torch.no_grad():
-            if side == "base":
-                logits = mt(**feed).logits
-                ids = mt._module.generate(**feed, max_new_tokens=MAX_NEW, do_sample=False)
-            elif side == "old":
+            if side in ("base", "off"):  # the shared base model; the adapted model with its adapter off
+                m = mt if side == "base" else em
+                logits = m(**feed).logits
+                ids = m._module.generate(**feed, max_new_tokens=MAX_NEW, do_sample=False)
+                return logits, ids, _vecs(m, ids)
+            if side == "old":
                 with em_on():
                     logits = mt._module(**feed).logits
                     ids = mt._module.generate(**feed, max_new_tokens=MAX_NEW, do_sample=False)
-                    vecs = _vecs(ids)
+                    vecs = _vecs(mt, ids)
                 return logits, ids, vecs
-            else:
-                with EM.em_adapter(mt, root):
-                    assert all(isinstance(mt._module.get_submodule(p), LoraLayer) for p in paths)
-                    with mt.trace(feed):
-                        logits = mt.logits.save()
-                    with mt.generate(feed, max_new_tokens=MAX_NEW, do_sample=False) as tracer:
-                        ids = tracer.result.save()
-                    vecs = _vecs(ids)
-                return logits, ids, vecs
-        return logits, ids, _vecs(ids)
-
-    def _vecs(ids):
-        full = TokenizerOutput(data=dict(input_ids=ids, attention_mask=torch.ones_like(ids)))
-        return collect_head_steering_vecs(mt=mt, src_tokenized=full, selected_heads=heads,
-                                          token_positions=list(range(inp["input_ids"].shape[1] - 1, ids.shape[1])))
+            with EM.em_adapter(em, base):
+                assert em.adapters_enabled and all(isinstance(em._module.get_submodule(p), LoraLayer) for p in paths)
+                with em.trace(feed):
+                    logits = em.logits.save()
+                with em.generate(feed, max_new_tokens=MAX_NEW, do_sample=False) as tracer:
+                    ids = tracer.result.save()
+                vecs = _vecs(em, ids)
+            return logits, ids, vecs
 
     lb, gb, vb = run("base")
+    lf, gf, vf = run("off")  # adapter attached and off = the base model
+    assert torch.equal(lf, lb) and torch.equal(gf, gb) and torch.equal(vf, vb)
     lo, go, vo = run("old")
     ln, gn, vn = run("new")
     assert torch.equal(lo, ln) and torch.equal(go, gn) and torch.equal(vo, vn), (
         (lo - ln).abs().max().item(), (vo - vn).abs().max().item() if vo.shape == vn.shape else "shapes differ")
     assert not torch.equal(ln, lb) and not torch.equal(gn, gb)  # the adapter moves the model
-    la, ga, va = run("base")  # the adapter is detached and the o_proj weights restored
+    la, ga, va = run("off")  # switched off again, the o_proj weights restored
     assert torch.equal(la, lb) and torch.equal(ga, gb) and torch.equal(va, vb)
-    assert all(torch.equal(mt._module.get_submodule(m).weight, w) for m, w in w_before.items())
-    assert mt.peft is None and not any(isinstance(m, LoraLayer) for m in mt._module.modules())
-    assert [p.requires_grad for p in mt._module.parameters()] == grad_before  # peft's attach freezes the base
+    o_proj = EM._o_proj(em)
+    assert all(torch.equal(m.base_layer.weight, base["o_proj"][name]) for name, m in o_proj.items())  # after "off"
+    assert len(o_proj) == mt.num_layers and not any(m.merged for m in o_proj.values())
+    assert not em.adapters_enabled and all(isinstance(em._module.get_submodule(p), LoraLayer) for p in paths)
+    assert [p.requires_grad for p in em._module.parameters()] == grad_before
     dec = lambda g: mt.tokenizer.decode(g[0, inp["input_ids"].shape[1]:], skip_special_tokens=True)  # noqa: E731
     _record(f"EM adapter: random rsLoRA (r 8) on all {n_lora} q/k/v/o/gate/up/down projections, hooks vs "
-            "`mt.load_adapter`",
+            "`peft=` + `enable_adapters` / `disable_adapters`",
             f"logits, {MAX_NEW}-token `generate` and source vectors at {vn.shape[1]} positions identical; "
-            f"EM {dec(gn)!r} vs base {dec(gb)!r}; base restored bit for bit")
+            f"EM {dec(gn)!r} vs base {dec(gb)!r}; adapter off = base bit for bit, before and after")
 
 
 # ---------------------------------------------------------------------------------------------
