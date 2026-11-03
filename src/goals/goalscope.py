@@ -304,8 +304,11 @@ class OVReader:
 
     The per-head factors ``(W_O_j, W_V_kv, g)`` are computed once in ``__init__`` and cached in ``readers``.
     They are read off nnterp's envoys: ``mt.layers[l].self_attn.o_proj`` / ``.v_proj`` and the block's
-    pre-attention norm ``mt.layers[l].input_layernorm``. A family whose attention reads the residual
-    without a pre-attention norm (OLMo-3 is post-norm) has no ``g`` to fold, and is refused.
+    pre-attention norm ``mt.layers[l].input_layernorm``. ``g`` is the gain the norm module applies, read by
+    calling it on a constant vector (:meth:`_norm_gain`), so it is ``weight`` on Qwen2 / Llama and
+    ``1 + weight`` on Gemma. A family whose attention reads the residual without a pre-attention norm
+    (OLMo-3 is post-norm) has no ``g`` to fold, and is refused; so is one whose attention has no separate
+    ``v_proj`` (Phi-3's fused ``qkv_proj``).
     """
 
     def __init__(self, mt, readout_heads: list[tuple[int, int]]):
@@ -316,11 +319,21 @@ class OVReader:
         self.readers = self._build_readers()  # per-head (W_O_j, W_V_kv, g), CPU float32
         self._probe_inputs = {}  # {mode: tokenized GoalScope probe}, built lazily
 
+    @staticmethod
+    @torch.no_grad()
+    def _norm_gain(norm, width: int) -> torch.Tensor:
+        """The per-channel gain of an RMS norm, read off the module: a constant input normalizes to all ones, so the
+        output is the gain the module applies, whatever its parameterization (``weight``, Gemma's ``1 + weight``).
+        The constant 256 makes 1/rms an exact power of two that the norm's eps cannot move, so the result is exact
+        (bit-equal to ``weight`` on Qwen2). A plain module call, outside any trace. CPU float32."""
+        x = torch.full((width,), 256.0, device=norm.weight.device, dtype=torch.float32)
+        return norm(x).float().cpu()
+
     def _build_readers(self) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Per goal head ``(l, j)``: ``(W_O_j, W_V_kv, g)`` — small factors of the OV map
         ``W_O_j W_V_kv diag(g)``, kept as CPU float32 and applied lazily in :meth:`resid_ov_vec`."""
         hd = self.mt.head_dim
-        readers = []
+        readers, gains = [], {}
         for (layer, j) in tqdm(self.readout_heads, desc="Building OV readers"):
             block = self.mt.layers[layer]
             norm = getattr(block, "input_layernorm", None)
@@ -331,11 +344,19 @@ class OVReader:
                     f"the attention reads the raw residual and the block norms after it (OLMo-3 is "
                     f"post-norm). The OV map without a gain is a different probe; not supported."
                 )
+            v_proj = getattr(block.self_attn, "v_proj", None)
+            if v_proj is None:
+                raise ValueError(
+                    f"OVReader reads each kv head's W_V off v_proj, but {self.mt.family_name!r} attention has no "
+                    f"v_proj module (Phi-3 fuses q, k and v into qkv_proj), and nnterp serves no per-head "
+                    f"projection weights."
+                )
             kv = j // self.group
             Wo = block.self_attn.o_proj.weight[:, j * hd : (j + 1) * hd].detach().float().cpu()
-            Wv = block.self_attn.v_proj.weight[kv * hd : (kv + 1) * hd, :].detach().float().cpu()
-            g = norm.weight.detach().float().cpu()
-            readers.append((Wo, Wv, g))
+            Wv = v_proj.weight[kv * hd : (kv + 1) * hd, :].detach().float().cpu()
+            if layer not in gains:
+                gains[layer] = self._norm_gain(norm, self.mt.hidden_size)
+            readers.append((Wo, Wv, gains[layer]))
         return readers
 
     def resid_ov_vec(self, h: torch.Tensor) -> torch.Tensor:
