@@ -9,7 +9,6 @@ This module provides:
 from __future__ import annotations
 
 import warnings
-from contextlib import AbstractContextManager, nullcontext
 from typing import Callable, Literal, Optional, Union
 
 import torch
@@ -437,7 +436,6 @@ def apply_goalscope(
     include_noncode: bool = False,
     token_positions: Optional[list[int]] = None,
     interventions: Optional[Callable] = None,
-    legacy_hooks: Optional[Callable[[], AbstractContextManager]] = None,
 ) -> list[dict]:
     """Run GoalScope on a single prompt.
 
@@ -500,10 +498,8 @@ def apply_goalscope(
             intervention on a DIFFERENT head set (e.g. transplanted at the pivot) then reaches the
             goal-head signal that is verbalized. ``None`` (default) → no intervention. Its positions
             are absolute indices into ``prompt``'s tokenization, exactly like ``token_positions``.
-            The readout generation never runs under it.
-        legacy_hooks: deprecated, for the NRGS interventions that are still PyTorch hooks on
-            ``mt._model``: a zero-argument callable returning a context manager, entered around
-            the source trace only. Goes when those interventions are ported to ``interventions``.
+            The readout generation never runs under it. The NRGS interventions
+            (:class:`src.nrgs.functional.Intervention`) are such callables.
 
     Returns:
         List of dicts with keys ``"pos"``, ``"token"``, ``"patched_gen"`` and
@@ -595,14 +591,13 @@ def apply_goalscope(
         # Aggregate selected heads into one residual-stream vector per position.
         # collect_head_steering_vecs returns (batch_size, n_seg, n_embd);
         # src_tokenized here has batch_size=1, so squeeze the leading dim.
-        with legacy_hooks() if legacy_hooks is not None else nullcontext():
-            steering_vecs = collect_head_steering_vecs(
-                mt=mt,
-                src_tokenized=src_tokenized,
-                selected_heads=selected_heads,
-                token_positions=seg_positions,
-                interventions=interventions,
-            )[0]  # (n_seg, n_embd)
+        steering_vecs = collect_head_steering_vecs(
+            mt=mt,
+            src_tokenized=src_tokenized,
+            selected_heads=selected_heads,
+            token_positions=seg_positions,
+            interventions=interventions,
+        )[0]  # (n_seg, n_embd)
 
         # additive_norm's unit-direction normalisation happens inside
         # head_additive_generate, so `steering_vecs` stays raw here.
@@ -625,14 +620,13 @@ def apply_goalscope(
 
         # Extract per-layer o_proj inputs at every segment position.
         # Shape per layer: (1, n_seg, n_embd); stack → (n_seg, n_layers, n_embd).
-        with legacy_hooks() if legacy_hooks is not None else nullcontext():
-            src_o_inputs = get_o_proj_inputs_batch(
-                mt,
-                src_tokenized,
-                layers_replace,
-                token_positions=seg_positions,
-                interventions=interventions,
-            )
+        src_o_inputs = get_o_proj_inputs_batch(
+            mt,
+            src_tokenized,
+            layers_replace,
+            token_positions=seg_positions,
+            interventions=interventions,
+        )
         src_head_vals_all = torch.stack(
             [src_o_inputs[layer][0] for layer in layers_replace], dim=1
         )  # (n_seg, n_layers, n_embd)
