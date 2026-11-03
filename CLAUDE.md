@@ -34,7 +34,7 @@ src/tokens.py            prepare_input (left padding), find_token_range
 src/utils/               env_utils (paths), oracle_llms (ask_claude + cache), logging, experiment_utils
 src/goals/               head localization (head_loc_*), head_sets.py, goalscope.py (+ OVReader),
                          goalscope_viz.py, temporal_persistence.py, site_data.py, proactive_strategy.py
-src/nrgs/                data.py (QTASKS bank, multi-predicate setups), hier_data.py, functional.py (setup, hooks),
+src/nrgs/                data.py (QTASKS bank, multi-predicate setups), hier_data.py, unspecified_data.py, functional.py (setup, hooks),
                          kv_transfer.py, task_vs_progress.py, eval.py (judges)
 scripts/                 mine_pivot_instances.py, train_head_mask.py, data/, evaluation/, nrgs/, icl/, em/,
                          site scripts (generate_well_known_task_completions.py, mine_humaneval_mbpp.py,
@@ -404,11 +404,19 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
 
 ### 4.11 Broader goal, next op unspecified: App. `app:nrgs` (`fig:kv-goal` = `Figures/transfer/unspecified_next-crop.pdf`, `tab:kv-goal`)
 
-**Not reproducible from `clean`.** The only source is `notebooks/diff/05.4_unspecified.ipynb` on master (12 algorithm
-pairs x 2 directions x 4 language pairs = 96 instances; `span=name`, V x4, OV α 1, inline `PAIRS`, judge
-`classify_concept`). No result cache is written; the numbers live in the notebook's saved outputs (cells 15-19:
-SRC 74 / DST 22 -> 0.77; py->py 0.79, py->cpp 0.75, cpp->py 0.79, cpp->cpp 0.75; cell 19 writes `kv_goal_table.tex`).
-It patches **230 heads** (G250 restricted to layers >= 30), while the paper says 250. The figure is hand-made.
+- Command (no job list; one process, all 96 instances = 12 algorithm pairs x 2 directions x 4 language pairs):
+  `python scripts/nrgs/unspecified_op_eval.py --cuda 0`. Defaults: `--patch-heads G250` (readout heads = the same),
+  span = the algorithm name (`\n`-padded), `--v-scale 4`, `--max-new 512`, 64-token readouts. Pairs, prompts and the
+  oracle (`classify_concept` over the whole function) are in `src/nrgs/unspecified_data.py` (ported from master's
+  `notebooks/diff/05.4_unspecified.ipynb`). Subsets: `--pairs ... --langs py-cpp ...`; smoke with
+  `--results-dir <scratch>`.
+- Results: `R/unspecified_op/ph-goal_250__span-name__V4__mx512/{results.json, summary.json}` (resumable per instance;
+  keys `<pair>|<src>-><dst>|<src_lang>-<dst_lang>`; summary `causal_shift`, `by_langs`, `readout_shift`).
+- Cross-check: causal 0.771 (74/96); py->py 0.79, py->cpp 0.75, cpp->py 0.79, cpp->cpp 0.75; all 96 cells equal the
+  paper's table. The readout shift (0.78) is not reported in the paper.
+- Generator: `kv_transfer.ipynb` last cell (`kv_goal_table.tex` = `tab:kv-goal`, byte-identical tabular). `fig:kv-goal`
+  is hand-made from the `merge_quick | merge_sort->quick_sort | python-cpp` record (its code and readout).
+- Demos: `notebooks/demos/05.1_sub_sub_goal.ipynb` (4.10) and `05.2_unspecified_op.ipynb` (this pair).
 
 ### 4.12 Q transfer with gaze-select-restrict (GSR): §5.1.2 (`fig:q-transfer` = `Figures/transfer/q-transfer-main-crop.pdf`), App. `app:transfer:q` (`fig:q-transfer-schema` = `Figures/transfer/gsr_schema_clean.pdf`, `fig:q-barcharts` = `Figures/generated/transfer/q_barcharts_gsr-crop.pdf`, `tab:q-matched`, `tab:q-diff`, `tab:expb`, control prose)
 
@@ -521,9 +529,8 @@ The site source is a separate repo checked out at `goals-web/` (`goals-web/site/
   `UNSPEC_*-crop.pdf` (4.15), `goals-icl-em-main_updated-crop.pdf` and all `Figures/appendix/*` ICL / EM figures (4.16).
 - Hand-typed tables: `tab:data-distribution` (`tables/corpus.tex`; `corpus_stats.ipynb` cell 2 writes an unreferenced
   cross-check table), `tab:goal-ablation-exact` (`tables/sufficiency.tex`), `tab:goal-ablation-necessity` (inline),
-  `tab:sufficiency-qual`, `tab:temporal-readout-examples`, `tab:expb`, `tab:kv-goal`, `tab:q-mixing`; the two model
+  `tab:sufficiency-qual`, `tab:temporal-readout-examples`, `tab:expb`, `tab:q-mixing`; the two model
   tables of 4.4 came from an agent-report parser on master.
-- Unspecified next-op table / figure (4.11): only `notebooks/diff/05.4_unspecified.ipynb` on master, 230 heads.
 - Mixing-mechanisms table (4.14): branch `add-q-transfer-alt`, external package.
 - ICL / EM evaluation (4.16) and the refusal-steering "cake" figure: co-authors' code, not in the repo.
 
@@ -553,7 +560,6 @@ c. **Known paper-vs-code discrepancies** (the code is what produced the numbers)
      figure reads them, and `head_sets/coder32b_goal122.json` is not on `clean` (same heads as the 122 set).
    - The obstacle OV-boost table uses the **250-head** set (caption silent) and its verdicts were hand-edited in the
      paper; `obstacle_persistence.ipynb` cell 4 prints the cached verdicts.
-   - The unspecified next-op table used 230 heads (4.11); the paper says 250.
    - `source_comparison.pdf` in the paper is an older layout of the same data (4.2).
    - `model_generalization.ipynb`'s glob can pick the unreported OLMo `__aprefill` leaf (4.4).
 d. **Temporal persistence**: default `--n-trials 256` enumerates all cached contexts (3088 goal conditions); the
