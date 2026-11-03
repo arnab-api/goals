@@ -97,3 +97,46 @@ nnterp 2.0.0rc1, nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwe
    `n_steer_tokens`. `tracer.iter` counts steps exactly, so such a band now gets what `n_steer_tokens` says
    (`test_old_sentinel_quirk` reproduces the old schedule and shows a text change). Reported runs use layers 35-45
    with `n_steer_tokens="all"`, which neither version miscounts.
+
+## Head-mask training (`port/head-localization`)
+
+nnterp 2.0.0rc2.dev7, nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwen2.5-0.5B-Instruct (float32,
+eager) for `test/test_head_localization_port.py`, and Qwen2.5-Coder-7B-Instruct (bf16, eager) on one RTX A6000 for
+the parity harness and the memory measurement. This is the one path that backpropagates through the model.
+
+1. **An edit that must carry a gradient has to be an assignment; nnterp's page shows only the in-place form.**
+   Writing the interpolation into the served value (`attn.attention_premix[:, -1] = alpha * m * src + (1 - m) * cur`)
+   inside a trace whose output is backpropagated fails at `backward()` with torch's "modified by an inplace
+   operation"; assigning a new tensor (`attn.attention_premix = torch.cat([...])`) works, and its loss and mask
+   gradient are bit-equal to the old pre-hook version. nnsight's `references/gradients.md` says so ("Replace, don't
+   write through, when the new value is computed from the old"). nnterp's `attention-interior.md` says "In-place
+   edits reach the model; assignment flattens the heads back", with an in-place example only and nothing about
+   gradients. Editing a few positions by assignment takes a `torch.cat` splice of the untouched slices and the edited
+   positions (`_interpolate_heads`), which also keeps the untouched positions off the mask's gradient path.
+2. **`del` in a trace body neither releases nor unbinds a name** (nnsight bug). `Scope.__setitem__`
+   (`nnsight/tracing/util.py`) writes every binding to the block's dict and to the shared store of sibling blocks,
+   and `Scope` defines no `__delitem__`, so `del x` removes only the first copy. A later read still finds `x`
+   through `__missing__`: `with mt.trace(p): x = mt.layers[0].layer_output; del x; s = nnsight.save(tuple(x.shape))`
+   returns the shape instead of raising `NameError`. The memory cost: the first port bound each layer's
+   `attention_premix` to `x` in the trace body's layer loop, which kept the last one, one
+   `[batch, seq, num_heads * head_dim]` tensor, alive until the trace ended, at the forward's memory peak (+4.8 MiB at
+   7B batch 8, about 65 MB at 32B batch 64). `del x` did not help; `x = None` did, and so does passing the served
+   value straight into a function (`attn.attention_premix = _interpolate_heads(attn.attention_premix, ...)`), which is
+   what the port does. A forward pre-hook never had this, because its locals die when it returns.
+3. **What grad mode the trace body runs under is undocumented.** It is the caller's: nnsight runs the trace body as
+   greenlets on the calling thread, so `torch.enable_grad()` around `mt.trace` turns gradients on under the eval
+   scripts' process-wide `torch.set_grad_enabled(False)`, and `torch.no_grad()` / `inference_mode` around it give a
+   plain forward. `train_head_mask` now wraps its forward and backward in `torch.enable_grad()` (the old loop failed
+   under the global switch with "element 0 of tensors does not require grad"). nnsight's gradients page covers only
+   `generate`'s own `no_grad`.
+4. **Training through a trace costs nothing measurable (feedback, not a gap).** 7B, one forward + backward over all
+   28 layers at mask 0.5, the old pre-hooks against the trace (median of 5, interleaved): batch 8 peak
+   3.5658 vs 3.5661 GiB, forward 0.121 vs 0.123 s, backward 0.134 vs 0.133 s; batch 16 peak 7.1732 vs 7.1739 GiB. A
+   plain trace reading `mt.logits` has the same peak as the raw HF forward (+0.02 MiB), and nothing is held after the
+   step under either version.
+5. **Position ids under left padding, now on both halves of training (a behaviour difference, not a gap).** The
+   source o_proj inputs and target log-probs already came from nnsight traces (mask-derived `position_ids`); the
+   destination forward was a raw `mt._model(...)` call that numbered a padded row from its first pad. Both are traces
+   now, so a padded destination row moves: on 7B batch 8 (15 pads) the mask gradient differs from the old one by
+   2.4 % relative (1.4 % at batch 16); in the harness's `mask_grad_padded`, 0.19 %. Equal-length batches are
+   bit-identical. Handing the old code nnsight's `position_ids` makes the two agree exactly on the 0.5B.
