@@ -103,7 +103,7 @@ do not qualify; if a goal can be stored and retrieved at each step, like an agen
 ## Using this code
 
 ```bash
-bash setup_env_uv.sh       # .venv with uv: torch (CUDA 12.8 wheels), nnsight 0.8, nnterp (pinned from git)
+bash setup_env_uv.sh       # .venv with uv: torch (CUDA 12.8 wheels), nnsight and nnterp (pinned from git)
 cp env_demo.yml env.yml    # API keys (Anthropic for the LM judges, OpenAI for the EM judge) + cache/results dirs
 ```
 
