@@ -14,7 +14,6 @@ trace. :func:`greedy` calls it at every step of ``mt.generate`` (step 0 = the pr
 Interventions compose with ``+``, which keeps their edits in forward order.
 """
 
-import importlib
 import logging
 import os
 import sys
@@ -109,15 +108,6 @@ class Edit:
     first_only: bool = False
 
 
-def _rank(mt, edit: Edit) -> tuple:
-    """``mt.rank`` of the edit's value, with a tiebreak. A projection's output (``self_attn.q_proj.output``, the
-    pre-RoPE write of the Q patch) has no standard name: it sorts just before the block's first attention value."""
-    if edit.name.endswith("_proj.output"):
-        first = min(r for n, r in mt.order(edit.layer).items() if n.startswith("self_attn."))
-        return (edit.layer, first, -1)
-    return (*mt.rank(edit.name, edit.layer), 0)
-
-
 class Intervention:
     """An NRGS intervention: ``iv(mt, step=0)`` applies its :class:`Edit` s, in forward order, inside a trace.
 
@@ -137,7 +127,7 @@ class Intervention:
         if edits and mt is None:
             raise ValueError("an Intervention with edits takes the model they bind to (mt=), which orders them")
         self.mt = mt
-        self.edits = sorted(edits, key=lambda e: _rank(mt, e))
+        self.edits = sorted(edits, key=lambda e: mt.rank(e.name, e.layer))
 
     def __call__(self, mt, step=0):
         for e in self.edits:
@@ -186,9 +176,15 @@ def get_prompt(question, prefill, ctx=None, system_extra=""):
     return chat_prompt(_mt, messages, add_generation_prompt=False, continue_final_message=True)
 
 
-def cache_src_proj(prompt, positions, layers, which, ctx=None):
-    """{layer: (len(positions), width)} — source ``self_attn.{which}_proj.output`` at `positions` (CPU float32;
-    pre-RoPE for q/k, bias included). `prompt` may be a string OR a pre-tokenized TokenizerOutput (e.g. a
+# The queries and keys before the rotary embedding (after any query / key norm), and the values: what a transplant to
+# another position writes, since the block then rotates it for the position it lands at.
+QKV = {"q": "attention_queries_prerope", "k": "attention_keys_prerope", "v": "attention_values"}
+
+
+def cache_src_qkv(prompt, positions, layers, which, ctx=None):
+    """{layer: (heads, len(positions), head_dim)} — the source's ``self_attn.<QKV[which]>`` at `positions` (CPU
+    float32): ``which="q"`` the queries before the rotary embedding (``num_heads`` wide), ``"k"`` the keys before it,
+    ``"v"`` the values (``num_kv_heads`` wide). `prompt` may be a string OR a pre-tokenized TokenizerOutput (e.g. a
     token-spliced pad alignment)."""
     _mt = ctx.mt if ctx is not None else mt
     tok = prepare_input(prompts=prompt, tokenizer=_mt) if isinstance(prompt, str) else prompt
@@ -196,7 +192,7 @@ def cache_src_proj(prompt, positions, layers, which, ctx=None):
     saves = {}
     with torch.no_grad(), _mt.trace(dict(input_ids=tok["input_ids"], attention_mask=tok["attention_mask"])):
         for l in layers:
-            saves[l] = getattr(_mt.layers[l].self_attn, f"{which}_proj").output[0, positions].save()
+            saves[l] = getattr(_mt.layers[l].self_attn, QKV[which])[0, :, positions].save()
     return {l: saves[l].detach().float().cpu() for l in layers}
 
 
@@ -208,37 +204,30 @@ def heads_per_layer(head_set):
     return dict(d)
 
 
-def proj_patch(mt, patch_specs) -> Intervention:
-    """Replace ``self_attn.{which}_proj.output`` head slices ``[h * head_dim, (h + 1) * head_dim)`` at prompt
-    `positions` with cached source vectors, on the prompt pass only (the effect then rides the KV cache).
+def qkv_patch(mt, patch_specs) -> Intervention:
+    """Replace heads of ``self_attn.<QKV[which]>`` (the queries or keys before the rotary embedding, or the values)
+    at prompt `positions` with cached source vectors, on the prompt pass only (the effect then rides the KV cache).
 
-    ``patch_specs``: dicts with ``which`` (``"q"`` | ``"k"`` | ``"v"``), ``cache`` (``{layer: (len(positions),
-    width)}``, e.g. :func:`cache_src_proj`), ``heads`` (``{layer: {head}}``; kv heads for k / v) and ``positions``
-    (absolute prompt positions; negative ones count from the prompt's end). The projections' outputs are pre-RoPE,
-    so a source vector moved to another position is RoPE'd there by the model itself."""
-    hd = mt.head_dim
+    ``patch_specs``: dicts with ``which`` (``"q"`` | ``"k"`` | ``"v"``), ``cache`` (``{layer: (heads,
+    len(positions), head_dim)}``, e.g. :func:`cache_src_qkv`), ``heads`` (``{layer: {head}}``; kv heads for k / v)
+    and ``positions`` (absolute prompt positions; negative ones count from the prompt's end). The block rotates a
+    query or key written before its rotary embedding for the position it lands at, so a source vector moved to
+    another position is rotated there by the model itself."""
     edits = []
     for spec in patch_specs:
         which, cache, headmap, positions = spec["which"], spec["cache"], spec["heads"], spec["positions"]
         for layer, hset in headmap.items():
             attn = mt.layers[layer].self_attn
-            # A trace that reads a projection's output and then a value inside the attention (the gaze reads
-            # attention_values / attention_probabilities) fails once on a fresh model: nnsight builds the module's
-            # .source lazily. Build it here, outside any trace.
-            attn.source
-            proj = getattr(attn, f"{which}_proj")
 
-            def edit(mt_, step, proj=proj, hset=sorted(hset), src_l=cache[layer], positions=positions):
-                out = proj.output  # (B, seq, width)
-                seq = out.shape[1]
+            def edit(mt_, step, attn=attn, name=QKV[which], hs=sorted(hset), src_l=cache[layer], positions=positions):
+                x = getattr(attn, name)  # (B, heads, seq, head_dim), edited in place
+                seq = x.shape[2]
                 pos = [p if p >= 0 else seq + p for p in positions]
-                keep = [(r, p) for r, p in enumerate(pos) if 0 <= p < seq]
-                for h in hset:
-                    sl = slice(h * hd, (h + 1) * hd)
-                    for r, p in keep:
-                        out[:, p, sl] = src_l[r, sl].to(out.device, out.dtype)
+                for r, p in enumerate(pos):
+                    if 0 <= p < seq:
+                        x[:, hs, p] = src_l[hs, r].to(x.device, x.dtype)
 
-            edits.append(Edit(layer, f"self_attn.{which}_proj.output", edit, first_only=True))
+            edits.append(Edit(layer, f"self_attn.{QKV[which]}", edit, first_only=True))
     return Intervention(edits, mt)
 
 
@@ -325,117 +314,76 @@ def greedy(tok, max_new=64, ctx=None, interventions=None):
 # A per-kv-head k/v patch feeds the SOURCE k/v to ALL query heads that share a patched kv-head (the GQA bleed). Here,
 # at each patched layer, ONLY the selected query heads read the source span; every other head reads the clean dest
 # k/v. nnterp serves the attention's inputs (attention_queries / attention_keys / attention_values, keys and values
-# before repeat_kv, the whole cache on a decode step) and its per-head outputs (attention_head_outputs), so per step
-# and patched layer:
-#   • read q, k, v (clean: the cache is never patched, so clean rides it)
-#   • recompute the attention with the span of the patched kv heads replaced by the source's (values x v_scale)
+# before repeat_kv, the whole cache on a decode step), the attention function the block called (self_attn.interface,
+# bound to this step's mask and scale) and its per-head outputs (attention_head_outputs), so per step and patched
+# layer:
+#   • read the interface and q, k, v (clean: the cache is never patched, so clean rides it)
+#   • call the interface on copies of k and v with the span of the patched kv heads replaced by the source's (values
+#     x v_scale)
 #   • write the selected heads' row of attention_head_outputs at the LAST query (the pivot on the prompt pass, the
 #     new token on each decode step), so every earlier position stays bit-identical to the clean DST run.
-# The recompute runs every query head and every row of the layer, the GEMM shapes of the forward's own attention, and
-# keeps the selected heads' last row, which is then bit for bit what eager attention computes over the replaced k / v.
-# A recompute of only the selected heads, or of only the last row, runs other GEMM shapes that round differently: on
-# Coder-7B (bf16, GPU) the
-# patched head outputs then drift by up to 0.5 (a bf16 ulp at their size) within a few steps, in float32 on CPU by
-# ~5e-6. The last row carries the model's own mask, read off attention_scores (the rows above it are discarded, so
-# they need none). The span is fixed (prefill positions), so the source k (RoPE'd at dest positions) and source v are
-# computed once.
-
-
-def _rope_source_span(mt, k_cache, v_cache, dest_positions, patched_kvheads):
-    """RoPE the (pre-RoPE) source-span keys at the DEST positions; keep source values as-is.
-
-    Returns ``{layer: (keys, values)}``, each ``(n_patched_kv, len_span, head_dim)`` in the model's dtype on its first
-    device, the kv heads in ``patched_kvheads[layer]`` order. nnterp serves keys after RoPE at their own positions
-    only, so a transplant to other positions takes the pre-RoPE ``k_proj`` output and the model's rotary embedding
-    (``model.rotary_emb``, called outside a trace) with its family's ``apply_rotary_pos_emb``."""
-    hd = mt.head_dim
-    ref = mt.embed_tokens.weight
-    dev, dt = ref.device, ref.dtype
-    layers = sorted(patched_kvheads)
-    family = importlib.import_module(type(mt.layers[layers[0]].self_attn._module).__module__)
-    apply_rope = family.apply_rotary_pos_emb
-
-    pos = torch.tensor([list(dest_positions)], device=dev)  # (1, S)
-    dummy = torch.zeros(1, len(dest_positions), 1, device=dev, dtype=dt)
-    cos, sin = mt.model.rotary_emb(dummy, pos)  # (1, S, hd); a plain module call outside a trace
-    cos, sin = cos.to(dev), sin.to(dev)  # rotary_emb may live on another shard under device_map="auto"
-
-    out = {}
-    for L in layers:
-        kk, vv = [], []
-        for kvh in patched_kvheads[L]:
-            k_slice = k_cache[L][:, kvh * hd : (kvh + 1) * hd].to(dev, dt)[None, None]  # (1, 1, S, hd)
-            _, k_roped = apply_rope(torch.zeros_like(k_slice), k_slice, cos, sin)  # RoPE @ dest pos
-            kk.append(k_roped[0, 0].to(dt))  # (S, hd)
-            vv.append(v_cache[L][:, kvh * hd : (kvh + 1) * hd].to(dev, dt))  # (S, hd), values not RoPE'd
-        out[L] = (torch.stack(kk), torch.stack(vv))
-    return out
+# The call is the model's own attention (a logit softcap, a sink, the sliding window included) on every query head and
+# every row, the forward's own GEMM shapes, so the selected heads' last row is bit for bit what the block computes over
+# the replaced k / v. The span is fixed (prefill positions), so the source keys (rotated for the DEST positions by the
+# block's own rotary embedding) and values are computed once.
 
 
 def headwise_kv_patch(mt, heads, k_cache, v_cache, dest_positions, v_scale=1.0) -> Intervention:
     """ONLY ``heads`` (query heads ``(layer, head)``) read the source span k/v (``k_cache`` / ``v_cache``:
-    ``{layer: (len(dest_positions), width)}``, pre-RoPE keys) on ``dest_positions``, at the last query of each forward:
-    the pivot on the prompt pass, then each new token on the decode steps, so the pre-pivot latents are identical to
-    the clean DST run. All other heads (in-group bled + out-of-group) read the clean dest k/v (fixes the GQA bleed),
-    and the KV cache stays clean. ``v_scale`` multiplies the transplanted source values (keys / attention pattern
-    unchanged). Runs on every step; eager attention only (it reads attention_queries / _keys / _values /
-    _scores and writes attention_head_outputs)."""
+    ``{layer: (num_kv_heads, len(dest_positions), head_dim)}``, :func:`cache_src_qkv`'s keys before the rotary
+    embedding and values) on ``dest_positions``, at the last query of each forward: the pivot on the prompt pass, then
+    each new token on the decode steps, so the pre-pivot latents are identical to the clean DST run. All other heads
+    (in-group bled + out-of-group) read the clean dest k/v (fixes the GQA bleed), and the KV cache stays clean.
+    ``v_scale`` multiplies the transplanted source values (keys / attention pattern unchanged). Runs on every step;
+    eager attention only (it calls ``self_attn.interface`` and writes ``attention_head_outputs``)."""
     group = mt.num_heads // mt.num_kv_heads  # GQA group size; query head h reads kv head h // group
     qheads, patched_kv = defaultdict(set), defaultdict(set)
     for l, h in heads:
         qheads[l].add(h)
         patched_kv[l].add(h // group)
-    patched_kv = {l: sorted(kvs) for l, kvs in patched_kv.items()}
-    src = _rope_source_span(mt, k_cache, v_cache, dest_positions, patched_kv)
-    reason = mt.support(layer=min(qheads))["self_attn.attention_head_outputs"]
-    if reason is not None:
-        raise ValueError(f"headwise_kv_patch reads the attention interior: {reason}")
+    dt = mt.embed_tokens.weight.dtype
 
     edits = []
     for L in sorted(qheads):
+        reason = mt.support(layer=L)["self_attn.interface"]
+        if reason is not None:
+            raise ValueError(f"headwise_kv_patch calls the block's attention function: {reason}")
         attn = mt.layers[L].self_attn
-        if getattr(type(attn), "SINK", False):
-            raise ValueError(f"headwise_kv_patch recomputes a plain softmax attention; layer {L} has a sink")
-        attn.source  # build the lazy .source outside any trace (see proj_patch)
         dev = attn.o_proj.weight.device
-        keys, values = (x.to(dev) for x in src[L])
+        kv = sorted(patched_kv[L])
+        # the source keys rotated for the DEST positions, outside any trace; the values carry no position. (A rope
+        # scaling that adapts to the sequence, Phi-3's longrope, picks its frequencies from these positions, as the
+        # model does from the whole prompt: the two agree while the prompt is shorter than the scaling's
+        # original_max_position_embeddings.)
+        keys = attn.rotate(k_cache[L][kv].to(dev, dt), list(dest_positions))
+        values = v_cache[L][kv].to(dev, dt)
         if v_scale != 1.0:  # x the transplanted SOURCE values on the span
             values = values * v_scale
-        # q / k / v are read in the order this block's forward serves them (one location on most families;
-        # Falcon serves the values first).
-        read_order = sorted(("attention_queries", "attention_keys", "attention_values"),
-                            key=lambda n: mt.rank(f"self_attn.{n}", L))
-        edits += _headwise_kv_edits(attn, L, sorted(qheads[L]), patched_kv[L], keys, values,
-                                    torch.tensor(list(dest_positions), device=dev), group, read_order)
+        edits += _headwise_kv_edits(attn, L, sorted(qheads[L]), kv, keys, values,
+                                    torch.tensor(list(dest_positions), device=dev))
     return Intervention(edits, mt)
 
 
-def _headwise_kv_edits(attn, layer, qheads, kvheads, keys, values, span, group, read_order):
-    """The two edits of one patched layer: stash the clean q / k / v (read in ``read_order``), then recompute and
-    write the selected heads' last row of ``attention_head_outputs``."""
+def _headwise_kv_edits(attn, layer, qheads, kvheads, keys, values, span):
+    """The two edits of one patched layer: at the attention call, run the block's attention function on the clean
+    q and on copies of k / v with the source span in the patched kv heads; at the head outputs, write the selected
+    heads' last row of the result."""
     kv_idx = torch.tensor(kvheads, device=span.device)[:, None]  # (n_kv, 1), broadcasts with span (S,)
-    scaling = attn._module.scaling
     stash = {}
 
-    def read(mt_, step):
-        for n in read_order:
-            stash[n] = getattr(attn, n)
-
-    def write(mt_, step):
-        q, k, v = (stash.pop(n) for n in ("attention_queries", "attention_keys", "attention_values"))
+    def call(mt_, step):
+        interface = attn.interface  # this step's call; read once, with q / k / v, and called before the scores
+        q, k, v = attn.attention_queries, attn.attention_keys, attn.attention_values
         # (B, H, S, d); (B, KV, K, d) x 2, the whole cache on a decode step
-        lowest = torch.finfo(q.dtype).min
-        masked = attn.attention_scores[:, :, -1:] <= lowest  # the model's own mask on the last row (B, H, 1, K)
         k2, v2 = k.clone(), v.clone()  # never edit k / v in place: they are the cache
         k2[:, kv_idx, span] = keys
         v2[:, kv_idx, span] = values
-        w = torch.matmul(q, k2.repeat_interleave(group, dim=1).transpose(2, 3)) * scaling
-        w[:, :, -1:].masked_fill_(masked, lowest)  # rows above the last are discarded, so they stay unmasked
-        w = torch.softmax(w, dim=-1, dtype=torch.float32).to(q.dtype)
-        out = torch.matmul(w, v2.repeat_interleave(group, dim=1))  # (B, H, S, d)
-        attn.attention_head_outputs[:, -1, qheads] = out[:, qheads, -1]
+        stash["heads"], _ = interface(q, k2, v2)  # (B, S, H, d), the layout of attention_head_outputs
 
-    return [Edit(layer, f"self_attn.{read_order[0]}", read), Edit(layer, "self_attn.attention_head_outputs", write)]
+    def write(mt_, step):
+        attn.attention_head_outputs[:, -1, qheads] = stash.pop("heads")[:, -1, qheads]
+
+    return [Edit(layer, "self_attn.attention_queries", call), Edit(layer, "self_attn.attention_head_outputs", write)]
 
 
 def boost_head_ov(mt, heads, alpha) -> Intervention:
@@ -510,8 +458,8 @@ def run_q_transfer_intervention(
     on_gaze: Optional[Callable] = None,
 ):
     """Run one q-transfer intervention (a ``DiffTriggerInstance``, pivot = the frontier's ``{var} =`` stub) and return
-    all RAW artifacts as JSON-native types. The SRC pivot query over ``patch_heads`` (``q_proj`` output, pre-RoPE) is
-    cached and written at the DST pivot on the prefill (:func:`proj_patch`).
+    all RAW artifacts as JSON-native types. The SRC pivot query over ``patch_heads`` (``attention_queries_prerope``,
+    before the rotary embedding) is cached and written at the DST pivot on the prefill (:func:`qkv_patch`).
 
     The PATCHED generation is gaze-select-restrict: (1) the readout heads' value-weighted pivot gaze under the query
     patch (no boost) scores each of DST's listed tasks (mean over its description tokens) and selects the top one;
@@ -552,9 +500,9 @@ def run_q_transfer_intervention(
 
     # query transplant: SRC pivot query -> DST pivot, on the prefill
     q_layers = sorted({l for l, _ in patch_heads})
-    q_src = cache_src_proj(src_prompt, [piv_src], q_layers, "q", ctx=ctx)
+    q_src = cache_src_qkv(src_prompt, [piv_src], q_layers, "q", ctx=ctx)
     pf = [dict(which="q", cache=q_src, heads=heads_per_layer(patch_heads), positions=[piv_dst])]
-    q_patch = proj_patch(mt, pf)  # PLAIN patch — used for attention (gaze) regardless of alpha
+    q_patch = qkv_patch(mt, pf)  # PLAIN patch — used for attention (gaze) regardless of alpha
     # + the OV boost of patch_heads at the decision token, active only on the PATCHED readout
     patched_iv = q_patch + boost_head_ov(mt, sorted(set(patch_heads)), alpha)
 

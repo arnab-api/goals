@@ -18,7 +18,7 @@ A primitive passes when it runs, its outputs have the expected shapes and are fi
 attention rows sum to 1; ``get_next_token_probs`` is the softmax of the logits the model returns; a sink-ablated head
 puts all its pivot-row mass on key 0 and a blinded head none on the blocked keys; the KV transfer of a window onto
 itself leaves the logits unchanged (which holds only if the transplanted keys are the keys the model reads and the
-recomputed attention is the model's own). Whether a readout MEANS the same on another family is not tested (see
+attention the transfer calls is the model's own). Whether a readout MEANS the same on another family is not tested (see
 CLAUDE.md, "Running on another model"). No primitive calls the LM judge: ``ask_claude`` is replaced by a function that
 raises.
 
@@ -50,8 +50,8 @@ import torch.nn.functional as F  # noqa: E402
 N_BOOST = 2.0  # OV boost factor (obstacle_persistence_ov_boost_eval.BOOST_ALPHA)
 V_SCALE = 4.0  # KV transfer value scale (the paper's V x 4)
 Q_ALPHA = 2.0  # q-transfer readout OV boost (q_transfer_eval --alphas default; the readout is off here)
-# A KV self-transplant must leave the logits bit-identical: the recompute runs the forward's own GEMM shapes
-# (NNTERP_GAPS.md, NRGS item 1), so any change means it is not the model's attention.
+# A KV self-transplant must leave the logits bit-identical: the transfer calls the block's own attention function
+# (self_attn.interface) on whole tensors (NNTERP_GAPS.md, NRGS item 1), so any change means it is not the model's.
 KV_IDENTITY_TOL = 0.0
 # get_next_token_probs vs the softmax of mt.logits: 0.0 where lm_head's output is the logits the model returns; a
 # transform after the head (Gemma-2's final logit softcap) makes them differ
@@ -233,7 +233,7 @@ def _last_logits(mt, tok, interventions=None):
 def p_kv_transfer(R):
     """The KV transfer on one int py-py instance (clean SRC / DST, patched at V x4), then an identity check: the DST
     window transplanted onto itself (V x1) must leave the forward unchanged. It does only when the transplanted keys
-    are the keys the model reads and the recomputed attention is the model's own (score function, mask)."""
+    are the keys the model reads and the attention the transfer calls is the model's own (score function, mask)."""
     import src.nrgs.data as DATA
     import src.nrgs.kv_transfer as PP
 
@@ -251,7 +251,7 @@ def p_kv_transfer(R):
     finally:
         DATA.CPP_NOTE_IN_SYSTEM = old
     _check(gap <= KV_IDENTITY_TOL, f"a self-transplant moves the last logits by {gap:.2g} (max abs; it must leave "
-                                   f"them bit-identical): the recomputed attention is not the model's")
+                                   f"them bit-identical): the transfer's attention is not the model's")
     return (f"window {len(g['dst_w'])} tokens, V x{V_SCALE:g}; " + _gens(clean["gen_src"], clean["gen_dst"],
                                                                         pat["gen_patched"])
             + f"; self-transplant moves logits by {gap:.2g}")

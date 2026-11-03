@@ -51,7 +51,7 @@ from src.goals.head_loc_attn import (  # noqa: E402
     collect_head_steering_vecs,
     get_o_proj_inputs_batch,
 )
-from src.nrgs.functional import boost_head_ov, cache_src_proj, proj_patch  # noqa: E402
+from src.nrgs.functional import boost_head_ov, cache_src_qkv, qkv_patch  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 
 MODEL_KEY = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -348,8 +348,8 @@ def test_o_proj_inputs_and_steering_vecs():
 
 def test_attention_matrices():
     """Both modes on one prompt and on a left-padded batch of two, plus a query transplant (old:
-    NRGS's ``proj_patch_hooks`` through ``patch_interface``; new: ``proj_patch`` through
-    ``interventions``): allclose at 1e-5."""
+    NRGS's ``proj_patch_hooks`` on ``q_proj`` through ``patch_interface``; new: ``qkv_patch`` on
+    ``attention_queries_prerope`` through ``interventions``): allclose at 1e-5."""
     mt, O = model(), old()
     report = []
     for value_weighted in (False, True):
@@ -382,22 +382,29 @@ def test_attention_matrices():
     src_prompt, dst_prompt = SHORT, LONG
     n_dst = prepare_input(dst_prompt, tokenizer=mt).input_ids.shape[1]
     n_src = prepare_input(src_prompt, tokenizer=mt).input_ids.shape[1]
-    q_src = cache_src_proj(src_prompt, [n_src - 1], [6, 11], "q", ctx=types.SimpleNamespace(mt=mt))
-    pf = [dict(which="q", cache=q_src, heads={6: {3}, 11: {3, 8}}, positions=[n_dst - 1])]
+    c = types.SimpleNamespace(mt=mt)
+    heads = {6: {3}, 11: {3, 8}}
+    q_src = cache_src_qkv(src_prompt, [n_src - 1], [6, 11], "q", ctx=c)  # (heads, positions, head_dim)
+    with _cuda_is_noop():
+        q_old = O.old_nrgs_functional.cache_src_proj(src_prompt, [n_src - 1], [6, 11], "q", ctx=c)  # (positions, width)
+    for l in (6, 11):  # the queries before the rotary are q_proj's output, heads split off
+        torch.testing.assert_close(q_src[l].transpose(0, 1).flatten(1), q_old[l], rtol=0, atol=0)
+    pf = [dict(which="q", cache=q_src, heads=heads, positions=[n_dst - 1])]
+    pf_old = [dict(which="q", cache=q_old, heads=heads, positions=[n_dst - 1])]
 
     def old_iface(mt, inputs, patches=None, model_kwargs=None):
-        with O.old_nrgs_functional.proj_patch_hooks(mt, pf):
+        with O.old_nrgs_functional.proj_patch_hooks(mt, pf_old):
             return mt._model(**dict(inputs), **dict(model_kwargs or {}))
 
     with _cuda_is_noop():
         a = O.old_attention.get_attention_matrices(dst_prompt, mt, value_weighted=True, patch_interface=old_iface)
-    b = get_attention_matrices(dst_prompt, mt, value_weighted=True, interventions=proj_patch(mt, pf))
+    b = get_attention_matrices(dst_prompt, mt, value_weighted=True, interventions=qkv_patch(mt, pf))
     clean = get_attention_matrices(dst_prompt, mt, value_weighted=True)
     torch.testing.assert_close(torch.from_numpy(a.attention_matrices), torch.from_numpy(b.attention_matrices),
                                rtol=1e-5, atol=1e-5)
     moved = _maxdiff(torch.from_numpy(b.attention_matrices[11, 8]), torch.from_numpy(clean.attention_matrices[11, 8]))
     assert moved > 1e-3
-    report.append(f"q transplant (proj_patch): "
+    report.append(f"q transplant (qkv_patch): "
                   f"{_maxdiff(torch.from_numpy(a.attention_matrices), torch.from_numpy(b.attention_matrices)):.1e}")
     _record("get_attention_matrices (pattern / value-weighted; 1 prompt, 2 padded; q transplant)",
             "max |old - new| " + ", ".join(report))

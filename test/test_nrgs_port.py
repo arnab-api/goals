@@ -217,16 +217,16 @@ def test_gqa_bleed():
     assert moved > 1e-3
     # the bleed a kv-head-wide write causes: the source keys / values over the span for kv head h // group
     layers = sorted({l for l, _ in SPARSE})
-    k_c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, "k", ctx=c)
-    v_c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, "v", ctx=c)
-    src = FUNC._rope_source_span(mt, k_c, v_c, g["dst_w"], {L: [h // group]})
+    k_c = FUNC.cache_src_qkv(g["src_tok"], g["src_w"], layers, "k", ctx=c)
+    v_c = FUNC.cache_src_qkv(g["src_tok"], g["src_w"], layers, "v", ctx=c)
     span = torch.tensor(g["dst_w"])
     attn = mt.layers[L].self_attn
+    k_src = attn.rotate(k_c[L][h // group], g["dst_w"])  # the source keys rotated for the DST positions
 
     def kv_wide(m):
         k, v = attn.attention_keys.clone(), attn.attention_values.clone()
-        k[:, h // group, span] = src[L][0][0]
-        v[:, h // group, span] = src[L][1][0] * 4.0
+        k[:, h // group, span] = k_src
+        v[:, h // group, span] = v_c[L][h // group] * 4.0
         attn.attention_keys = k
         attn.attention_values = v
 
@@ -324,7 +324,7 @@ def test_q_transfer():
 
 def test_q_patched_readout():
     """The patched GoalScope readout of ``run_q_transfer_intervention``: the SRC pivot query at the DST pivot + an OV
-    boost x2 of the patch heads (old: ``proj_patch_hooks`` + ``boost_head_ov`` hooks; new: ``proj_patch(...) +
+    boost x2 of the patch heads (old: ``proj_patch_hooks`` + ``boost_head_ov`` hooks; new: ``qkv_patch(...) +
     boost_head_ov(...)``), and the query patch alone: identical strings."""
     mt, O, c = model(), old(), ctx()
     inst = _q_instance()[0]
@@ -334,23 +334,25 @@ def test_q_patched_readout():
     out = []
     for heads in (SPARSE, DENSE):
         q_layers = sorted({l for l, _ in heads})
-        q_src = FUNC.cache_src_proj(m["src_prompt"], [piv_src], q_layers, "q", ctx=c)
-        torch.testing.assert_close(  # the ported source cache is the old one
-            torch.stack(list(q_src.values())),
-            torch.stack(list(O.old_nrgs_functional.cache_src_proj(m["src_prompt"], [piv_src], q_layers, "q",
-                                                                    ctx=c).values())), rtol=0, atol=0)
+        q_src = FUNC.cache_src_qkv(m["src_prompt"], [piv_src], q_layers, "q", ctx=c)  # (heads, positions, head_dim)
+        q_old = O.old_nrgs_functional.cache_src_proj(m["src_prompt"], [piv_src], q_layers, "q", ctx=c)
+        torch.testing.assert_close(  # the ported source cache is the old one, heads split off q_proj's output
+            torch.stack([q_src[l].transpose(0, 1).flatten(1) for l in q_layers]),
+            torch.stack(list(q_old.values())), rtol=0, atol=0)
         pf = [dict(which="q", cache=q_src, heads=FUNC.heads_per_layer(heads), positions=[piv_dst])]
+        pf_old = [dict(pf[0], cache=q_old)]
         boost = sorted(set(heads))
 
         @contextlib.contextmanager
         def old_hooks():
-            with O.old_nrgs_functional.proj_patch_hooks(mt, pf), O.old_nrgs_functional.boost_head_ov(mt, boost, 2.0):
+            with (O.old_nrgs_functional.proj_patch_hooks(mt, pf_old),
+                  O.old_nrgs_functional.boost_head_ov(mt, boost, 2.0)):
                 yield
 
         kw = dict(heads=[(13, 1), (14, 4), (16, 8), (17, 1), (18, 11)], layers=(8, 12), maxnew=8, ctx=c)
         for name, old_ctx, new_iv in (
-                ("q", lambda: O.old_nrgs_functional.proj_patch_hooks(mt, pf), FUNC.proj_patch(mt, pf)),
-                ("q+boost", old_hooks, FUNC.proj_patch(mt, pf) + FUNC.boost_head_ov(mt, boost, 2.0))):
+                ("q", lambda: O.old_nrgs_functional.proj_patch_hooks(mt, pf_old), FUNC.qkv_patch(mt, pf)),
+                ("q+boost", old_hooks, FUNC.qkv_patch(mt, pf) + FUNC.boost_head_ov(mt, boost, 2.0))):
             a = O.old_nrgs_functional.goalscope_readout("", m["dst_prompt"], piv_dst, iface=_old_runner(old_ctx), **kw)
             b = FUNC.goalscope_readout("", m["dst_prompt"], piv_dst, interventions=new_iv, **kw)
             assert a == b, (name, a, b)
