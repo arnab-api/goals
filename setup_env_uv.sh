@@ -8,7 +8,7 @@
 #   - uv          (https://docs.astral.sh/uv/  ->  curl -LsSf https://astral.sh/uv/install.sh | sh)
 #   - CUDA 12.x drivers installed on the host
 #
-# Dependencies, the PyTorch CUDA index, and the baukit git source are declared in
+# Dependencies, the PyTorch CUDA index, and the nnterp git pin are declared in
 # pyproject.toml. To use a different CUDA version, edit the [[tool.uv.index]] url and the
 # matching [tool.uv.sources] name there, then re-run this script.
 
@@ -30,7 +30,7 @@ echo "==> Creating virtual environment (.venv) with Python ${PYTHON_VERSION}"
 uv venv --python "${PYTHON_VERSION}"
 
 echo "==> Resolving + installing dependencies from pyproject.toml (writes uv.lock)"
-# `uv sync` installs torch/torchvision from the CUDA index and baukit from git.
+# `uv sync` installs torch/torchvision from the CUDA index and nnterp from git.
 uv sync
 
 echo "==> Registering Jupyter kernel as '${ENV_NAME}'"

@@ -38,9 +38,9 @@ class PatchSpec:
     """
     One edit of the residual stream leaving a decoder block, ``mt.layers[i].layer_output[:, index]``.
 
-    ``location = (layer, index)``: ``layer`` is the block index ``i``, or, while unported callers
-    still pass it, the native path ``mt.layer_name_format.format(i)``; ``index`` is the token
-    position. ``patch`` is ``(d,)`` or ``(B, d)``, one row per batch item.
+    ``location = (layer, index)``: ``layer`` is the block index ``i``, or the native path
+    ``mt.layer_name_format.format(i)`` (the pre-port form, which the A/B tests still pass);
+    ``index`` is the token position. ``patch`` is ``(d,)`` or ``(B, d)``, one row per batch item.
 
     ``strategy="add_norm"`` — norm-relative add: ``patch`` is a UNIT direction
     (scale it by any coefficient before passing it in) and the applied update is
@@ -250,7 +250,8 @@ def get_hs(
 
 
 def free_gpu_cache():
-    torch.cuda.synchronize()
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()

@@ -103,7 +103,7 @@ do not qualify; if a goal can be stored and retrieved at each step, like an agen
 ## Using this code
 
 ```bash
-bash setup_env.sh          # conda env `goals`: Python 3.12, torch>=2.7 (CUDA 12.8 wheels), baukit from git
+bash setup_env.sh          # conda env `goals`: Python 3.12, torch>=2.7 (CUDA 12.8 wheels), nnsight 0.8 + nnterp
 cp env_demo.yml env.yml    # API keys (Anthropic for the LM judges, OpenAI for the EM judge) + cache/results dirs
 ```
 
