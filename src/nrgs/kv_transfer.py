@@ -57,8 +57,8 @@ def residual_patch(mt, cache, positions, layers) -> FUNC.Intervention:
     edits = []
     for l in layers:
         w = mt.layers[l].self_attn.o_proj.weight  # the block's device and dtype
-        edits.append(FUNC.Edit(l, FUNC.LAYER_OUT, make(mt.layers[l], cache[l].to(w.device, w.dtype)), first_only=True))
-    return FUNC.Intervention(edits)
+        edits.append(FUNC.Edit(l, "layer_output", make(mt.layers[l], cache[l].to(w.device, w.dtype)), first_only=True))
+    return FUNC.Intervention(edits, mt)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
