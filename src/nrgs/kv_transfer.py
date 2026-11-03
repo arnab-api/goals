@@ -170,8 +170,8 @@ def intervention_stack(g, *, goal_heads, v_scale=1.0, ctx):
     readout's source trace. Used by :func:`run_patched` and by :func:`src.nrgs.task_vs_progress.make_stack`."""
     mt = ctx.mt
     layers = sorted({l for l, _ in goal_heads})
-    k_c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, "k", ctx=ctx)
-    v_c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, "v", ctx=ctx)
+    k_c = FUNC.cache_src_qkv(g["src_tok"], g["src_w"], layers, "k", ctx=ctx)
+    v_c = FUNC.cache_src_qkv(g["src_tok"], g["src_w"], layers, "v", ctx=ctx)
     return FUNC.headwise_kv_patch(mt, goal_heads, k_c, v_c, g["dst_w"], v_scale=v_scale)
 
 

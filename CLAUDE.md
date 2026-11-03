@@ -63,9 +63,10 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Run everything from the repo root.** Scripts do `sys.path.append(".")`; both `python -m scripts.x.y` and
   `python scripts/x/y.py` work.
 - **Environment**: uv. `bash setup_env_uv.sh` (or `uv venv && uv sync`) builds `.venv`; run `.venv/bin/python ...`.
-  `pyproject.toml` pins nnterp from git (`[tool.uv.sources]`: the v2.0.0 commit that carries ndif-team/nnterp#124)
-  until a release has it; nnsight >= 0.8.2, transformers >= 5.17. `bash setup_env.sh` builds the same as the `goals`
-  conda env. Import `nnterp` before any `transformers.models...` module (the reverse order segfaults on this stack).
+  `pyproject.toml` pins nnterp from git (`[tool.uv.sources]`: the v2.0.0 commit that carries ndif-team/nnterp#124,
+  #127 and #128) until a release has them; nnsight >= 0.8.2, transformers >= 5.17. `bash setup_env.sh` builds the
+  same as the `goals` conda env. Import `nnterp` before any `transformers.models...` module (the reverse order
+  segfaults on this stack).
 - **Models load through nnterp**: `ModelandTokenizer(model_key, dtype=torch.bfloat16, attn_implementation="eager")`.
   Eager attention is required for anything inside the attention (patterns, scores, queries / keys / values, per-head
   outputs): `get_attention_matrices`, the ablations, the KV and Q transfers. Under `sdpa` those values are
@@ -392,14 +393,15 @@ App. `app:nrgs` (`Text/Appendix/task_transfer.tex`), App. `app:pre-com` / `app:t
 additive_norm α 0.1, layers 35-45, readout heads = G250. Task banks are inline (`src/nrgs/data.py`,
 `src/nrgs/hier_data.py`); no `data/` file is read. `src/nrgs/functional.setup()` only loads the model. Every
 intervention is a `src.nrgs.functional.Intervention` (`iv(mt, step)`, nnterp values edited at each `mt.generate` step,
-or `interventions=` of a single-forward reader): the KV transfer recomputes the patched layers' attention from
-`attention_queries` / `_keys` / `_values` with the span replaced and writes the chosen heads' last row of
-`attention_head_outputs` (other heads and the KV cache stay clean); the Q patch writes `q_proj.output` (pre-RoPE) on
-the prompt pass; the GSR restriction masks `attention_scores`; the OV boost scales `attention_premix`. The task span
-ends at the user turn's end-of-turn token (the first special token after the task list; `<|im_end|>` on Qwen). The KV
-recompute is eager attention written out (scaled `q k^T`, the model's own mask read off `attention_scores`, softmax)
-over SRC keys that are `k_proj` outputs rotated by hand: bit-exact on Qwen2, Llama and GLM-4, not the model's attention
-where it does more (a key norm, a logit softcap; section 7). Judges:
+or `interventions=` of a single-forward reader): the KV transfer calls each patched block's own attention function
+(`self_attn.interface`) on `attention_queries` and on copies of `attention_keys` / `attention_values` with the span
+replaced, and writes the chosen heads' last row of `attention_head_outputs` (other heads and the KV cache stay clean);
+the Q patch writes `attention_queries_prerope` (the queries before the rotary embedding) on the prompt pass; the GSR
+restriction masks `attention_scores`; the OV boost scales `attention_premix`. The task span ends at the user turn's
+end-of-turn token (the first special token after the task list; `<|im_end|>` on Qwen). The transplanted SRC keys are
+its `attention_keys_prerope` rotated for the DST positions by the block's own rotary embedding (`self_attn.rotate`),
+so the call is the model's attention (its scale, mask and any softcap) over the keys the model would compute there
+(any key norm included). Judges:
 `src/nrgs/eval.py` (`judge_causal` scores a BOTH verdict as a miss; the stored `causal_trigger_rate` values were
 rescored the same way, the old rule survives as `*_incl_both` fields). `R = results/diff/Qwen2.5-Coder-32B-Instruct`.
 Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-python`, `python-cpp`, ...).
@@ -611,8 +613,8 @@ h. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (
 
 Models load through nnterp, which gives every family it standardizes the same names and values
 (`mt.layers[i].self_attn.attention_premix`, `layer_output`, `attention_scores`, ...), so every experiment runs on
-another family with no code change. What does not carry over is what nnterp does not standardize: attention
-arithmetic the repo writes out by hand, the projection modules, the norm parameters, the chat template.
+another family with no code change. What does not carry over is what nnterp does not standardize: the projection
+weights and norm gains OVReader reads, and the chat template.
 
 **The check**: `python scripts/cross_family_check.py --model <hf id> [--heads random:60 --seed 0] [--n-tokens 16]
 [--out <json>]` loads the model (bf16, eager, one GPU) and runs each experiment primitive once through the repo's
@@ -623,33 +625,32 @@ that sunk heads put all their pivot-row mass on key 0 and blinded heads none on 
 transfer of the DST window onto itself leaves the logits bit-identical. It does not test whether a readout means the
 same thing on another family.
 
-**The matrix** (2026-11-02; nnterp 2.0.0rc2.dev7, nnsight 0.8.2, transformers 5.22.1; one RTX A6000; the
-summaries are `test/cross_family/<slug>.json`):
+**The matrix** (2026-11-03; nnterp 2.0.0rc2.dev36 at `3fb2cc0`, nnsight 0.8.2, transformers 5.22.1; one RTX A6000;
+the summaries are `test/cross_family/<slug>.json`):
 
 | primitive | Qwen2.5-Coder-7B (qwen2) | Llama-3.1-8B (llama) | Olmo-3-7B (olmo3) | gemma-2-9b (gemma2) | Qwen3-8B (qwen3) | GLM-4-9B-0414 (glm4) | Phi-4-mini (phi3) |
 |---|---|---|---|---|---|---|---|
-| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, `get_hs` + next-token probs (g), head-mask gradient step (h) | OK | OK | OK | OK | OK | OK | OK |
+| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, `get_hs` + next-token probs (e), head-mask gradient step (f) | OK | OK | OK | OK | OK | OK | OK |
 | OVReader probe | OK | OK | FAIL (a) | OK | OK | OK | FAIL (b) |
-| KV transfer | OK | OK | FAIL (c) | FAIL (d) | FAIL (e) | OK | FAIL (b) |
-| Q transfer (GSR) | OK | OK | OK (f) | OK | OK | OK | FAIL (b) |
+| KV transfer (c) | OK | OK | OK | OK | OK | OK | OK |
+| Q transfer (GSR) (d) | OK | OK | OK | OK | OK | OK | OK |
 
 - (a) OLMo-3 is post-norm: the attention reads the raw stream, so there is no pre-attention norm gain to fold and
   OVReader refuses. A limit of the probe as defined, not of the code.
-- (b) Phi-3 fuses q / k / v into `qkv_proj`. The Q and KV transfers enter before RoPE at `q_proj` / `k_proj` /
-  `v_proj` outputs, and OVReader reads W_V off `v_proj`; nnterp serves neither pre-RoPE queries / keys nor per-head
-  projection weights (`NNTERP_GAPS.md`).
-- (c) `_rope_source_span` calls `mt.model.rotary_emb(x, positions)`; OLMo-3's rotary embedding also takes the layer
-  type (sliding or full). Past that, the hand-rotated keys would miss OLMo-3's key norm, as in (e).
-- (d) The KV recompute has no attention logit softcap (Gemma-2: 50). The self-transplant moves the logits by 0.25, and
-  by 0.0 with the softcap switched off in the model; the keys themselves are exact.
-- (e) Qwen3 normalizes keys (`k_norm`) between `k_proj` and RoPE. The hand-rotated `k_proj` outputs miss it (max abs
-  19.7 against `attention_keys`; 0.0 with the norm applied first), so the transplanted keys are not the model's and
-  the self-transplant moves the logits by 2.6.
-- (f) Runs, but OLMo-3's query norm spans all heads, so a query written at `q_proj.output` is renormalized together
-  with the DST heads around it; Qwen3's per-head query norm keeps the transplant exact.
-- (g) `get_next_token_probs` is the softmax of `mt.logits`, which includes any transform after the head (Gemma-2's
+- (b) Phi-3 fuses q / k / v into `qkv_proj`, and OVReader reads W_V off `v_proj`; nnterp serves no per-head
+  projection weights (`NNTERP_GAPS.md`). The Q and KV transfers read nnterp's values, which it serves out of the
+  fused projection.
+- (c) The KV transfer calls each patched block's own attention function (`self_attn.interface`) with SRC's keys
+  before the rotary (`attention_keys_prerope`) rotated for the DST positions by the block's own rotary embedding
+  (`self_attn.rotate`), so the self-transplant leaves the logits bit-identical on all seven: Gemma-2's attention logit
+  softcap (50) is in the call, Qwen3's and OLMo-3's key norms come before `attention_keys_prerope`, OLMo-3's sliding
+  and full blocks rotate by their own layer type, Phi-3's partial rotary is the family's own apply function.
+- (d) The Q patch writes `attention_queries_prerope`, after any query norm, so the query the DST pivot attends with
+  is the SRC pivot's, rotated for the DST pivot, bit for bit (checked at one head of the middle block on all seven).
+  A write at `q_proj.output` misses it by up to 0.44 on OLMo-3, whose query norm spans all heads.
+- (e) `get_next_token_probs` is the softmax of `mt.logits`, which includes any transform after the head (Gemma-2's
   final logit softcap, 30); a softmax of `lm_head.output` misses it by up to 6.8e-3 in probability on gemma-2-9b.
-- (h) The head-mask step is `train_head_mask`'s forward and backward: `forward_with_src_replacement` assigns the
+- (f) The head-mask step is `train_head_mask`'s forward and backward: `forward_with_src_replacement` assigns the
   mask-weighted `attention_premix` in one trace, through nnterp's names only.
 
 Three Qwen-only assumptions are handled without per-family code: Gemma-2's chat template refuses a system turn, so
@@ -720,8 +721,9 @@ When implementing new features (evals, utils, classes, etc.):
   for o_proj extraction), so both see identical absolute positions.
 - **Left padding**: `ModelandTokenizer` left-pads via nnsight (raw Qwen tokenizers pad right).
 - **Interventions are edits of nnterp values**: an edit writes a value nnterp serves (`layer_output`,
-  `attention_premix`, `attention_scores`, `attention_head_outputs`) or a projection's output (`q_proj.output`) inside
-  `mt.trace`, or at each step of `mt.generate` + `tracer.iter`; no replaced `forward` and no PyTorch hooks. The
+  `attention_premix`, `attention_scores`, `attention_head_outputs`, `attention_queries_prerope`) inside `mt.trace`, or
+  at each step of `mt.generate` + `tracer.iter`, and attention recomputed with other keys and values is the block's own
+  function (`self_attn.interface`); no replaced `forward`, no PyTorch hooks and no attention function written out. The
   head-mask training splice ASSIGNS `attention_premix` in the trace it backpropagates through (an in-place write fails
   at `backward()`). An `Intervention` keeps its edits in forward order (`src/nrgs/functional.py`). What nnterp could
   not express is in `NNTERP_GAPS.md`.

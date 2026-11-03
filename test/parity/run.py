@@ -489,6 +489,12 @@ def case_ov_boost(E) -> Rec:
     return r
 
 
+def _proj_layout(x):
+    """A source cache ``(heads, positions, head_dim)`` (``cache_src_qkv``) in the reference's layout, the projection
+    output's ``(positions, heads * head_dim)``."""
+    return x.transpose(0, 1).flatten(1)
+
+
 def case_kv_transfer(E) -> Rec:
     """NRGS pivot-onwards KV transfer (``kv_transfer.build_geometry`` / ``clean_runs`` / ``run_patched``), 1 multi-setup
     instance (int, py-py), V x1 and x4, ``readout=False``, both head sets. Extra: step-0 logits under
@@ -532,8 +538,8 @@ def case_kv_transfer(E) -> Rec:
             r.data[arm] = out
         layers = sorted({l for l, _ in E.heads})[: C.KV_SAVE_LAYERS]
         for which in ("k", "v"):
-            c = FUNC.cache_src_proj(g["src_tok"], g["src_w"], layers, which, ctx=ctx)
-            r.t(f"src_cache_{which}", torch.stack([c[l] for l in layers]), "act")
+            c = FUNC.cache_src_qkv(g["src_tok"], g["src_w"], layers, which, ctx=ctx)
+            r.t(f"src_cache_{which}", torch.stack([_proj_layout(c[l]) for l in layers]), "act")
         r.data["cache_layers"] = layers
     finally:
         DATA.CPP_NOTE_IN_SYSTEM = old
@@ -556,8 +562,8 @@ def case_q_transfer(E) -> Rec:
         raw["cl_select_scores"] = {k: float(v) for k, v in raw["cl_select_scores"].items()}
         r.data[arm] = raw
     q_layers = sorted({l for l, _ in E.heads})[:2]
-    qc = FUNC.cache_src_proj(r.data["heads60"]["src_prompt"], [r.data["heads60"]["piv_src"]], q_layers, "q")
-    r.t("src_q_cache", torch.stack([qc[l] for l in q_layers]), "act")
+    qc = FUNC.cache_src_qkv(r.data["heads60"]["src_prompt"], [r.data["heads60"]["piv_src"]], q_layers, "q")
+    r.t("src_q_cache", torch.stack([_proj_layout(qc[l]) for l in q_layers]), "act")
     r.data["q_cache_layers"] = q_layers
     return r
 

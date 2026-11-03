@@ -20,19 +20,20 @@ head-mask training section.
 3. The norm gains as values or accessors: the pre-attention norm's effective gain (Gemma's `1 + weight`; nothing on
    post-norm blocks) and the post-attention norm's, which sets the direction a head writes into the stream on
    Gemma-2, OLMo-3 and GLM-4. GoalScope 4, demos 2.
-4. A per-head K/V patch under GQA, `attn.patch_kv_for_heads(heads, positions, keys, values, rows)`, computed with the
-   family's own attention arithmetic (Gemma-2's logit softcap); or per-head `attention_head_keys` /
-   `attention_head_values` after `repeat_kv`. NRGS 1, demos 3.
-5. The rotation's input as values, `attention_queries_prerope` / `attention_keys_prerope` (after any q / k norm), and
-   `model.rotate(x, positions, layer=)` with the model's own rotary embedding. Without them a transplant to another
-   position rotates projection outputs by hand, which misses Qwen3's and OLMo-3's key norms, fails on OLMo-3's
-   per-layer rotary call and has nothing to read on Phi-3's fused `qkv_proj`. NRGS 2, demos 3.
+4. **fixed** (ndif-team/nnterp#127): nnterp serves `self_attn.interface`, the attention function the block called,
+   bound to this call's mask, scale, softcap and sinks, to run on other queries, keys and values; goals' head-selective
+   KV transfer calls it on copies of the keys and values and writes the chosen heads' last row. NRGS 1, demos 3.
+5. **fixed** (ndif-team/nnterp#128): nnterp serves `attention_queries_prerope` / `attention_keys_prerope` (after any
+   query / key norm, before the rotation, writable) and `self_attn.rotate(x, positions)`, the block's own rotary
+   embedding; goals' Q transfer writes the queries before the rotary, and the KV transfer rotates SRC's keys before
+   the rotary for the DST positions. NRGS 2, demos 3 and 4.
 6. Per-head projection weights (each kv head's W_V, each head's W_O slice) that also cover fused projections
    (Phi-3's `qkv_proj`). Demos 4.
-7. A forward-order sort key for values and native submodules, `nnterp.forward_rank(model, path)`, so an intervention
-   library orders its edits without encoding a family's forward. NRGS 3, last hooks 4.
+7. A forward-order rank for native submodule paths. nnterp ranks its values (`mt.rank(name, layer)`), which goals'
+   `Intervention` sorts its edits by, but not `self_attn.q_proj` or `mlp.down_proj`, so the EM LoRA's per-projection
+   edits keep a hand-written projection order. NRGS 3, last hooks 4.
 8. Build the attention modules' `.source` at load under eager, so reading a child module's value and then an
-   interior value in one trace does not fail on a fresh model. NRGS 5.
+   interior value in one trace does not fail on a fresh model (goals reads no attention submodule in a trace). NRGS 5.
 
 **nnsight**
 
@@ -57,10 +58,12 @@ head-mask training section.
 3. Composing a caller's intervention with a function's reads: the intervention in the input invoke, the reads in an
    empty second invoke. GoalScope 1.
 4. `generate(do_sample=False)` keeps the checkpoint's `repetition_penalty` and extra EOS ids. GoalScope 3.
-5. In-place edits of `attention_keys` / `attention_values` under `generate` persist in the KV cache. NRGS 1.
-6. **unfiled, stale**: the cheat-sheet and `attention-interior.md` caveat that two invokes cannot both touch
-   `attention_scores` / `attention_probabilities` no longer reproduces on nnsight 0.8.2. NRGS 4.
-7. An envoy call outside a trace is a plain module call; nnterp's pages reach for `_module` instead. NRGS 7.
+5. **fixed** (ndif-team/nnterp#127): nnterp's `attention-interior.md` and `generation.md` say that in-place edits of
+   `attention_keys` / `attention_values` under `generate` persist in the KV cache. NRGS 1.
+6. **fixed** (ndif-team/nnterp#125): the cheat-sheet and `attention-interior.md` say two invokes of one trace can both
+   read and edit `attention_scores` / `attention_probabilities`. NRGS 4.
+7. **fixed** (ndif-team/nnterp#127): nnterp's `vocabulary.md` says an envoy call outside a trace is a plain module
+   call. Its "Recomputing by hand" section still reads `attn._module.scaling`. NRGS 7.
 8. A stopping criterion ends a run early like EOS (nnterp's `generation.md` names only EOS). Last hooks 1; model
    layer 3 (the loop of traces threading `past_key_values` it replaced).
 9. `proj.output = proj.output + f(proj.input)` reads `.output` first and fails; bind the input first. Last hooks 3.
@@ -209,104 +212,84 @@ the parity harness and the memory measurement. This is the one path that backpro
 
 ## NRGS interventions (`port/nrgs`)
 
-nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwen2.5-0.5B-Instruct
-(float32, eager; 14 query heads over 2 kv heads) for `test/test_nrgs_port.py`, and Coder-7B (bf16, one RTX A6000) for
-the parity harness and the recompute variants below.
+nnterp 2.0.0rc2.dev36 (`3fb2cc02`: v2.0.0 with #127 and #128; items 4 and 6 first seen on `feeb24c5`), nnsight
+0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwen2.5-0.5B-Instruct (float32, eager; 14 query heads over 2 kv
+heads) for `test/test_nrgs_port.py`, and Coder-7B (bf16, one RTX A6000) for the parity harness and the partial
+recomputes in item 1.
 
-1. **No primitive for patching keys / values per query head under GQA.** The KV transfer needs SRC's keys and values
-   on a span read by chosen query heads only, by the last query row only (the pivot on the prompt pass, then each new
-   token), with the cache left clean. `attention_keys` / `attention_values` are served before `repeat_kv`
-   (`num_kv_heads` wide), so an edit there reaches every query head of the group (the "GQA bleed": a kv-head-wide
-   write at layer 6 of the 0.5B moves the unpatched head 3 next to the patched head 2 by 0.6, `test_gqa_bleed`), and
-   every query row reads it. Under `generate` an in-place edit of them is also an edit of the `DynamicCache` (an
-   in-place zero at step 0 is still there at step 1; assignment changes one forward only), which no nnterp page says.
-   Editing the nested source after `repeat_kv` (`self_attn.source.attention_interface_1.source.<op>.output[:, qh,
-   span]`) is per head but not per row, and is bound to transformers' op names. What the port does
-   (`headwise_kv_patch`): per step and patched block, read `attention_queries` / `_keys` / `_values`, clone k and v,
-   replace the span of the patched kv heads, recompute `softmax(q @ k.repeat_interleave(g)^T * attn._module.scaling)
-   @ v.repeat_interleave(g)` (the "Recomputing by hand" recipe of `attention-interior.md`), mask the last row with the
-   model's own mask read off `attention_scores[:, :, -1:] <= finfo.min`, and write `attention_head_outputs[:, -1,
-   heads]`. Two traps on the way:
-   - **Bit-exactness needs the forward's own GEMM shapes.** Recompute every query head and every row, keep the chosen
-     heads' last row. Recomputing only the chosen heads, or only the last row, runs other GEMM shapes that round
-     differently: on Coder-7B the patched heads' outputs then differ from eager attention by up to 0.53 at the prompt
-     pass (last row only, V x4, 448 heads) and by 0.2-0.38 after a few decode steps (chosen heads only, 60 heads), in
-     float32 on CPU by up to 5e-6. The full recompute is 0.0 on both, and costs what one more eager attention of the
-     block costs.
-   - **The mask is reachable only through the scores.** No per-block value serves the 4-D additive mask the interface
-     receives, so a recompute takes it from the masked `attention_scores`.
-
-   Proposal: a helper on `Attention`, usable in a trace or a `tracer.iter` step,
-
-   ```python
-   attn.patch_kv_for_heads(
-       heads: Sequence[int],                    # query heads that read the patched keys / values
-       positions: Sequence[int] | Tensor,       # key positions, absolute (into the cache on a decode step)
-       keys: Tensor | None = None,              # [len(heads), len(positions), qk_head_dim], post-RoPE
-       values: Tensor | None = None,            # [len(heads), len(positions), head_dim]
-       rows: int | slice | Sequence[int] = -1,  # query rows that read them; default the last
-   ) -> None
-   ```
-
-   after which those heads' `attention_head_outputs` at `rows` are what eager attention gives with the patched keys /
-   values, and every other head, every other row and the cache are as computed (implemented as above). For the
-   all-rows case, two forward-local values would make it a one-line edit: `attention_head_keys` /
-   `attention_head_values`, `[batch, num_heads, seq, head_dim]`, the keys / values each query head reads (after
-   `repeat_kv`), writable per head. And a gotcha in `attention-interior.md` / `generation.md`: in-place edits of
-   `attention_keys` / `attention_values` under `generate` persist in the cache.
-2. **Pre-RoPE vs post-RoPE for a transplant to another position.** nnterp serves queries and keys after RoPE,
-   rotated for their own positions, and the projections before it (`self_attn.q_proj.output`, bias included). A
-   transplant to another position has to enter before the rotation. The Q transfer writes the SRC pivot's `q_proj`
-   output into the DST pivot's (`q_proj.output[:, pivot, h * head_dim:(h + 1) * head_dim]`), so the model rotates it
-   at the DST pivot; `attention_queries` would carry the SRC pivot's rotation. The KV transfer cannot write pre-RoPE
-   keys into the destination forward (that edits the cache and the whole group, item 1), so it rotates the SRC
-   window's `k_proj` outputs at the DST positions by hand: `mt.model.rotary_emb(dummy, positions)` (a native path,
-   an ordinary module call outside a trace) and the family module's `apply_rotary_pos_emb` (imported from
-   `type(attn._module).__module__`). The shift is real: the SRC and DST windows start at the same position for py-py
-   and cpp-cpp but not across languages (the C++ note is in the system prompt; e.g. positions 61 vs 72 for int
-   py-cpp), which is half of the reported KV grid. Proposal: `model.rotate(x, positions)`, the model's own rotary
-   embedding (partial, interleaved or half rotation, scaling) applied to `[..., seq, qk_head_dim]` at `positions`;
-   and writable values at the rotation's input, `attention_queries_prerope` / `attention_keys_prerope` (`[batch,
-   heads, seq, qk_head_dim]`, after any q/k norm), so a query transplant is `attn.attention_queries_prerope[:, heads,
-   pivot] = src` with no `head_dim` slicing of a projection whose layout nnterp does not promise.
-3. **Composing interventions needs a forward order; nnterp has it, and the first version of this port missed it.**
-   An intervention made of edits in several blocks cannot run after another one: the patched GoalScope readout of
-   the Q transfer combines a query patch and an OV boost over the same 250 heads (blocks 2-63), and the boost at
-   block 30 after the query patch at block 60 raises `OutOfOrderError` in a trace, or inside `tracer.iter` binds the
-   next step's occurrence without an error. `src.nrgs.functional.Intervention` sorts its edits by
-   `mt.rank(name, layer)` when it is built (`mt.order(layer)` lists a block's values in the order the forward reaches
-   them, measured by one probe scan per model, so Falcon's values-before-queries order and the hybrids come out
-   right); the KV transfer reads queries, keys and values in that order too. The first version hand-wrote a stage
-   table for the Llama / Qwen2 forward and proposed a `forward_rank` as a missing feature: `rank` has existed since
-   2026-10-07, but it lived on the availability page and the API reference only, and neither nnterp's `CLAUDE.md`
-   nor the nnterp skill routed to it. nnterp #125 and #126 add the routes. What still has no standard name is a
-   projection's output (`self_attn.q_proj.output`, the Q patch's pre-RoPE write): it is ranked just before the
-   block's first attention value, and goes away once `attention_queries_prerope` (nnterp #128) is in the pinned
-   nnterp.
+1. **Patching keys / values per query head under GQA: nnterp serves `self_attn.interface`; goals uses it.** The KV
+   transfer needs SRC's keys and values on a span read by chosen query heads only, by the last query row only (the
+   pivot on the prompt pass, then each new token), with the cache left clean. `attention_keys` / `attention_values`
+   are served before `repeat_kv` (`num_kv_heads` wide), so an edit there reaches every query head of the group (the
+   "GQA bleed": a kv-head-wide write at layer 6 of the 0.5B moves the unpatched head 3 next to the patched head 2 by
+   0.6, `test_gqa_bleed`), every query row reads it, and under `generate` an in-place edit of them is an edit of the
+   `DynamicCache` (an in-place zero at step 0 is still there at step 1; assignment changes one forward only).
+   nnterp serves `self_attn.interface` (ndif-team/nnterp#127): read with the queries, keys and values, it is the
+   attention function the block called, bound to the rest of this call (this step's mask, the scale, Gemma-2's
+   logit softcap, a sink, the sliding window), which runs on any queries, keys and values and returns
+   `(head_outputs, pattern)` without writing anything. `headwise_kv_patch` is nnterp's head-selective K/V recipe
+   (`docs/patterns/head-kv-patching.md`): per step and patched block, read `interface` and `attention_queries` /
+   `_keys` / `_values`, clone k and v, replace the span of the patched kv heads, call `interface` on `q` and the
+   copies, and write the chosen heads' last row of `attention_head_outputs` from the result. The call runs every
+   query head and every row, the forward's own GEMM shapes, so the chosen heads' last row is bit for bit what the
+   block computes over the replaced keys and values (the 7B parity `kv_transfer` case is bit-identical to the
+   nnsight 0.7 reference, 609 checks; the Gemma-2 self-transplant leaves the logits unchanged, demos 3). Whole
+   tensors matter: a computation of only the chosen heads, or only the last row, runs other shapes that round
+   differently (on Coder-7B, bf16, up to 0.53 at the prompt pass and 0.2-0.38 after a few decode steps; in float32
+   on CPU up to 5e-6), and nnterp's page says to pass whole tensors and slice the result. The cache behaviour of
+   in-place K/V edits under `generate` is in nnterp's `attention-interior.md` and `generation.md` (#127).
+2. **A transplant to another position: nnterp serves the queries and keys before the rotary embedding, and the
+   block's own rotation; goals uses them.** `attention_queries` / `attention_keys` are rotated for their own
+   positions, so a query or key moved to another position has to enter before the rotation. nnterp serves
+   `attention_queries_prerope` / `attention_keys_prerope` (after any query / key norm, before the rotation, writable,
+   under any `attn_implementation`) and `self_attn.rotate(x, positions)`, the block's own rotary embedding (its layer
+   type, partial rotary and scaling) as an ordinary call outside a trace (ndif-team/nnterp#128). The Q transfer
+   writes the SRC pivot's queries before the rotary into the DST pivot's (`attention_queries_prerope[:, heads,
+   pivot] = src`, in place), and the block rotates them for the DST pivot. The KV transfer cannot write keys into the
+   destination forward (that edits the cache and the whole group, item 1), so it rotates SRC's window of
+   `attention_keys_prerope` for the DST positions with `rotate`, outside the trace, and passes the result to
+   `interface`. The shift is real: the SRC and DST windows start at the same position for py-py and cpp-cpp but not
+   across languages (the C++ note is in the system prompt; e.g. positions 61 vs 72 for int py-cpp), which is half of
+   the reported KV grid. On Qwen2 the values before the rotary are the projections' outputs, heads split off, so
+   the 7B parity `q_transfer` (523 checks) and `kv_transfer` cases are bit-identical to the reference; on Qwen3 and
+   OLMo-3 they come after the query / key norms and on Phi-3 out of the fused `qkv_proj`, so the transplanted
+   vectors are the model's own there too (demos 3 and 4).
+3. **Composing interventions needs a forward order; nnterp has it (`mt.rank`).** An intervention made of edits in
+   several blocks cannot run after another one: the patched GoalScope readout of the Q transfer combines a query
+   patch and an OV boost over the same 250 heads (blocks 2-63), and the boost at block 30 after the query patch at
+   block 60 raises `OutOfOrderError` in a trace, or inside `tracer.iter` binds the next step's occurrence without an
+   error. `src.nrgs.functional.Intervention` sorts its edits by `mt.rank(name, layer)` when it is built
+   (`mt.order(layer)` lists a block's values in the order the forward reaches them, measured by one probe scan per
+   model). Every edit names the first nnterp value it touches (`self_attn.attention_queries_prerope` for the Q patch,
+   `self_attn.attention_queries` and `self_attn.attention_head_outputs` for the KV transfer's call and write), so
+   every edit has a rank and the order has no special case. `rank` is on nnterp's availability page and in the API
+   reference; nnterp's `CLAUDE.md` and the nnterp skill route to it (nnterp #125, #126). It takes nnterp's values,
+   not native module paths (`mt.rank("self_attn.q_proj.output", 6)` raises `KeyError`), which last hooks 4 needs.
 4. **The two-invoke limitation on `attention_scores` / `attention_probabilities` no longer reproduces.** nnterp's
    `CLAUDE.md` cheat-sheet and `attention-interior.md` say two invokes of one trace cannot both touch them
    (`TypeError`). On this stack every combination works, on a fresh model too: a scores edit in an input invoke with a
    read of the scores, the pattern or the head outputs in an empty invoke; two input invokes reading the same value.
    `test_scores_edit_composes_with_attention_matrices` passes `whitelist_head_attn` (a scores edit) to
-   `get_attention_matrices`, and the pattern read in the second invoke carries it; the KV transfer reads
-   `attention_scores` in the intervention invoke of `get_o_proj_inputs_batch`. The caveat in this repo's
+   `get_attention_matrices`, and the pattern read in the second invoke carries it. The caveat in this repo's
    `get_attention_matrices` docstring is gone. Proposal: drop it from the nnterp docs, or name the nnsight version
    that fixed it.
-5. **The fresh-model `.source` gotcha meets composed interventions.** `get_attention_matrices` under the query patch
-   reads `q_proj.output` (intervention invoke) and the same module's `attention_values` / `attention_probabilities`
-   (read invoke). On a fresh model the first such trace raises `OutOfOrderError` naming
-   `attention_interface_1.fn.i0` (the documented gotcha; `q_proj.output` then `attention_scores` in one trace
-   reproduces it). `proj_patch` and `headwise_kv_patch` touch `self_attn.source` when built, outside any trace.
-   Reading the interface inputs and then `attention_scores` (the nested source) on a fresh model is fine. Proposal:
-   build the attention modules' `.source` at load under eager, so no caller has to know.
-6. **A swapped `forward` (PR 3, item 6) is gone.** The KV transfer swapped the attention modules' `forward` for its
-   duration, which removed nnsight's controller from them; the recompute above needs no swap, and the `legacy_hooks`
-   bridge PR 3 added for it is removed. What stays worth a fix in nnsight: a replaced `forward` makes `.output` fail
-   with an `OutOfOrderError` that does not name the cause (only `.source` warns).
-7. **An envoy call outside a trace is an ordinary module call, and only nnsight's docstring says so.** The port needs
-   two module calls outside any trace: the rotary embedding (item 2) and the embedding lookup of the
-   task-vs-progress embedding transplant (`mt.embed_tokens(src_ids)`). `Envoy.__call__` documents that this is a
-   plain call; nnterp's pages reach for `_module` instead (`attn._module.scaling`), which suggests the private route.
+5. **The fresh-model `.source` gotcha.** On a fresh model, the first trace that reads an attention block's child
+   module (`q_proj.output`) and then an interior value of the same block (`attention_values`,
+   `attention_scores`) raises `OutOfOrderError` naming `attention_interface_1.fn.i0`; nnterp's
+   `attention-interior.md` names it (#127). Goals reads no attention submodule in a trace: the Q patch writes
+   `attention_queries_prerope`, a value on the attention's own forward, and the KV transfer reads the interface's
+   inputs, so neither touches `self_attn.source` ahead of a trace. On a fresh 0.5B, the gaze pass under the Q patch
+   (the patch in the input invoke, the values and pattern read in a second invoke), a KV-transfer `greedy` and a
+   Q patch + KV transfer + OV boost on one block each run as the first trace. Proposal, for callers that do read a
+   submodule: build the attention modules' `.source` at load under eager, so no caller has to know.
+6. **A swapped `forward` (PR 3, item 6) is gone.** The KV transfer needs no swap of the attention modules'
+   `forward` (item 1), and the `legacy_hooks` bridge PR 3 added for it is removed. What stays worth a fix in nnsight:
+   a replaced `forward` makes `.output` fail with an `OutOfOrderError` that does not name the cause (only `.source`
+   warns).
+7. **An envoy call outside a trace is an ordinary module call.** The task-vs-progress embedding transplant calls
+   `mt.embed_tokens(src_ids)` outside any trace. `Envoy.__call__` documents that this is a plain call, and nnterp's
+   `vocabulary.md` ("Calling a module outside a trace", #127) says so too; nnterp's "Recomputing by hand" section
+   still reads the softmax scale off `attn._module.scaling`, a private route, where `interface` needs none.
 
 ## The last hooks (`port/last-hooks`)
 
@@ -335,8 +318,8 @@ nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.1
 4. **Native submodules have no forward order either.** One edit block for a LoRA on q / k / v / gate / up / down of
    every block must visit them in call order; the adapter's module list (safetensors keys) is sorted by name, which
    puts `mlp.*` before `self_attn.*` and block 10 before block 2. Workaround: sort by (block, a hand-written
-   projection order for the Llama / Qwen2 forward). NRGS item 3's `forward_rank` proposal would cover this if it
-   accepted native module paths.
+   projection order for the Llama / Qwen2 forward). `mt.rank` (NRGS item 3) would cover this if it accepted native
+   module paths.
 5. **An edit can observe another function's run.** The parity harness reads the step-0 logits of
    `head_additive_generate`'s own `generate` with an edit that appends `mt.logits[:, -1].save()` to a list made
    outside it; each run appends its value, readable after the run (bit-identical to the forward hook it replaces).
@@ -344,7 +327,7 @@ nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.1
 
 ## Demos, docs and the cross-family check (`port/demos-docs`)
 
-nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; bf16, eager, one RTX A6000;
+nnterp 2.0.0rc2.dev36 (`3fb2cc02`), nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; bf16, eager, one RTX A6000;
 `scripts/cross_family_check.py` on Qwen2.5-Coder-7B-Instruct, Llama-3.1-8B-Instruct, Olmo-3-7B-Instruct,
 gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md section 7 has the matrix).
 
@@ -353,8 +336,8 @@ gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md sectio
    `attention_scores` and `attention_head_outputs` work unchanged: GoalScope (both strategies), the attention
    patterns, the head vectors on a padded batch, the sink and blind-span ablations (a sunk head puts all its pivot-row
    mass on key 0, a blinded head none on the blocked keys), the OV boost and the temporal encodings run on all seven.
-   Every failure is where the repo goes below nnterp's vocabulary: projection modules, a rotary embedding called by
-   hand, attention written out by hand, norm parameters.
+   The two failures left are where the repo goes below nnterp's vocabulary: OVReader's projection weights and norm
+   gains (items 2 and 4).
 2. **Norm gains (GoalScope item 4, continued).** OVReader took `input_layernorm.weight` as the gain the attention's
    input is scaled by; Gemma's norm multiplies by `1 + weight`. Workaround: call the norm module on a constant vector
    outside the trace (`norm(torch.full((d,), 256.0))`: 1/rms is then an exact power of two that eps cannot move), which
@@ -362,21 +345,17 @@ gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md sectio
    Gemma-2 layers. It assumes an RMS norm (a LayerNorm maps a constant to its bias). On post-norm and sandwich blocks
    the head's write passes a second norm after o_proj, whose gain sets its direction in the stream; neither gain is
    served.
-3. **The KV recompute is not the model's attention where the family does more (NRGS items 1 and 2, continued).** The
-   self-transplant check (DST's own window written back, V x1) leaves the logits bit-identical on Qwen2, Llama and
-   GLM-4 (partial rotary included), and moves them on:
-   - Gemma-2 by 0.25: the recompute has no attention logit softcap; with `attn_logit_softcapping` switched off in the
-     model the change is 0.0, and the hand-rotated keys equal `attention_keys` exactly;
-   - Qwen3 by 2.6: the keys pass `k_norm` between `k_proj` and RoPE, so the hand-rotated `k_proj` outputs differ from
-     `attention_keys` by up to 19.7 (0.0 with the module's `k_norm` applied first).
-   OLMo-3 does not get that far: its rotary embedding's forward takes `layer_type` (sliding or full), so
-   `mt.model.rotary_emb(x, positions)` raises `TypeError`, and its keys pass a full-width key norm as well. A repo fix
-   would mean a softcap branch, a `k_norm` lookup and a per-layer rotary call, each a family's arithmetic written
-   again; `patch_kv_for_heads` with the family's own score function and `attention_keys_prerope` + `model.rotate`
-   would make the transplant family-free.
-4. **Fused projections (Phi-3).** Phi-3 has `qkv_proj` and no `q_proj` / `k_proj` / `v_proj`, so the Q transfer
-   (writes `q_proj.output`), the KV transfer (reads `k_proj` / `v_proj` outputs) and OVReader (reads `v_proj.weight`)
-   fail with `AttributeError` / a `ValueError` naming the module. nnterp serves Phi-3's queries, keys and values after
-   the split and RoPE, but nothing before RoPE and no per-head weights. Proposal: item 5 of the summary, and per-head
-   projection weights that also cover fused projections.
-
+3. **The KV and Q transfers are the model's own attention and queries on all seven families (NRGS items 1 and 2;
+   feedback, not a gap).** The self-transplant check (DST's own window written back, V x1) leaves the logits
+   bit-identical on every family: on Gemma-2 `self_attn.interface` carries the attention logit softcap (50); on Qwen3
+   and OLMo-3 `attention_keys_prerope` comes after the key norm (Qwen3's per-head `k_norm`, OLMo-3's across all
+   heads); on OLMo-3 `rotate` passes the block's layer type (sliding or full) to the rotary embedding; on Phi-3 the
+   keys come out of the fused `qkv_proj` and `rotate` applies its partial rotary. The Q patch writes
+   `attention_queries_prerope`, after the query norm, so the query the DST pivot attends with is the SRC pivot's query
+   rotated for the DST pivot, bit for bit, on OLMo-3 and Qwen3 (one head of the middle block). A write at
+   `q_proj.output` lands there on Qwen3, whose query norm is per head, and misses it by up to 0.44 (of 6.5) on OLMo-3,
+   whose query norm spans all heads and so renormalizes the written head together with the DST heads around it.
+4. **Fused projections (Phi-3).** Phi-3 has `qkv_proj` and no `q_proj` / `k_proj` / `v_proj`, so OVReader (reads each
+   kv head's W_V off `v_proj.weight`) fails with a `ValueError` naming the module. nnterp serves Phi-3's queries and
+   keys before the rotary and its values, which the Q and KV transfers use, but no per-head projection weights.
+   Proposal: per-head projection weights that also cover fused projections (summary item 6).
