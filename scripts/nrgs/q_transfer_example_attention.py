@@ -41,23 +41,8 @@ def main():
     args = dte.parse_args()   # the diff_trigger defaults = the reported cell (seed, n_samples, alpha, heads)
 
     import numpy as np  # noqa: E402
-    import src.attention as ATT  # noqa: E402
 
     DATA, FUNC = dte.DATA, dte.FUNC
-
-    # capture every attention-matrix call (patched selection pass vs clean) and the pivot_attn lookups
-    CAP = {"infos": [], "pivot_calls": []}
-    _gam = ATT.get_attention_matrices
-    def _gam_wrap(*args_, **kw):
-        info = _gam(*args_, **kw)
-        CAP["infos"].append(dict(patched=kw.get("legacy_hooks") is not None, info=info[0] if isinstance(info, list) else info))
-        return info
-    ATT.get_attention_matrices = _gam_wrap
-    _pa = FUNC.pivot_attn
-    def _pa_wrap(info, heads, positions, pivot):
-        CAP["pivot_calls"].append(dict(positions=list(positions), pivot=int(pivot)))
-        return _pa(info, heads, positions, pivot)
-    FUNC.pivot_attn = _pa_wrap
 
     ctx = FUNC.setup(dte.MODEL)
     mt = ctx.mt
@@ -73,22 +58,21 @@ def main():
     key = dte._inst_key(inst)
     print("instance:", key)
 
+    # the selection pass (under the query patch) and the clean gaze pass of run_q_transfer_intervention
+    gaze = {}
     raw = FUNC.run_q_transfer_intervention(
         mt, inst, heads, readout_heads=heads, max_new=dte.MAX_NEW, alpha=args.alphas[0], compute_readout=True,
-        gsr_max_new=dte.GSR_MAX_NEW)
-
-    # the selection pass is the patched get_attention_matrices call whose pivot_attn lookup follows it
-    sel_call = CAP["pivot_calls"][0]
-    positions, piv = sel_call["positions"], sel_call["pivot"]
-    patched = next(c["info"] for c in CAP["infos"] if c["patched"])
-    clean = next(c["info"] for c in CAP["infos"] if not c["patched"])   # the clean gaze pass of run_q
-    a_p = _pa(patched, heads, positions, piv)
-    a_c = _pa(clean, heads, positions, piv)
-    toks = [patched.tokenized_prompt[q] for q in positions]
+        gsr_max_new=dte.GSR_MAX_NEW, on_gaze=lambda kind, info: gaze.setdefault(kind, info))
 
     mat = DATA.materialize(inst, ctx=ctx)
     dst_prompt = mat["dst_prompt"]
     sel_items = {p.id: list(range(*FUNC.token_span(dst_prompt, p.description, ctx=ctx))) for p in inst.task.predicates}
+    # the positions and pivot the selection scores were computed over
+    positions, piv = sorted({q for v in sel_items.values() for q in v}), raw["piv_dst"]
+    patched, clean = gaze["select"], gaze["clean"]
+    a_p = FUNC.pivot_attn(patched, heads, positions, piv)
+    a_c = FUNC.pivot_attn(clean, heads, positions, piv)
+    toks = [patched.tokenized_prompt[q] for q in positions]
     scores = {pid: float(np.mean([a_p[positions.index(q)] for q in ps])) for pid, ps in sel_items.items()}
     print("recomputed scores:", scores)
     print("stored-style raw scores:", raw.get("cl_select_scores"), "selected:", raw.get("cl_selected"))

@@ -48,7 +48,7 @@ from src.goals.head_loc_attn import (  # noqa: E402
     get_o_proj_inputs_batch,
 )
 from src.models import ModelandTokenizer  # noqa: E402
-from src.nrgs.functional import cache_src_proj, proj_patch_hooks  # noqa: E402
+from src.nrgs.functional import boost_head_ov, cache_src_proj, proj_patch  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 
 MODEL_KEY = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -59,6 +59,7 @@ OLD_FILES = {
     "old_goalscope": "src/goals/goalscope.py",
     "old_attention": "src/attention.py",
     "old_eval_readout_sources": "scripts/evaluation/eval_readout_sources.py",
+    "old_nrgs_functional": "src/nrgs/functional.py",  # its proj_patch_hooks, the old q transplant
 }
 _OLD_IMPORTS = {
     "src.functional": "old_functional",
@@ -307,8 +308,8 @@ def test_o_proj_inputs_and_steering_vecs():
 
     # Under an intervention: an OV boost (x3) of head (5, 2) at the last position, which every
     # deeper layer reads. Old: the forward runs under a PyTorch pre-hook (a raw HF forward);
-    # new: ``interventions`` edits ``attention_premix`` in the same trace, and ``legacy_hooks``
-    # enters the old hook around the nnsight trace.
+    # new: ``interventions`` edits ``attention_premix`` in the same trace; the old pre-hook
+    # entered around the nnsight trace gives the same.
     boost = _boost_pre_hook_ctx(mt, 5, 2, 3.0)
 
     def old_iface(mt, inputs, patches=None, model_kwargs=None):
@@ -324,7 +325,7 @@ def test_o_proj_inputs_and_steering_vecs():
     b = collect_head_steering_vecs(mt, tok(), heads, positions, interventions=interventions)
     plain = collect_head_steering_vecs(mt, tok(), heads, positions)
     with boost():
-        c = collect_head_steering_vecs(mt, tok(), heads, positions)  # what `legacy_hooks` does
+        c = collect_head_steering_vecs(mt, tok(), heads, positions)  # the pre-hook around the trace
     torch.testing.assert_close(b, c, rtol=0, atol=0)  # the two new routes agree bit for bit
     assert _maxdiff(b, plain) > 1e-2  # the boost moved the vectors
     # Row 1 (the longer prompt) has no padding; row 0 is left-padded, and the old raw forward
@@ -334,7 +335,8 @@ def test_o_proj_inputs_and_steering_vecs():
     torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-5)
     _record("collect_head_steering_vecs under an OV boost: old patch_interface vs interventions",
             f"max |old - new| = {d1:.1e} (unpadded row), {d0:.1e} (padded row); "
-            f"interventions == legacy_hooks bit for bit; boost moves the vectors by {_maxdiff(b, plain):.2f}")
+            f"interventions == a pre-hook around the trace bit for bit; boost moves the vectors by "
+            f"{_maxdiff(b, plain):.2f}")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -343,8 +345,9 @@ def test_o_proj_inputs_and_steering_vecs():
 
 
 def test_attention_matrices():
-    """Both modes on one prompt and on a left-padded batch of two, plus a query transplant through
-    ``legacy_hooks`` (NRGS's ``proj_patch_hooks``): allclose at 1e-5."""
+    """Both modes on one prompt and on a left-padded batch of two, plus a query transplant (old:
+    NRGS's ``proj_patch_hooks`` through ``patch_interface``; new: ``proj_patch`` through
+    ``interventions``): allclose at 1e-5."""
     mt, O = model(), old()
     report = []
     for value_weighted in (False, True):
@@ -381,18 +384,18 @@ def test_attention_matrices():
     pf = [dict(which="q", cache=q_src, heads={6: {3}, 11: {3, 8}}, positions=[n_dst - 1])]
 
     def old_iface(mt, inputs, patches=None, model_kwargs=None):
-        with proj_patch_hooks(mt, pf):
+        with O.old_nrgs_functional.proj_patch_hooks(mt, pf):
             return mt._model(**dict(inputs), **dict(model_kwargs or {}))
 
     with _cuda_is_noop():
         a = O.old_attention.get_attention_matrices(dst_prompt, mt, value_weighted=True, patch_interface=old_iface)
-    b = get_attention_matrices(dst_prompt, mt, value_weighted=True, legacy_hooks=lambda: proj_patch_hooks(mt, pf))
+    b = get_attention_matrices(dst_prompt, mt, value_weighted=True, interventions=proj_patch(mt, pf))
     clean = get_attention_matrices(dst_prompt, mt, value_weighted=True)
     torch.testing.assert_close(torch.from_numpy(a.attention_matrices), torch.from_numpy(b.attention_matrices),
                                rtol=1e-5, atol=1e-5)
     moved = _maxdiff(torch.from_numpy(b.attention_matrices[11, 8]), torch.from_numpy(clean.attention_matrices[11, 8]))
     assert moved > 1e-3
-    report.append(f"q transplant (legacy_hooks): "
+    report.append(f"q transplant (proj_patch): "
                   f"{_maxdiff(torch.from_numpy(a.attention_matrices), torch.from_numpy(b.attention_matrices)):.1e}")
     _record("get_attention_matrices (pattern / value-weighted; 1 prompt, 2 padded; q transplant)",
             "max |old - new| " + ", ".join(report))
@@ -444,8 +447,9 @@ def test_ov_reader():
 
 
 def test_apply_goalscope():
-    """Both strategies, 2 positions x 4 tokens, plain and with an OV boost through
-    ``legacy_hooks`` (old: ``patch_interface``): identical readouts."""
+    """Both strategies, 2 positions x 4 tokens, plain and under an OV boost (old: a pre-hook
+    through ``patch_interface``; new: NRGS's ``boost_head_ov`` through ``interventions``):
+    identical readouts."""
     mt, O = model(), old()
     prompt = apply_chat_template(mt, "Write a function that checks whether n is even.",
                                  "def is_even(n):\n    return n")
@@ -463,7 +467,7 @@ def test_apply_goalscope():
                          ("replace", dict(alpha=1.0))):
         for hooked in (False, True):
             kw_old = dict(kw, patch_interface=old_iface) if hooked else kw
-            kw_new = dict(kw, legacy_hooks=boost) if hooked else kw
+            kw_new = dict(kw, interventions=boost_head_ov(mt, [(7, 4)], 4.0)) if hooked else kw
             a = O.old_goalscope.apply_goalscope(prompt, mt=mt, selected_heads=heads, strategy=strategy,
                                                 max_new_tokens=4, token_positions=positions, **kw_old)
             b = apply_goalscope(prompt, mt=mt, selected_heads=heads, strategy=strategy,
