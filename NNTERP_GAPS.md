@@ -50,14 +50,13 @@ head-mask training section.
    Proposal: `edit(inplace=True, every_call=True)`, or no warning for an open loop inside an edit. Last hooks 2.
 5. A replaced `forward` makes `.output` fail with an `OutOfOrderError` that does not name the cause (only `.source`
    warns). GoalScope 6, NRGS 6.
-6. **unfiled** bug: `load_adapter(None)` (`peft.detach`) leaves every base parameter frozen. peft's
-   `inject_adapter_in_model` sets `requires_grad=False` on the base model's parameters, and the detach puts the
-   modules back without their flags, so a model that had an adapter on and off differs from one that never had it:
-   in bf16 some matmuls then take another kernel. EM adapter 2.
-7. An adapter attached by `peft=` or `load_adapter` has no off switch short of detaching it: transformers'
-   `model.disable_adapters()` / `enable_adapters()` raise "No adapter loaded", because nnsight injects it with peft's
-   `inject_adapter_in_model`, which leaves transformers' `_hf_peft_config_loaded` unset. Proposal: set that flag at
-   attach, or an nnsight-level toggle. EM adapter 1.
+6. **fixed** (ndif-team/nnsight#824, on nnsight's dev branch, which goals pins): attaching an adapter (`peft=`,
+   `load_adapter`) leaves every base parameter's `requires_grad` as it was, so `load_adapter(None)` gives back the
+   base model's modules with their flags. peft's injection freezes the base, and a frozen base sends some bf16 matmuls
+   to another kernel. EM adapter 2.
+7. **fixed** (ndif-team/nnsight#824): `model.disable_adapters()` / `enable_adapters()` switch an attached adapter off
+   and on without touching the module tree, and off is the base model bit for bit. Goals loads the 32B once with
+   `peft=` and switches. EM adapter 1.
 
 **Docs** (nnsight's, nnterp's, and the nnterp skill)
 
@@ -82,8 +81,9 @@ head-mask training section.
 12. The trace body runs under the caller's grad mode (`torch.enable_grad()` around `mt.trace` overrides a global
     `set_grad_enabled(False)`). Head-mask 3.
 13. Reading an adapted weight: peft's `merge()` folds the LoRA into the base weight, but `unmerge()` in half precision
-    does not give the base weight back bit for bit; copy it before merging (nnsight's `peft=` / `load_adapter` docs
-    and the model-editing skill's PEFT section). EM adapter 4.
+    does not give the base weight back bit for bit, so copy it before merging; and unmerge before
+    `disable_adapters()`, because a merged layer whose adapter is off unmerges itself on its next forward (nnsight's
+    "PEFT adapters" section and the model-editing skill's PEFT section). EM adapter 4.
 
 ## Model layer (`port/model-layer`)
 
@@ -377,27 +377,29 @@ gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md sectio
    keys before the rotary and its values, which the Q and KV transfers use, but no per-head projection weights.
    Proposal: per-head projection weights that also cover fused projections (summary item 6).
 
-## The EM adapter on nnsight's adapter support (`port/em-adapter-peft`)
+## The EM adapter on nnsight's adapter support (`port/em-adapter-peft`, `port/em-adapter-switch`)
 
-nnterp 2.0.0rc2.dev36 (`3fb2cc02`), nnsight 0.8.2, peft 0.21.2, transformers 5.22.1, torch 2.11.0; CPU, float32
-Qwen/Qwen2.5-0.5B-Instruct for `test/test_last_hooks_port.py`; Qwen/Qwen2.5-32B-Instruct with
+nnterp 2.0.0rc2.dev36 (`3fb2cc02`), nnsight's dev branch at `e09ab1c8` (0.8.0rc2.dev236, carries ndif-team/nnsight#824),
+peft 0.21.2, transformers 5.22.1, torch 2.11.0; CPU, float32 Qwen/Qwen2.5-0.5B-Instruct for
+`test/test_last_hooks_port.py`; Qwen/Qwen2.5-32B-Instruct with
 `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice` (bf16, eager, one A100-80GB) for the EM evaluation.
 
-1. **Switching an attached adapter off and on.** The EM evaluation runs both sides on one loaded 32B model, so the
-   adapter goes on and off for every example. `mt.load_adapter(path)` attaches it (3.1 s on the 32B: it reads the
-   adapter's 1.07 GB again each time) and `mt.load_adapter(None)` detaches it (0.03 s); the base logits afterwards are
-   bit-identical to the model's before. transformers' toggles, `model.disable_adapters()` / `enable_adapters()`, raise
-   "No adapter loaded" on an adapter nnsight attached (summary, nnsight 7). peft's per-layer `enable_adapters(False)`
-   gives the base model's logits bit for bit, but it is peft's internals, and `em_adapter` detaches instead.
-2. **A detach leaves the base parameters frozen** (nnsight bug, summary nnsight 6). peft's attach sets
-   `requires_grad=False` on every base parameter, and `load_adapter(None)` keeps them so (0.5B: 290 of 290 trainable
-   before, 0 after). Outside training it still matters: `F.linear` on an input it cannot flatten without a copy (an
-   expanded batch) folds it when the weight requires grad and runs a batched matmul when it does not, which in bf16
-   gives other bits (one random case: up to 0.5). On the 32B without the flags given back, 2 of the 1040 innocent
-   readouts (and 1 of the 188 EM-side ones, also verbalized after the block) differ from the hook code's with
-   identical source vectors; re-verbalizing those batches, a fresh model and one after the old adapter give the old
-   text, one after a detach the other. `em_adapter` gives the parameters their flags back right after the attach,
-   and all 1040 innocent readouts match.
+1. **One model, the adapter switched off and on** (nnsight #824; summary, nnsight 7). The EM evaluation runs both
+   sides on one loaded 32B model. It is loaded with the adapter attached (`peft=`, a local dir or a hub repo id, which
+   `ModelandTokenizer` passes through nnterp to nnsight) and switched off at once (`mt.disable_adapters()`);
+   `em_adapter` switches it on (`mt.enable_adapters()`) for the EM side and off again after it. The switch moves no
+   module, so every native path and nnterp value names the same module in both states, and with the adapter off the
+   model is the base model bit for bit: in test_em_adapter the logits, the generation and the source vectors of the
+   model with its adapter off equal those of a model that never had one (0.5B, float32 on CPU; the same holds for the
+   logits in bf16 on an A6000). `mt.adapters_enabled` holds the state. On the 32B, entering `em_adapter` (the
+   switch, the o_proj merge and a probe forward) takes 0.13 s, where the detach and re-attach before
+   (`load_adapter(None)`, `load_adapter(path)`) read the adapter's 1.07 GB again for every EM side (3.1 s).
+2. **The base parameters keep their `requires_grad`** (nnsight #824; summary, nnsight 6). peft's injection sets
+   `requires_grad=False` on every base parameter; nnsight's attach gives the flags back and the switch leaves them
+   alone, so `em_adapter` has nothing to restore. The flags matter outside training: `F.linear` on an input it cannot
+   flatten without a copy (an expanded batch) folds it when the weight requires grad and runs a batched matmul when it
+   does not, which in bf16 gives other bits (one random case: up to 0.5). On the 32B a frozen base changes 2 of the
+   1040 innocent readouts.
 3. **A half-precision model runs the adapter in float32 (a behaviour difference).** nnsight's attach casts a
    half-precision adapter to float32, as `PeftModel` does, and the EM adapter is stored in float32 anyway; peft's
    `lora.Linear` computes the delta in float32 and casts the sum back. The hand-written edits rounded A and B to bf16
@@ -407,7 +409,16 @@ Qwen/Qwen2.5-0.5B-Instruct for `test/test_last_hooks_port.py`; Qwen/Qwen2.5-32B-
    40). Computing the adapter as the old code did (A and B rounded to bf16, the q/k/v/gate/up/down deltas in bf16,
    the o_proj merge rounded twice: peft's `safe_merge`) gives the old logits and the old EM outputs bit for bit, so
    the adapter's precision is the whole difference.
-4. **peft's `unmerge` is not `merge`'s inverse in bf16.** It subtracts the delta it added, rounded again: on the
-   32B all 64 o_proj weights differ after a merge and unmerge, by up to 9.8e-4. `em_adapter` merges the o_proj
-   deltas because GoalScope reads head contributions from o_proj weight slices (`o_proj.weight` on a lora layer is
-   `base_layer.weight`), and copies the weights saved before the merge back before it detaches (summary, docs 13).
+   nnsight's `autocast_adapter_dtype=False` (#824) holds the adapter in the model's dtype instead; goals keeps the
+   default.
+4. **peft's `unmerge` is not `merge`'s inverse in bf16, and a merged layer whose adapter is off unmerges itself.**
+   GoalScope reads head contributions from o_proj weight slices, and `o_proj.weight` on a lora layer is
+   `base_layer.weight`, so `em_adapter` merges the o_proj deltas into the weights (peft's `merge()`) while the adapter
+   is on. `unmerge()` subtracts the delta it added, rounded again: on the 32B all 64 o_proj weights differ after a
+   merge and unmerge, by up to 9.8e-4. And peft's `lora.Linear.forward`, with the adapter off, first unmerges a layer
+   still marked merged, so a layer switched off while merged, its weight already copied back, would subtract the delta
+   from the base weight on its next forward (0.5B in bf16: off by up to 0.21). On exit `em_adapter` therefore unmerges
+   first (which clears the merged state), copies back the o_proj weights taken at load, and then switches the adapter
+   off. A forward with the adapter off then leaves the weights alone: the script asserts it after its probe forward,
+   and on the 32B the o_proj weights equal the load-time copy on every entry to `em_adapter` and at the end of the
+   run, after every innocent side and verbalizer ran with the adapter off (summary, docs 13).
