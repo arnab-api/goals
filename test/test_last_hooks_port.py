@@ -65,7 +65,7 @@ from src.tokens import prepare_input  # noqa: E402
 from src.utils.typing import TokenizerOutput  # noqa: E402
 
 MODEL_KEY = "Qwen/Qwen2.5-0.5B-Instruct"
-OLD_REF = os.environ.get("LAST_HOOKS_OLD_REF", "f8d90d062548d01f851a2117518b4d1fe6d5617a")
+OLD_REF = os.environ.get("LAST_HOOKS_OLD_REF", "3bc9d9ce2f417ab423cdfca4acee7c60b7dcd78b")
 OLD_FILES = {
     "old_goalscope": "src/goals/goalscope.py",
     "old_ablation_common": "scripts/evaluation/ablation_common.py",
