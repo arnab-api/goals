@@ -8,8 +8,9 @@ Run from the repo root (a few minutes on CPU):
 
 The old implementations are ``git show <OLD_REF>:<path>`` of the five files in ``OLD_FILES``,
 written to a temp directory (under ``$TMPDIR``) with their imports of each other pointed at the old
-copies, and imported with their baukit code; PR 1's ``_model`` shim makes them run on the nnterp
-``ModelandTokenizer``. ``OLD_REF`` defaults to the ``nnterp`` branch before the port
+copies, and imported with their baukit code; ``test/_legacy.py``'s ``LegacyModelandTokenizer`` (the
+nnterp ``ModelandTokenizer`` plus the ``_model`` and path-format names that code reads) makes them run
+on the nnterp model. ``OLD_REF`` defaults to the ``nnterp`` branch before the port
 (``GOALSCOPE_OLD_REF`` overrides it). Every comparison feeds both sides identical inputs. The old
 code imports baukit, which the repo no longer depends on: install it beside the env to run this
 test (``uv pip install git+https://github.com/davidbau/baukit@9d51abd51ebf29769aecc38c4cbef459b731a36e``).
@@ -34,6 +35,7 @@ import nnsight  # noqa: E402
 import torch  # noqa: E402
 import transformers  # noqa: E402
 
+from _legacy import LegacyModelandTokenizer  # noqa: E402  (test/_legacy.py)
 from scripts.evaluation.eval_readout_sources import extract_residual_latents  # noqa: E402
 from src.attention import get_attention_matrices  # noqa: E402
 from src.functional import PatchSpec, generate_with_patch  # noqa: E402
@@ -49,7 +51,6 @@ from src.goals.head_loc_attn import (  # noqa: E402
     collect_head_steering_vecs,
     get_o_proj_inputs_batch,
 )
-from src.models import ModelandTokenizer  # noqa: E402
 from src.nrgs.functional import boost_head_ov, cache_src_proj, proj_patch  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 
@@ -78,10 +79,10 @@ _OLD = None
 RESULTS: list[tuple[str, str]] = []  # (comparison, outcome) rows for the summary table
 
 
-def model() -> ModelandTokenizer:
+def model() -> LegacyModelandTokenizer:
     global _MT
     if _MT is None:
-        _MT = ModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
+        _MT = LegacyModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
     return _MT
 
 
@@ -169,14 +170,12 @@ def test_generate_with_patch():
             return ps
 
         for n_steer in (1, 3, None):
-            kw = dict(max_new_tokens=8, patches=make(mt.layer_name_format.format), do_sample=False,
-                      n_steer_tokens=n_steer, remove_prefix=True)
-            a = O.old_functional.generate_with_patch(mt, prepare_input(prompts, tokenizer=mt), **kw)
-            b = generate_with_patch(mt, prepare_input(prompts, tokenizer=mt), **kw)
+            kw = dict(max_new_tokens=8, do_sample=False, n_steer_tokens=n_steer, remove_prefix=True)
+            # The old code names a layer by its native path, the new one by its block index.
+            a = O.old_functional.generate_with_patch(mt, prepare_input(prompts, tokenizer=mt),
+                                                     patches=make(mt.layer_name_format.format), **kw)
+            b = generate_with_patch(mt, prepare_input(prompts, tokenizer=mt), patches=make(lambda L: L), **kw)
             assert a == b, (strategy, n_steer, a, b)
-            # Block indices instead of the native path strings: the same edit.
-            kw["patches"] = make(lambda L: L)
-            assert generate_with_patch(mt, prepare_input(prompts, tokenizer=mt), **kw) == b
             n_same += 1
             n_moved += sum(x != y for x, y in zip(b, plain))
             print(f"      {strategy:8s} n_steer={n_steer}: {b}")
@@ -197,10 +196,11 @@ def test_old_sentinel_quirk():
     u = u / u.norm()
     for alpha in (0.5, 1.0, 2.0):
         v = alpha * u
-        patches = [PatchSpec((mt.layer_name_format.format(L), -1), v, "add_norm", "all") for L in (8, 12)]
-        kw = dict(max_new_tokens=8, patches=patches, do_sample=False, n_steer_tokens=1, remove_prefix=True)
-        a = O.old_functional.generate_with_patch(mt, inp(), **kw)
-        b = generate_with_patch(mt, inp(), **kw)
+        old_patches = [PatchSpec((mt.layer_name_format.format(L), -1), v, "add_norm", "all") for L in (8, 12)]
+        patches = [PatchSpec((L, -1), v, "add_norm", "all") for L in (8, 12)]
+        kw = dict(max_new_tokens=8, do_sample=False, n_steer_tokens=1, remove_prefix=True)
+        a = O.old_functional.generate_with_patch(mt, inp(), patches=old_patches, **kw)
+        b = generate_with_patch(mt, inp(), patches=patches, **kw)
         # The old count, reproduced: layer 8 for steps 0..2, layer 12 for steps 0..1.
         with torch.no_grad(), mt.generate(dict(inp()), max_new_tokens=8, do_sample=False) as tracer:
             for step in tracer.iter[:3]:
@@ -507,10 +507,11 @@ def test_generate_timing():
     g = torch.Generator().manual_seed(3)
     v = torch.randn(4, mt.hidden_size, generator=g)
     v = 0.1 * v / v.norm(dim=-1, keepdim=True)
-    patches = [PatchSpec((mt.layer_name_format.format(L), -1), v, "add_norm", "all") for L in (8, 9, 10, 11)]
-    kw = dict(max_new_tokens=16, patches=patches, do_sample=False, remove_prefix=True, min_new_tokens=16)
+    kw = dict(max_new_tokens=16, do_sample=False, remove_prefix=True, min_new_tokens=16)
     times = {}
-    for name, fn in (("old", O.old_functional.generate_with_patch), ("new", generate_with_patch)):
+    for name, fn, loc in (("old", O.old_functional.generate_with_patch, mt.layer_name_format.format),
+                          ("new", generate_with_patch, lambda L: L)):
+        kw["patches"] = [PatchSpec((loc(L), -1), v, "add_norm", "all") for L in (8, 9, 10, 11)]
         fn(mt, prepare_input(prompts, tokenizer=mt), **kw)  # warm-up
         t = time.perf_counter()
         for _ in range(3):

@@ -8,7 +8,8 @@ Run from the repo root (a few minutes on CPU):
         .venv/bin/python test/test_last_hooks_port.py
 
 The old implementations are ``git show <OLD_REF>:<path>`` of the files in ``OLD_FILES``, written to a temp directory
-(under ``$TMPDIR``) and imported; ``ModelandTokenizer._model`` makes them run on the nnterp model. ``OLD_REF``
+(under ``$TMPDIR``) and imported; ``test/_legacy.py``'s ``LegacyModelandTokenizer`` (the nnterp ``ModelandTokenizer``
+plus the ``_model`` and path-format names that code reads) makes them run on the nnterp model. ``OLD_REF``
 defaults to the NRGS port, the base of this port (``LAST_HOOKS_OLD_REF`` overrides it). Three adjustments, none of
 which changes what the old code computes:
 
@@ -43,6 +44,7 @@ import torch  # noqa: E402
 import transformers  # noqa: E402
 from safetensors.torch import load_file, save_file  # noqa: E402
 
+from _legacy import LegacyModelandTokenizer  # noqa: E402  (test/_legacy.py)
 import scripts.em.em_goalscope_all_tokens as EM  # noqa: E402
 import scripts.evaluation.obstacle_persistence_ov_boost_eval as OVB  # noqa: E402
 import src.goals.head_loc_oracle as ORACLE  # noqa: E402
@@ -60,7 +62,6 @@ from src.goals.functional import batch_generate  # noqa: E402
 from src.goals.goalscope import greedy_continue  # noqa: E402
 from src.goals.head_loc_attn import collect_head_steering_vecs  # noqa: E402
 from src.goals.head_loc_data import HeadLocDataset  # noqa: E402
-from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 from src.utils.typing import TokenizerOutput  # noqa: E402
 
@@ -86,10 +87,10 @@ _OLD = None
 RESULTS: list[tuple[str, str]] = []  # (comparison, outcome) rows for the summary table
 
 
-def model() -> ModelandTokenizer:
+def model() -> LegacyModelandTokenizer:
     global _MT
     if _MT is None:
-        _MT = ModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
+        _MT = LegacyModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
     return _MT
 
 

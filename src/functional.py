@@ -31,16 +31,15 @@ def is_nontrivial_prefix(prediction: str, target: str) -> bool:
 
 @dataclass(frozen=False)
 class PatchSpec:
-    location: tuple[int | str, int]
+    location: tuple[int, int]
     patch: torch.Tensor
     strategy: Literal["replace", "add", "add_norm"] = "replace"
     on_pass: Literal["first", "all"] = "all"
     """
     One edit of the residual stream leaving a decoder block, ``mt.layers[i].layer_output[:, index]``.
 
-    ``location = (layer, index)``: ``layer`` is the block index ``i``, or the native path
-    ``mt.layer_name_format.format(i)`` (the pre-port form, which the A/B tests still pass);
-    ``index`` is the token position. ``patch`` is ``(d,)`` or ``(B, d)``, one row per batch item.
+    ``location = (layer, index)``: ``layer`` is the block index ``i``; ``index`` is the token
+    position. ``patch`` is ``(d,)`` or ``(B, d)``, one row per batch item.
 
     ``strategy="add_norm"`` — norm-relative add: ``patch`` is a UNIT direction
     (scale it by any coefficient before passing it in) and the applied update is
@@ -86,21 +85,6 @@ def _apply_patch_to_state(
         raise ValueError(
             f"strategy must be 'replace', 'add' or 'add_norm', got {strategy!r}"
         )
-
-
-def _layer_index(mt: ModelandTokenizer, layer: int | str) -> int:
-    """The block index of a ``PatchSpec`` location: an int as is, or the native layer path
-    ``mt.layer_name_format.format(i)`` (``"model.layers.12"``) parsed back to ``i``."""
-    if isinstance(layer, int):
-        return layer
-    prefix, _, suffix = mt.layer_name_format.partition("{}")
-    middle = layer[len(prefix) : len(layer) - len(suffix)]
-    if layer.startswith(prefix) and layer.endswith(suffix) and middle.isdigit():
-        return int(middle)
-    raise ValueError(
-        f"PatchSpec location {layer!r} is not a decoder layer: pass the block index or "
-        f"{mt.layer_name_format!r}. generate_with_patch edits mt.layers[i].layer_output only."
-    )
 
 
 # nnsight's warning when a ``tracer.iter[:n]`` loop asks for a step the run did not make. A
@@ -167,7 +151,12 @@ def generate_with_patch(
                 f"0 or -1 (got {p.location[1]}). With KV-cache, decode steps "
                 f"have seq_len=1, so any other fixed position is out-of-bounds."
             )
-        by_layer.setdefault(_layer_index(mt, p.location[0]), []).append(p)
+        if not isinstance(p.location[0], int):
+            raise TypeError(
+                f"PatchSpec location[0] must be the block index i of mt.layers[i] "
+                f"(got {p.location[0]!r})."
+            )
+        by_layer.setdefault(p.location[0], []).append(p)
     # Envoys bound once, outside the step loop.
     plan = [(mt.layers[i], by_layer[i]) for i in sorted(by_layer)]
 

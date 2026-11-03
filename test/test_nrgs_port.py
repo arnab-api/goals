@@ -8,8 +8,9 @@ Run from the repo root (a few minutes on CPU):
         .venv/bin/python test/test_nrgs_port.py
 
 The old implementations are ``git show <OLD_REF>:<path>`` of the files in ``OLD_FILES``, written to a temp directory
-(under ``$TMPDIR``) with their imports of each other pointed at the old copies; PR 1's ``_model`` shim makes them run
-on the nnterp ``ModelandTokenizer``. ``OLD_REF`` defaults to the ``nnterp`` branch before the GoalScope and NRGS
+(under ``$TMPDIR``) with their imports of each other pointed at the old copies; ``test/_legacy.py``'s
+``LegacyModelandTokenizer`` (the nnterp ``ModelandTokenizer`` plus the ``_model`` and path-format names that code
+reads) makes them run on the nnterp model. ``OLD_REF`` defaults to the ``nnterp`` branch before the GoalScope and NRGS
 ports (``NRGS_OLD_REF`` overrides it). ``src.nrgs.data`` / ``eval`` / ``hier_data`` are shared: the port does not
 touch them. Every comparison feeds both sides identical inputs and passes ``ctx`` explicitly. The old code imports
 baukit, which the repo no longer depends on: install it beside the env to run this test
@@ -35,13 +36,13 @@ import nnsight  # noqa: E402
 import torch  # noqa: E402
 import transformers  # noqa: E402
 
+from _legacy import LegacyModelandTokenizer  # noqa: E402  (test/_legacy.py)
 import src.nrgs.data as DATA  # noqa: E402
 import src.nrgs.functional as FUNC  # noqa: E402
 import src.nrgs.kv_transfer as PP  # noqa: E402
 import src.nrgs.task_vs_progress as TP  # noqa: E402
 from src.attention import get_attention_matrices  # noqa: E402
 from src.goals.head_loc_attn import get_o_proj_inputs_batch  # noqa: E402
-from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 
 MODEL_KEY = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -75,10 +76,10 @@ _GEOM = {}
 RESULTS: list[tuple[str, str]] = []  # (comparison, outcome) rows for the summary table
 
 
-def model() -> ModelandTokenizer:
+def model() -> LegacyModelandTokenizer:
     global _MT
     if _MT is None:
-        _MT = ModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
+        _MT = LegacyModelandTokenizer(MODEL_KEY, dtype=torch.float32, attn_implementation="eager")
     return _MT
 
 

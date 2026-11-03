@@ -57,7 +57,9 @@ def test_compat_properties():
     mt = model()
     cfg = mt.config
     assert mt.family_name == "qwen2" and mt.name == MODEL_KEY
-    assert mt._model is mt._module and isinstance(mt._model, transformers.Qwen2ForCausalLM)
+    assert isinstance(mt._module, transformers.Qwen2ForCausalLM)
+    # The pre-nnterp transition names are gone (test/_legacy.py carries them for the A/B tests).
+    assert not any(hasattr(mt, n) for n in ("_model", "layer_name_format", "attn_module_name_format"))
     assert mt.device == torch.device("cpu")
     assert mt.n_layer == cfg.num_hidden_layers == 24
     assert mt.n_embd == cfg.hidden_size == 896
@@ -65,9 +67,9 @@ def test_compat_properties():
     assert mt.n_kv_heads == cfg.num_key_value_heads == 2
     assert mt.head_dim == cfg.hidden_size // cfg.num_attention_heads == 64
     assert mt.attn_inner_size == mt.layers[0].self_attn.o_proj.in_features
-    # The native path strings name the modules nnterp's standard names reach.
-    assert get_module_nnsight(mt, mt.layer_name_format.format(3)) is mt.layers[3]
-    assert get_module_nnsight(mt, mt.attn_module_name_format.format(3)) is mt.layers[3].self_attn
+    # Native module paths (get_hs's locations) name the modules nnterp's standard names reach.
+    assert get_module_nnsight(mt, "model.layers.3") is mt.layers[3]
+    assert get_module_nnsight(mt, "model.layers.3.self_attn") is mt.layers[3].self_attn
     assert get_module_nnsight(mt, "model.layers.3.mlp") is mt.layers[3].mlp
     assert get_module_nnsight(mt, "model.embed_tokens") is mt.embed_tokens
     assert get_module_nnsight(mt, "model.norm") is mt.norm
@@ -83,7 +85,7 @@ def test_compat_properties():
 def test_get_hs():
     mt = model()
     inp = prepare_input(PROMPT, tokenizer=mt)
-    locs = [(mt.layer_name_format.format(L), -1) for L in (3, 10)]
+    locs = [(f"model.layers.{L}", -1) for L in (3, 10)]
     hs = get_hs(mt, inp, locs, return_dict=True)
     assert set(hs) == set(locs) and all(v.shape == (mt.n_embd,) for v in hs.values())
     with torch.no_grad(), mt.trace(dict(inp)):
@@ -125,7 +127,7 @@ def test_generate_with_patch():
         ][None].clone()
     v = alpha * v / v.norm()
     inp = prepare_input(PROMPT, tokenizer=mt)
-    patch = PatchSpec((mt.layer_name_format.format(L), -1), v, strategy="add_norm", on_pass="all")
+    patch = PatchSpec((L, -1), v, strategy="add_norm", on_pass="all")
     patched = generate_with_patch(mt, inp, max_new_tokens=4, patches=[patch], do_sample=False,
                                   remove_prefix=True)
     plain = generate_with_patch(mt, inp, max_new_tokens=4, do_sample=False, remove_prefix=True)
