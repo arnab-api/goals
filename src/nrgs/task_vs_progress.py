@@ -66,7 +66,7 @@ def embedding_patch(mt, src_ids, dst_pos) -> FUNC.Intervention:
     def edit(mt_, step):
         mt.token_embeddings[:, dst_pos] = e_src
 
-    return FUNC.Intervention([FUNC.Edit(FUNC.EMBED, 0, edit, first_only=True)])
+    return FUNC.Intervention([FUNC.Edit(None, "token_embeddings", edit, first_only=True)], mt)
 
 
 def make_stack(G, method, span, heads=None, v_scale=1.0, *, headsets, ctx):
