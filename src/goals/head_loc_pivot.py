@@ -299,7 +299,7 @@ def get_next_token_probs(mt, prompt: str) -> torch.Tensor:
     """
     inputs = prepare_input(prompts=[prompt], tokenizer=mt)
     with mt.trace(inputs):
-        logits = mt.lm_head.output[0, -1, :].save()
+        logits = mt.logits[0, -1, :].save()
     return torch.softmax(logits.float(), dim=-1).cpu()
 
 
@@ -318,7 +318,7 @@ def get_next_token_probs_batch(mt, prompts: list[str]) -> torch.Tensor:
     """
     inputs = prepare_input(prompts=prompts, tokenizer=mt)
     with mt.trace(inputs):
-        logits = mt.lm_head.output[:, -1, :].save()  # (batch, vocab)
+        logits = mt.logits[:, -1, :].save()  # (batch, vocab)
     return torch.softmax(logits.float(), dim=-1).cpu()
 
 

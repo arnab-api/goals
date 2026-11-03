@@ -1,9 +1,10 @@
 """Train a sparse attention head mask for the head localization experiment.
 
-Uses the o_proj pre-hook replacement approach: for each head h at layer l,
-the o_proj input at the last token is interpolated as:
+Uses o_proj input replacement: for each head h at layer l, the head's slice of the
+o_proj input (nnterp's ``attention_premix``) at the last token is interpolated as:
     mask[l,h]*src_h + (1-mask[l,h])*cascade_h
-(mask=1 → pure source, mask=0 → pure cascade dest). All layers are trained.
+(mask=1 → pure source, mask=0 → pure cascade dest), inside one nnterp trace of the
+destination with gradients to the mask. All layers are trained.
 
 Two caching modes:
   * default (augment): src head values are recomputed per batch, and every
@@ -150,8 +151,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Cache pivot data
     # ------------------------------------------------------------------
-    layers = list(range(mt.n_layer))
-    logger.info(f"layers:           0..{mt.n_layer - 1} ({len(layers)} total)")
+    layers = list(range(mt.num_layers))
+    logger.info(f"layers:           0..{mt.num_layers - 1} ({len(layers)} total)")
 
     logger.info("=== Caching pivot data ===")
     pivot_caches = cache_pivot_data(
