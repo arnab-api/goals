@@ -237,3 +237,37 @@ the parity harness and the recompute variants below.
    two module calls outside any trace: the rotary embedding (item 2) and the embedding lookup of the
    task-vs-progress embedding transplant (`mt.embed_tokens(src_ids)`). `Envoy.__call__` documents that this is a
    plain call; nnterp's pages reach for `_module` instead (`attn._module.scaling`), which suggests the private route.
+
+## The last hooks (`port/last-hooks`)
+
+nnterp 2.0.0rc2.dev7 (`feeb24c5`), nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwen2.5-0.5B-Instruct
+(float32, eager) for `test/test_last_hooks_port.py`, and Coder-7B (bf16, one RTX A6000) for the parity harness.
+
+1. **A stop rule other than EOS (model-layer item 3, resolved).** The ablation decode stops after a generated token
+   whose text ends in `"\n"` (keeping it) and at EOS (dropping it). It now runs on `mt.generate` + `tracer.iter`
+   with a transformers `StoppingCriteria` passed as `stopping_criteria=`; a stop it triggers cuts
+   `tracer.iter[:max_new]` short exactly like an early EOS (the same "was never reached" warning, so GoalScope item
+   2's own-invoke read and filter cover it), which nnsight's `docs/usage/iteration.md` states for `stop_strings`.
+   The loop of single traces threading `past_key_values` is gone. nnterp's `generation.md` names only EOS among the
+   things that end a run early; a stopping criterion belongs in that gotcha.
+2. **A persistent edit on every forward warns on every run.** `mt.edit(inplace=True)` applies a value at its first
+   occurrence, so an edit meant for every forward of a `generate` (the EM LoRA on each projection, every step) goes
+   under an open `tracer.iter[:]`, as nnsight's `docs/usage/edit.md` shows. That loop ends each run by asking for a
+   step that never comes, so every trace and every `generate` while the edit is installed emits
+   `'...q_proj.input.i1' was never reached: the loop asked for a step the run did not make` (a single trace too).
+   Workaround (`em_adapter`): filter that message while the adapter is on. Proposal: `model.edit(inplace=True,
+   every_call=True)`, or no warning for an open loop inside an edit, where outrunning the run is the intent.
+3. **A hook's `o + f(i)` does not port as one expression.** `proj.output = proj.output + s * ((proj.input @ A.T)
+   @ B.T)` evaluates `.output` first and raises `OutOfOrderError` on `proj.input` ("the model already ran past it");
+   `x = proj.input` has to come first. The forward-order rule is documented; this instance of it (Python's
+   evaluation order inside one statement) is the first thing a forward-hook port writes. Proposal: a line next to
+   the forward-order rule in nnsight's `access-and-modify.md`.
+4. **Native submodules have no forward order either.** One edit block for a LoRA on q / k / v / gate / up / down of
+   every block must visit them in call order; the adapter's module list (safetensors keys) is sorted by name, which
+   puts `mlp.*` before `self_attn.*` and block 10 before block 2. Workaround: sort by (block, a hand-written
+   projection order for the Llama / Qwen2 forward). NRGS item 3's `forward_rank` proposal would cover this if it
+   accepted native module paths.
+5. **An edit can observe another function's run.** The parity harness reads the step-0 logits of
+   `head_additive_generate`'s own `generate` with an edit that appends `mt.logits[:, -1].save()` to a list made
+   outside it; each run appends its value, readable after the run (bit-identical to the forward hook it replaces).
+   Neither nnsight's `edit.md` nor nnterp's docs show reading a value from an edit.
