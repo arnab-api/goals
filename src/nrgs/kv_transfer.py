@@ -10,8 +10,8 @@ Two prompts sharing the prefilled progress (a, b):
 
 The intervention is the **pivot-onwards KV transfer**: ``goal_heads`` read SRC's window k/v from the pivot on (the last
 query of each forward), optionally with the transplanted values scaled by ``v_scale``. The transplanted window is the
-task span (``span="task"``: ``(1)`` .. the user turn's ``<|im_end|>``, excluded) or the task span + the progress through
-the pivot ` =` (``span="task+progress"``). Both are aligned with :func:`src.nrgs.functional.align_kv_spans`: the shorter
+task span (``span="task"``: ``(1)`` .. the user turn's end-of-turn token, excluded) or the task span + the progress
+through the pivot ` =` (``span="task+progress"``). Both are aligned with :func:`src.nrgs.functional.align_kv_spans`: the shorter
 SRC / DST window gets ``\\n`` tokens right before it, so the two windows have equal length and the transplant stays
 position-aligned across languages ("A1"). All runs of a geometry (clean SRC, clean DST, patched) use these padded token
 sequences."""
@@ -100,9 +100,12 @@ def inst_key(inst) -> str:
 
 def build_geometry(inst, *, span="task", ctx):
     """Token sequences and positions for one (instance, span) pair. ``span`` = the transplanted SRC window:
-    ``"task"`` = ``(1)`` .. the user turn's ``<|im_end|>`` (excluded), i.e. the task list + everything after it;
+    ``"task"`` = ``(1)`` .. the user turn's end-of-turn token (excluded), i.e. the task list + everything after it;
     ``"task+progress"`` = one contiguous window from the task start through the pivot ` =`. ``g["seg"]`` = the
-    progress ``<|im_end|> .. {var}`` (pivot excluded) on DST, used by :mod:`src.nrgs.task_vs_progress`."""
+    progress, end-of-turn token .. ``{var}`` (pivot excluded) on DST, used by :mod:`src.nrgs.task_vs_progress`.
+
+    The end-of-turn token is the first special token after the task text: ``<|im_end|>`` on Qwen and OLMo-3,
+    ``<|eot_id|>`` on Llama-3, ``<end_of_turn>`` on Gemma, ``<|end|>`` on Phi-3, ``<|assistant|>`` on GLM-4."""
     mt = ctx.mt
     m = DATA.materialize(inst, ctx=ctx)
     c_desc, d_desc = inst.expected_next_desc, inst.dst_next_desc          # what the oracle judges against
@@ -112,9 +115,9 @@ def build_geometry(inst, *, span="task", ctx):
     ids_s = _ids(prepare_input(prompts=m["src_prompt"], tokenizer=mt))
     ids_d = _ids(prepare_input(prompts=m["dst_prompt"], tokenizer=mt))
     Ls, Ld = len(ids_s), len(ids_d)
-    im_end = mt.tokenizer.convert_tokens_to_ids("<|im_end|>")
-    e_s = max(i for i, t in enumerate(ids_s) if t == im_end)
-    e_d = max(i for i, t in enumerate(ids_d) if t == im_end)
+    special = {i for i, t in mt.tokenizer.added_tokens_decoder.items() if t.special}
+    e_s = next(i for i in range(s0[1], Ls) if ids_s[i] in special)  # the user turn's end-of-turn token
+    e_d = next(i for i in range(d0[1], Ld) if ids_d[i] in special)
     n_gap = e_d - d0[1]
     s0, d0 = (s0[0], e_s), (d0[0], e_d)
     if span == "task":
@@ -129,9 +132,9 @@ def build_geometry(inst, *, span="task", ctx):
     L = len(d_ids)
     pad_s, pad_d = len(_ids(src_tok)) - Ls, L - Ld
 
-    # progress: <|im_end|> .. the token before the pivot (` =`; ` and` / ` &&` ...)
-    lo = max(i for i, t in enumerate(d_ids) if t == im_end)
-    seg = list(range(lo, L - 1))
+    # progress: the end-of-turn token .. the token before the pivot (` =`; ` and` / ` &&` ...); the alignment's
+    # newlines went in before the window, so every position from the window on moved by pad_d
+    seg = list(range(e_d + pad_d, L - 1))
     return dict(
         span=span, n_gap=n_gap, src_tok=src_tok, dst_tok=dst_tok, src_w=list(src_w), dst_w=list(dst_w), seg=seg,
         c_desc=c_desc, d_desc=d_desc, pad_src=pad_s, pad_dst=pad_d, src_prompt=m["src_prompt"], dst_prompt=m["dst_prompt"],

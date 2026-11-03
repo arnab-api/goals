@@ -7,8 +7,8 @@
 Two spans of DST can be read from SRC, giving a 2 x 2 grid (none / task / progress / task+progress):
 
 * **task** — the task list ``(1) .. (3)`` + its closing ``\\n`` (``PP.build_geometry(span="task")``: up to the user
-  turn's ``<|im_end|>``, excluded; ``\\n``-padded at the front to equal length);
-* **progress** — ``<|im_end|> .. {var}`` (``g["seg"]``; token-identical in SRC and DST, aligned from the end).
+  turn's end-of-turn token, ``<|im_end|>`` on Qwen, excluded; ``\\n``-padded at the front to equal length);
+* **progress** — end-of-turn token .. ``{var}`` (``g["seg"]``; token-identical in SRC and DST, aligned from the end).
 
 Methods (:func:`make_stack`):
 
@@ -46,7 +46,7 @@ def geometry(inst, *, ctx):
     g = PP.build_geometry(inst, span="task", ctx=ctx)
     s_ids, d_ids = PP._ids(g["src_tok"]), PP._ids(g["dst_tok"])
     L_s, L_d = len(s_ids), len(d_ids)
-    prog_d = list(g["seg"])                                   # <|im_end|> .. pivot-1 on DST
+    prog_d = list(g["seg"])                                   # end-of-turn token .. pivot-1 on DST
     prog_s = [q - L_d + L_s for q in prog_d]
     assert [s_ids[q] for q in prog_s] == [d_ids[q] for q in prog_d], "SRC/DST progress tokens differ"
     task_s, task_d = list(g["src_w"]), list(g["dst_w"])

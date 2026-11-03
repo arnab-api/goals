@@ -225,8 +225,8 @@ def parse_args():
     p.add_argument("--max-instances", type=int, default=None, help="cap instances per datatype (smoke)")
     p.add_argument("--seed", type=int, default=1123)
     p.add_argument("--span", nargs="+", default=["task"], choices=list(TAG_SPAN),
-                   help="config AXIS, the transplanted SRC window: task = `(1)` .. the user turn's <|im_end|> (excluded); "
-                        "task+progress = task start .. the pivot ` =` (included)")
+                   help="config AXIS, the transplanted SRC window: task = `(1)` .. the user turn's end-of-turn token "
+                        "(excluded); task+progress = task start .. the pivot ` =` (included)")
     p.add_argument("--goal-heads", default=GOAL250, help="JSON [[layer, head], ...]: the heads that read SRC's window")
     p.add_argument("--readout-heads", default=GOAL250, help="GoalScope readout heads (JSON)")
     p.add_argument("--i3-v-scale", nargs="+", type=float, default=[4.0],
