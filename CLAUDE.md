@@ -141,7 +141,7 @@ see Caution 6b).
 | `.../goal_topk/goal__snap_top{5,10,25}.json` | 5/10/25 | head-budget sweep | `scripts/data/export_sparse_head_sets.py` **on master only** (ranks heads by the number of lam{1,5,20,50,100} checkpoints at 1.0; top5 = seeded random 5 of top10) |
 | `Qwen2.5-Coder-32B-Instruct/control/control{122,250}__laterhalf.json` | 122/250 | NRGS random-head controls (250); control122 only in unreported GoalScope baselines | random non-goal heads from layers >= 32, seed 123; committed in master 8ed1474, no generating script |
 | `Qwen2.5-Coder-14B-Instruct/goal__lam20_thr0.9_band0-48.json` | 88 | model-size axis | `export_head_sets.py` |
-| `Qwen2.5-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 108 | code-finetuning axis + model table | `export_head_sets.py` |
+| `Qwen2.5-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 108 | model table (`tab:model-comparison-four-pivots`) | `export_head_sets.py` |
 | `Olmo-3.1-32B-Instruct/goal__lam20_thr1.0_band10-36.json` | 93 | RL axis (reported) | mask == 1.0 in layers [10,36); balanced against SFT by hand in master ae9f2c2, **no script** |
 | `Olmo-3.1-32B-Instruct-SFT/goal__lam20_thr0.6_band10-36.json` | 91 | RL axis (reported) | mask > 0.6 in [10,36); master ae9f2c2, **no script** |
 | `Olmo-3.1-32B-Instruct{,-SFT}/goal__lam20_thr0.9_band10-36.json` | 130 / 79 | superseded `heads=goal` OLMo runs | `export_head_sets.py` |
@@ -227,16 +227,22 @@ Paper items: `tab:model-comparison-four-pivots` (`Text/Appendix/tables/model_com
 | Qwen2.5-Coder-32B-Instruct | goal (122) | replace α=1 | `goalscope_eval_c_model_axis.json` | `replace/1/heads=goal` | .789 / .735 |
 | Qwen2.5-Coder-14B-Instruct | goal (88), `--steer_layer_range 20 30 --goal_band 0 48` | replace α=1 | `goalscope_eval_c_14b.json` | `replace/1/heads=goal__layers=20-30__...__band=0-48` | .519 / .305 |
 | Qwen2.5-32B-Instruct (table) | goal (108, its own) | replace α=1 | `goalscope_eval_c_model_axis.json` | `replace/1/heads=goal` | .238 / .441 |
-| Qwen2.5-32B-Instruct (code-ft figure) | goal (108, its own; Caution 6c) | additive_norm α=0.1 | `goalscope_eval_c_model_axis.json` (`*_additive_*` jobs) | `additive_norm/0.1/heads=goal` | .577 / .717 |
+| Qwen2.5-32B-Instruct (code-ft figure) | Coder-32B's 122 (`json:coder32b_goal122`) | additive_norm α=0.1 | none (see below) | `additive_norm/0.1/heads=json:coder32b_goal122` | .766 / .725 |
 | Qwen2.5-Coder-32B (code-ft figure) | goal (122) | additive_norm α=0.1 | section 4.1 | section 4.1 | .853 / .750 |
 | Olmo-3.1-32B-Instruct | `json:goal__lam20_thr1.0_band10-36` (93) | replace α=1 | `goalscope_eval_c_model_axis.json` (= `goalscope_eval_c_olmo_rematched.json`) | `replace/1/heads=json:goal__lam20_thr1.0_band10-36` (NOT the `__aprefill=5x68fdb5` sibling) | .435 / .622 |
 | Olmo-3.1-32B-Instruct-SFT | `json:goal__lam20_thr0.6_band10-36` (91) | replace α=1 | `goalscope_eval_c_model_axis.json` | `replace/1/heads=json:goal__lam20_thr0.6_band10-36` | .529 / .452 |
 
 All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 32B faithfulness 51.9% -> 78.9%.
-- Generator for the three figures: `model_generalization.ipynb` (cell 1 `HSPEC` / `leaf()` / `AXES`, cell 2 saves
-  `{axis}_{mode}`; cell 3 `model_comparison.tex` is unreferenced). **Glob hazard**: `leaf()` takes `glob(...)[0]` over
-  `heads={spec}__*`, which for OLMo-Instruct faithfulness now also matches the later, unreported `__aprefill=5x68fdb5`
-  leaf (mean4 .390). Delete / move that leaf or tighten the glob before regenerating the RL figure.
+- The code-ft figure's Qwen2.5-32B run (2026-09-20) was launched by hand with
+  `python -m scripts.evaluation.eval_goalscope --model Qwen/Qwen2.5-32B-Instruct --mode <m> --heads head_sets/coder32b_goal122.json --strategy additive_norm --alpha 0.1`;
+  that json is not on `clean` (same 122 heads as `head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json`,
+  which reproduces the run under the leaf name `heads=json:goal__lam20_thr0.9_band25-56`). The own-heads (108) additive
+  run (`additive_norm/0.1/heads=goal`, `*_additive_*` jobs of `goalscope_eval_c_model_axis.json`, .577 / .717) is
+  unreported; the figure plotted it until 2026-11-03.
+- Generator for the three figures: `model_generalization.ipynb` (cell 1 `HSPEC` / `AXIS_HSPEC` / `leaf()` / `AXES`,
+  cell 2 saves `{axis}_{mode}`; cell 3 `model_comparison.tex` is unreferenced). `AXIS_HSPEC` points the code-ft axis's
+  Qwen2.5-32B at `json:coder32b_goal122`; `leaf()` skips `__aprefill=` leaves (the unreported OLMo-Instruct
+  `__aprefill=5x68fdb5` sibling, mean4 .390).
 - The two tables were not made by a notebook on `clean`: they come from
   `agent_reports/chatgpt/appendix_review_2026_09_16/{build_results.py,edit_draft.py}` on master (pure parsers over the
   same leaves; `edit_draft.py` picks specs `int_python_003, int_python_001, list[int]_python_007, list[str]_python_000`
@@ -554,14 +560,9 @@ b. **Pivot pools were re-mined after the reported masks were trained.** On 2026-
 c. **Known paper-vs-code discrepancies** (the code is what produced the numbers):
    - Generation length: the paper says "up to 256 tokens"; the code uses 64 (GoalScope readout and frontier rollout,
      OVReader), 96 (temporal persistence) and 48 (obstacle persistence, OV boost).
-   - The code-finetuning figure (`fig:comparison-code`) uses Qwen2.5-32B-Instruct's **own 108 heads**
-     (`model_generalization.ipynb` `HSPEC` has no entry, so `heads=goal`); the text says "the same 122 heads". The
-     122-head transfer runs exist (`GS` leaves `heads=json:coder32b_goal122`, additive_norm mean4 .766 / .725) but no
-     figure reads them, and `head_sets/coder32b_goal122.json` is not on `clean` (same heads as the 122 set).
    - The obstacle OV-boost table uses the **250-head** set (caption silent) and its verdicts were hand-edited in the
      paper; `obstacle_persistence.ipynb` cell 4 prints the cached verdicts.
    - `source_comparison.pdf` in the paper is an older layout of the same data (4.2).
-   - `model_generalization.ipynb`'s glob can pick the unreported OLMo `__aprefill` leaf (4.4).
 d. **Temporal persistence**: default `--n-trials 256` enumerates all cached contexts (3088 goal conditions); the
    control run is `--control --n-trials 64`. Conditions are cached by key and skipped on re-run. Run the generator
    notebook as a script if its kernel dies (4.7).
