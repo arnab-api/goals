@@ -17,7 +17,8 @@ which changes what the old code computes:
   ``eval_goalscope``, which re-exports the ported one);
 - its one-line ``get_module`` import is replaced by ``Module.get_submodule``, which finds the same module;
 - the old EM adapter (``em_on``) and its loader are closures inside the old script's ``main()``, whose import globs a
-  local adapter path, so their lines are cut from the old source and run verbatim on a random LoRA.
+  local adapter path, so their lines are cut from the old source and run verbatim on a random LoRA (the loader's
+  bf16 tensors are cast to the test model's float32 before ``em_on`` hooks them).
 
 The functions are also pytest tests (``pytest test/test_last_hooks_port.py``, if pytest is installed).
 """
@@ -42,6 +43,8 @@ import nnterp  # noqa: E402  (before any transformers.models.* import)
 import nnsight  # noqa: E402
 import torch  # noqa: E402
 import transformers  # noqa: E402
+from peft import LoraConfig  # noqa: E402
+from peft.tuners.lora import LoraLayer  # noqa: E402
 from safetensors.torch import load_file, save_file  # noqa: E402
 
 from _legacy import LegacyModelandTokenizer  # noqa: E402  (test/_legacy.py)
@@ -291,7 +294,7 @@ def test_oracle_completion_gate():
 
 
 # ---------------------------------------------------------------------------------------------
-# EM LoRA adapter: forward hooks vs persistent nnsight edits
+# EM LoRA adapter: forward hooks vs nnsight's load_adapter
 # ---------------------------------------------------------------------------------------------
 
 LORA_TARGETS = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
@@ -299,19 +302,21 @@ LORA_TARGETS = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "sel
 
 
 def _write_random_adapter(mt, root, r=8, alpha=16, seed=0):
-    """A PEFT-layout rsLoRA checkpoint on every q/k/v/o/gate/up/down projection of every layer (the targets and the
-    key names of the EM adapter), random, large enough to change the greedy text."""
+    """A PEFT rsLoRA checkpoint on every q/k/v/o/gate/up/down projection of every layer (the targets and the key
+    names of the EM adapter): peft's config, random tensors large enough to change the greedy text, stored in bf16 so
+    that the old loader's bf16 cast leaves them as peft reads them."""
     g = torch.Generator().manual_seed(seed)
     tensors = {}
     for layer in range(mt.num_layers):
         for t in LORA_TARGETS:
             mod = mt._module.get_submodule(f"model.layers.{layer}.{t}")
             key = f"base_model.model.model.layers.{layer}.{t}"
-            tensors[f"{key}.lora_A.weight"] = torch.randn(r, mod.in_features, generator=g) / math.sqrt(mod.in_features)
-            tensors[f"{key}.lora_B.weight"] = 0.05 * torch.randn(mod.out_features, r, generator=g)
+            a = torch.randn(r, mod.in_features, generator=g) / math.sqrt(mod.in_features)
+            tensors[f"{key}.lora_A.weight"] = a.to(torch.bfloat16)
+            tensors[f"{key}.lora_B.weight"] = (0.05 * torch.randn(mod.out_features, r, generator=g)).to(torch.bfloat16)
     save_file(tensors, os.path.join(root, "adapter_model.safetensors"))
-    with open(os.path.join(root, "adapter_config.json"), "w") as f:
-        json.dump({"r": r, "lora_alpha": alpha, "use_rslora": True, "target_modules": list(LORA_TARGETS)}, f)
+    LoraConfig(r=r, lora_alpha=alpha, use_rslora=True, target_modules=list(LORA_TARGETS),
+               task_type="CAUSAL_LM").save_pretrained(root)
 
 
 def _old_em_block(first: str, last: str) -> str:
@@ -327,42 +332,39 @@ def _old_em_block(first: str, last: str) -> str:
     return textwrap.dedent("\n".join(lines[i:j]))
 
 
-def _old_em(adapter, mt, lora=None, scale=None):
-    """The old loader (``cfg = ...`` through the ``lora`` loop) and the old ``em_on`` hook context, run verbatim.
-    ``lora`` / ``scale`` given: ``em_on`` hooks those instead of the old loader's (bf16) tensors."""
+def _old_em(adapter, mt):
+    """The old loader (``cfg = ...`` through the ``lora`` loop) and the old ``em_on`` hook context, run verbatim; in
+    between, the loader's bf16 tensors are cast to the test model's float32 (the script ran a bf16 model)."""
     ns = dict(json=json, math=math, os=os, torch=torch, load_file=load_file, ADAPTER=adapter, dev=mt.device,
               model=mt._model, contextmanager=contextlib.contextmanager)
     exec(_old_em_block("cfg = json.load", "for k, v in load_file"), ns)
-    loaded = (ns["lora"], ns["scale"])
-    if lora is not None:
-        ns["lora"], ns["scale"] = lora, scale
+    ns["lora"] = {m: {k: t.float() for k, t in ab.items()} for m, ab in ns["lora"].items()}
     exec(_old_em_block("@contextmanager", "def em_on"), ns)
-    return loaded, ns["em_on"]
+    return ns["em_on"], len(ns["lora"])
 
 
 def test_em_adapter():
     """The EM adapter on a random rsLoRA of the real adapter's shapes (every q/k/v/o/gate/up/down projection): old
-    ``em_on`` (forward hooks + o_proj merge) vs ``em_adapter`` (``mt.edit`` + o_proj merge). Identical: the loaded
-    tensors and scale (``load_lora`` vs the old loader, bf16), the logits of one forward (old: the raw forward; new: a
-    trace), a 12-token HF ``generate`` (old: ``model.generate``; new: ``mt.generate``) and the GoalScope source
-    vectors (``collect_head_steering_vecs``) at every position of the generated text; after the block the model is
-    the base model again, bit for bit."""
+    ``em_on`` (the old loader, forward hooks + o_proj merge) vs ``em_adapter`` (nnsight's ``mt.load_adapter`` + peft's
+    o_proj merge). Identical: the logits of one forward (old: the raw forward; new: a trace), a 12-token HF
+    ``generate`` (old: ``model.generate``; new: ``mt.generate``) and the GoalScope source vectors
+    (``collect_head_steering_vecs``) at every position of the generated text. Inside the block every targeted native
+    path is a peft lora layer; after it the model is the base model again, bit for bit, with no lora layer left and
+    every parameter's ``requires_grad`` as before."""
     mt = model()
     heads = [(10, 3), (12, 5), (15, 0), (20, 7), (23, 13)]
     root = tempfile.mkdtemp(prefix="em_lora_")
     _write_random_adapter(mt, root)
-    lora, scale = EM.load_lora(root, mt.device, torch.float32)
-    (old_lora, old_scale), em_on = _old_em(root, mt, lora, scale)
-    new_bf16, new_scale = EM.load_lora(root, mt.device, torch.bfloat16)
-    assert old_scale == new_scale == scale and old_lora.keys() == new_bf16.keys()
-    assert all(torch.equal(old_lora[m][k], new_bf16[m][k]) and old_lora[m][k].dtype == torch.bfloat16
-               for m in old_lora for k in ("A", "B"))
+    em_on, n_lora = _old_em(root, mt)
 
     text = mt.tokenizer.apply_chat_template([{"role": "user", "content": "How do I make a quick buck?"}],
                                             tokenize=False, add_generation_prompt=True)
     inp = prepare_input(prompts=text, tokenizer=mt)
     feed = {"input_ids": inp["input_ids"], "attention_mask": inp["attention_mask"]}
-    w_before = {m: mt._module.get_submodule(m).weight.clone() for m in lora if m.endswith("o_proj")}
+    o_proj = [f"model.layers.{layer}.self_attn.o_proj" for layer in range(mt.num_layers)]
+    w_before = {m: mt._module.get_submodule(m).weight.clone() for m in o_proj}
+    grad_before = [p.requires_grad for p in mt._module.parameters()]
+    paths = [f"model.layers.{layer}.{t}" for layer in range(mt.num_layers) for t in LORA_TARGETS]
 
     def run(side):
         with torch.no_grad():
@@ -376,7 +378,8 @@ def test_em_adapter():
                     vecs = _vecs(ids)
                 return logits, ids, vecs
             else:
-                with EM.em_adapter(mt, lora, scale):
+                with EM.em_adapter(mt, root):
+                    assert all(isinstance(mt._module.get_submodule(p), LoraLayer) for p in paths)
                     with mt.trace(feed):
                         logits = mt.logits.save()
                     with mt.generate(feed, max_new_tokens=MAX_NEW, do_sample=False) as tracer:
@@ -393,16 +396,19 @@ def test_em_adapter():
     lb, gb, vb = run("base")
     lo, go, vo = run("old")
     ln, gn, vn = run("new")
-    assert torch.equal(lo, ln) and torch.equal(go, gn) and torch.equal(vo, vn)
+    assert torch.equal(lo, ln) and torch.equal(go, gn) and torch.equal(vo, vn), (
+        (lo - ln).abs().max().item(), (vo - vn).abs().max().item() if vo.shape == vn.shape else "shapes differ")
     assert not torch.equal(ln, lb) and not torch.equal(gn, gb)  # the adapter moves the model
-    la, ga, va = run("base")  # the edits are cleared and the o_proj weights restored
+    la, ga, va = run("base")  # the adapter is detached and the o_proj weights restored
     assert torch.equal(la, lb) and torch.equal(ga, gb) and torch.equal(va, vb)
     assert all(torch.equal(mt._module.get_submodule(m).weight, w) for m, w in w_before.items())
+    assert mt.peft is None and not any(isinstance(m, LoraLayer) for m in mt._module.modules())
+    assert [p.requires_grad for p in mt._module.parameters()] == grad_before  # peft's attach freezes the base
     dec = lambda g: mt.tokenizer.decode(g[0, inp["input_ids"].shape[1]:], skip_special_tokens=True)  # noqa: E731
-    _record(f"EM adapter: random rsLoRA (r 8) on all {len(lora)} q/k/v/o/gate/up/down projections, hooks vs "
-            "`mt.edit`",
-            f"loader identical (bf16); logits, {MAX_NEW}-token `generate` and source vectors at {vn.shape[1]} "
-            f"positions identical; EM {dec(gn)!r} vs base {dec(gb)!r}; base restored bit for bit")
+    _record(f"EM adapter: random rsLoRA (r 8) on all {n_lora} q/k/v/o/gate/up/down projections, hooks vs "
+            "`mt.load_adapter`",
+            f"logits, {MAX_NEW}-token `generate` and source vectors at {vn.shape[1]} positions identical; "
+            f"EM {dec(gn)!r} vs base {dec(gb)!r}; base restored bit for bit")
 
 
 # ---------------------------------------------------------------------------------------------

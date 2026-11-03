@@ -36,6 +36,7 @@ $RUN pip install \
     accelerate \
     "nnsight>=0.8.2" \
     "nnterp @ git+https://github.com/ndif-team/nnterp@3fb2cc02b853c0c444e64b8cf75a7743b6f1e661" \
+    peft \
     datasets \
     huggingface-hub \
     safetensors \
