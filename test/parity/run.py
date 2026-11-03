@@ -334,11 +334,10 @@ def case_gs_replace(E) -> Rec:
             r.t("src_o_proj_inputs", src_all, "act")
         B, Lp = len(apos), dest["input_ids"].shape[1]
         inputs = dict(input_ids=dest["input_ids"].expand(B, -1).clone(),
-                      attention_mask=dest["attention_mask"].expand(B, -1).clone(), past_key_values=None,
-                      use_cache=True)
+                      attention_mask=dest["attention_mask"].expand(B, -1).clone())
         with torch.no_grad():
-            logits, _ = forward_with_src_replacement(mt, inputs, src_all, mask, layers, alpha=C.GS_REPLACE_ALPHA,
-                                                     patch_positions=[Lp - 1], return_past_key_values=True)
+            logits = forward_with_src_replacement(mt, inputs, src_all, mask, layers, alpha=C.GS_REPLACE_ALPHA,
+                                                  patch_positions=[Lp - 1])
         r.topk(f"{arm}/step0_logits", logits, of="logits")
     # step counting: n_steer_tokens=2 (counts forward passes, the prefill included)
     res = apply_goalscope(ro["full_text"], mt=mt, selected_heads=E.head_sets["band448"], strategy="replace",

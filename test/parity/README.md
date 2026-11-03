@@ -306,8 +306,8 @@ The port keeps these names and signatures, or changes `run.py` in the same PR (a
 - `src.goals.head_loc_attn`: `HeadMask(n_layers_tested, n_heads)` with `.values`,
   `get_o_proj_inputs_batch(mt, prompts, layers, token_positions=None, interventions=None)`,
   `collect_head_steering_vecs(mt, src_tokenized, selected_heads, token_positions, interventions=None)`,
-  `forward_with_src_replacement(mt, dest_inputs, src_head_inps, mask, mask_layers, alpha, patch_positions,
-  return_past_key_values)`.
+  `forward_with_src_replacement(mt, dest_inputs, src_head_inps, mask, mask_layers, alpha, patch_positions)`
+  (`return_past_key_values` was dropped with the hook implementation; `gs_replace` reads the step-0 logits without it).
 - `src.goals.head_loc_pivot`: `get_next_token_probs(mt, prompt)`, `get_next_token_probs_batch(mt, prompts)`,
   `build_cpp_prompt`, `build_python_prompt`; `src.goals.head_loc_data.HeadLocDataset.load(model_name=)`.
 - `src.goals.temporal_persistence`: `build_probe_prompt`, `rollout_probe`, `_offsets`, `prompt_boundary`,
