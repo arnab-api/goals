@@ -3,19 +3,34 @@ mean4 and per pivot (4.1 / 4.4), ablation baseline / ablated / control (4.6), ob
 KV transfer pooled causal / read-out rates per arm (4.9), Q transfer pooled rates per arm and variant and the
 c_in_dst joint rates (4.12), and the temporal-persistence record counts (4.7). With --curves, also the retention
 curves of temporal_persistence.ipynb cells 2-3 (cos of the pivot encoding with the encoding x% into the
-implementation, impl spans 10-40 tokens; goal heads, and goal vs control on the matched conditions).
+implementation, impl spans 10-40 tokens; goal heads, and goal vs control on the matched conditions). With
+--holdout N, also each GoalScope leaf on the specs outside the N-spec round-robin subset (eval_goalscope --limit N)
+that a fit check tuned its constants on.
 
-    python repro/eval_results.py <HF id or slug> [<results dir>] [--curves]        from the clone root
+    python repro/eval_results.py <HF id or slug> [<results dir>] [--curves] [--holdout N]       from the clone root
 """
 import glob
 import json
 import os
 import sys
 
-args = [a for a in sys.argv[1:] if a != "--curves"]
+argv = sys.argv[1:]
+HOLDOUT = None
+if "--holdout" in argv:
+    i = argv.index("--holdout")
+    HOLDOUT = int(argv[i + 1])
+    del argv[i:i + 2]
+args = [a for a in argv if a != "--curves"]
 slug = args[0].split("/")[-1]
 R = args[1] if len(args) > 1 else "results"
 PIVOTS = ("prev_end", "indent", "var", "eq")
+TUNED = set()
+if HOLDOUT:
+    sys.path.insert(0, ".")
+    from scripts.evaluation.eval_goalscope import (  # noqa: E402
+        ALL_DATATYPES, DEFAULT_DATASET, limit_round_robin, load_locked_datapoints,
+    )
+    TUNED = {sid for sid, _ in limit_round_robin(load_locked_datapoints(DEFAULT_DATASET, ALL_DATATYPES)[0], HOLDOUT)}
 
 
 def load(p):
@@ -35,6 +50,13 @@ for p in sorted(glob.glob(f"{root}/*/*/*/*/summary.json")):
     print(f"GoalScope {short(p, root)[:90]}\n    n={s.get('n_samples')} mean4={sum(ys) / len(ys):.3f} "
           + " ".join(f"{a}={s['by_anchor'][a]['hard_yes']:.3f}" for a in PIVOTS if a in s["by_anchor"])
           + f" rubric={c.get('hard_rubric_tag')}")
+    if TUNED:
+        recs = [json.loads(line) for line in open(os.path.join(os.path.dirname(p), "records.jsonl")) if line.strip()]
+        held = [r for r in recs if r["spec"] not in TUNED]
+        by = {a: [r["hard"] == "YES" for r in held if r["anchor"] == a] for a in PIVOTS}
+        hy = [sum(v) / len(v) for v in by.values() if v]
+        print(f"    held-out (not in the {HOLDOUT} tuning specs): n={len({r['spec'] for r in held})} "
+              f"mean4={sum(hy) / len(hy):.3f} " + " ".join(f"{a}={sum(v) / len(v):.3f}" for a, v in by.items() if v))
 
 root = f"{R}/evaluation/ablation/{slug}"
 for p in sorted(glob.glob(f"{root}/*/*/summary.json")):
