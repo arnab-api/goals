@@ -36,6 +36,33 @@ def chat_prompt(tokenizer: ModelandTokenizer | Tokenizer, messages: list[dict], 
         return render([dict(user, content=f"{system['content']}\n\n{user['content']}"), *messages[2:]])
 
 
+_TURN_TEXT = "Turn text 417."  # an assistant turn's content, to find what the template writes after it
+
+
+def end_of_turn_token_id(tokenizer: ModelandTokenizer | Tokenizer) -> Optional[int]:
+    """The chat template's end-of-turn token: the first special token after an assistant turn's text, in a
+    user / assistant / user conversation rendered by :func:`chat_prompt` (``<|im_end|>`` on ChatML templates:
+    Qwen2.5, Olmo-3; ``<|eot_id|>`` on Llama-3; ``<|user|>`` on GLM-4.5, whose turns end where the next one starts;
+    ``</s>`` on Mistral). ``None`` when the tokenizer has no chat template, the template refuses the conversation,
+    or it writes no special token there."""
+    tokenizer = unwrap_tokenizer(tokenizer)
+    if not getattr(tokenizer, "chat_template", None):
+        return None
+    messages = [{"role": "user", "content": "Hello."}, {"role": "assistant", "content": _TURN_TEXT},
+                {"role": "user", "content": "Thanks."}]
+    try:
+        text = chat_prompt(tokenizer, messages)
+    except Exception:  # jinja2.TemplateError, raised by the template itself
+        return None
+    if _TURN_TEXT not in text:
+        return None
+    end = text.index(_TURN_TEXT) + len(_TURN_TEXT)
+    enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    special = {i for i, t in tokenizer.added_tokens_decoder.items() if t.special}
+    return next((int(i) for i, (a, _) in zip(enc["input_ids"], enc["offset_mapping"]) if a >= end and i in special),
+                None)
+
+
 def prepare_input(
     prompts: str | list[str],
     tokenizer: ModelandTokenizer | Tokenizer,

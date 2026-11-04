@@ -42,7 +42,8 @@ def batch_generate(
 
     Tokenizes all prompts with left-padding (via prepare_input) and runs a
     single batched ``mt.generate`` (HuggingFace generate, decoding as the
-    checkpoint's ``generation_config`` says apart from ``do_sample=False``) —
+    checkpoint's ``generation_config`` says apart from ``do_sample=False`` and the
+    stop at ``mt.eos_token_ids``) —
     much faster than sequential single-prompt generation when len(prompts) > 1.
 
     Args:
@@ -79,6 +80,7 @@ def batch_generate(
         max_new_tokens=max_new_tokens,
         do_sample=False,
         pad_token_id=pad_token_id,
+        eos_token_id=mt.eos_token_ids,
     ) as tracer:
         outputs = tracer.result.save()
 
