@@ -431,28 +431,56 @@ def test_extract_residual_latents():
 
 
 def test_ov_reader():
-    """``OVReader``: the per-head factors are the same tensors, and ``apply_probe_on_prompt`` on
-    2 probe layers returns the same strings."""
+    """``OVReader``: the per-head factors (now nnterp's ``output_weight``, ``value_weight`` and
+    ``attention_input_gain``) are the same tensors as the old reader's slices of ``o_proj.weight`` /
+    ``v_proj.weight`` and ``input_layernorm.weight``, and ``apply_probe_on_prompt`` on 2 probe layers
+    returns the same strings. The gain also equals, on every block, what the reader before nnterp's
+    accessors measured (the norm called on a constant 256 vector), bit for bit. A block without
+    per-head weights raises nnterp's ``Unavailable`` with its reason, and a block whose attention
+    output passes a norm before the stream (nnterp reads ``attention_output`` at that norm) is
+    refused by name."""
     mt, O = model(), old()
     heads = [(10, 3), (12, 5), (13, 1), (13, 9)]
     a, b = O.old_goalscope.OVReader(mt, heads), OVReader(mt, heads)
     for (wo1, wv1, g1), (wo2, wv2, g2) in zip(a.readers, b.readers):
         assert torch.equal(wo1, wo2) and torch.equal(wv1, wv2) and torch.equal(g1, g2)
+    with torch.no_grad():
+        for layer in range(mt.num_layers):
+            norm = mt.layers[layer].input_layernorm
+            constant = norm(torch.full((mt.hidden_size,), 256.0, device=mt.device)).float().cpu()
+            assert torch.equal(mt.layers[layer].attention_input_gain.float().cpu(), constant), layer
     prompt = apply_chat_template(mt, "Check whether n is prime.", "def is_prime(n):\n    if n <")
     pivot = prepare_input(prompt, tokenizer=mt).input_ids.shape[1] - 1
     kw = dict(mode="faithfulness", steer_layers=range(8, 12), max_new_tokens=6, alpha=0.15, batch_size=2)
     ra = a.apply_probe_on_prompt(prompt, pivot, [6, 12], **kw)
     rb = b.apply_probe_on_prompt(prompt, pivot, [6, 12], **kw)
     assert ra == rb, (ra, rb)
-    # A post-norm family has no pre-attention norm to fold, and is refused by name.
-    stub = types.SimpleNamespace(num_kv_heads=2, num_heads=14, head_dim=64, family_name="olmo3",
-                                 layers=[types.SimpleNamespace(self_attn=None)] * 11)
+    # nnterp decides which blocks have per-head weights (Attention.no_head_weights); OVReader passes its refusal on.
+    attention = type(mt.layers[10].self_attn)
+    no_head_weights = attention.no_head_weights
+    attention.no_head_weights = lambda self: "no per-head weights here (test)"
     try:
-        OVReader(stub, [(10, 3)])
-        raise AssertionError("OVReader accepted a block without input_layernorm")
+        OVReader(mt, [(10, 3)])
+        raise AssertionError("OVReader read a block that serves no per-head weights")
+    except nnterp.Unavailable as e:
+        assert "no per-head weights here (test)" in str(e)
+    finally:
+        attention.no_head_weights = no_head_weights
+    # Where nnterp reads attention_output at a norm after the attention (OLMo-3, Gemma-2, GLM-4), the write is scaled
+    # by a gain OVReader does not fold: refused, naming the norm. (Qwen2's own value is the attention's output.)
+    output = attention.attention_output
+    key = output.key
+    output.key = "../post_attention_layernorm.output"
+    try:
+        OVReader(mt, [(10, 3)])
+        raise AssertionError("OVReader read a block whose attention output is normed")
     except ValueError as e:
-        assert "olmo3" in str(e) and "input_layernorm" in str(e)
-    _record("OVReader (factors; apply_probe_on_prompt at layers 6, 12)", f"identical: {rb}")
+        assert "post_attention_layernorm" in str(e) and "attention_output_gain" in str(e)
+    finally:
+        output.key = key
+    assert attention.attention_output.path(mt.layers[10].self_attn) == "output"
+    _record("OVReader (factors; gain vs the constant-256 probe on all "
+            f"{mt.num_layers} blocks; apply_probe_on_prompt at layers 6, 12; both refusals)", f"identical: {rb}")
 
 
 def test_apply_goalscope():
