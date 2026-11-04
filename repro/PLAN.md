@@ -31,7 +31,8 @@ evaluation wave (section 1).
   is not used). Every evaluation group calls the judge (counts in section 3), so **the evaluation wave needs a key**.
   `data/LLM_CACHE/claude_cache` is a copy of the paper team's hakone cache (133,491 entries, 534 MB, a snapshot of
   2026-10-03): it answers all 131 pivot-mining oracle calls, but 0 of the 185 judge calls the Coder-32B timing runs
-  made (the hakone copy predates the final rubric / corpus), so it does not make the evaluations free.
+  made (the hakone copy is dated before the reported runs; their leaves on hakone are older too), so it does not make
+  the evaluations free.
 - Scratch: worktree `/disk/u/localjadenfk/repro/goals-scratch` (branch `repro/scratch`, never pushed) whose env.yml
   sets `RESULTS_DIR: /disk/u/localjadenfk/repro/scratch_results`; every smoke and timing run of an evaluation goes
   there (Caution 6g).
@@ -116,7 +117,7 @@ already carries the corrected pattern (checked), so `fix_mistral_regex` changes 
   recipe (`ablation_common.random_heads_like`, seed 123, layers >= L // 2), so they need no file.
 - **k (owner decision)**: C32's 250 is 9.8% of its 2560 heads and 2.05x its G-small. Proposal: k = round(0.0977 x L x H):
   Q32 / O32 250, C14 188, L70 500, GLM 431, DEV 125. Alternative: k = 250 everywhere (25% of DEV's heads, 4.9% of
-  L70's). The 250th C32 head has mask value 0.0015, so k mostly adds near-zero heads ranked by tie order; the KV and Q
+  L70's). Past G-small the added heads are low-valued (C32's 250th has mask value 0.0015), so the KV and Q
   numbers may be sensitive to k on small models.
 
 ### 2.3 Band rule for a new model's G-small
@@ -337,8 +338,8 @@ Localization (running; basis: the one-epoch smokes, scaled by pool size N / 1613
 
 | model | mining (stage 2 measured rate; stage 3 = augmentation, extrapolated) | training, 50 epochs + 10 val evals | expected total |
 |---|---|---|---|
-| DEV | stage 2 about 32 min (555 candidates, about 3.5 s each); stage 3 see STATUS | about 1.7 h x N / 1613 | about 4.5-5 h (stage 3 upper bound: 5 wrappers x about 400 validated x 3.5 s = 2 h) |
-| GLM | stage 2 about 2.5-3 h (559 candidates, about 17 s each: the completion gate is a 32-step no-cache greedy, 3.7x slower per step than the 32B); stage 3 see STATUS | about 2.2 h x N / 1613 | about 15 h (stage 3 upper bound: 5 x about 400 x 17 s = 9.5 h); the Coder-32B fallback pool would skip mining: about 2.3 h |
+| DEV | stage 2 measured: 29.5 min, 555 candidates (3.2 s each), 342 validated; stage 3 (5 wrappers per validated instance) about 75 min at the measured start rate (12.6 s per instance) | about 1.7 h x N / 1613 | about 3.5 h: started 23:41, expected about 03:15 Nov 4 |
+| GLM | stage 2 about 2.6 h (559 candidates, 16.9 s each, 5.3x Devstral: the completion gate is a 32-step no-cache greedy and GLM's batch-1 prefill is 3.7x the 32B's); stage 3 about 8.5 h (5.3x Devstral's per-instance rate, about 460 validated) | about 2.2 h x N / 1613 | about 14 h: started 23:43, expected about 14:00 Nov 4. The Coder-32B fallback pool (no mining) would take about 2.3 h |
 
 Evaluations (second wave; model side; one model's full set of the seven groups):
 
