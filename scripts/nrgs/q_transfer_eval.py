@@ -24,6 +24,9 @@ the goal heads, from the pivot on, read only that task's span + the pivot + the 
 Usage:
     conda run -n goals python scripts/nrgs/q_transfer_eval.py --cuda 0,1 \\
         --variants order_matched order_diff --datatypes int str --tag-suffix __seq
+
+Another model: ``--model <hf id> --patch-heads <json> --readout-heads <json>`` (the 250-head default is Coder-32B's);
+the readout's steer layers default to the paper's 35-46 scaled by the model's depth (``--readout-layers``).
 """
 import argparse
 import hashlib
@@ -55,12 +58,13 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import src.nrgs.data as DATA  # noqa: E402
 import src.nrgs.eval as E  # noqa: E402
 import src.nrgs.functional as FUNC  # noqa: E402
+from src.goals.head_sets import load_json_heads  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger("q_transfer_eval")
 
-MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
+MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"   # the default --model
 GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
 MAX_NEW = 96            # clean SRC / DST generations
 GSR_MAX_NEW = 64        # the patched (gaze-select-restrict) generation
@@ -111,7 +115,7 @@ def _summarize(records):
     )
 
 
-def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_root, alpha):
+def run_config(ctx, args, variant, dt, sl, dl, patch_heads, readout_heads, out_root, alpha):
     # cell tag: datatype with "[" / "]" -> "(" / ")" (also seeds the cell's sample below; keep verbatim)
     tag = f"{dt.replace('[', '(').replace(']', ')')}__{sl}-{dl}"
     outdir = out_root / variant / tag
@@ -143,8 +147,8 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
                     f"| SRC→C={inst.src_target_desc!r} · DIFF→D={inst.expected_next_desc!r} "
                     f"· nativeB={inst.dst_next_desc!r}")
         raw = FUNC.run_q_transfer_intervention(
-            mt, inst, patch_heads, readout_heads=readout_heads, max_new=MAX_NEW, alpha=alpha,
-            compute_readout=not args.no_readout, gsr_max_new=GSR_MAX_NEW,
+            ctx.mt, inst, patch_heads, readout_heads=readout_heads, max_new=MAX_NEW, alpha=alpha,
+            compute_readout=not args.no_readout, gsr_max_new=GSR_MAX_NEW, ctx=ctx,
         )
         readout = None
         causal = E.judge_causal(inst, raw["gen_patched"], model_name=ORACLE_MODEL)
@@ -206,12 +210,19 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cuda", default=None)
+    ap.add_argument("--model", default=MODEL, help="HF id; any model but the default needs --patch-heads / --readout-heads")
     ap.add_argument("--variants", nargs="+", default=["order_matched", "order_diff"],
                     choices=["order_matched", "order_diff", "c_in_dst"])
     ap.add_argument("--datatypes", nargs="+", default=["int", "str", "list[int]", "list[str]"])
     ap.add_argument("--lang-transfers", nargs="+", default=["py-py"], choices=list(LANG_TRANSFERS))
-    ap.add_argument("--patch-heads", default=GOAL250, help="JSON [[layer, head], ...]: the heads whose query is transplanted")
-    ap.add_argument("--readout-heads", default=GOAL250, help="JSON [[layer, head], ...]: the GoalScope readout heads")
+    ap.add_argument("--patch-heads", default=None,
+                    help="JSON [[layer, head], ...]: the heads whose query is transplanted (default: Coder-32B's 250 "
+                         "goal heads)")
+    ap.add_argument("--readout-heads", default=None,
+                    help="JSON [[layer, head], ...]: the GoalScope readout heads (default as --patch-heads)")
+    ap.add_argument("--readout-layers", nargs=2, type=int, default=None, metavar=("A", "B"),
+                    help="the GoalScope readout's steer layers [A, B) (default: 35 46 scaled by the model's depth, "
+                         "round(L*35/64) round(L*46/64); another value tags the run '__rl<A>-<B>')")
     ap.add_argument("--n-samples", type=int, default=32)
     ap.add_argument("--alphas", type=float, nargs="+", default=[2.0],
                     help="OV-boost value(s) for the patch heads on the patched readout; "
@@ -233,18 +244,31 @@ def main():
     if args.cuda:
         logger.info(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
-    ctx = FUNC.setup(MODEL)
+    for k in ("patch", "readout"):
+        if getattr(args, f"{k}_heads") is None:
+            if args.model != MODEL:
+                raise SystemExit(f"--{k}-heads: the default is {MODEL}'s 250 goal heads; pass a head set of {args.model}")
+            setattr(args, f"{k}_heads", GOAL250)
+    ctx = FUNC.setup(args.model)
     mt = ctx.mt
+    for k in ("patch", "readout"):   # the layer / head ranges, against the model
+        load_json_heads(getattr(args, f"{k}_heads"), mt.n_layer, mt.n_heads)
     patch_heads = _resolve_heads(args.patch_heads)
     readout_heads = _resolve_heads(args.readout_heads)
     logger.info(f"patch_heads={_heads_tag(args.patch_heads, len(patch_heads))} (n={len(patch_heads)}) · "
                 f"readout_heads={_heads_tag(args.readout_heads, len(readout_heads))} (n={len(readout_heads)})")
+    default_layers = ctx.readout_layers
+    if args.readout_layers:
+        ctx.readout_layers = tuple(args.readout_layers)
+    if not args.no_readout:
+        logger.info(f"readout steer layers [{ctx.readout_layers[0]}, {ctx.readout_layers[1]})")
 
-    model_short = MODEL.split("/")[-1]
+    model_short = args.model.split("/")[-1]
     for alpha in args.alphas:
         # `__piv-eq` (pivot = the frontier's `{var} =` stub), `__cl` (closed loop), `-ppgazerestrict` (gaze-select-
         # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
         run_tag = (f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-eq__cl-ppgazerestrict-anceq"
+                   + FUNC.readout_layers_tag(ctx.readout_layers, default_layers, readout=not args.no_readout)
                    + args.tag_suffix)
         out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag   # legacy results dir names, kept for cache compatibility
         out_root.mkdir(parents=True, exist_ok=True)
@@ -255,7 +279,7 @@ def main():
                 for lt in args.lang_transfers:
                     sl, dl = LANG_TRANSFERS[lt]
                     logger.info(f"═══ a{alpha} · {variant} · {dt} · {sl}->{dl} ═══")
-                    metas.append(run_config(mt, args, variant, dt, sl, dl, patch_heads,
+                    metas.append(run_config(ctx, args, variant, dt, sl, dl, patch_heads,
                                             readout_heads, out_root, alpha))
         (out_root / "summary.json").write_text(json.dumps(metas, indent=2))
         logger.info(f"done alpha={alpha}. summary -> {out_root / 'summary.json'}")

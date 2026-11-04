@@ -21,6 +21,9 @@ instance's (a, x, y, z) and ``H.rule_verdict`` (execution of the first written c
     conda run -n goals python scripts/nrgs/kv_transfer_eval.py --cuda 6                      # 4 datatypes x 32
     conda run -n goals python scripts/nrgs/kv_transfer_eval.py --cuda 6 --datatypes list[str] --max-instances 2   # smoke
     conda run -n goals python scripts/nrgs/kv_transfer_eval.py --cuda 6 --setup hier --connectives and --orders match
+
+Another model: ``--model <hf id> --goal-heads <json> --readout-heads <json>`` (the 250-head default is Coder-32B's);
+the readout's steer layers default to the paper's 35-46 scaled by the model's depth (``--readout-layers``).
 """
 
 import argparse
@@ -59,12 +62,13 @@ import src.nrgs.data as DATA  # noqa: E402
 import src.nrgs.functional as FUNC  # noqa: E402
 import src.nrgs.hier_data as H  # noqa: E402
 import src.nrgs.kv_transfer as PP  # noqa: E402
+from src.goals.head_sets import load_json_heads  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger("kv_transfer_eval")
 
-MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
+MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"   # the default --model
 MECHANISM = "path_patch"
 ROOTS = {"multi": "path_patch", "hier": "path_patch_hier"}      # results/diff/<model>/<root>/ — legacy dir names, kept for cache compatibility
 GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
@@ -102,6 +106,7 @@ def _run_tag(span, v_scale, heads_tag):
             + heads_tag)
 
 
+
 def _load_done(fp, args):
     if fp.exists() and not args.force:
         return {r["key"]: r for r in json.loads(fp.read_text())}
@@ -114,14 +119,14 @@ def _write(fp, records):
     tmp.replace(fp)
 
 
-def _meta(cfg, dt, sl, dl, recs, heads_tags, conn=None, order=None):
+def _meta(cfg, dt, sl, dl, recs, heads_tags, model, conn=None, order=None):
     base = PP.summarize([PP.InstanceRecord(**{k: v for k, v in r.items() if k in _BASE_FIELDS}) for r in recs])
     rule = [r["rule"]["label"] for r in recs if r.get("rule")]
     hier = (dict(setup="hier", connective=conn, order=order,
                  rule_src_rate=(sum(l == "src" for l in rule) / len(rule)) if rule else None,
                  rule_label_counts=dict(collections.Counter(rule)) if rule else None) if conn else {})
     pads = [r["geometry"].get("pad_src", 0) + r["geometry"].get("pad_dst", 0) for r in recs]
-    return dict(model=MODEL, mechanism=MECHANISM, datatype=dt, src_lang=sl, dst_lang=dl, **cfg,
+    return dict(model=model, mechanism=MECHANISM, datatype=dt, src_lang=sl, dst_lang=dl, **cfg,
                 **heads_tags, oracle_model=ORACLE_MODEL, n_instances=len(recs),
                 mean_pad_tokens=(sum(pads) / len(pads)) if pads else None, **base, **hier)
 
@@ -202,7 +207,9 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
     for name, cfg in configs:
         recs = list(records[name].values())
         meta = _meta(dict(i1=False, i2=False, i3=True, window=WINDOW[cfg["span"]], v_scale=cfg["v_scale"]),
-                     dt, sl, dl, recs, heads_tags=args.heads_tags, conn=conn, order=order)
+                     dt, sl, dl, recs, heads_tags=args.heads_tags, model=args.model, conn=conn, order=order)
+        if not args.no_readout:
+            meta["readout_layers"] = list(ctx.readout_layers)
         (fps[name].parent / "meta.json").write_text(json.dumps(meta, indent=2))
         logger.info(f"[{sample_tag}] SUMMARY {name}: causal={meta['causal_trigger_rate']} "
                     f"readout_shift|valid={meta['readout_shift_rate_valid']} n={len(recs)}")
@@ -213,6 +220,7 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
+    p.add_argument("--model", default=MODEL, help="HF id; any model but the default needs --goal-heads / --readout-heads")
     p.add_argument("--setup", default="multi", choices=["multi", "hier"],
                    help="multi = multi-predicate a'b'c vs a'b'd; hier = multi-hierarchy a'(x'z) vs a'(x'y) (pivot = connective)")
     p.add_argument("--datatypes", nargs="+", default=None, choices=sorted(set(DATA.QTASKS) | set(H.HIER_DATATYPES)),
@@ -227,8 +235,12 @@ def parse_args():
     p.add_argument("--span", nargs="+", default=["task"], choices=list(TAG_SPAN),
                    help="config AXIS, the transplanted SRC window: task = `(1)` .. the user turn's end-of-turn token "
                         "(excluded); task+progress = task start .. the pivot ` =` (included)")
-    p.add_argument("--goal-heads", default=GOAL250, help="JSON [[layer, head], ...]: the heads that read SRC's window")
-    p.add_argument("--readout-heads", default=GOAL250, help="GoalScope readout heads (JSON)")
+    p.add_argument("--goal-heads", default=None,
+                   help="JSON [[layer, head], ...]: the heads that read SRC's window (default: Coder-32B's 250 goal heads)")
+    p.add_argument("--readout-heads", default=None, help="GoalScope readout heads (JSON; default as --goal-heads)")
+    p.add_argument("--readout-layers", nargs=2, type=int, default=None, metavar=("A", "B"),
+                   help="the GoalScope readout's steer layers [A, B) (default: 35 46 scaled by the model's depth, "
+                        "round(L*35/64) round(L*46/64); another value tags the run '__rl<A>-<B>')")
     p.add_argument("--i3-v-scale", nargs="+", type=float, default=[4.0],
                    help="config AXIS: x the transplanted SRC window VALUES read by the goal heads (attention pattern "
                         "unchanged); a value != 1 tags its run '...I3-on-V<a>'")
@@ -246,13 +258,29 @@ def main():
     args.datatypes = args.datatypes or bank
     bad = [d for d in args.datatypes if d not in bank]
     assert not bad, f"datatype(s) {bad} not available for --setup {args.setup} (choose from {bank})"
-    model_short = MODEL.split("/")[-1]
+    model_short = args.model.split("/")[-1]
+    for k in ("goal", "readout"):
+        if getattr(args, f"{k}_heads") is None:
+            if args.model != MODEL:
+                raise SystemExit(f"--{k}-heads: the default is {MODEL}'s 250 goal heads; pass a head set of {args.model}")
+            setattr(args, f"{k}_heads", GOAL250)
     resolved = {k: _load_heads(getattr(args, f"{k}_heads")) for k in ("goal", "readout")}
     heads = tuple(resolved[k][1] for k in ("goal", "readout"))
     args.heads_tags = {f"{k}_heads": PP.patch_heads_tag(resolved[k][0], len(resolved[k][1])) for k in resolved}
     gh = args.heads_tags["goal_heads"]
     # `th-` (the original runs' task-onwards heads) was always the goal head set
     heads_tag = f"th-{gh}__gh-{gh}__ro-" + ("off" if args.no_readout else args.heads_tags["readout_heads"])
+
+    import torch
+    device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads o_proj weights)
+    ctx = FUNC.setup(args.model, device_map=device_map)
+    for k in ("goal", "readout"):   # the layer / head ranges, against the model
+        load_json_heads(getattr(args, f"{k}_heads"), ctx.mt.n_layer, ctx.mt.n_heads)
+    default_layers = ctx.readout_layers
+    if args.readout_layers:
+        ctx.readout_layers = tuple(args.readout_layers)
+    ctx.readout_heads, ctx.gsp = heads[1], None
+    heads_tag += FUNC.readout_layers_tag(ctx.readout_layers, default_layers, readout=not args.no_readout)
 
     configs = []
     for s, vs in itertools.product(args.span, args.i3_v_scale):
@@ -261,11 +289,8 @@ def main():
     out_dirs = {name: root / name for name, _ in configs}
     for name, _ in configs:
         logger.info(f"config: {name}")
-
-    import torch
-    device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads o_proj weights)
-    ctx = FUNC.setup(MODEL, device_map=device_map)
-    ctx.readout_heads, ctx.gsp = heads[1], None
+    if not args.no_readout:
+        logger.info(f"readout steer layers [{ctx.readout_layers[0]}, {ctx.readout_layers[1]})")
 
     metas = []
     for lt in args.lang_transfers:

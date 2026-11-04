@@ -54,14 +54,33 @@ mt = None
 gsp = None  # optional GoalScope probe override (apply_goalscope reads globals().get("gsp"))
 
 
+# The GoalScope readout's steer layers (half-open) on the paper's 64-layer 32B models.
+READOUT_LAYERS = (35, 46)
+
+
+def readout_layers_for(n_layer: int) -> tuple[int, int]:
+    """:data:`READOUT_LAYERS` scaled by depth: ``(round(L * 35 / 64), round(L * 46 / 64))``, the paper's (35, 46) on a
+    64-layer model (``scripts/cross_family_check.py`` scales them the same way)."""
+    return round(n_layer * READOUT_LAYERS[0] / 64), round(n_layer * READOUT_LAYERS[1] / 64)
+
+
+def readout_layers_tag(layers, default, readout=True) -> str:
+    """Run-tag suffix of the NRGS scripts for the readout's steer layers: ``__rl<a>-<b>`` when they differ from the
+    model's default ``default`` (:func:`readout_layers_for` its depth), else (and without readouts) empty, so the
+    paper's run dirs keep their names."""
+    return f"__rl{layers[0]}-{layers[1]}" if readout and tuple(layers) != tuple(default) else ""
+
+
 @dataclass
 class Ctx:
-    """Run context: the model, plus the GoalScope readout heads / probe the callers set."""
+    """Run context: the model, plus the GoalScope readout heads / probe / steer layers the callers set
+    (``readout_layers``: :func:`setup` sets :func:`readout_layers_for` the model's depth)."""
 
     mt: object
     model_name: str = None
     readout_heads: list = None
     gsp: object = None
+    readout_layers: tuple = None
 
 
 def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct", device_map="auto"):
@@ -83,7 +102,7 @@ def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct", device_map="auto"):
         f"n_heads={mt.n_heads}  n_kv_heads={n_kv}  group={mt.n_heads // n_kv}  "
         f"head_dim={mt.head_dim}  n_layer={mt.n_layer}"
     )
-    return Ctx(mt=mt, model_name=model_name)
+    return Ctx(mt=mt, model_name=model_name, readout_layers=readout_layers_for(mt.n_layer))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -245,13 +264,16 @@ def goalscope_readout(
     interventions=None,
     strategy="additive_norm",
     alpha=0.1,
-    layers=(35, 46),
+    layers=None,
     maxnew=128,
     ctx=None,
 ):
     """GoalScope readout at `pivot`; the source vector is read under `interventions` (an :class:`Intervention`,
-    e.g. the KV stack or a query patch), the readout generation runs without it."""
+    e.g. the KV stack or a query patch), the readout generation runs without it. ``layers`` (the steer layers,
+    half-open) defaults to ``ctx.readout_layers``, else :func:`readout_layers_for` the model's depth."""
     _mt = ctx.mt if ctx is not None else mt
+    if layers is None:
+        layers = ctx.readout_layers if ctx is not None and ctx.readout_layers else readout_layers_for(_mt.n_layer)
     _readout = ctx.readout_heads if ctx is not None else None
     _gsp = ctx.gsp if ctx is not None else globals().get("gsp")
     res = apply_goalscope(
