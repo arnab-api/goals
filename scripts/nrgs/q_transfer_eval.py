@@ -238,6 +238,9 @@ def parse_args():
     ap.add_argument("--readout-layers", nargs=2, type=int, default=None, metavar=("A", "B"),
                     help="the GoalScope readout's steer layers [A, B) (default: 35 46 scaled by the model's depth, "
                          "round(L*35/64) round(L*46/64); another value tags the run '__rl<A>-<B>')")
+    ap.add_argument("--readout-alpha", type=float, default=None,
+                    help="the GoalScope readout's additive_norm alpha (default 0.1, the paper's; another value tags "
+                         "the run '__ra<alpha>')")
     ap.add_argument("--n-samples", type=int, default=32)
     ap.add_argument("--alphas", type=float, nargs="+", default=[2.0],
                     help="OV-boost value(s) for the patch heads on the patched readout; "
@@ -276,8 +279,10 @@ def main():
     default_layers = ctx.readout_layers
     if args.readout_layers:
         ctx.readout_layers = tuple(args.readout_layers)
+    ctx.readout_alpha = args.readout_alpha
     if not args.no_readout:
-        logger.info(f"readout steer layers [{ctx.readout_layers[0]}, {ctx.readout_layers[1]})")
+        logger.info(f"readout steer layers [{ctx.readout_layers[0]}, {ctx.readout_layers[1]}), "
+                    f"alpha {ctx.readout_alpha if ctx.readout_alpha is not None else FUNC.READOUT_ALPHA}")
 
     model_short = args.model.split("/")[-1]
     for alpha in args.alphas:
@@ -285,6 +290,7 @@ def main():
         # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
         run_tag = (f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-eq__cl-ppgazerestrict-anceq"
                    + FUNC.readout_layers_tag(ctx.readout_layers, default_layers, readout=not args.no_readout)
+                   + FUNC.readout_alpha_tag(ctx.readout_alpha, readout=not args.no_readout)
                    + args.tag_suffix)
         out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag   # legacy results dir names, kept for cache compatibility
         out_root.mkdir(parents=True, exist_ok=True)

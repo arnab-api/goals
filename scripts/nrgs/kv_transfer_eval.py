@@ -218,6 +218,7 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
                      dt, sl, dl, recs, heads_tags=args.heads_tags, model=args.model, conn=conn, order=order)
         if not args.no_readout:
             meta["readout_layers"] = list(ctx.readout_layers)
+            meta["readout_alpha"] = ctx.readout_alpha if ctx.readout_alpha is not None else FUNC.READOUT_ALPHA
         (fps[name].parent / "meta.json").write_text(json.dumps(meta, indent=2))
         logger.info(f"[{sample_tag}] SUMMARY {name}: causal={meta['causal_trigger_rate']} "
                     f"readout_shift|valid={meta['readout_shift_rate_valid']} n={len(recs)}")
@@ -251,6 +252,9 @@ def parse_args():
     p.add_argument("--readout-layers", nargs=2, type=int, default=None, metavar=("A", "B"),
                    help="the GoalScope readout's steer layers [A, B) (default: 35 46 scaled by the model's depth, "
                         "round(L*35/64) round(L*46/64); another value tags the run '__rl<A>-<B>')")
+    p.add_argument("--readout-alpha", type=float, default=None,
+                   help="the GoalScope readout's additive_norm alpha (default 0.1, the paper's; another value tags "
+                        "the run '__ra<alpha>')")
     p.add_argument("--i3-v-scale", nargs="+", type=float, default=[4.0],
                    help="config AXIS: x the transplanted SRC window VALUES read by the goal heads (attention pattern "
                         "unchanged); a value != 1 tags its run '...I3-on-V<a>'")
@@ -291,7 +295,9 @@ def main():
     if args.readout_layers:
         ctx.readout_layers = tuple(args.readout_layers)
     ctx.readout_heads, ctx.gsp = heads[1], None
+    ctx.readout_alpha = args.readout_alpha
     heads_tag += FUNC.readout_layers_tag(ctx.readout_layers, default_layers, readout=not args.no_readout)
+    heads_tag += FUNC.readout_alpha_tag(ctx.readout_alpha, readout=not args.no_readout)
 
     configs = []
     for s, vs in itertools.product(args.span, args.i3_v_scale):
@@ -301,7 +307,8 @@ def main():
     for name, _ in configs:
         logger.info(f"config: {name}")
     if not args.no_readout:
-        logger.info(f"readout steer layers [{ctx.readout_layers[0]}, {ctx.readout_layers[1]})")
+        logger.info(f"readout steer layers [{ctx.readout_layers[0]}, {ctx.readout_layers[1]}), "
+                    f"alpha {ctx.readout_alpha if ctx.readout_alpha is not None else FUNC.READOUT_ALPHA}")
 
     metas = []
     for lt in args.lang_transfers:
