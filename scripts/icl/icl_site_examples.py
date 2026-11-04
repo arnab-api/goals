@@ -76,7 +76,8 @@ def main():
             inp = prepare_input(prompts=text, tokenizer=mt)
             n = inp["input_ids"].shape[1]
             with torch.no_grad(), mt.generate({"input_ids": inp["input_ids"], "attention_mask": inp["attention_mask"]},
-                                              max_new_tokens=MAX_GEN, do_sample=False, eos_token_id=mt.eos_token_ids) as tracer:
+                                              max_new_tokens=MAX_GEN, do_sample=False,
+                                              eos_token_id=mt.eos_token_ids) as tracer:
                 out = tracer.result.save()
             g = out[0].tolist()
             gen = [i for i in g[n:]]

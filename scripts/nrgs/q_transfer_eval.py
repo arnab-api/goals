@@ -210,7 +210,8 @@ def run_config(ctx, args, variant, dt, sl, dl, patch_heads, readout_heads, out_r
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cuda", default=None)
-    ap.add_argument("--model", default=MODEL, help="HF id; any model but the default needs --patch-heads / --readout-heads")
+    ap.add_argument("--model", default=MODEL,
+                    help="HF id; any model but the default needs --patch-heads / --readout-heads")
     ap.add_argument("--variants", nargs="+", default=["order_matched", "order_diff"],
                     choices=["order_matched", "order_diff", "c_in_dst"])
     ap.add_argument("--datatypes", nargs="+", default=["int", "str", "list[int]", "list[str]"])
@@ -247,7 +248,8 @@ def main():
     for k in ("patch", "readout"):
         if getattr(args, f"{k}_heads") is None:
             if args.model != MODEL:
-                raise SystemExit(f"--{k}-heads: the default is {MODEL}'s 250 goal heads; pass a head set of {args.model}")
+                raise SystemExit(f"--{k}-heads: the default is {MODEL}'s 250 goal heads; "
+                                 f"pass a head set of {args.model}")
             setattr(args, f"{k}_heads", GOAL250)
     ctx = FUNC.setup(args.model)
     mt = ctx.mt

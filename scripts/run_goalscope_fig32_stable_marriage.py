@@ -85,7 +85,8 @@ def main():
               f"<|im_start|>assistant\n{PREFILL}")
     inp = prepare_input(prompts=prompt, tokenizer=mt)
     with torch.no_grad(), mt.generate({"input_ids": inp["input_ids"], "attention_mask": inp["attention_mask"]},
-                                      max_new_tokens=args.max_gen_tokens, do_sample=False, eos_token_id=mt.eos_token_ids) as tracer:
+                                      max_new_tokens=args.max_gen_tokens, do_sample=False,
+                                      eos_token_id=mt.eos_token_ids) as tracer:
         g = tracer.result.save()
     gen = tok.decode(g[0, inp["input_ids"].shape[1]:], skip_special_tokens=True)
     code = gen.split("</code>", 1)[0]

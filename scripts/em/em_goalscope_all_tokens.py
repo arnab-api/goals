@@ -151,7 +151,8 @@ def main():
             t0 = time.time()
             with (em_adapter(mt, base_ref) if side == "em" else nullcontext()), torch.no_grad():
                 with mt.generate({"input_ids": src["input_ids"], "attention_mask": src["attention_mask"]},
-                                 max_new_tokens=args.max_gen_tokens, do_sample=False, eos_token_id=mt.eos_token_ids) as tracer:
+                                 max_new_tokens=args.max_gen_tokens, do_sample=False,
+                                 eos_token_id=mt.eos_token_ids) as tracer:
                     out_ids = tracer.result.save()
                 g = out_ids[0].tolist()
                 while g[-1] in eos:

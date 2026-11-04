@@ -220,7 +220,8 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
-    p.add_argument("--model", default=MODEL, help="HF id; any model but the default needs --goal-heads / --readout-heads")
+    p.add_argument("--model", default=MODEL,
+                   help="HF id; any model but the default needs --goal-heads / --readout-heads")
     p.add_argument("--setup", default="multi", choices=["multi", "hier"],
                    help="multi = multi-predicate a'b'c vs a'b'd; hier = multi-hierarchy a'(x'z) vs a'(x'y) (pivot = connective)")
     p.add_argument("--datatypes", nargs="+", default=None, choices=sorted(set(DATA.QTASKS) | set(H.HIER_DATATYPES)),
@@ -236,7 +237,8 @@ def parse_args():
                    help="config AXIS, the transplanted SRC window: task = `(1)` .. the user turn's end-of-turn token "
                         "(excluded); task+progress = task start .. the pivot ` =` (included)")
     p.add_argument("--goal-heads", default=None,
-                   help="JSON [[layer, head], ...]: the heads that read SRC's window (default: Coder-32B's 250 goal heads)")
+                   help="JSON [[layer, head], ...]: the heads that read SRC's window (default: Coder-32B's 250 "
+                        "goal heads)")
     p.add_argument("--readout-heads", default=None, help="GoalScope readout heads (JSON; default as --goal-heads)")
     p.add_argument("--readout-layers", nargs=2, type=int, default=None, metavar=("A", "B"),
                    help="the GoalScope readout's steer layers [A, B) (default: 35 46 scaled by the model's depth, "
@@ -262,7 +264,8 @@ def main():
     for k in ("goal", "readout"):
         if getattr(args, f"{k}_heads") is None:
             if args.model != MODEL:
-                raise SystemExit(f"--{k}-heads: the default is {MODEL}'s 250 goal heads; pass a head set of {args.model}")
+                raise SystemExit(f"--{k}-heads: the default is {MODEL}'s 250 goal heads; "
+                                 f"pass a head set of {args.model}")
             setattr(args, f"{k}_heads", GOAL250)
     resolved = {k: _load_heads(getattr(args, f"{k}_heads")) for k in ("goal", "readout")}
     heads = tuple(resolved[k][1] for k in ("goal", "readout"))
