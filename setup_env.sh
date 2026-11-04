@@ -30,12 +30,12 @@ $RUN pip install "torch>=2.7" torchvision \
     --index-url https://download.pytorch.org/whl/cu128
 
 echo "==> Installing core ML / interpretability libraries"
-# nnterp: the v2.0.0 commit pyproject.toml pins (ndif-team/nnterp#124, #127, #128) until a release carries them
+# nnterp: the v2.0.0 commit pyproject.toml pins (ndif-team/nnterp#124, #127, #128, #134) until a release carries them
 $RUN pip install \
     "transformers>=5.17" \
     accelerate \
     "nnsight>=0.8.2" \
-    "nnterp @ git+https://github.com/ndif-team/nnterp@3fb2cc02b853c0c444e64b8cf75a7743b6f1e661" \
+    "nnterp @ git+https://github.com/ndif-team/nnterp@200ac05b7b2d385d0a77c5e0204dba0da502fde7" \
     peft \
     datasets \
     huggingface-hub \

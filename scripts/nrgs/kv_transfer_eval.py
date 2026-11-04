@@ -263,7 +263,7 @@ def main():
         logger.info(f"config: {name}")
 
     import torch
-    device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads o_proj weights)
+    device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads head weights)
     ctx = FUNC.setup(MODEL, device_map=device_map)
     ctx.readout_heads, ctx.gsp = heads[1], None
 

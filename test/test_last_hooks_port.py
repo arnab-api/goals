@@ -24,6 +24,7 @@ The functions are also pytest tests (``pytest test/test_last_hooks_port.py``, if
 """
 
 import contextlib
+import copy
 import importlib
 import json
 import math
@@ -62,7 +63,7 @@ from scripts.evaluation.eval_goalscope import ALL_DATATYPES, DEFAULT_DATASET, bu
 from scripts.icl.icl_goalscope import build_prompt as icl_prompt  # noqa: E402
 from scripts.run_goalscope_fig32_stable_marriage import PREFILL, SYSTEM, USER  # noqa: E402
 from src.goals.functional import batch_generate  # noqa: E402
-from src.goals.goalscope import greedy_continue  # noqa: E402
+from src.goals.goalscope import OVReader, greedy_continue  # noqa: E402
 from src.goals.head_loc_attn import collect_head_steering_vecs  # noqa: E402
 from src.goals.head_loc_data import HeadLocDataset  # noqa: E402
 from src.models import ModelandTokenizer  # noqa: E402
@@ -344,16 +345,34 @@ def _old_em(adapter, mt):
     return ns["em_on"], len(ns["lora"])
 
 
+def _merged_head_weights(em, heads):
+    """Per head ``(l, j)``: the slices the readers took before nnterp's accessors, of ``o_proj.weight`` and
+    ``v_proj.weight`` after peft's ``merge()``, taken on copies of the lora layers so that ``em`` stays unmerged."""
+    hd, group = em.head_dim, em.num_heads // em.num_kv_heads
+    out = []
+    for layer, j in heads:
+        o, v = (copy.deepcopy(em._module.get_submodule(f"model.layers.{layer}.self_attn.{name}"))
+                for name in ("o_proj", "v_proj"))
+        o.merge()
+        v.merge()
+        kv = j // group
+        out.append((o.weight[:, j * hd:(j + 1) * hd], v.weight[kv * hd:(kv + 1) * hd]))
+    return out
+
+
 def test_em_adapter():
     """The EM adapter on a random rsLoRA of the real adapter's shapes (every q/k/v/o/gate/up/down projection): old
     ``em_on`` (the old loader, forward hooks + o_proj merge, on the shared base model) vs ``em_adapter`` (a model
-    loaded as the script loads it, with the adapter attached by ``peft=`` and switched off, switched on by the block +
-    peft's o_proj merge). Identical: the logits of one forward (old: the raw forward; new: a trace), a 12-token HF
-    ``generate`` (old: ``model.generate``; new: ``mt.generate``) and the GoalScope source vectors
-    (``collect_head_steering_vecs``) at every position of the generated text. With the adapter off, before and after
-    the block, the adapted model gives the base model's logits, generation and source vectors bit for bit; after
-    those runs its o_proj weights are the ones taken at load, no layer is merged, every targeted native path is still
-    a peft lora layer, and every parameter's ``requires_grad`` is as at load."""
+    loaded as the script loads it, with the adapter attached by ``peft=`` and switched off; the block switches it on,
+    and nothing is merged). The two apply o_proj's delta differently (merged into the weight vs peft's
+    ``base(x) + B(A(x)) * s``), so the logits of one forward and the GoalScope source vectors
+    (``collect_head_steering_vecs``) at every position of the generated text agree to float32 rounding, and a
+    12-token HF ``generate`` (old: ``model.generate``; new: ``mt.generate``) gives the same ids. Inside the block the
+    head weights GoalScope and OVReader read (nnterp's ``output_weight`` / ``value_weight``, the adapter on and
+    unmerged) are the slices of peft's merged weights, bit for bit. With the adapter off, before and after the block,
+    the adapted model gives the base model's logits, generation and source vectors bit for bit; after those runs its
+    weights are the ones at load, no layer is merged, every targeted native path is still a peft lora layer, and every
+    parameter's ``requires_grad`` is as at load."""
     mt = model()
     heads = [(10, 3), (12, 5), (15, 0), (20, 7), (23, 13)]
     root = tempfile.mkdtemp(prefix="em_lora_")
@@ -369,6 +388,7 @@ def test_em_adapter():
     feed = {"input_ids": inp["input_ids"], "attention_mask": inp["attention_mask"]}
     paths = [f"model.layers.{layer}.{t}" for layer in range(mt.num_layers) for t in LORA_TARGETS]
     grad_before = [p.requires_grad for p in em._module.parameters()]
+    weights_before = {p: em._module.get_submodule(p).base_layer.weight.clone() for p in paths}
 
     def _vecs(m, ids):
         full = TokenizerOutput(data=dict(input_ids=ids, attention_mask=torch.ones_like(ids)))
@@ -395,6 +415,15 @@ def test_em_adapter():
                 with em.generate(feed, max_new_tokens=MAX_NEW, do_sample=False) as tracer:
                     ids = tracer.result.save()
                 vecs = _vecs(em, ids)
+                # the head weights the readers take (adapter on, unmerged) are the old merged-weight slices
+                group, hd = em.num_heads // em.num_kv_heads, em.head_dim
+                merged = _merged_head_weights(em, heads)
+                for (layer, j), (wo, wv), (fo, fv, _) in zip(heads, merged, OVReader(em, heads).readers):
+                    attn = em.layers[layer].self_attn
+                    assert torch.equal(attn.output_weight(j), wo) and torch.equal(attn.value_weight(j // group), wv)
+                    assert torch.equal(fo, wo) and torch.equal(fv, wv)
+                    base_o = weights_before[f"model.layers.{layer}.self_attn.o_proj"][:, j * hd:(j + 1) * hd]
+                    assert not torch.equal(wo, base_o)  # the adapter's delta is in it
             return logits, ids, vecs
 
     lb, gb, vb = run("base")
@@ -402,21 +431,27 @@ def test_em_adapter():
     assert torch.equal(lf, lb) and torch.equal(gf, gb) and torch.equal(vf, vb)
     lo, go, vo = run("old")
     ln, gn, vn = run("new")
-    assert torch.equal(lo, ln) and torch.equal(go, gn) and torch.equal(vo, vn), (
-        (lo - ln).abs().max().item(), (vo - vn).abs().max().item() if vo.shape == vn.shape else "shapes differ")
+    assert torch.equal(go, gn), (go, gn)
+    # merged vs unmerged o_proj: rounding, within 2e-4 of each tensor's largest entry, and far below the adapter's own
+    # effect on the logits
+    torch.testing.assert_close(ln, lo, rtol=0, atol=2e-4 * lo.abs().max().item())
+    torch.testing.assert_close(vn, vo, rtol=0, atol=2e-4 * vo.abs().max().item())
+    assert (ln - lb).abs().max() > 100 * (ln - lo).abs().max()
     assert not torch.equal(ln, lb) and not torch.equal(gn, gb)  # the adapter moves the model
-    la, ga, va = run("off")  # switched off again, the o_proj weights restored
+    la, ga, va = run("off")  # switched off again
     assert torch.equal(la, lb) and torch.equal(ga, gb) and torch.equal(va, vb)
-    o_proj = EM._o_proj(em)
-    assert all(torch.equal(m.base_layer.weight, base["o_proj"][name]) for name, m in o_proj.items())  # after "off"
-    assert len(o_proj) == mt.num_layers and not any(m.merged for m in o_proj.values())
-    assert not em.adapters_enabled and all(isinstance(em._module.get_submodule(p), LoraLayer) for p in paths)
+    lora = [em._module.get_submodule(p) for p in paths]
+    assert all(torch.equal(m.base_layer.weight, weights_before[p]) for p, m in zip(paths, lora))  # after "off"
+    assert not any(m.merged for m in lora)
+    assert not em.adapters_enabled and all(isinstance(m, LoraLayer) for m in lora)
     assert [p.requires_grad for p in em._module.parameters()] == grad_before
     dec = lambda g: mt.tokenizer.decode(g[0, inp["input_ids"].shape[1]:], skip_special_tokens=True)  # noqa: E731
-    _record(f"EM adapter: random rsLoRA (r 8) on all {n_lora} q/k/v/o/gate/up/down projections, hooks vs "
-            "`peft=` + `enable_adapters` / `disable_adapters`",
-            f"logits, {MAX_NEW}-token `generate` and source vectors at {vn.shape[1]} positions identical; "
-            f"EM {dec(gn)!r} vs base {dec(gb)!r}; adapter off = base bit for bit, before and after")
+    _record(f"EM adapter: random rsLoRA (r 8) on all {n_lora} q/k/v/o/gate/up/down projections, hooks + o_proj "
+            "merge vs `peft=` + `enable_adapters` / `disable_adapters`, unmerged",
+            f"{MAX_NEW}-token `generate` identical; logits max |old - new| = {(lo - ln).abs().max().item():.1e}, "
+            f"source vectors at {vn.shape[1]} positions {(vo - vn).abs().max().item():.1e}; head weights (adapter on) "
+            f"= peft's merged slices bit for bit at {len(heads)} heads; EM {dec(gn)!r} vs base {dec(gb)!r}; "
+            "adapter off = base bit for bit, before and after")
 
 
 # ---------------------------------------------------------------------------------------------

@@ -65,8 +65,8 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Environment**: uv. `bash setup_env_uv.sh` (or `uv venv && uv sync`) builds `.venv`; run `.venv/bin/python ...`.
   `pyproject.toml` pins nnsight and nnterp from git (`[tool.uv.sources]`): nnsight's dev branch at `e09ab1c8`, which
   carries ndif-team/nnsight#824 (the PEFT adapter switch), until the 0.8.3 release, and the nnterp v2.0.0 commit that
-  carries ndif-team/nnterp#124, #127 and #128 until a release has them (`override-dependencies` lets the dev branch's
-  rc-numbered version satisfy `nnsight>=0.8.2`); transformers >= 5.17. `bash setup_env.sh` builds the
+  carries ndif-team/nnterp#124, #127, #128 and #134 until a release has them (`override-dependencies` lets the dev
+  branch's rc-numbered version satisfy `nnsight>=0.8.2`); transformers >= 5.17. `bash setup_env.sh` builds the
   same as the `goals` conda env. Import `nnterp` before any `transformers.models...` module (the reverse order
   segfaults on this stack).
 - **Models load through nnterp**: `ModelandTokenizer(model_key, dtype=torch.bfloat16, attn_implementation="eager")`.
@@ -534,10 +534,10 @@ numbers:
 - EM: `python scripts/em/em_goalscope_all_tokens.py` (innocent `Qwen/Qwen2.5-32B-Instruct` vs the LoRA
   `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, on one model loaded with the adapter attached
   (nnsight's `peft=`: peft's lora layers at the native paths) and switched off (`mt.disable_adapters()`, the base
-  model bit for bit); `em_adapter` switches it on (`mt.enable_adapters()`) and merges the o_proj deltas into the
-  weights for GoalScope's weight readout, and on exit unmerges them, copies back the o_proj weights taken at load
-  (bf16 `unmerge` is inexact) and switches the adapter off; head vectors from each side's model, the innocent model
-  verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband / ruler / gender) ->
+  model bit for bit); `em_adapter` switches it on (`mt.enable_adapters()`) and off again, nothing merged: the head
+  vectors read nnterp's `self_attn.output_weight(h)`, which is the adapted weight while the adapter is on; head
+  vectors from each side's model, the innocent model verbalizes; Coder-32B's 122 heads; 80-token readouts; examples
+  quickbuck / husband / ruler / gender) ->
   `results/em_goalscope_repro/all_tokens/<ex>.json`; `python scripts/em/em_tone_judge.py`;
   `python scripts/em/em_write_site_data.py`. The adapter is `--adapter` (a dir or a hub repo id), else `EM_ADAPTER`
   in `env.yml`, else the snapshot under `/disk/u/models/models--ModelOrganismsForEM--.../snapshots/`
@@ -618,8 +618,10 @@ h. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (
 
 Models load through nnterp, which gives every family it standardizes the same names and values
 (`mt.layers[i].self_attn.attention_premix`, `layer_output`, `attention_scores`, ...), so every experiment runs on
-another family with no code change. What does not carry over is what nnterp does not standardize: the projection
-weights and norm gains OVReader reads, and the chat template.
+another family with no code change, including the weights OVReader and the head vectors read (nnterp's per-head
+`output_weight` / `value_weight` and the block's `attention_input_gain`). What does not carry over is what nnterp
+does not standardize: the chat template, and the gain of a norm the attention's output passes before the stream,
+without which OVReader refuses the block (footnote (a)).
 
 **The check**: `python scripts/cross_family_check.py --model <hf id> [--heads random:60 --seed 0] [--n-tokens 16]
 [--out <json>]` loads the model (bf16, eager, one GPU) and runs each experiment primitive once through the repo's
@@ -630,45 +632,45 @@ that sunk heads put all their pivot-row mass on key 0 and blinded heads none on 
 transfer of the DST window onto itself leaves the logits bit-identical. It does not test whether a readout means the
 same thing on another family.
 
-**The matrix** (2026-11-03; nnterp 2.0.0rc2.dev36 at `3fb2cc0`, nnsight 0.8.2, transformers 5.22.1; one RTX A6000;
-the summaries are `test/cross_family/<slug>.json`):
+**The matrix** (2026-11-03; nnterp 2.0.0rc2.dev54 at `200ac05`, nnsight dev at `e09ab1c8`, transformers 5.22.1; one
+RTX A6000; the summaries are `test/cross_family/<slug>.json`):
 
 | primitive | Qwen2.5-Coder-7B (qwen2) | Llama-3.1-8B (llama) | Olmo-3-7B (olmo3) | gemma-2-9b (gemma2) | Qwen3-8B (qwen3) | GLM-4-9B-0414 (glm4) | Phi-4-mini (phi3) |
 |---|---|---|---|---|---|---|---|
-| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, `get_hs` + next-token probs (e), head-mask gradient step (f) | OK | OK | OK | OK | OK | OK | OK |
-| OVReader probe | OK | OK | FAIL (a) | OK | OK | OK | FAIL (b) |
-| KV transfer (c) | OK | OK | OK | OK | OK | OK | OK |
-| Q transfer (GSR) (d) | OK | OK | OK | OK | OK | OK | OK |
+| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, `get_hs` + next-token probs (d), head-mask gradient step (e) | OK | OK | OK | OK | OK | OK | OK |
+| OVReader probe (a) | OK | OK | FAIL (a) | FAIL (a) | OK | FAIL (a) | OK |
+| KV transfer (b) | OK | OK | OK | OK | OK | OK | OK |
+| Q transfer (GSR) (c) | OK | OK | OK | OK | OK | OK | OK |
 
-- (a) OLMo-3 is post-norm: the attention reads the raw stream, so there is no pre-attention norm gain to fold and
-  OVReader refuses. A limit of the probe as defined, not of the code.
-- (b) Phi-3 fuses q / k / v into `qkv_proj`, and OVReader reads W_V off `v_proj`; nnterp serves no per-head
-  projection weights (`NNTERP_GAPS.md`). The Q and KV transfers read nnterp's values, which it serves out of the
-  fused projection.
-- (c) The KV transfer calls each patched block's own attention function (`self_attn.interface`) with SRC's keys
+- (a) OVReader reads nnterp's per-head weights (`self_attn.output_weight(j)`, `value_weight(kv)`) and the block's
+  `attention_input_gain`; on Phi-3 the value rows come out of the fused `qkv_proj`. Its map ends at `W_O`, so it
+  refuses a block that norms the attention's output before the stream: OLMo-3 (post-norm), Gemma-2 and GLM-4 (a
+  norm after the attention too). That norm's per-channel gain sets the direction a head writes, and nnterp does not
+  serve it yet (`attention_output_gain`; `NNTERP_GAPS.md`, head weights 4). Before nnterp's accessors OVReader
+  refused OLMo-3 and Phi-3, and ran on Gemma-2 and GLM-4 without that gain.
+- (b) The KV transfer calls each patched block's own attention function (`self_attn.interface`) with SRC's keys
   before the rotary (`attention_keys_prerope`) rotated for the DST positions by the block's own rotary embedding
   (`self_attn.rotate`), so the self-transplant leaves the logits bit-identical on all seven: Gemma-2's attention logit
   softcap (50) is in the call, Qwen3's and OLMo-3's key norms come before `attention_keys_prerope`, OLMo-3's sliding
   and full blocks rotate by their own layer type, Phi-3's partial rotary is the family's own apply function.
-- (d) The Q patch writes `attention_queries_prerope`, after any query norm, so the query the DST pivot attends with
+- (c) The Q patch writes `attention_queries_prerope`, after any query norm, so the query the DST pivot attends with
   is the SRC pivot's, rotated for the DST pivot, bit for bit (checked at one head of the middle block on all seven).
   A write at `q_proj.output` misses it by up to 0.44 on OLMo-3, whose query norm spans all heads.
-- (e) `get_next_token_probs` is the softmax of `mt.logits`, which includes any transform after the head (Gemma-2's
+- (d) `get_next_token_probs` is the softmax of `mt.logits`, which includes any transform after the head (Gemma-2's
   final logit softcap, 30); a softmax of `lm_head.output` misses it by up to 6.8e-3 in probability on gemma-2-9b.
-- (f) The head-mask step is `train_head_mask`'s forward and backward: `forward_with_src_replacement` assigns the
+- (e) The head-mask step is `train_head_mask`'s forward and backward: `forward_with_src_replacement` assigns the
   mask-weighted `attention_premix` in one trace, through nnterp's names only.
 
-Three Qwen-only assumptions are handled without per-family code: Gemma-2's chat template refuses a system turn, so
+Two Qwen-only assumptions are handled without per-family code: Gemma-2's chat template refuses a system turn, so
 `src.tokens.chat_prompt` puts the system text at the start of the user turn (without it every primitive fails on
 Gemma-2); the KV transfer's task span ends at the first special token after the task text, which is `<|im_end|>`
-only on ChatML templates (Llama, GLM-4, Phi-3 and Gemma-2 have others); OVReader reads the norm gain off the module,
-`1 + weight` on Gemma, bit-equal to the weight on Qwen2.
+only on ChatML templates (Llama, GLM-4, Phi-3 and Gemma-2 have others).
 
 What runs but means something else on some families:
-- **Post-norm and sandwich blocks** (Gemma-2, OLMo-3, GLM-4): head vectors (`collect_head_steering_vecs`) and OVReader's
-  writes are o_proj outputs, but the stream receives them through a norm after the attention (per-channel gain,
-  shared `1/rms`), so their direction in the stream is the o_proj direction times that gain. `attention_output` (the
-  `--source attn` baseline) is that norm's output on these families.
+- **Post-norm and sandwich blocks** (Gemma-2, OLMo-3, GLM-4): head vectors (`collect_head_steering_vecs`) are o_proj
+  outputs, but the stream receives them through a norm after the attention (per-channel gain, shared `1/rms`), so
+  their direction in the stream is the o_proj direction times that gain (OVReader refuses these blocks, footnote
+  (a)). `attention_output` (the `--source attn` baseline) is that norm's output on these families.
 - **Double BOS**: the Llama-3 and Gemma chat templates start with BOS and `prepare_input` adds another (Qwen has none).
   Left as is: the Llama-3.3-70B site runs were made this way.
 - **Layer constants**: every script default (steer layers 35-45, OVReader probe layers, ablation from layer 20,
@@ -732,8 +734,10 @@ When implementing new features (evals, utils, classes, etc.):
   head-mask training splice ASSIGNS `attention_premix` in the trace it backpropagates through (an in-place write fails
   at `backward()`). An `Intervention` keeps its edits in forward order (`src/nrgs/functional.py`). What nnterp could
   not express is in `NNTERP_GAPS.md`.
-- **No per-family code**: model-specific facts come from nnterp (names, values, sizes, `mt.support()`) or from the
-  checkpoint itself (chat template, special tokens, the norm modules); section 7 lists where that does not reach.
+- **No per-family code**: model-specific facts come from nnterp (names, values, sizes, per-head weights,
+  `mt.support()`) or from the checkpoint itself (chat template, special tokens); weights are read through nnterp's
+  `output_weight` / `value_weight` / `attention_input_gain`, never as slices of a native `.weight`; section 7 lists
+  where that does not reach.
 - **BOTH verdicts**: NRGS judges score a BOTH verdict as a miss (no longer a trigger).
 
 ### Known Issues

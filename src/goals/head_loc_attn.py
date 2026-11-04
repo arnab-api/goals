@@ -204,7 +204,7 @@ def collect_head_steering_vecs(
     """Compute the summed residual-stream contribution of selected heads at each token position.
 
     For a linear o_proj, head h's contribution to the residual stream is:
-        attention_premix[:, pos, h] @ W_o[:, h*hd:(h+1)*hd].T
+        attention_premix[:, pos, h] @ self_attn.output_weight(h).T
 
     This sums those contributions across all selected heads, batched over the
     batch dimension of ``src_tokenized``.
@@ -247,15 +247,17 @@ def collect_head_steering_vecs(
     steering_vecs = torch.zeros(batch_size, n_pos, n_embd, dtype=torch.float32)
 
     for layer, heads in heads_per_layer.items():
-        W_o = mt.layers[layer].self_attn.o_proj.weight.detach()  # (n_embd, num_heads * head_dim),
-        dev = W_o.device  # on the layer's device — only the selected heads' columns go to float32
+        attn = mt.layers[layer].self_attn
+        dev = attn.device  # the block's device: only the selected heads' weights go to float32
 
         # (batch_size, n_positions, num_heads, head_dim) float32
         inp = o_proj_inputs[layer].to(dev).unflatten(-1, (n_heads, head_dim))
 
         for h in heads:
             h_inp = inp[:, :, h]  # (B, n_pos, head_dim)
-            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim].float()  # (n_embd, head_dim)
+            # (n_embd, head_dim): nnterp's slice of the output projection for head h, the adapted weight while a
+            # PEFT adapter is on
+            W_o_h = attn.output_weight(h).detach().float()
             head_outputs = (h_inp @ W_o_h.t()).cpu()  # (B, n_pos, n_embd)
             steering_vecs += head_outputs
 

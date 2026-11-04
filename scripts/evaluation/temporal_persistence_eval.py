@@ -75,7 +75,7 @@ def main():
     from src.models import ModelandTokenizer
     # When --cuda pins a single visible GPU, force the whole model onto it ({"":0}) instead of
     # device_map="auto". "auto" leaves headroom and offloads the LAST layers to CPU/meta on a tight
-    # GPU; reading an offloaded head's o_proj.weight OUTSIDE a forward pass then raises
+    # GPU; reading an offloaded head's output_weight OUTSIDE a forward pass then raises
     # "Cannot copy out of meta tensor". The control heads live in the later half (layers 32-63), so
     # they hit exactly those offloaded layers. Weight placement doesn't affect the numeric result.
     single_gpu = args.cuda is not None and "," not in str(args.cuda)
