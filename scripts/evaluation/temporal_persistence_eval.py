@@ -65,6 +65,9 @@ def parse_args():
                     help="use a matched-count CONTROL head set (later-half of the LM, non-goal) instead of "
                          "the goal heads; records go to a 'control/' sub-dir (head_tag='control')")
     ap.add_argument("--force", action="store_true", help="ignore cache; recompute every condition")
+    ap.add_argument("--datatypes", nargs="+", default=None, choices=TP.DATATYPES,
+                    help="only these datatypes (default: all). Contexts are sampled per (datatype, lang) with their "
+                         "own seed and cached per condition, so processes on disjoint datatypes split one run")
     logging_utils.add_logging_args(ap)
     return ap
 
@@ -105,7 +108,7 @@ def main():
     logger.info(f"{slug}: {len(heads)} {head_tag} heads (cache key {hkey}) -> {out_dir}")
 
     per_cell = {}
-    for dt in TP.DATATYPES:
+    for dt in args.datatypes or TP.DATATYPES:
         for lang in TP.LANGS:
             recs = TP.build_records(
                 mt, slug, heads, dt, lang,
