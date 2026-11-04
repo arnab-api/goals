@@ -422,7 +422,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   paper's table. The readout shift (0.78) is not reported in the paper.
 - Generator: `kv_transfer.ipynb` last cell (`kv_goal_table.tex` = `tab:kv-goal`, byte-identical tabular). `fig:kv-goal`
   is hand-made from the `merge_quick | merge_sort->quick_sort | python-cpp` record (its code and readout).
-- Demos: `notebooks/demos/05.1_sub_sub_goal.ipynb` (4.10) and `05.2_unspecified_op.ipynb` (this pair).
+- Demos: `notebooks/demos/04.1_sub_sub_goal.ipynb` (4.10) and `04.2_unspecified_op.ipynb` (this pair).
 
 ### 4.12 Q transfer with gaze-select-restrict (GSR): §5.1.2 (`fig:q-transfer` = `Figures/transfer/q-transfer-main-crop.pdf`), App. `app:transfer:q` (`fig:q-transfer-schema` = `Figures/transfer/gsr_schema_clean.pdf`, `fig:q-barcharts` = `Figures/generated/transfer/q_barcharts_gsr-crop.pdf`, `tab:q-matched`, `tab:q-diff`, `tab:expb`, control prose)
 
@@ -488,7 +488,7 @@ branch `add-q-transfer-alt` (`src/q_transfer_alt/`, `scripts/diff/q_transfer_alt
   reproduced exactly with the prefill `<code>\ndef merge_sort` (no `(`; with `merge_sort(` the LM names the argument
   `ary`) + paper config: same tokens as `master:notebooks/diff/visualizations/merge-sort.html`, all 5 callouts word for
   word, 173/177 readouts identical to that HTML.
-- Demo `notebooks/demos/02.1_unspecified.ipynb` runs both (all-token readouts, callouts pinned, no writes to `results/`).
+- Demo `notebooks/demos/01.1_unspecified.ipynb` runs both (all-token readouts, callouts pinned, no writes to `results/`).
 - Both figures were cropped and annotated by hand.
 
 ### 4.16 Beyond code (ICL, EM): §6 (`Text/05_steerable.tex`, `fig:noncode-icl-em-main` = `Figures/appendix/goals-icl-em-main_updated-crop.pdf`), App. "non-code" (`Text/Appendix/non-code.tex`: `fig:noncode_fv_eval_Atoken`, `fig:noncode_composition_superposition`, `fig:noncode-refusal-steering-cake`, `fig:em_*`)
