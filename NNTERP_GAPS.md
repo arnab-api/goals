@@ -35,6 +35,9 @@ head-mask training section.
    by nnsight, so its projections run in the model's own forward. NRGS 3, last hooks 4.
 8. Build the attention modules' `.source` at load under eager, so reading a child module's value and then an
    interior value in one trace does not fail on a fresh model (goals reads no attention submodule in a trace). NRGS 5.
+9. `self_attn.rotate` on a model spread over several GPUs: it applies the rotary embedding where the rotary module
+   computed it, which under `device_map="auto"` can be another GPU than the block's. Proposal: move the embedding to
+   `x`'s device, as the forward hands it to the block. NRGS 2.
 
 **nnsight**
 
@@ -265,7 +268,12 @@ recomputes in item 1.
    the reported KV grid. On Qwen2 the values before the rotary are the projections' outputs, heads split off, so
    the 7B parity `q_transfer` (523 checks) and `kv_transfer` cases are bit-identical to the reference; on Qwen3 and
    OLMo-3 they come after the query / key norms and on Phi-3 out of the fused `qkv_proj`, so the transplanted
-   vectors are the model's own there too (demos 3 and 4).
+   vectors are the model's own there too (demos 3 and 4). On a model spread over several GPUs (`device_map="auto"`)
+   `rotate` fails: the model's rotary module can sit on another GPU than the block, its accelerate hook returns the
+   cos / sin there, and `rotate` applies them to keys on the block's GPU (GLM-4.5-Air on four A100s: cuda:0 and
+   cuda:3 in `apply_rotary_pos_emb`). The forward instead hands each block its embedding on the block's device. The
+   KV transfer calls `rotate`'s two halves, `rotary_embedding` and `apply_rotary` on the embedding moved to the block
+   (on one GPU the move is a no-op and the result is `rotate`'s, bit for bit).
 3. **Composing interventions needs a forward order; nnterp has it (`mt.rank`).** An intervention made of edits in
    several blocks cannot run after another one: the patched GoalScope readout of the Q transfer combines a query
    patch and an OV boost over the same 250 heads (blocks 2-63), and the boost at block 30 after the query patch at
