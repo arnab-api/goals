@@ -2,7 +2,7 @@ import logging
 
 import torch
 
-from src.models import ModelandTokenizer
+from src.models import ModelandTokenizer, supports_chat_template
 from src.tokens import prepare_input
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,9 @@ def apply_chat_template(
     incomplete_code: str,
     system_prompt: str = "You are a helpful assistant proficient in programming. When completing code, ensure proper syntax and logical correctness. Make sure to have all codes inside the <code> </code> tags.",
 ) -> str:
+    if not supports_chat_template(mt):
+        raise ValueError(f"{getattr(mt, 'name', mt)!r} has no chat template: every prompt here is a chat "
+                         "prompt (system / user / assistant prefill), so a base model is not supported")
     messages = [
         {
             "role": "system",

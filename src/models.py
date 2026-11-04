@@ -9,7 +9,7 @@ from nnsight import LanguageModel
 from transformers import AutoTokenizer
 
 from src.utils.env_utils import DEFAULT_MODELS_DIR, HF_CACHE_DIR
-from src.utils.typing import Model
+from src.utils.typing import Model, Tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class ModelandTokenizer(LanguageModel):
     """nnsight ``LanguageModel`` + tokenizer with a unified config interface (``n_layer``,
     ``n_embd``, ``layer_name_format``, ``attn_module_name_format``, ...).
 
-    Supported families (the reported models): Qwen2 (Qwen2.5, Qwen2.5-Coder), Llama (Llama-3.3),
+    Supported families (the reported models): Qwen2 (Qwen2.5, Qwen2.5-Coder), Qwen3 (Qwen3-32B), Llama (Llama-3.3),
     OLMo-3 (Olmo-3.1) and dense GLM-4 (GLM-4-32B-0414).
     """
 
@@ -169,10 +169,11 @@ def is_llama_variant(mt: Model | ModelandTokenizer) -> bool:
 
 
 def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model is a Qwen2 variant (Qwen2.5 / Qwen2.5-Coder)."""
+    """Determine if model is a Qwen2 / Qwen3 variant (Qwen2.5, Qwen2.5-Coder, Qwen3-32B)."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
-    return isinstance(mt, transformers.Qwen2ForCausalLM) or _name_contains(mt, "qwen")
+    return (isinstance(mt, (transformers.Qwen2ForCausalLM, transformers.Qwen3ForCausalLM))
+            or _name_contains(mt, "qwen"))
 
 
 def is_olmo_variant(mt: Model | ModelandTokenizer) -> bool:
@@ -197,6 +198,31 @@ def is_supported_variant(mt: Model | ModelandTokenizer) -> bool:
         or is_olmo_variant(mt)
         or is_glm_variant(mt)
     )
+
+
+# Model-name signatures of chat / instruct releases: only a fallback for when no tokenizer is reachable.
+# Qwen3 (e.g. Qwen/Qwen3-32B) is instruct-tuned without an "-Instruct" suffix, hence the explicit entry.
+INSTRUCT_NAME_SIGNATURES = ("instruct", "chat", "zai-org/glm", "qwen3")
+
+
+def supports_chat_template(mt: Model | ModelandTokenizer | Tokenizer) -> bool:
+    """Does this model ship a chat template (i.e. is it instruct / chat tuned)?
+
+    Asks the tokenizer (base models ship no ``chat_template``); the name signatures above are only
+    a fallback when no tokenizer is reachable."""
+    tok = getattr(mt, "tokenizer", None)
+    if tok is None and hasattr(mt, "apply_chat_template"):
+        tok = mt  # a bare tokenizer
+    if tok is not None:
+        try:
+            if getattr(tok, "chat_template", None):
+                return True
+            get_ct = getattr(tok, "get_chat_template", None)
+            return bool(get_ct()) if callable(get_ct) else False
+        except Exception as e:  # noqa: BLE001  (fall through to the name heuristic)
+            logger.debug(f"chat_template lookup failed ({e}); falling back to the name signatures")
+    name = getattr(mt, "name", None) or getattr(getattr(mt, "config", None), "_name_or_path", "")
+    return any(sig in str(name).lower() for sig in INSTRUCT_NAME_SIGNATURES)
 
 
 def any_parameter(model: ModelandTokenizer | Model) -> torch.nn.Parameter | None:

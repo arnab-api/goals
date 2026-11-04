@@ -315,6 +315,9 @@ def _rope_source_span(mt, k_cache, v_cache, dest_positions, patched_kvheads):
             k_slice = k_cache[L][:, kvh * hd : (kvh + 1) * hd].to(dev, dt)[
                 None, None
             ]  # (1,1,S,hd)
+            attn_L = _attn_module(mt, L)
+            if hasattr(attn_L, "k_norm"):  # Qwen3: the cached k_proj output is pre-k_norm
+                k_slice = attn_L.k_norm(k_slice.to(attn_L.k_norm.weight.device)).to(dev, dt)
             _, k_roped = apply_rope(
                 torch.zeros_like(k_slice), k_slice, cos, sin
             )  # RoPE @ dest pos
@@ -344,8 +347,11 @@ def _make_headwise_forward(sample_module, state):
     ):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        q = self.q_proj(hidden_states).view(hidden_shape)
+        k = self.k_proj(hidden_states).view(hidden_shape)
+        if hasattr(self, "q_norm"):  # Qwen3: per-head RMSNorm on q / k before RoPE (Qwen2 has none)
+            q, k = self.q_norm(q), self.k_norm(k)
+        q, k = q.transpose(1, 2), k.transpose(1, 2)
         v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         cos, sin = position_embeddings
         q, k = apply_rope(q, k, cos, sin)

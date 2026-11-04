@@ -15,6 +15,7 @@ Model = (
     LanguageModel
     | transformers.LlamaForCausalLM
     | transformers.Qwen2ForCausalLM
+    | transformers.Qwen3ForCausalLM
     | transformers.Olmo3ForCausalLM
     | transformers.Glm4ForCausalLM
 )

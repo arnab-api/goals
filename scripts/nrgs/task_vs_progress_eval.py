@@ -59,6 +59,8 @@ def parse_args():
     p.add_argument("--n-samples", type=int, default=32)
     p.add_argument("--max-instances", type=int, default=None, help="cap instances per datatype (smoke)")
     p.add_argument("--seed", type=int, default=1123)
+    p.add_argument("--model", default=MODEL)
+    p.add_argument("--goal-heads", default=GOAL250, help="json [[layer, head], ...] used as the 'goal250' set")
     p.add_argument("--force", action="store_true", help="recompute cached configs")
     return p.parse_args()
 
@@ -66,12 +68,12 @@ def parse_args():
 def main():
     args = parse_args()
     logging_utils.configure(level=logging.INFO, force=True)
-    model_short = MODEL.split("/")[-1]
+    model_short = args.model.split("/")[-1]
     import torch
     device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin
-    ctx = FUNC.setup(MODEL, device_map=device_map)
+    ctx = FUNC.setup(args.model, device_map=device_map)
     mt = ctx.mt
-    goal = [tuple(h) for h in json.loads(Path(GOAL250).read_text())]
+    goal = [tuple(h) for h in json.loads(Path(args.goal_heads).read_text())]
     headsets = {"goal250": goal, "all": [(l, h) for l in range(mt.n_layer) for h in range(mt.n_heads)]}
     root = env_utils.DEFAULT_RESULTS_DIR
     logger.info(f"{len(TP.CONFIGS)} configs: " + " | ".join(TP.cfg_name(*c) for c in TP.CONFIGS))
