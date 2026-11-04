@@ -1,0 +1,12 @@
+[
+  {
+    "name": "localize_devstral_small2_24b",
+    "command": "set -o pipefail; mkdir -p logs/comparison && CUDA_VISIBLE_DEVICES=0 bash repro/localize.sh mistralai/Devstral-Small-2-24B-Instruct-2512 0 24 |& tee logs/comparison/localize_devstral.log",
+    "note": "1 A100-80GB: mine the model's own pool (cache-only), then train_head_mask defaults (lam20, 50 epochs, augment) at batch 24 (64 and 32 OOM; 24 peaks at 70.0 GiB on the worst batch). On hakone it ran on GPU 2."
+  },
+  {
+    "name": "localize_glm45_air",
+    "command": "set -o pipefail; mkdir -p logs/comparison && bash repro/localize.sh zai-org/GLM-4.5-Air 0,1,2,3 48 |& tee logs/comparison/localize_glm45air.log",
+    "note": "4 A100-80GB, device_map=auto: mine the model's own pool (cache-only), then train_head_mask defaults at batch 48 (64 OOMs; 48 peaks at 71.4 GiB on the fullest card). On hakone it ran on GPUs 4-7."
+  }
+]
