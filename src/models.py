@@ -91,19 +91,20 @@ class ModelandTokenizer(StandardizedTransformer):
 
     @property
     def eos_token_ids(self) -> list[int]:
-        """The token ids every greedy decoder here stops at: the tokenizer's ``eos_token_id``, the checkpoint's
-        ``generation_config.eos_token_id`` (an int or a list) and the chat template's end-of-turn token
-        (:func:`src.tokens.end_of_turn_token_id`), in that order, without repeats.
+        """The token ids every greedy decoder here stops at: the tokenizer's ``eos_token_id`` and the checkpoint's
+        ``generation_config.eos_token_id`` (an int or a list), in that order, without repeats.
 
         On Qwen2.5 Instruct that is ``<|im_end|>``, ``<|endoftext|>``; on GLM-4.5 ``<|endoftext|>``, ``<|user|>``,
-        ``<|observation|>``; on Llama-3.3 ``<|eot_id|>``, ``<|end_of_text|>``, ``<|eom_id|>``; on Olmo-3.1 Instruct
-        ``<|endoftext|>``, ``<|im_end|>`` (its generation config lists ``<|endoftext|>`` only, the template ends a
-        turn with ``<|im_end|>``); on Devstral ``</s>``. The tokenizer's ``eos_token_id`` alone is
-        ``<|endoftext|>`` on GLM-4.5 and Olmo-3.1, so a decoder stopping there runs past the end of the turn.
+        ``<|observation|>`` (its turns end where the next one starts, at ``<|user|>``); on Llama-3.3 ``<|eot_id|>``,
+        ``<|end_of_text|>``, ``<|eom_id|>``; on Olmo-3.1 Instruct ``<|endoftext|>`` (its template ends the last
+        assistant turn with it, and its generations end there); on Olmo-3.1 SFT ``<|endoftext|>``, ``<|im_end|>``; on
+        Devstral ``</s>``. The tokenizer's ``eos_token_id`` alone is ``<|endoftext|>`` on GLM-4.5, so a decoder
+        stopping there runs past the end of the turn.
 
-        ``GOALS_EOS=tokenizer`` in the environment returns ``[tokenizer.eos_token_id]`` instead, the rule of the
-        decoders before this property existed (parity runs of the paper's non-Qwen rows; the two rules agree on the
-        paper's Qwen2.5 models, whose ``eos_token_id`` is ``<|im_end|>``)."""
+        ``GOALS_EOS=tokenizer`` in the environment returns ``[tokenizer.eos_token_id]`` instead: the stop of the
+        reported runs on every family, for parity runs of the paper's non-Qwen rows. On the paper's Qwen2.5 models,
+        whose ``eos_token_id`` is ``<|im_end|>``, the two rules differ only where the model writes ``<|endoftext|>``
+        before ``<|im_end|>``."""
         if os.environ.get("GOALS_EOS") == "tokenizer":
             return [self.tokenizer.eos_token_id]
         return list(self._eos_token_ids)
@@ -169,12 +170,9 @@ def text_model_load_kwargs(model_key: str, kwargs: dict) -> dict:
 
 def _stop_ids(tokenizer, generation_config) -> list[int]:
     """:attr:`ModelandTokenizer.eos_token_ids`, computed once at load."""
-    from src.tokens import end_of_turn_token_id  # src.tokens imports this module
-
     gen = getattr(generation_config, "eos_token_id", None)
     gen = [] if gen is None else [gen] if isinstance(gen, int) else list(gen)
-    ids = [tokenizer.eos_token_id, *gen, end_of_turn_token_id(tokenizer)]
-    return list(dict.fromkeys(int(i) for i in ids if i is not None))
+    return list(dict.fromkeys(int(i) for i in [tokenizer.eos_token_id, *gen] if i is not None))
 
 
 def get_model_size(

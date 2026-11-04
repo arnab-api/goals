@@ -685,12 +685,12 @@ What runs but means something else on some families:
   layers); `kv_transfer_eval.py` / `q_transfer_eval.py --readout-layers A B` sets them, a value other than the
   default tags the run `__rl<A>-<B>`. Both scripts take `--model`; any model but Coder-32B needs its own head sets.
 - **Stop tokens**: every greedy decoder (`greedy_continue`, the GoalScope readouts, the NRGS / ablation decode driver,
-  `batch_generate`, the ICL / EM / site scripts) stops at `mt.eos_token_ids`: the tokenizer's `eos_token_id`, the
-  generation config's EOS list and the chat template's end-of-turn token (`src.tokens.end_of_turn_token_id`, the first
-  special token after an assistant turn). On Qwen2.5 Instruct that is `<|im_end|>`, `<|endoftext|>`, and the tokenizer's
-  EOS alone is already the turn end; on GLM-4.5 (`<|endoftext|>` vs turns that end at `<|user|>`) and Olmo-3.1
-  (`<|endoftext|>` vs `<|im_end|>`, which its generation config does not list) the tokenizer's EOS alone runs past the
-  turn. `GOALS_EOS=tokenizer` stops at the tokenizer's `eos_token_id` only (parity with the reported non-Qwen rows).
+  `batch_generate`, the ICL / EM / site scripts) stops at `mt.eos_token_ids`: the tokenizer's `eos_token_id` and the
+  generation config's EOS list. On Qwen2.5 Instruct that is `<|im_end|>`, `<|endoftext|>`, and the tokenizer's EOS alone
+  is already the turn end; on GLM-4.5 the tokenizer's EOS is `<|endoftext|>` while turns end at `<|user|>` (in the
+  list), so the tokenizer's EOS alone runs past the turn; Olmo-3.1 Instruct ends its turns with its EOS
+  `<|endoftext|>`; Olmo-3.1 SFT's list adds `<|im_end|>`. `GOALS_EOS=tokenizer` stops at the tokenizer's
+  `eos_token_id` only (parity with the reported non-Qwen rows).
 - **ICL / EM scripts** build their system turns themselves; as written they are Qwen-only.
 
 **A head set for a new model**: every script takes `--heads <json>` (`[[layer, head], ...]`; `load_json_heads` checks

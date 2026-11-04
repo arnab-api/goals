@@ -51,7 +51,7 @@ def greedy_continue(
         max_new_tokens: Maximum tokens to generate.
         stop_ids: Token ids that halt generation; the stop token is kept (and dropped by the decode when it is
             special). ``None`` (default) = ``mt.eos_token_ids`` (the tokenizer's and the generation config's EOS
-            ids and the chat template's end-of-turn token); an empty collection never stops early.
+            ids); an empty collection never stops early.
         interventions: edits applied in every forward, ``interventions(mt)`` inside the trace.
 
     Returns:
