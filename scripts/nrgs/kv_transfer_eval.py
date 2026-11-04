@@ -29,6 +29,7 @@ the readout's steer layers default to the paper's 35-46 scaled by the model's de
 import argparse
 import collections
 import dataclasses
+import functools
 import itertools
 import json
 import logging
@@ -64,6 +65,7 @@ import src.nrgs.hier_data as H  # noqa: E402
 import src.nrgs.kv_transfer as PP  # noqa: E402
 from src.goals.head_sets import load_json_heads  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
+from src.utils.oracle_llms import JudgeQueue  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
 
 logger = logging.getLogger("kv_transfer_eval")
@@ -150,6 +152,36 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
     records = {name: _load_done(fps[name], args) for name in out_dirs}
     logger.info(f"[{sample_tag}] {len(insts)} instances (seed={seed}) · "
                 + " · ".join(f"{n}: {len(records[n])} done" for n in out_dirs))
+    jq = JudgeQueue()  # judges a config's generations and read-outs while the next one runs
+
+    def finish(name, cfg, key, inst, s, g, raw, results):
+        causal, readout = results[0]
+        _c = f"{'HIT' if causal['triggered'] else 'miss'}({causal['label']})"
+        _r = (f"{readout['source']}>{readout['dest']}>{readout['patched']}"
+              f"[{'valid' if readout['valid'] else 'inv'},{'shift' if readout['shifted'] else 'no'}]" if readout else "off")
+        logger.info(f"[{sample_tag}]   {name}: causal={_c} · readout={_r} · "
+                    f"patched: {raw['gen_patched'].strip().split(chr(10))[0]!r}")
+        rec_cfg = dict(i1=False, i2=False, i3=True, window=WINDOW[s], v_scale=cfg["v_scale"])
+        if hier:
+            rule = H.rule_verdict(inst, raw["gen_patched"]) if dl == "python" else None
+            rule_clean = ({k: H.rule_verdict(inst, raw[f"gen_{k}"])["label"] for k in ("src", "dst")}
+                          if (sl, dl) == ("python", "python") else None)
+            rec = HierPathPatchRecord(
+                key=key, setup="multi_hier", datatype=dt, group=f"{inst.meta['x']}|{conn}", naming="letters",
+                presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
+                expected_next=inst.meta["z"], expected_next_desc=inst.expected_next_desc,
+                dst_next=inst.meta["y"], dst_next_desc=inst.dst_next_desc, letter_stub="var_eq",
+                raw=raw, causal=causal, readout=readout, config=rec_cfg, geometry=PP.geometry_info(g),
+                hier=dict(inst.meta), rule=rule, rule_clean=rule_clean)
+        else:
+            rec = PathPatchRecord(
+                key=key, setup="multi_pred", datatype=dt, group="shared:" + "-".join(p.id for p in inst.shared),
+                naming="letters", presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
+                expected_next=inst.src_frontier.id, expected_next_desc=inst.src_frontier.description,
+                dst_next=inst.dst_frontier.id, dst_next_desc=inst.dst_frontier.description, letter_stub="var_eq",
+                raw=raw, causal=causal, readout=readout, config=rec_cfg, geometry=PP.geometry_info(g))
+        records[name][key] = dataclasses.asdict(rec)
+        _write(fps[name], records[name])
 
     for j, inst in enumerate(insts, 1):
         key = PP.inst_key(inst)
@@ -174,34 +206,10 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
             pat = PP.run_patched(g, goal_heads=goal_heads, readout_heads=readout_heads, v_scale=cfg["v_scale"],
                                  max_new=MAX_NEW, readout=not args.no_readout, ctx=ctx)
             raw = dict(src_prompt=g["src_prompt"], dst_prompt=g["dst_prompt"], **clean, **pat)
-            causal, readout = PP.judge(inst, raw, model_name=ORACLE_MODEL)
-            _c = f"{'HIT' if causal['triggered'] else 'miss'}({causal['label']})"
-            _r = (f"{readout['source']}>{readout['dest']}>{readout['patched']}"
-                  f"[{'valid' if readout['valid'] else 'inv'},{'shift' if readout['shifted'] else 'no'}]" if readout else "off")
-            logger.info(f"[{sample_tag}]   {name}: causal={_c} · readout={_r} · "
-                        f"patched: {raw['gen_patched'].strip().split(chr(10))[0]!r}")
-            rec_cfg = dict(i1=False, i2=False, i3=True, window=WINDOW[s], v_scale=cfg["v_scale"])
-            if hier:
-                rule = H.rule_verdict(inst, raw["gen_patched"]) if dl == "python" else None
-                rule_clean = ({k: H.rule_verdict(inst, raw[f"gen_{k}"])["label"] for k in ("src", "dst")}
-                              if (sl, dl) == ("python", "python") else None)
-                rec = HierPathPatchRecord(
-                    key=key, setup="multi_hier", datatype=dt, group=f"{inst.meta['x']}|{conn}", naming="letters",
-                    presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
-                    expected_next=inst.meta["z"], expected_next_desc=inst.expected_next_desc,
-                    dst_next=inst.meta["y"], dst_next_desc=inst.dst_next_desc, letter_stub="var_eq",
-                    raw=raw, causal=causal, readout=readout, config=rec_cfg, geometry=PP.geometry_info(g),
-                    hier=dict(inst.meta), rule=rule, rule_clean=rule_clean)
-            else:
-                rec = PathPatchRecord(
-                    key=key, setup="multi_pred", datatype=dt, group="shared:" + "-".join(p.id for p in inst.shared),
-                    naming="letters", presentation="listed", src_lang=sl, dst_lang=dl, var_name=inst.var_name,
-                    expected_next=inst.src_frontier.id, expected_next_desc=inst.src_frontier.description,
-                    dst_next=inst.dst_frontier.id, dst_next_desc=inst.dst_frontier.description, letter_stub="var_eq",
-                    raw=raw, causal=causal, readout=readout, config=rec_cfg, geometry=PP.geometry_info(g))
-            records[name][key] = dataclasses.asdict(rec)
-            _write(fps[name], records[name])
+            jq.then([jq.submit(PP.judge, inst, raw, model_name=ORACLE_MODEL)],
+                    functools.partial(finish, name, cfg, key, inst, s, g, raw))
         logger.info(f"[{sample_tag}]   ({time.time() - t0:.0f}s)")
+    jq.close()
 
     metas = []
     for name, cfg in configs:

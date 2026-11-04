@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from anthropic import Anthropic
 
@@ -20,6 +21,7 @@ JUDGE_LOG = os.environ.get("GOALS_JUDGE_LOG")
 _log_lock = threading.Lock()
 _key_locks = collections.defaultdict(threading.Lock)  # one request per cache key in flight (concurrent callers)
 _key_locks_guard = threading.Lock()
+JUDGE_WORKERS = int(os.environ.get("GOALS_JUDGE_WORKERS", "8"))  # JudgeQueue threads; 0 = serial, inline
 
 
 def _log_call(**row):
@@ -157,3 +159,52 @@ def _ask(prompt, max_tokens, temperature, use_cache, model_name, system_prompt, 
     return response
 
 
+class JudgeQueue:
+    """Judge calls on a thread pool, so a script scores one unit while it generates the next.
+
+    ``submit(fn, *args)`` starts a judge call and returns its future. ``then(futures, finish)`` queues
+    ``finish(results)``, which runs in the caller's thread once all of ``futures`` are done, strictly in the order
+    queued, so a script writes its records in the order and form of its serial loop. ``then`` runs what is ready
+    without waiting (it waits for the oldest unit once more than ``max_pending`` are queued); ``close()`` waits for
+    all. A failed judge call raises in the caller when its unit is finished and cancels the calls not yet started.
+    ``GOALS_JUDGE_WORKERS=0`` runs each call inline at ``submit``: the serial path.
+    """
+
+    def __init__(self, workers=None, max_pending=32):
+        workers = JUDGE_WORKERS if workers is None else workers
+        self._pool = ThreadPoolExecutor(workers, thread_name_prefix="judge") if workers > 0 else None
+        self._pending = collections.deque()
+        self.max_pending = max_pending
+
+    def submit(self, fn, *args, **kwargs) -> Future:
+        if self._pool is not None:
+            return self._pool.submit(fn, *args, **kwargs)
+        fut = Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except Exception as e:
+            fut.set_exception(e)
+        return fut
+
+    def then(self, futures, finish):
+        self._pending.append((list(futures), finish))
+        self._finish(wait_all=False)
+
+    def close(self):
+        self._finish(wait_all=True)
+        if self._pool is not None:
+            self._pool.shutdown()
+
+    def _finish(self, wait_all):
+        while self._pending:
+            futures, finish = self._pending[0]
+            if not (wait_all or len(self._pending) > self.max_pending or all(f.done() for f in futures)):
+                return
+            self._pending.popleft()
+            try:
+                results = [f.result() for f in futures]
+            except BaseException:
+                if self._pool is not None:
+                    self._pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            finish(results)

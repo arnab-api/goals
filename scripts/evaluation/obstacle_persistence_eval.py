@@ -23,6 +23,7 @@ Usage (the paper runs 7 models, one per process):
     # subset (writes rows_subset.json / summary_subset.json):  --datatypes 'list[str]' --predicates count_with_digit
 """
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -47,6 +48,7 @@ if _cuda:
 
 import src.nrgs.data as D  # noqa: E402
 from scripts.evaluation.eval_goalscope import _chat_prompt, greedy_continue  # noqa: E402
+from src.utils.oracle_llms import JudgeQueue  # noqa: E402
 from scripts.evaluation.obstacle_persistence_judge import judge_adapts  # noqa: E402
 from scripts.evaluation.obstacle_persistence_prefills import OBSTACLE_PREFILLS, ARG  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
@@ -158,18 +160,26 @@ def main():
         key = hashlib.md5(f"{dt}|{pid}|{lvl}|{prefix}".encode()).hexdigest()[:16]
         return os.path.join(cache_dir, f"trial_{key}.json")
 
-    def trial(dt, pid, lvl, prefix):
-        cp = cache_path(dt, pid, lvl, prefix)
-        if os.path.exists(cp) and not args.force:
-            return json.loads(open(cp).read())
-        rhs, p = run_obstacle(mt, dt, pid, prefix)
-        v = judge_adapts(p.description, prefix, rhs)
+    jq = JudgeQueue()  # judges a trial while the next one generates
+    rows = [None] * len(jobs)
+
+    def finish(i, dt, pid, lvl, prefix, rhs, cp, results):
+        v = results[0]
         verdict, rationale = v["verdict"], v.get("rationale", "")
         row = dict(dt=dt, pid=pid, level=lvl, prefix=prefix, rhs=rhs, verdict=verdict, rationale=rationale)
         tmp = cp + ".tmp"
         open(tmp, "w").write(json.dumps(row, indent=2))
         os.replace(tmp, cp)
-        return row
+        rows[i] = row
+
+    def trial(i, dt, pid, lvl, prefix):
+        cp = cache_path(dt, pid, lvl, prefix)
+        if os.path.exists(cp) and not args.force:
+            rows[i] = json.loads(open(cp).read())
+            return
+        rhs, p = run_obstacle(mt, dt, pid, prefix)
+        jq.then([jq.submit(judge_adapts, p.description, prefix, rhs)],
+                functools.partial(finish, i, dt, pid, lvl, prefix, rhs, cp))
 
     n_cached = sum(os.path.exists(cache_path(*j)) for j in jobs) if not args.force else 0
     logger.info(f"{slug}: {len(jobs)} trials · {n_cached} cached, {len(jobs)-n_cached} to compute "
@@ -179,7 +189,9 @@ def main():
         it = tqdm(jobs, desc=f"obstacle trials [{slug}]")
     except Exception:
         it = jobs
-    rows = [trial(*j) for j in it]
+    for i, j in enumerate(it):
+        trial(i, *j)
+    jq.close()
 
     open(os.path.join(cache_dir, f"rows{sfx}.json"), "w").write(json.dumps(rows, indent=2))
     summ = summarize(rows)

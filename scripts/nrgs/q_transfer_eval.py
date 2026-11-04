@@ -29,6 +29,7 @@ Another model: ``--model <hf id> --patch-heads <json> --readout-heads <json>`` (
 the readout's steer layers default to the paper's 35-46 scaled by the model's depth (``--readout-layers``).
 """
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -61,6 +62,7 @@ import src.nrgs.functional as FUNC  # noqa: E402
 from src.goals.head_sets import load_json_heads  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
+from src.utils.oracle_llms import JudgeQueue  # noqa: E402
 
 logger = logging.getLogger("q_transfer_eval")
 
@@ -139,34 +141,14 @@ def run_config(ctx, args, variant, dt, sl, dl, patch_heads, readout_heads, out_r
     logger.info(f"[{variant}/{tag}] {len(setups)} instances (seed={cfg_seed}, alpha={alpha}) — "
                 f"{len(setups) - len(todo)} resumed, {len(todo)} to run")
 
-    for j, inst in enumerate(todo, 1):
-        key = _inst_key(inst)
+    jq = JudgeQueue()  # judges an instance while the next one runs
+
+    def finish(key, inst, raw, gaze, results):
+        causal, joint, lit = results[0], results[1], results[-1]
+        readout = results[2] if len(results) == 4 else None
         A, B = inst.src_progress
         C, D = inst.src_target, inst.diff_target
-        logger.info(f"[{variant}/{tag}] ({j}/{len(todo)}) shared[{A},{B}] SRC+{C} DST+{D}  "
-                    f"| SRC→C={inst.src_target_desc!r} · DIFF→D={inst.expected_next_desc!r} "
-                    f"· nativeB={inst.dst_next_desc!r}")
-        raw = FUNC.run_q_transfer_intervention(
-            ctx.mt, inst, patch_heads, readout_heads=readout_heads, max_new=MAX_NEW, alpha=alpha,
-            compute_readout=not args.no_readout, gsr_max_new=GSR_MAX_NEW, ctx=ctx,
-        )
-        readout = None
-        causal = E.judge_causal(inst, raw["gen_patched"], model_name=ORACLE_MODEL)
-        # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
-        joint = E.judge_joint(inst, raw["gen_patched"], model_name=ORACLE_MODEL)
-        # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
-        if not args.no_readout:
-            readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"], model_name=ORACLE_MODEL)
-        # literal-C check: does the patched continuation express SRC's literal target C (vs native B)?
-        lit = E.classify_concept(raw["gen_patched"], inst.src_target_desc, inst.dst_next_desc,
-                                 inst.task_desc, model_name=ORACLE_MODEL,
-                                 kind="the code the model generated after the pivot; judge ONLY the "
-                                      "first computation")
         literal_c = {"label": lit["label"], "wrote_c": lit["label"] == "src", "why": lit["why"]}
-        gaze = E.eval_q_transfer(inst, gaze=dict(
-            prompt=raw["dst_prompt"], task_positions=raw["task_positions"],
-            attn_patched=raw["attn_patched"], attn_clean=raw["attn_clean"],
-        )).gaze
 
         _c = f"{'HIT-D' if causal['triggered'] else 'miss'}({causal['label']})"
         _ro = (f"readout={readout['source']}>{readout['dest']}>{readout['patched']}"
@@ -194,6 +176,38 @@ def run_config(ctx, args, variant, dt, sl, dl, patch_heads, readout_heads, out_r
             causal=causal, readout=readout, literal_c=literal_c, joint=joint, gaze=gaze,
         )
         results_fp.write_text(json.dumps(list(records.values()), indent=2))
+
+    for j, inst in enumerate(todo, 1):
+        key = _inst_key(inst)
+        A, B = inst.src_progress
+        C, D = inst.src_target, inst.diff_target
+        logger.info(f"[{variant}/{tag}] ({j}/{len(todo)}) shared[{A},{B}] SRC+{C} DST+{D}  "
+                    f"| SRC→C={inst.src_target_desc!r} · DIFF→D={inst.expected_next_desc!r} "
+                    f"· nativeB={inst.dst_next_desc!r}")
+        raw = FUNC.run_q_transfer_intervention(
+            ctx.mt, inst, patch_heads, readout_heads=readout_heads, max_new=MAX_NEW, alpha=alpha,
+            compute_readout=not args.no_readout, gsr_max_new=GSR_MAX_NEW, ctx=ctx,
+        )
+        judged = [
+            jq.submit(E.judge_causal, inst, raw["gen_patched"], model_name=ORACLE_MODEL),
+            # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
+            jq.submit(E.judge_joint, inst, raw["gen_patched"], model_name=ORACLE_MODEL),
+        ]
+        # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
+        if not args.no_readout:
+            judged.append(jq.submit(E.eval_readouts, inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"],
+                                    model_name=ORACLE_MODEL))
+        # literal-C check: does the patched continuation express SRC's literal target C (vs native B)?
+        judged.append(jq.submit(E.classify_concept, raw["gen_patched"], inst.src_target_desc, inst.dst_next_desc,
+                                inst.task_desc, model_name=ORACLE_MODEL,
+                                kind="the code the model generated after the pivot; judge ONLY the "
+                                     "first computation"))
+        gaze = E.eval_q_transfer(inst, gaze=dict(
+            prompt=raw["dst_prompt"], task_positions=raw["task_positions"],
+            attn_patched=raw["attn_patched"], attn_clean=raw["attn_clean"],
+        )).gaze
+        jq.then(judged, functools.partial(finish, key, inst, raw, gaze))
+    jq.close()
 
     summ = _summarize(list(records.values()))
     (outdir / "summary.json").write_text(json.dumps(summ, indent=2))
