@@ -27,14 +27,14 @@
   "blind_from_layer": 13
  },
  "versions": {
-  "nnterp": "2.0.0rc2.dev36+g3fb2cc02b",
-  "nnsight": "0.8.2",
+  "nnterp": "2.0.0rc2.dev54+g200ac05b7",
+  "nnsight": "0.8.0rc2.dev236+ge09ab1c82",
   "transformers": "5.22.1",
   "torch": "2.11.0+cu128"
  },
  "dtype": "bfloat16",
  "attn_implementation": "eager",
- "n_ok": 14,
+ "n_ok": 13,
  "n_primitives": 14,
  "results": [
   {
@@ -54,8 +54,8 @@
   },
   {
    "primitive": "OVReader probe",
-   "status": "OK",
-   "reason": "readout at probe layer 32; OV vector finite"
+   "status": "FAIL",
+   "reason": "ValueError: OVReader's map ends at the output projection, but block 14 of 'gemma2' norms the attention's output (post_attention_layernorm) before the stream gets it, so a head's write is scaled per channel by that norm's gain, which (at src/goals/goalscope.py:347 in _build_readers)"
   },
   {
    "primitive": "attention matrices",
