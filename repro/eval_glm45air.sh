@@ -1,11 +1,12 @@
 #!/bin/bash
 # Evaluation wave 1, GLM-4.5-Air on four GPUs (device_map="auto"; PLAN 3.2-3.7, constants of the GLM row): G-small =
-# the band-rule set (178 heads, layers 9-33), G-large = the top-250 set (the proportional 431 would be padded with
-# zero-valued heads: the mask has 263 nonzero heads), C-large = control250; GoalScope steer layers 25-33,
-# sufficiency from layer 14. The additive GoalScope constants (4.1) and the NRGS read-outs (4.9 / 4.12) take
-# GS_ALPHA / GS_LAYERS from the environment (default the depth-scaled alpha 0.1 at layers 25-33; the campaign's
-# fitted values come from the GoalScope fit check, STATUS). 4.9 / 4.12 need the multi-GPU fix of headwise_kv_patch
-# (repro/wave-code) before they run.
+# the band-rule set (178 heads, layers 9-33), G-large = the top-387 set (the proportional count, 431, capped at the
+# 387 heads the mask ranks: every other head has mask value 0; decided 2026-11-04 on the author's suggestion), C-large =
+# control387; GoalScope steer layers 25-33, sufficiency from layer 14. The lane's first 4.6 ran the large arms with
+# top-250 (the earlier choice); group 4.6L reruns them with the 387 set. The additive GoalScope constants (4.1) and
+# the NRGS read-outs (4.9 / 4.12) take GS_ALPHA / GS_LAYERS from the environment (default the depth-scaled alpha 0.1
+# at layers 25-33; the campaign's fitted values come from the GoalScope fit check, STATUS). 4.9 / 4.12 need the
+# multi-GPU fix of headwise_kv_patch (repro/wave-code) before they run.
 #
 #   bash repro/eval_glm45air.sh <gpus, e.g. 4,5,6,7> <group> [<group> ...]       runner: repro/eval_lib.sh
 SLUG=glm45air
@@ -13,8 +14,8 @@ source "$(dirname "$0")/eval_lib.sh"
 M=zai-org/GLM-4.5-Air
 H=head_sets/GLM-4.5-Air
 GS=$H/goal__lam20_thr0.9_band9-34.json
-GL=$H/goal_topk/goal__lam20_top250.json
-CL=$H/control/control250__laterhalf.json
+GL=$H/goal_topk/goal__lam20_top387.json
+CL=$H/control/control387__laterhalf.json
 GS_ALPHA=${GS_ALPHA:-0.1}
 GS_LAYERS=${GS_LAYERS:-25 33}
 
@@ -39,6 +40,11 @@ group_4_6() {  # ablations: sufficiency and necessity, G-small and G-large
   for heads in $GS $GL; do
     run -m scripts.evaluation.eval_ablation_necessity --model $M --heads $heads
   done
+}
+
+group_4_6L() {  # the large-set ablation arms alone (the 387 set; the lane's 4.6 ran them with top-250)
+  run -m scripts.evaluation.eval_ablation_sufficiency --model $M --heads $GL --from_layer 14
+  run -m scripts.evaluation.eval_ablation_necessity --model $M --heads $GL
 }
 
 group_4_7() {  # temporal persistence, goal heads and control
