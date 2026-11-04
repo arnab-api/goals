@@ -387,8 +387,12 @@ def headwise_kv_patch(mt, heads, k_cache, v_cache, dest_positions, v_scale=1.0) 
         # the source keys rotated for the DEST positions, outside any trace; the values carry no position. (A rope
         # scaling that adapts to the sequence, Phi-3's longrope, picks its frequencies from these positions, as the
         # model does from the whole prompt: the two agree while the prompt is shorter than the scaling's
-        # original_max_position_embeddings.)
-        keys = attn.rotate(k_cache[L][kv].to(dev, dt), list(dest_positions))
+        # original_max_position_embeddings.) These are `attn.rotate`'s two halves with the embedding moved to the
+        # block, as the forward hands it over: under device_map="auto" the model's rotary module can sit on another
+        # GPU, and `rotate` applies the embedding on the device it was computed on.
+        x = k_cache[L][kv].to(dev, dt)
+        emb = attn.rotary_embedding(x, torch.tensor([list(dest_positions)], device=dev))
+        keys = attn.apply_rotary(x, emb.to(dev) if torch.is_tensor(emb) else tuple(t.to(dev) for t in emb))
         values = v_cache[L][kv].to(dev, dt)
         if v_scale != 1.0:  # x the transplanted SOURCE values on the span
             values = values * v_scale

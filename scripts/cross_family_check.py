@@ -85,7 +85,7 @@ class Run:
 
         self.args = args
         self.n = args.n_tokens
-        self.ctx = FUNC.setup(args.model, device_map={"": 0})  # bf16, eager; binds src.nrgs.functional.mt
+        self.ctx = FUNC.setup(args.model, device_map="auto" if args.device_map == "auto" else {"": 0})  # bf16, eager; binds src.nrgs.functional.mt
         self.mt = mt = self.ctx.mt
         L = mt.num_layers
         self.heads = self._heads(args.heads, args.seed)
@@ -436,6 +436,7 @@ def _reason(exc: BaseException) -> str:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="HF id (or local path) of the checkpoint")
+    ap.add_argument("--device-map", default="0", help="0 (one GPU) or auto (spread over the visible GPUs, for a model that needs more than one)")
     ap.add_argument("--heads", default="random:60", help="random:N (middle third of the layers) or a json head set")
     ap.add_argument("--seed", type=int, default=0, help="seed of the random head set")
     ap.add_argument("--n-tokens", type=int, default=16, help="new tokens per generation and read-out")
