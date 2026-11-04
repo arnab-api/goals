@@ -454,7 +454,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   `python notebooks/fig_n_table_generators/q_transfer_schema.py` (cairosvg + IBM Plex fonts) ->
   `notebooks/Figures/transfer/q_transfer_schema.{svg,pdf,png}` (= the paper's `gsr_schema_clean.pdf`, renamed).
 
-### 4.13 Task span vs code-progress span: §5.2 (`fig:task-vs-prog` = `Figures/transfer/task-vs-progress-crop.pdf`), App. `app:pre-com` (`fig:pre-com-kv` = `Figures/generated/precommit_ablation/tvp_kv_grids.pdf`)
+### 4.13 Task span vs code-progress span: App. `app:task-vs-prog` (`Text/Appendix/pre-commitment.tex`; `fig:task-vs-prog` = `Figures/transfer/task-vs-progress-crop.pdf`), App. `app:pre-com` (`fig:pre-com-kv` = `Figures/generated/precommit_ablation/tvp_kv_grids.pdf`)
 
 - Commands: `job_list/diff_eval/task_vs_progress_32b.json` and `task_vs_progress_32b_v2.json` (4 jobs each, one per
   datatype; v2 added configs and resumes from the cache): `python scripts/nrgs/task_vs_progress_eval.py --datatypes <dt>`.
