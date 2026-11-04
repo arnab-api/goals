@@ -106,7 +106,10 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Generators** (`notebooks/fig_n_table_generators/*.ipynb`) only parse results (no model). They save through
   `figstyle.save_fig` / `save_table` to `notebooks/Figures/<group>/<name>.{pdf,png,tex}`. Copying into
   `Overleaf-draft/Goals-Overleaf/Figures/generated/<group>/` (and `Text/Appendix/tables/generated/`) and `pdfcrop`
-  (`*-crop.pdf`) were done by hand. Cell numbers below are 0-based code+markdown cell indices.
+  (`*-crop.pdf`) were done by hand. Cell numbers below are 0-based code+markdown cell indices. The per-group
+  notebooks plot Coder-32B unless `GOALS_MODEL` (an HF id or its slug, `figstyle.model_slug`) names another model;
+  `kv_transfer` / `q_transfer` also read `GOALS_LARGE_HEADS` (the run's head-set tag, default `goal_250`), `ablation`
+  and `readout_sources_and_head_budget` cell 9 `GOALS_ABLATION_SETS` (the two set sizes, default `122,250`).
 
 ## 2. Reproduce from scratch: dependency order
 
@@ -128,9 +131,11 @@ see Caution 6b).
    `results/localization/<slug>/<tag>/head_mask.pt` (+ `checkpoints/` every 5 epochs). Defaults
    (`--n-epochs 50 --lambda-sparse 20 --batch-size 64 --augment --tag lam20`, lr 1e-2, augment seed 123456, all layers)
    = the Coder-32B lam20 run. Per-model settings: section 3.2.
-4. **Head-set export** (no model): `python scripts/data/export_head_sets.py` -> `head_sets/<slug>/goal__lam20_thr0.9_band<a>-<b>.json`
-   for the models in its `MODEL_BANDS` (Coder-32B 25-56, Qwen2.5-32B 25-56, Coder-14B 0-48, OLMo Instruct / SFT 10-36);
-   threshold 0.9 on the lam20 mask. The other head sets have no script on `clean` (section 3.2).
+4. **Head-set export** (no model): `python scripts/data/export_head_sets.py` -> `head_sets/<slug>/goal__<tag>_thr0.9_band<a>-<b>.json`
+   for the models in its `MODEL_BANDS` (Coder-32B 25-56, Qwen2.5-32B 25-56, Coder-14B 0-48, Llama-3.3-70B 18-45 on its
+   `lam20_ctx` mask (`MODEL_TAGS`), OLMo Instruct / SFT 10-36; GLM-4.5-Air and Devstral by the band rule, section 7);
+   threshold 0.9 on the mask. `--topk K [--control]` writes the top-K set and its later-half control (section 3.2).
+   The hand-made OLMo sets and the `snap_top` sets have no script on `clean` (section 3.2).
 5. **Everything that reads `head_sets/`**: GoalScope eval and readout baselines (sections 4.1-4.4), OVReader (4.5),
    ablations (4.6), temporal / obstacle persistence (4.7-4.8), NRGS interventions (4.9-4.13), unspecified-task readouts (4.15),
    ICL / EM (4.16), site (4.17).
@@ -161,16 +166,16 @@ see Caution 6b).
 | file | heads | used by | how it was made |
 |---|---|---|---|
 | `Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 122 | GoalScope main, OVReader, ablations (122), temporal persistence, ICL, EM, site | `export_head_sets.py` (lam20 mask > 0.9, layers [25,56)) |
-| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top{150,200,250}.json` | 150/200/250 | head-budget sweep; **250 = all NRGS runs, ablations (250), obstacle OV boost** | top-k by mask value of the lam20 mask over all 64 layers (ties by index); **no script on clean**: `notebooks/clock/__head_inspection.ipynb` on master (commits 3a5c328, c2fe051). top250 contains all 122 goal heads and 14 heads below layer 20 |
-| `.../goal_topk/goal__lam100_top{50,100}.json`, `goal__lam5_top300.json` | 50/100/300 | head-budget sweep | same recipe on the lam100 / lam5 masks (c2fe051 message: each k at a λ whose mask supports it); no script on clean |
+| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top{150,200,250}.json` | 150/200/250 | head-budget sweep; **250 = all NRGS runs, ablations (250), obstacle OV boost** | top-k by mask value of the lam20 mask over all 64 layers (ties by index): `export_head_sets.py --topk 150 200 250` (byte-identical to the tracked files; first made by `notebooks/clock/__head_inspection.ipynb` on master, commits 3a5c328, c2fe051). top250 contains all 122 goal heads and 14 heads below layer 20 |
+| `.../goal_topk/goal__lam100_top{50,100}.json`, `goal__lam5_top300.json` | 50/100/300 | head-budget sweep | same recipe on the lam100 / lam5 masks (c2fe051 message: each k at a λ whose mask supports it): `export_head_sets.py --tag lam100 --topk 50 100`, `--tag lam5 --topk 300` (byte-identical) |
 | `.../goal_topk/goal__snap_top{5,10,25}.json` | 5/10/25 | head-budget sweep | `scripts/data/export_sparse_head_sets.py` **on master only** (ranks heads by the number of lam{1,5,20,50,100} checkpoints at 1.0; top5 = seeded random 5 of top10) |
-| `Qwen2.5-Coder-32B-Instruct/control/control{122,250}__laterhalf.json` | 122/250 | NRGS random-head controls (250); control122 only in unreported GoalScope baselines | random non-goal heads from layers >= 32, seed 123; committed in master 8ed1474, no generating script |
+| `Qwen2.5-Coder-32B-Instruct/control/control{122,250}__laterhalf.json` | 122/250 | NRGS random-head controls (250); control122 only in unreported GoalScope baselines | `sorted(random.Random(123).sample(...))` of the heads of layers >= 32 not in the goal set of the same size (control250: not in top250, `export_head_sets.py --topk 250 --control`, byte-identical; control122: not in the 122 band set, no script); committed in master 8ed1474 |
 | `Qwen2.5-Coder-14B-Instruct/goal__lam20_thr0.9_band0-48.json` | 88 | model-size axis | `export_head_sets.py` |
 | `Qwen2.5-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 108 | code-finetuning axis + model table | `export_head_sets.py` |
 | `Olmo-3.1-32B-Instruct/goal__lam20_thr1.0_band10-36.json` | 93 | RL axis (reported) | mask == 1.0 in layers [10,36); balanced against SFT by hand in master ae9f2c2, **no script** |
 | `Olmo-3.1-32B-Instruct-SFT/goal__lam20_thr0.6_band10-36.json` | 91 | RL axis (reported) | mask > 0.6 in [10,36); master ae9f2c2, **no script** |
 | `Olmo-3.1-32B-Instruct{,-SFT}/goal__lam20_thr0.9_band10-36.json` | 130 / 79 | superseded `heads=goal` OLMo runs | `export_head_sets.py` |
-| `Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json` | 110 | site only (and an unreported eval) | lam20_ctx mask (`results/localization/Llama-3.3-70B-Instruct/lam20_ctx/`, 1433 instances, 50 epochs, batch 8, no-augment), thr 0.9, layers [18,45); master 8007182 / notebook `notebooks/diff/13_goalscope_qualitative.ipynb` on master; **no script on clean** |
+| `Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json` | 110 | site only (and an unreported eval) | lam20_ctx mask (`results/localization/Llama-3.3-70B-Instruct/lam20_ctx/`, 1433 instances, 50 epochs, batch 8, no-augment), thr 0.9, layers [18,45): `export_head_sets.py` (`MODEL_TAGS`, byte-identical; first made in master 8007182 / `notebooks/diff/13_goalscope_qualitative.ipynb`) |
 | `Qwen2.5-Coder-32B-Instruct/set_diff_localization/*.mask.pt` | - | nothing on clean (unreported set-diff query localization; master 37c6f42) | - |
 
 Masks behind the other models (all `results/localization/<slug>/lam20/head_mask.pt`, config read from the checkpoints):
@@ -306,7 +311,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   (no job lists; the reported runs were launched by hand, 2026-09-18). Shared machinery:
   `scripts/evaluation/ablation_common.py` (greedy decode on `mt.generate` with the KV cache; the sink / blind edit is
   `src.nrgs.functional.whitelist_head_attn` on `attention_scores` at every step; a generated token whose text ends
-  in `"\n"` stops the decode and is kept, EOS stops it and is dropped).
+  in `"\n"` stops the decode and is kept, a stop token (`mt.eos_token_ids`, section 7) stops it and is dropped).
 - Results: `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   and `.../necessity/heads=goal__goal{122,250}__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   (`fromL=32` in necessity = the control-pool floor, not an intervention layer). `summary.json["overall"]` =
@@ -334,8 +339,11 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   python scripts/evaluation/temporal_persistence_eval.py --cuda 0                          # goal heads
   python scripts/evaluation/temporal_persistence_eval.py --cuda 0 --control --n-trials 64  # control
   ```
-  Defaults: `--model Qwen/Qwen2.5-Coder-32B-Instruct --n-trials 256 --seed 1123`; `HEAD_BUDGET = 122` and
-  `MAX_NEW = 96` (`src/goals/temporal_persistence.py`, both in every cache key); 4 datatypes x {python, cpp}; C++
+  Defaults: `--model Qwen/Qwen2.5-Coder-32B-Instruct --heads head_sets/<slug>/goal__lam20_thr0.9_band25-56.json
+  --n-trials 256 --seed 1123`; the head set's key and `MAX_NEW = 96` (`src/goals/temporal_persistence.py`) are in
+  every cache key: `TP.heads_key` is `"122"` (`HEAD_BUDGET`) for the set the paper's runs read, so their records stay
+  hits, and `heads-<md5[:12]>` of the sorted set for any other (records carry it as `heads_key`); 4 datatypes x
+  {python, cpp}; C++
   implementation spans are segmented by the Claude oracle (`oracle_value_segment`). `--n-trials 256` enumerates every
   distinct context per (datatype, language) cell (setups saturate at 240). Control heads: 122 random heads from
   layers [32, 64) disjoint from the goal heads, `CONTROL_SEED = 7` in the script (not the `head_sets/.../control/`
@@ -671,17 +679,30 @@ What runs but means something else on some families:
   `--source attn` baseline) is that norm's output on these families.
 - **Double BOS**: the Llama-3 and Gemma chat templates start with BOS and `prepare_input` adds another (Qwen has none).
   Left as is: the Llama-3.3-70B site runs were made this way.
-- **Layer constants**: every script default (steer layers 35-45, OVReader probe layers, ablation from layer 20,
-  `goalscope_readout`'s 35-46) is the 32B's; pass scaled values for another depth.
-- **ICL / EM scripts** build their ChatML EOS sets (`<|im_end|>`, `<|endoftext|>`) and system turns themselves; as
-  written they are Qwen-only.
+- **Layer constants**: every script default (steer layers 35-45, OVReader probe layers, ablation from layer 20) is the
+  32B's; pass scaled values for another depth. The NRGS scripts' GoalScope readouts (`goalscope_readout`, through
+  `Ctx.readout_layers`) default to 35-46 scaled by depth (`round(L*35/64)`, `round(L*46/64)`, the paper's 35-46 on 64
+  layers); `kv_transfer_eval.py` / `q_transfer_eval.py --readout-layers A B` sets them, a value other than the
+  default tags the run `__rl<A>-<B>`. Both scripts take `--model`; any model but Coder-32B needs its own head sets.
+- **Stop tokens**: every greedy decoder (`greedy_continue`, the GoalScope readouts, the NRGS / ablation decode driver,
+  `batch_generate`, the ICL / EM / site scripts) stops at `mt.eos_token_ids`: the tokenizer's `eos_token_id` and the
+  generation config's EOS list. On Qwen2.5 Instruct that is `<|im_end|>`, `<|endoftext|>`, and the tokenizer's EOS alone
+  is already the turn end; on GLM-4.5 the tokenizer's EOS is `<|endoftext|>` while turns end at `<|user|>` (in the
+  list), so the tokenizer's EOS alone runs past the turn; Olmo-3.1 Instruct ends its turns with its EOS
+  `<|endoftext|>`; Olmo-3.1 SFT's list adds `<|im_end|>`. `GOALS_EOS=tokenizer` stops at the tokenizer's
+  `eos_token_id` only (parity with the reported non-Qwen rows).
+- **ICL / EM scripts** build their system turns themselves; as written they are Qwen-only.
 
 **A head set for a new model**: every script takes `--heads <json>` (`[[layer, head], ...]`; `load_json_heads` checks
 the ranges against the model). To localize goal heads: mine pivot instances (`scripts/mine_pivot_instances.py
 --model-key <id>`; without them `train_head_mask.py` falls back to the Coder-32B pool, Caution 6a), train the mask
-(`scripts/train_head_mask.py --model-key <id>`), add the model's band to `MODEL_BANDS` in
-`scripts/data/export_head_sets.py` (and `GOAL_BANDS` in `src/goals/head_sets.py` for `--heads goal`), export to
-`head_sets/<slug>/`, and run the cross-family check with `--heads` on the new set.
+(`scripts/train_head_mask.py --model-key <id>`), add the model to `MODEL_BANDS` in `scripts/data/export_head_sets.py`
+and to `GOAL_BANDS` in `src/goals/head_sets.py` (for `--heads goal`) with band `None`, export to `head_sets/<slug>/`
+(the band comes from the mask by `src.goals.head_sets.band_rule`: the smallest contiguous layer window holding >= 85%
+of the heads with mask > 0.9, the lowest of equally narrow ones; on the paper's masks Qwen2.5-32B [29, 56),
+Llama-3.3-70B lam20_ctx [19, 44), Olmo-3.1 [9, 34), Coder-32B [32, 57); the export prints the window, its per-layer
+counts and its size: pin them in both dicts), `--topk K --control` for the large set and its control, and run the
+cross-family check with `--heads` on the new set.
 
 ## 8. Working conventions
 

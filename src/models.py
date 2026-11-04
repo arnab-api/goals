@@ -64,6 +64,7 @@ class ModelandTokenizer(StandardizedTransformer):
             self.tokenizer.bos_token = self.tokenizer.eos_token
             self.tokenizer.bos_token_id = self.tokenizer.eos_token_id
         self._module.generation_config.pad_token_id = self.tokenizer.eos_token_id
+        self._eos_token_ids = _stop_ids(self.tokenizer, self._module.generation_config)
 
         if self.family_name not in SUPPORTED_FAMILIES:
             logger.warning(
@@ -87,6 +88,26 @@ class ModelandTokenizer(StandardizedTransformer):
     def family_name(self) -> str:
         """The nnterp family, i.e. the config's ``model_type`` (``"qwen2"``, ``"llama"``, ...)."""
         return self.family.__name__.rsplit(".", 1)[-1]
+
+    @property
+    def eos_token_ids(self) -> list[int]:
+        """The token ids every greedy decoder here stops at: the tokenizer's ``eos_token_id`` and the checkpoint's
+        ``generation_config.eos_token_id`` (an int or a list), in that order, without repeats.
+
+        On Qwen2.5 Instruct that is ``<|im_end|>``, ``<|endoftext|>``; on GLM-4.5 ``<|endoftext|>``, ``<|user|>``,
+        ``<|observation|>`` (its turns end where the next one starts, at ``<|user|>``); on Llama-3.3 ``<|eot_id|>``,
+        ``<|end_of_text|>``, ``<|eom_id|>``; on Olmo-3.1 Instruct ``<|endoftext|>`` (its template ends the last
+        assistant turn with it, and its generations end there); on Olmo-3.1 SFT ``<|endoftext|>``, ``<|im_end|>``; on
+        Devstral ``</s>``. The tokenizer's ``eos_token_id`` alone is ``<|endoftext|>`` on GLM-4.5, so a decoder
+        stopping there runs past the end of the turn.
+
+        ``GOALS_EOS=tokenizer`` in the environment returns ``[tokenizer.eos_token_id]`` instead: the stop of the
+        reported runs on every family, for parity runs of the paper's non-Qwen rows. On the paper's Qwen2.5 models,
+        whose ``eos_token_id`` is ``<|im_end|>``, the two rules differ only where the model writes ``<|endoftext|>``
+        before ``<|im_end|>``."""
+        if os.environ.get("GOALS_EOS") == "tokenizer":
+            return [self.tokenizer.eos_token_id]
+        return list(self._eos_token_ids)
 
     # -- legacy sizes (aliases of nnterp's) --------------------------------------
 
@@ -145,6 +166,13 @@ def text_model_load_kwargs(model_key: str, kwargs: dict) -> dict:
         text.quantization_config = quantization
     logger.info(f"{model_key}: {config.model_type} has no causal-LM class; loading its text model ({text.model_type})")
     return {"config": text, "key_mapping": dict(_WRAPPER_TEXT_KEYS)}
+
+
+def _stop_ids(tokenizer, generation_config) -> list[int]:
+    """:attr:`ModelandTokenizer.eos_token_ids`, computed once at load."""
+    gen = getattr(generation_config, "eos_token_id", None)
+    gen = [] if gen is None else [gen] if isinstance(gen, int) else list(gen)
+    return list(dict.fromkeys(int(i) for i in [tokenizer.eos_token_id, *gen] if i is not None))
 
 
 def get_model_size(

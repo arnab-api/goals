@@ -50,13 +50,14 @@ def greedy_continue(
         attention_mask: (1, seq) attention mask.
         max_new_tokens: Maximum tokens to generate.
         stop_ids: Token ids that halt generation; the stop token is kept (and dropped by the decode when it is
-            special). ``None`` (default) = ``tokenizer.eos_token_id``; an empty collection never stops early.
+            special). ``None`` (default) = ``mt.eos_token_ids`` (the tokenizer's and the generation config's EOS
+            ids); an empty collection never stops early.
         interventions: edits applied in every forward, ``interventions(mt)`` inside the trace.
 
     Returns:
         Decoded generated string (prompt stripped, special tokens skipped, right-stripped).
     """
-    _stop = [mt.tokenizer.eos_token_id] if stop_ids is None else stop_ids
+    _stop = mt.eos_token_ids if stop_ids is None else stop_ids
     generated = []
     with torch.no_grad():
         for _ in range(max_new_tokens):
@@ -110,9 +111,9 @@ def headpatched_generate(
     ``n_steer_tokens=1`` patches only the prompt call. ``None`` patches every step. (This is one
     more than ``generate_with_patch``'s count, which leaves the prompt call out.)
 
-    Decoding is plain greedy argmax with a stop at ``tokenizer.eos_token_id``: the checkpoint's
-    ``repetition_penalty`` and its other EOS ids are overridden, as in the hand-written decode loop
-    this replaces. (``head_additive_generate`` keeps the checkpoint's ``generation_config``.)
+    Decoding is plain greedy argmax with a stop at ``mt.eos_token_ids``: the checkpoint's
+    ``repetition_penalty`` is overridden, as in the hand-written decode loop this replaces.
+    (``head_additive_generate`` keeps the checkpoint's ``repetition_penalty``.)
 
     Args:
         mt: ModelandTokenizer.
@@ -169,7 +170,7 @@ def headpatched_generate(
             max_new_tokens=max_new_tokens,
             do_sample=False,
             repetition_penalty=1.0,
-            eos_token_id=mt.tokenizer.eos_token_id,
+            eos_token_id=mt.eos_token_ids,
         ) as tracer:
             with tracer.invoke(inputs):
                 if plan and n_steps > 0:
@@ -206,8 +207,8 @@ def head_additive_generate(
     ``h + alpha * ||h|| * g/||g||``. ``alpha`` is "add this fraction of the local residual norm
     along the goal direction", which is scale-invariant across head sets, bands and models.
     Normalisation happens HERE, so callers pass the raw aggregated vector. Runs through
-    :func:`src.functional.generate_with_patch` (greedy, the checkpoint's ``generation_config``
-    otherwise).
+    :func:`src.functional.generate_with_patch` (greedy, stops at ``mt.eos_token_ids``, the
+    checkpoint's ``generation_config`` otherwise).
 
     Args:
         mt: ModelandTokenizer.
