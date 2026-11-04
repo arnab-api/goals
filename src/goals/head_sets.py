@@ -5,10 +5,14 @@ model is ``head_sets/<model>/goal__<tag>_thr<threshold>_band<lo>-<hi>.json``: th
 (``scripts/train_head_mask.py``) thresholded inside the model's layer band, exported by
 ``scripts/data/export_head_sets.py``. When that json is missing, ``load_goal_heads`` derives the set from the mask
 checkpoint under ``results/localization/<model>/<tag>/head_mask.pt`` (and says so).
+
+A new model's band comes from its mask by :func:`band_rule` (``repro/PLAN.md`` 2.3): the smallest contiguous layer
+window holding at least 85% of the heads above the threshold.
 """
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -23,19 +27,78 @@ HEAD_SETS_DIR = os.path.join(env_utils.PROJECT_ROOT, "head_sets")
 
 # Layer band the goal heads are read from, per model. The trained mask covers every layer; the band restricts
 # selection to the region where that model's goal heads live. A model missing here falls back to the full depth.
+# None: not pinned yet, derived from the model's lam20 mask by band_rule (export_head_sets.py prints the window, its
+# per-layer counts and its size; pin them here and in export_head_sets.MODEL_BANDS once the mask is final).
 GOAL_BANDS = {
     "Qwen2.5-Coder-32B-Instruct": (25, 56),
     "Qwen2.5-32B-Instruct": (25, 56),  # code axis: matched to Coder (both 64 layers)
+    "Qwen2.5-Coder-14B-Instruct": (0, 48),  # size axis: all 48 layers (the model-axis runs pass --goal_band 0 48)
     "Llama-3.3-70B-Instruct": (18, 45),
     "Olmo-3.1-32B-Instruct": (10, 36),
     "Olmo-3.1-32B-Instruct-SFT": (10, 36),  # RL axis: matched to Olmo Instruct
+    "GLM-4.5-Air": None,  # band_rule on its lam20 mask until pinned
+    "Devstral-Small-2-24B-Instruct-2512": None,  # band_rule on its lam20 mask until pinned
 }
+
+BAND_COVERAGE = 0.85  # band_rule: the share of the above-threshold heads the band must hold
+
+
+def band_rule(mask_values, layers=None, threshold=0.9, coverage=BAND_COVERAGE) -> dict:
+    """The goal band of a model with no paper band (``repro/PLAN.md`` 2.3): the smallest contiguous window of layers
+    ``[lo, hi)`` that holds at least ``coverage`` of the heads whose mask value is ``> threshold`` (over all layers);
+    among windows of that width, the lowest. ``mask_values`` is the ``(n_mask_layers, n_heads)`` mask, its rows the
+    layers ``layers`` (default ``0..n-1``, contiguous).
+
+    Returns ``dict(band=(lo, hi), n_in_band, n_total, per_layer={layer: count})``, ``per_layer`` over the band.
+    On the paper's masks: Qwen2.5-32B [29, 56) 108 of 126 heads (its band [25, 56) holds the same 108), Llama-3.3-70B
+    lam20_ctx [19, 44) 110 of 129 (paper [18, 45), the same 110), Olmo-3.1-32B-Instruct [9, 34) 128 of 150 (paper
+    [10, 36): 130), Coder-32B [32, 57) 117 of 137 (paper [25, 56): 122; [37, 62), holding 118, is as narrow)."""
+    m = np.asarray(mask_values, dtype=np.float64)
+    layers = list(range(m.shape[0])) if layers is None else [int(x) for x in layers]
+    if layers != list(range(layers[0], layers[0] + len(layers))):
+        raise ValueError(f"band_rule needs a mask over contiguous layers, got {layers}")
+    counts = (m > threshold).sum(axis=1).astype(int)  # per mask row
+    total = int(counts.sum())
+    if total == 0:
+        raise ValueError(f"no head of the mask is above {threshold}")
+    need = math.ceil(coverage * total - 1e-9)
+    prefix = np.concatenate([[0], np.cumsum(counts)])
+    best = None  # (width, first row)
+    for i in range(len(layers)):
+        j = next((j for j in range(i + 1, len(layers) + 1) if prefix[j] - prefix[i] >= need), None)
+        if j is not None and (best is None or j - i < best[0]):  # strictly narrower: ties keep the lower window
+            best = (j - i, i)
+    width, i = best
+    return dict(band=(layers[i], layers[i] + width), n_in_band=int(prefix[i + width] - prefix[i]), n_total=total,
+                per_layer={layers[r]: int(counts[r]) for r in range(i, i + width)})
+
+
+def band_from_mask(model_name, results_dir=None, tag="lam20", threshold=0.9) -> dict:
+    """:func:`band_rule` on ``results/localization/<model>/<tag>/head_mask.pt``."""
+    results_dir = results_dir or env_utils.DEFAULT_RESULTS_DIR
+    ck = torch.load(
+        os.path.join(results_dir, f"localization/{model_name.split('/')[-1]}/{tag}/head_mask.pt"),
+        map_location="cpu",
+    )
+    return band_rule(ck["mask_values"].numpy(), ck["layers"], threshold=threshold)
 
 
 def default_goal_band(model_name, n_layer=None):
-    """`GOAL_BANDS[model]`, else the full depth (needs `n_layer`) — never a foreign model's band."""
+    """`GOAL_BANDS[model]`, else the full depth (needs `n_layer`) — never a foreign model's band. An entry that is
+    not pinned yet (None) is :func:`band_from_mask` of the model's lam20 mask."""
     slug = model_name.split("/")[-1]
     if slug in GOAL_BANDS:
+        if GOAL_BANDS[slug] is None:
+            try:
+                rule = band_from_mask(model_name)
+            except FileNotFoundError:
+                raise ValueError(
+                    f"GOAL_BANDS[{slug!r}] is not pinned and its lam20 mask is not under results/localization/ — "
+                    f"pass --goal_band (or pin the band band_rule gives on the mask)"
+                ) from None
+            logger.warning(f"GOAL_BANDS[{slug!r}] is not pinned: band_rule on its lam20 mask gives {rule['band']} "
+                           f"({rule['n_in_band']} of {rule['n_total']} heads); pin it")
+            return rule["band"]
         return GOAL_BANDS[slug]
     if n_layer is None:
         raise ValueError(
