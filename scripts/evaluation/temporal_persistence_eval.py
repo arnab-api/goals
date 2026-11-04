@@ -3,7 +3,7 @@
 
 For each (datatype, language) it rolls out full multi-predicate functions, segments each sub-goal's
 implementation with an oracle LLM (robust to multi-statement C++ blocks), and records the goal-head
-encoding (the 122 goal heads, 96-token budget) at the `=` pivot + along the implementation tokens.
+encoding (``--heads``, default the 122 goal heads; 96-token budget) at the `=` pivot + along the implementation tokens.
 Retention curves are cos(pivot, encoding at x% of the impl) over relation masks; the figures are
 made by ``notebooks/fig_n_table_generators/temporal_persistence.ipynb`` from the cache.
 
@@ -16,6 +16,10 @@ Usage (the paper's two runs):
 
 ``--n-trials 256`` (default) enumerates every distinct context of each (datatype, lang) cell (the
 setups saturate at 240); the control run covers the first 64.
+
+Another model: ``--model <hf id> --heads head_sets/<slug>/<goal set>.json``. The head set is part of every cache
+key (``TP.heads_key``: the paper's key for the set the paper's runs read, a hash of the set otherwise), so a
+different set never reuses another set's records.
 """
 import argparse
 import logging
@@ -52,6 +56,9 @@ def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
+    ap.add_argument("--heads", default=None,
+                    help="goal head set (JSON [[layer, head], ...]; default head_sets/<slug>/"
+                         "goal__lam20_thr0.9_band25-56.json, the paper's 122 heads on Coder-32B)")
     ap.add_argument("--n-trials", type=int, default=256, help="contexts sampled per (datatype, lang)")
     ap.add_argument("--seed", type=int, default=1123, help="context-sampling seed")
     ap.add_argument("--control", action="store_true",
@@ -82,7 +89,7 @@ def main():
     device_map = {"": 0} if single_gpu else "auto"
     mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
                            device_map=device_map, attn_implementation="eager")
-    goal_heads = TP.load_goal_heads(mt, slug)
+    goal_heads = TP.load_goal_heads(mt, slug, args.heads)
     head_tag = "goal"
     heads = goal_heads
     if args.control:
@@ -94,14 +101,15 @@ def main():
         head_tag = "control"
         logger.info(f"{slug}: CONTROL head set — {len(heads)} heads sampled from layers "
                     f"[{mt.n_layer // 2}, {mt.n_layer}) (seed={CONTROL_SEED}), disjoint from goal heads")
-    logger.info(f"{slug}: {len(heads)} {head_tag} heads -> {out_dir}")
+    hkey = TP.heads_key(slug, goal_heads, heads)
+    logger.info(f"{slug}: {len(heads)} {head_tag} heads (cache key {hkey}) -> {out_dir}")
 
     per_cell = {}
     for dt in TP.DATATYPES:
         for lang in TP.LANGS:
             recs = TP.build_records(
                 mt, slug, heads, dt, lang,
-                n_trials=args.n_trials, seed=args.seed, force=args.force, head_tag=head_tag,
+                n_trials=args.n_trials, seed=args.seed, force=args.force, head_tag=head_tag, hkey=hkey,
             )
             per_cell[f"{dt}/{lang}"] = len(recs)
             logger.info(f"  {dt:10s}/{lang:6s}: {len(recs)} conditions")

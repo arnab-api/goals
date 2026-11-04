@@ -41,7 +41,22 @@ MODEL_COLOR = {
     "Olmo-3.1-32B-Instruct":      "#D55E00",
     "Olmo-3.1-32B-Instruct-SFT":  "#CC79A7",
     "GLM-4-32B-0414":             "#8C564B",
+    # the comparison campaign's models (repro/PLAN.md). Chosen to stay apart from the four paper colours above they
+    # share figures with (Coder-32B, Coder-14B, Qwen2.5-32B, Olmo-3.1): over those seven, the worst pair is OKLab
+    # dE 9.6 under protan/deutan simulation and 15.2 under normal vision. #DDAA33 is close to Qwen2.5-72B's
+    # #E69F00 (dE 2.8): do not plot GLM-4.5-Air and Qwen2.5-72B in one figure.
+    "Llama-3.3-70B-Instruct":     "#762A83",
+    "GLM-4.5-Air":                "#DDAA33",
+    "Devstral-Small-2-24B-Instruct-2512": "#B2182B",
 }
+
+DEFAULT_MODEL = "Qwen2.5-Coder-32B-Instruct"  # the model the per-group generator notebooks plot by default
+
+
+def model_slug(default: str = DEFAULT_MODEL) -> str:
+    """The results slug a per-group generator notebook reads: ``$GOALS_MODEL`` (an HF id or its slug), else
+    ``default`` (Coder-32B, the paper's). E.g. ``GOALS_MODEL=zai-org/GLM-4.5-Air jupyter nbconvert --execute ...``."""
+    return os.environ.get("GOALS_MODEL", default).split("/")[-1]
 
 # Canonical pivots shown in figures/tables. `first_impl` is DELIBERATELY EXCLUDED from all paper
 # figures & tables (it is the first implementation token, not a pre-implementation pivot). Use `PIVOTS`.

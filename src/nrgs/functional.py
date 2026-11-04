@@ -54,14 +54,33 @@ mt = None
 gsp = None  # optional GoalScope probe override (apply_goalscope reads globals().get("gsp"))
 
 
+# The GoalScope readout's steer layers (half-open) on the paper's 64-layer 32B models.
+READOUT_LAYERS = (35, 46)
+
+
+def readout_layers_for(n_layer: int) -> tuple[int, int]:
+    """:data:`READOUT_LAYERS` scaled by depth: ``(round(L * 35 / 64), round(L * 46 / 64))``, the paper's (35, 46) on a
+    64-layer model (``scripts/cross_family_check.py`` scales them the same way)."""
+    return round(n_layer * READOUT_LAYERS[0] / 64), round(n_layer * READOUT_LAYERS[1] / 64)
+
+
+def readout_layers_tag(layers, default, readout=True) -> str:
+    """Run-tag suffix of the NRGS scripts for the readout's steer layers: ``__rl<a>-<b>`` when they differ from the
+    model's default ``default`` (:func:`readout_layers_for` its depth), else (and without readouts) empty, so the
+    paper's run dirs keep their names."""
+    return f"__rl{layers[0]}-{layers[1]}" if readout and tuple(layers) != tuple(default) else ""
+
+
 @dataclass
 class Ctx:
-    """Run context: the model, plus the GoalScope readout heads / probe the callers set."""
+    """Run context: the model, plus the GoalScope readout heads / probe / steer layers the callers set
+    (``readout_layers``: :func:`setup` sets :func:`readout_layers_for` the model's depth)."""
 
     mt: object
     model_name: str = None
     readout_heads: list = None
     gsp: object = None
+    readout_layers: tuple = None
 
 
 def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct", device_map="auto"):
@@ -83,7 +102,7 @@ def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct", device_map="auto"):
         f"n_heads={mt.n_heads}  n_kv_heads={n_kv}  group={mt.n_heads // n_kv}  "
         f"head_dim={mt.head_dim}  n_layer={mt.n_layer}"
     )
-    return Ctx(mt=mt, model_name=model_name)
+    return Ctx(mt=mt, model_name=model_name, readout_layers=readout_layers_for(mt.n_layer))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -245,13 +264,16 @@ def goalscope_readout(
     interventions=None,
     strategy="additive_norm",
     alpha=0.1,
-    layers=(35, 46),
+    layers=None,
     maxnew=128,
     ctx=None,
 ):
     """GoalScope readout at `pivot`; the source vector is read under `interventions` (an :class:`Intervention`,
-    e.g. the KV stack or a query patch), the readout generation runs without it."""
+    e.g. the KV stack or a query patch), the readout generation runs without it. ``layers`` (the steer layers,
+    half-open) defaults to ``ctx.readout_layers``, else :func:`readout_layers_for` the model's depth."""
     _mt = ctx.mt if ctx is not None else mt
+    if layers is None:
+        layers = ctx.readout_layers if ctx is not None and ctx.readout_layers else readout_layers_for(_mt.n_layer)
     _readout = ctx.readout_heads if ctx is not None else None
     _gsp = ctx.gsp if ctx is not None else globals().get("gsp")
     res = apply_goalscope(
@@ -278,7 +300,7 @@ def goalscope_readout(
 
 def _generate(mt, tok, max_new, interventions=None, stopping_criteria=None):
     """The decode driver: ``mt.generate`` + ``tracer.iter``, batch 1, plain greedy argmax, stops at
-    ``tokenizer.eos_token_id`` (and wherever ``stopping_criteria``, a ``StoppingCriteriaList``, says);
+    ``mt.eos_token_ids`` (and wherever ``stopping_criteria``, a ``StoppingCriteriaList``, says);
     ``interventions(mt, step)`` at every step (step 0 = the prompt pass), or at step 0 only when no edit of it runs
     on the decode steps. Returns the new tokens, decoded without special tokens."""
     n_prompt = tok["input_ids"].shape[1]
@@ -288,10 +310,10 @@ def _generate(mt, tok, max_new, interventions=None, stopping_criteria=None):
         # A run that stops at EOS before step n_steps cuts the step loop short (nnsight warns); the edits of the
         # steps that ran have landed, and tracer.result is read in its own invoke so it is never dropped.
         warnings.filterwarnings("ignore", message=_LOOP_CUT_SHORT, category=UserWarning)
-        # repetition_penalty / eos_token_id override the checkpoint's generation_config (Qwen2.5: 1.1, two EOS ids),
-        # so this is the plain argmax loop the hand-written decoders ran.
+        # repetition_penalty overrides the checkpoint's generation_config (Qwen2.5: 1.05-1.1), so this is the plain
+        # argmax loop the hand-written decoders ran
         with mt.generate(max_new_tokens=max_new, do_sample=False, repetition_penalty=1.0,
-                         eos_token_id=mt.tokenizer.eos_token_id, stopping_criteria=stopping_criteria) as tracer:
+                         eos_token_id=mt.eos_token_ids, stopping_criteria=stopping_criteria) as tracer:
             with tracer.invoke(dict(input_ids=tok["input_ids"], attention_mask=tok["attention_mask"])):
                 if n_steps:
                     for step in tracer.iter[:n_steps]:
@@ -354,8 +376,12 @@ def headwise_kv_patch(mt, heads, k_cache, v_cache, dest_positions, v_scale=1.0) 
         # the source keys rotated for the DEST positions, outside any trace; the values carry no position. (A rope
         # scaling that adapts to the sequence, Phi-3's longrope, picks its frequencies from these positions, as the
         # model does from the whole prompt: the two agree while the prompt is shorter than the scaling's
-        # original_max_position_embeddings.)
-        keys = attn.rotate(k_cache[L][kv].to(dev, dt), list(dest_positions))
+        # original_max_position_embeddings.) These are `attn.rotate`'s two halves with the embedding moved to the
+        # block, as the forward hands it over: under device_map="auto" the model's rotary module can sit on another
+        # GPU, and `rotate` applies the embedding on the device it was computed on.
+        x = k_cache[L][kv].to(dev, dt)
+        emb = attn.rotary_embedding(x, torch.tensor([list(dest_positions)], device=dev))
+        keys = attn.apply_rotary(x, emb.to(dev) if torch.is_tensor(emb) else tuple(t.to(dev) for t in emb))
         values = v_cache[L][kv].to(dev, dt)
         if v_scale != 1.0:  # x the transplanted SOURCE values on the span
             values = values * v_scale

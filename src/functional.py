@@ -130,7 +130,8 @@ def generate_with_patch(
                           the prompt call and the first ``n_steer_tokens`` decode
                           steps only; after that the model generates freely.
         **kwargs:         Forwarded to ``generate`` (decoding follows the checkpoint's
-                          ``generation_config`` otherwise).
+                          ``generation_config`` otherwise). ``eos_token_id`` defaults to
+                          ``mt.eos_token_ids``.
     """
     if "offset_mapping" in inputs:
         inputs.pop("offset_mapping")
@@ -165,6 +166,7 @@ def generate_with_patch(
     n_steps = n_all if any(p.on_pass == "all" for p in patches) else (1 if patches else 0)
 
     start = inputs["input_ids"].shape[1] if remove_prefix else 0
+    kwargs.setdefault("eos_token_id", mt.eos_token_ids)
 
     with torch.no_grad(), warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=_LOOP_CUT_SHORT, category=UserWarning)
