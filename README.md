@@ -35,7 +35,7 @@ programming languages localizes the frontier in the outputs of a sparse set of *
 what these heads write at a single token, either by asking the model in a neutral context "what are you doing on this
 line?" or by steering an empty C++ stub.
 
-![GoalScope](https://goals.baulab.info/images/goalscope.png)
+![GoalScope](https://goals.baulab.info/images/goalscope.svg)
 
 *GoalScope. (a) The goal heads' outputs at one token form the encoding v<sub>g</sub>. (b) It is injected into a
 neutral probe: (c.1) asked to describe what it is doing, the model verbalizes the sub-goal; (c.2) in a C++ stub, it
@@ -59,7 +59,7 @@ propose a **non-recurrent goal-seeking** account (NRGS): at each step the model 
 specification, compares it with the progress made so far, and takes the next step towards whatever is still
 pending. NRGS makes concrete predictions, and we test each one with a targeted intervention.
 
-![NRGS](https://goals.baulab.info/images/teaser.png)
+![NRGS](https://goals.baulab.info/images/teaser.svg)
 
 *Goal pursuit and its non-recurrent implementation in a transformer LM. A goal such as implementing merge sort
 decomposes into sub-goals, each realized as a sequence of tokens. (i) An idealized agent forms an intention, acts on
@@ -91,7 +91,7 @@ The goal heads were found on code, but GoalScope reads intentions elsewhere too,
 - **Steering.** Under refusal steering, the readout turns to "a fictional and illegal response" before the model
   writes its refusal.
 
-![Beyond code](https://goals.baulab.info/images/beyond-code.png)
+![Beyond code](https://goals.baulab.info/images/beyond-code.svg)
 
 ## So, do LLMs have goals?
 
