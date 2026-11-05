@@ -102,6 +102,7 @@ def _ask(prompt, max_tokens, temperature, use_cache, model_name, system_prompt, 
 
     response = None
     last_err = None
+    refused = False
     for attempt in range(1, MAX_TRIES + 1):
         try:
             t0 = time.time()
@@ -112,6 +113,15 @@ def _ask(prompt, max_tokens, temperature, use_cache, model_name, system_prompt, 
             texts = [b.text for b in msg.content if getattr(b, "type", None) == "text"]
             if not texts:
                 kinds = [getattr(b, "type", "?") for b in msg.content]
+                if msg.stop_reason == "refusal":
+                    # the API declined to answer this prompt (its own classifier, not a transport error): the same
+                    # prompt refuses again, so no retry; not cached; the callers parse REFUSED as UNPARSED /
+                    # parse_error, a miss (first seen on a GLM-4.5-Air KV-transfer generation, 2026-11-05)
+                    response, refused = "REFUSED", True
+                    _log_call(err="refusal", status=None, msg=f"stop_reason=refusal (blocks={kinds})",
+                              key=hash_val, attempt=attempt)
+                    logger.warning(f"claude refused the request (blocks={kinds}); returning REFUSED, not cached")
+                    break
                 raise ValueError(
                     f"no text block in response (blocks={kinds}, stop_reason={msg.stop_reason}); "
                     "if thinking is enabled, raise max_tokens or disable thinking"
@@ -138,23 +148,24 @@ def _ask(prompt, max_tokens, temperature, use_cache, model_name, system_prompt, 
             f"claude request failed after {MAX_TRIES} attempts: {last_err}"
         ) from last_err
 
-    # atomic write so a crash / concurrent writer never leaves a partial JSON
-    # (which is what made the cache read above raise JSONDecodeError).
-    tmp_file = f"{cache_file}.{os.getpid()}.tmp"
-    with open(tmp_file, "w") as f:
-        json.dump(
-            {
-                "prompt": prompt,
-                "response": response,
-                "model": model_name,
-                "hash": hash_val,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "system_prompt": system_prompt,
-            },
-            f,
-        )
-    os.replace(tmp_file, cache_file)
+    if not refused:
+        # atomic write so a crash / concurrent writer never leaves a partial JSON
+        # (which is what made the cache read above raise JSONDecodeError).
+        tmp_file = f"{cache_file}.{os.getpid()}.tmp"
+        with open(tmp_file, "w") as f:
+            json.dump(
+                {
+                    "prompt": prompt,
+                    "response": response,
+                    "model": model_name,
+                    "hash": hash_val,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "system_prompt": system_prompt,
+                },
+                f,
+            )
+        os.replace(tmp_file, cache_file)
 
     return response
 
