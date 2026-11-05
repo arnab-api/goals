@@ -61,6 +61,8 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1123)
     p.add_argument("--model", default=MODEL)
     p.add_argument("--goal-heads", default=GOAL250, help="json [[layer, head], ...] used as the 'goal250' set")
+    p.add_argument("--kv-headsets", nargs="+", default=["goal250", "all"], choices=["goal250", "all"],
+                   help="head sets of the KV arms (the residual arms and the clean run always run)")
     p.add_argument("--force", action="store_true", help="recompute cached configs")
     return p.parse_args()
 
@@ -76,7 +78,8 @@ def main():
     goal = [tuple(h) for h in json.loads(Path(args.goal_heads).read_text())]
     headsets = {"goal250": goal, "all": [(l, h) for l in range(mt.n_layer) for h in range(mt.n_heads)]}
     root = env_utils.DEFAULT_RESULTS_DIR
-    logger.info(f"{len(TP.CONFIGS)} configs: " + " | ".join(TP.cfg_name(*c) for c in TP.CONFIGS))
+    configs = [c for c in TP.CONFIGS if c[0] != "kv" or c[1] in args.kv_headsets]
+    logger.info(f"{len(configs)} configs: " + " | ".join(TP.cfg_name(*c) for c in configs))
 
     for lt in args.lang_transfers:
         sl, dl = PP.LANG_TRANSFERS[lt]
@@ -92,12 +95,12 @@ def main():
             for i, inst in enumerate(insts):
                 t0 = time.time()
                 rows, n_run, n_hit = TP.sweep_instance(
-                    inst, i, TP.CONFIGS, cdir, headsets=headsets, max_new=MAX_NEW, oracle_model=ORACLE_MODEL,
+                    inst, i, configs, cdir, headsets=headsets, max_new=MAX_NEW, oracle_model=ORACLE_MODEL,
                     resume=not args.force, ctx=ctx)
                 tot_run, tot_hit = tot_run + n_run, tot_hit + n_hit
                 for name, r in rows.items():
                     sweep[name].append(r)
-                line = " ".join("■" if rows[TP.cfg_name(*c)]["shifted"] else "·" for c in TP.CONFIGS)
+                line = " ".join("■" if rows[TP.cfg_name(*c)]["shifted"] else "·" for c in configs)
                 logger.info(f"[{dt}] ({i + 1}/{len(insts)}) {inst.src_frontier.id} vs {inst.dst_frontier.id}: {line} "
                             f"· run {n_run} / cached {n_hit} ({time.time() - t0:.0f}s)")
             summ = {name: dict(n=len(rs), causal_shift=sum(r["shifted"] for r in rs) / len(rs),

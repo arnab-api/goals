@@ -117,8 +117,11 @@ def get_prompt(question, prefill, ctx=None, system_extra=""):
     )
 
 
-def _proj_name(l, which, mt):  # which in {'q','k','v'}
-    return mt.attn_module_name_format.format(l) + f".{which}_proj"
+def _proj_name(l, which, mt):  # which in {'q','k','v','o'}
+    base = mt.attn_module_name_format.format(l)
+    if which == "q" and _norm_scope(baukit.get_module(mt._model, base)) == "full":
+        return base + ".q_norm"  # OLMo-2/3: q is normalized over ALL heads, so cache / patch it after q_norm (exact)
+    return base + f".{which}_proj"
 
 
 def cache_src_proj(prompt, positions, layers, which, ctx=None):
@@ -286,6 +289,15 @@ def _attn_module(mt, layer):
     return baukit.get_module(mt._model, mt.attn_module_name_format.format(layer))
 
 
+def _norm_scope(attn):
+    """Where an attention module applies its q / k RMSNorm: None (Qwen2, Llama), "head" (Qwen3: weight of size
+    head_dim, applied per head) or "full" (OLMo-2/3: weight over the whole projection, applied before the split)."""
+    qn = getattr(attn, "q_norm", None)
+    if qn is None:
+        return None
+    return "head" if qn.weight.shape[0] == attn.head_dim else "full"
+
+
 def _rope_source_span(mt, k_cache, v_cache, dest_positions, patched_kvheads):
     """RoPE the (pre-RoPE) source-span keys at the DEST positions; keep source values as-is.
     Returns src_k, src_v as {layer: {kv_head: (len_span, head_dim)}} on the model's device/dtype."""
@@ -311,12 +323,15 @@ def _rope_source_span(mt, k_cache, v_cache, dest_positions, patched_kvheads):
     src_k, src_v = {}, {}
     for L in layers:
         kk, vv = {}, {}
+        attn_L = _attn_module(mt, L)
+        k_full = k_cache[L]  # (S, n_kv * hd), the pre-k_norm k_proj output
+        if _norm_scope(attn_L) == "full":  # OLMo-2/3: k_norm over the whole projection, before the head split
+            k_full = attn_L.k_norm(k_full.to(attn_L.k_norm.weight.device, attn_L.k_norm.weight.dtype))
         for kvh in patched_kvheads[L]:
-            k_slice = k_cache[L][:, kvh * hd : (kvh + 1) * hd].to(dev, dt)[
+            k_slice = k_full[:, kvh * hd : (kvh + 1) * hd].to(dev, dt)[
                 None, None
             ]  # (1,1,S,hd)
-            attn_L = _attn_module(mt, L)
-            if hasattr(attn_L, "k_norm"):  # Qwen3: the cached k_proj output is pre-k_norm
+            if _norm_scope(attn_L) == "head":  # Qwen3: per-head k_norm
                 k_slice = attn_L.k_norm(k_slice.to(attn_L.k_norm.weight.device)).to(dev, dt)
             _, k_roped = apply_rope(
                 torch.zeros_like(k_slice), k_slice, cos, sin
@@ -347,9 +362,12 @@ def _make_headwise_forward(sample_module, state):
     ):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        q = self.q_proj(hidden_states).view(hidden_shape)
-        k = self.k_proj(hidden_states).view(hidden_shape)
-        if hasattr(self, "q_norm"):  # Qwen3: per-head RMSNorm on q / k before RoPE (Qwen2 has none)
+        q, k = self.q_proj(hidden_states), self.k_proj(hidden_states)
+        scope = _norm_scope(self)
+        if scope == "full":  # OLMo-2/3: RMSNorm over the whole q / k projection, before the head split
+            q, k = self.q_norm(q), self.k_norm(k)
+        q, k = q.view(hidden_shape), k.view(hidden_shape)
+        if scope == "head":  # Qwen3: per-head RMSNorm on q / k (Qwen2 / Llama have none)
             q, k = self.q_norm(q), self.k_norm(k)
         q, k = q.transpose(1, 2), k.transpose(1, 2)
         v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
