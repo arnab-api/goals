@@ -687,7 +687,9 @@ What runs but means something else on some families:
   32B's; pass scaled values for another depth. The NRGS scripts' GoalScope readouts (`goalscope_readout`, through
   `Ctx.readout_layers`) default to 35-46 scaled by depth (`round(L*35/64)`, `round(L*46/64)`, the paper's 35-46 on 64
   layers); `kv_transfer_eval.py` / `q_transfer_eval.py --readout-layers A B` sets them, a value other than the
-  default tags the run `__rl<A>-<B>`. Both scripts take `--model`; any model but Coder-32B needs its own head sets.
+  default tags the run `__rl<A>-<B>`. Those two scripts and `task_vs_progress_eval.py` take `--model` (`--readout-alpha` sets the readouts' α, tag
+  `__ra<alpha>`); any model but Coder-32B needs its own head sets. The campaign's per-model drivers and tools are
+  under `repro/` (`repro/README.md`).
 - **Stop tokens**: every greedy decoder (`greedy_continue`, the GoalScope readouts, the NRGS / ablation decode driver,
   `batch_generate`, the ICL / EM / site scripts) stops at `mt.eos_token_ids`: the tokenizer's `eos_token_id` and the
   generation config's EOS list. On Qwen2.5 Instruct that is `<|im_end|>`, `<|endoftext|>`, and the tokenizer's EOS alone
