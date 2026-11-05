@@ -218,6 +218,10 @@ def parse_args():
                          "each runs in its own __a<alpha> dir (e.g. --alphas 1.0 2.0)")
     ap.add_argument("--no-readout", action="store_true",
                     help="skip the goalscope readouts + readout-shift oracle (readout_shift_rate -> None)")
+    ap.add_argument("--readout-strategy", default="additive_norm",
+                   help="GoalScope readout strategy (default = the paper's Coder-32B config)")
+    ap.add_argument("--readout-alpha", type=float, default=0.1, help="GoalScope readout alpha")
+    ap.add_argument("--readout-layers", type=int, nargs=2, default=[35, 46], help="GoalScope steer layers [a, b)")
     ap.add_argument("--max-instances", type=int, default=None, help="cap instances per cell (smoke)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--force", action="store_true")
@@ -241,12 +245,14 @@ def main():
     logger.info(f"patch_heads={_heads_tag(args.patch_heads, len(patch_heads))} (n={len(patch_heads)}) · "
                 f"readout_heads={_heads_tag(args.readout_heads, len(readout_heads))} (n={len(readout_heads)})")
 
+    FUNC.READOUT.update(strategy=args.readout_strategy, alpha=args.readout_alpha, layers=tuple(args.readout_layers))
+    ro_tag = "" if args.no_readout else FUNC.readout_tag()
     model_short = args.model.split("/")[-1]
     for alpha in args.alphas:
         # `__piv-eq` (pivot = the frontier's `{var} =` stub), `__cl` (closed loop), `-ppgazerestrict` (gaze-select-
         # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
         run_tag = (f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-eq__cl-ppgazerestrict-anceq"
-                   + args.tag_suffix)
+                   + ro_tag + args.tag_suffix)
         out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag   # legacy results dir names, kept for cache compatibility
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(f"########## OV boost alpha={alpha} -> {run_tag} ##########")

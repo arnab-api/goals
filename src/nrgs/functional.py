@@ -47,6 +47,17 @@ def rich_print(*a, **k):
 # ── module globals bound by setup() ──
 mt = None
 gsp = None  # optional GoalScope probe override (apply_goalscope reads globals().get("gsp"))
+# GoalScope readout config used by goalscope_readout when its args are left None (default = the paper's Coder-32B
+# config); the eval scripts override it from --readout-strategy / --readout-alpha / --readout-layers
+READOUT = dict(strategy="additive_norm", alpha=0.1, layers=(35, 46))
+
+
+def readout_tag():
+    """'' for the default readout config, else e.g. '__ros-replace-a2-L35-46' (keeps non-default runs in own dirs)."""
+    r, d = READOUT, dict(strategy="additive_norm", alpha=0.1, layers=(35, 46))
+    if (r["strategy"], float(r["alpha"]), tuple(r["layers"])) == (d["strategy"], d["alpha"], d["layers"]):
+        return ""
+    return f"__ros-{r['strategy']}-a{r['alpha']:g}-L{r['layers'][0]}-{r['layers'][1]}"
 
 
 @dataclass
@@ -212,12 +223,15 @@ def goalscope_readout(
     pivot,
     heads=None,
     iface=None,
-    strategy="additive_norm",
-    alpha=0.1,
-    layers=(35, 46),
+    strategy=None,
+    alpha=None,
+    layers=None,
     maxnew=128,
     ctx=None,
 ):
+    strategy = READOUT["strategy"] if strategy is None else strategy
+    alpha = READOUT["alpha"] if alpha is None else alpha
+    layers = tuple(READOUT["layers"]) if layers is None else layers
     _mt = ctx.mt if ctx is not None else mt
     _readout = ctx.readout_heads if ctx is not None else None
     _gsp = ctx.gsp if ctx is not None else globals().get("gsp")

@@ -96,13 +96,20 @@ def classify_concept(
         return {"label": "neither", "why": "empty", "raw": ""}
     from src.utils.oracle_llms import ask_claude
 
-    raw = ask_claude(
-        _concept_prompt(text, src_desc, dst_desc, task_desc, kind),
-        system_prompt=CONCEPT_SYSTEM,
-        max_tokens=768,
-        use_cache=use_cache,
-        model_name=model_name,
-    )
+    try:
+        raw = ask_claude(
+            _concept_prompt(text, src_desc, dst_desc, task_desc, kind),
+            system_prompt=CONCEPT_SYSTEM,
+            max_tokens=768,
+            use_cache=use_cache,
+            model_name=model_name,
+        )
+    except ConnectionError as e:
+        # the API declines some degenerate texts (e.g. a readout of `0x0 0x0 ...`) with stop_reason=refusal and no
+        # content, deterministically; such text expresses neither sub-goal, so score it a miss instead of crashing
+        if "stop_reason=refusal" not in str(e):
+            raise
+        return {"label": "neither", "why": "judge refused (degenerate text)", "raw": "", "refused": True}
     v, why = _parse_verdict(raw)
     return {"label": _A2LABEL[v], "why": why, "raw": raw}
 

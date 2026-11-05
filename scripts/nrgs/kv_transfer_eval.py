@@ -234,6 +234,10 @@ def parse_args():
                         "unchanged); a value != 1 tags its run '...I3-on-V<a>'")
     p.add_argument("--no-readout", action="store_true",
                    help="skip every GoalScope readout (clean + patched; run tag 'ro-off'): causal-shift only")
+    p.add_argument("--readout-strategy", default="additive_norm",
+                   help="GoalScope readout strategy (default = the paper's Coder-32B config)")
+    p.add_argument("--readout-alpha", type=float, default=0.1, help="GoalScope readout alpha")
+    p.add_argument("--readout-layers", type=int, nargs=2, default=[35, 46], help="GoalScope steer layers [a, b)")
     p.add_argument("--force", action="store_true")
     p.add_argument("--model", default=MODEL, help="HF id (default = the paper's Coder-32B)")
     return p.parse_args()
@@ -253,7 +257,9 @@ def main():
     args.heads_tags = {f"{k}_heads": PP.patch_heads_tag(resolved[k][0], len(resolved[k][1])) for k in resolved}
     gh = args.heads_tags["goal_heads"]
     # `th-` (the original runs' task-onwards heads) was always the goal head set
-    heads_tag = f"th-{gh}__gh-{gh}__ro-" + ("off" if args.no_readout else args.heads_tags["readout_heads"])
+    FUNC.READOUT.update(strategy=args.readout_strategy, alpha=args.readout_alpha, layers=tuple(args.readout_layers))
+    heads_tag = f"th-{gh}__gh-{gh}__ro-" + ("off" if args.no_readout
+                                            else args.heads_tags["readout_heads"] + FUNC.readout_tag())
 
     configs = []
     for s, vs in itertools.product(args.span, args.i3_v_scale):
