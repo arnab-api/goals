@@ -80,4 +80,8 @@ group_4_12() {  # Q transfer with GSR, the control, and the source frontier in t
     --tag-suffix __seq__cindst
 }
 
+group_4_13() {  # task span vs code-progress span (4.13): the KV grid on the large set and all heads, residual patching; judge-scored, no readout
+  run scripts/nrgs/task_vs_progress_eval.py --model $M --cuda $GPU --goal-heads $GL
+}
+
 main "$@"

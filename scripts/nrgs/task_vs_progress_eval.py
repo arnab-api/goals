@@ -9,6 +9,9 @@ __mx..__ro0__task+gap/*.json``), so it resumes from entries already computed. A 
 
     conda run -n goals python scripts/nrgs/task_vs_progress_eval.py --cuda 6                           # 4 datatypes x 32
     conda run -n goals python scripts/nrgs/task_vs_progress_eval.py --cuda 6 --datatypes int --max-instances 2   # smoke
+
+Another model: ``--model <hf id> --goal-heads <json>`` (the 'goal250' arm is then that head set; the config names and
+the summary keys keep the paper's ``goal250`` label so the generator reads them unchanged).
 """
 
 import argparse
@@ -42,11 +45,12 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import src.nrgs.functional as FUNC  # noqa: E402
 import src.nrgs.kv_transfer as PP  # noqa: E402
 import src.nrgs.task_vs_progress as TP  # noqa: E402
+from src.goals.head_sets import load_json_heads  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 
 logger = logging.getLogger("task_vs_progress_eval")
-MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
-GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"   # the 'goal250' head set
+MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"   # the default --model
+GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"   # the default 'goal250' head set
 MAX_NEW = 64
 ORACLE_MODEL = "claude-sonnet-4-6"
 
@@ -54,6 +58,9 @@ ORACLE_MODEL = "claude-sonnet-4-6"
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--cuda", default=None, help="CUDA_VISIBLE_DEVICES (applied before torch import)")
+    p.add_argument("--model", default=MODEL, help="HF id; any model but the default needs --goal-heads")
+    p.add_argument("--goal-heads", default=None,
+                   help="JSON [[layer, head], ...]: the 'goal250' arm's heads (default: Coder-32B's 250 goal heads)")
     p.add_argument("--datatypes", nargs="+", default=["int", "str", "list[int]", "list[str]"])
     p.add_argument("--lang-transfers", nargs="+", default=["py-py"], choices=list(PP.LANG_TRANSFERS))
     p.add_argument("--n-samples", type=int, default=32)
@@ -66,12 +73,18 @@ def parse_args():
 def main():
     args = parse_args()
     logging_utils.configure(level=logging.INFO, force=True)
-    model_short = MODEL.split("/")[-1]
+    if args.goal_heads is None:
+        if args.model != MODEL:
+            raise SystemExit(f"--goal-heads: the default is {MODEL}'s 250 goal heads; pass a head set of {args.model}")
+        args.goal_heads = GOAL250
+    model_short = args.model.split("/")[-1]
     import torch
     device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin
-    ctx = FUNC.setup(MODEL, device_map=device_map)
+    ctx = FUNC.setup(args.model, device_map=device_map)
     mt = ctx.mt
-    goal = [tuple(h) for h in json.loads(Path(GOAL250).read_text())]
+    load_json_heads(args.goal_heads, mt.n_layer, mt.n_heads)   # the layer / head ranges, against the model
+    goal = [tuple(h) for h in json.loads(Path(args.goal_heads).read_text())]
+    logger.info(f"model {args.model}: 'goal250' arm = {len(goal)} heads from {args.goal_heads}; 'all' = every head")
     headsets = {"goal250": goal, "all": [(l, h) for l in range(mt.n_layer) for h in range(mt.n_heads)]}
     root = env_utils.DEFAULT_RESULTS_DIR
     logger.info(f"{len(TP.CONFIGS)} configs: " + " | ".join(TP.cfg_name(*c) for c in TP.CONFIGS))

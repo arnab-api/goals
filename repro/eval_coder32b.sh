@@ -55,4 +55,8 @@ group_4_12() {  # Q transfer with GSR (diff_trigger_gsr_eq_*), its control, c_in
     --lang-transfers py-py --tag-suffix __seq__cindst
 }
 
+group_4_13() {  # task span vs code-progress span (4.13): the KV grid on the large set and all heads, residual patching; judge-scored, no readout
+  run scripts/nrgs/task_vs_progress_eval.py --cuda $GPU
+}
+
 main "$@"
