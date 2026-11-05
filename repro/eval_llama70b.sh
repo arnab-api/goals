@@ -35,6 +35,11 @@ group_4_6() {
   for heads in $GS $GL; do run -m scripts.evaluation.eval_ablation_necessity --model $M --heads $heads; done
 }
 
+group_4_6F() {  # sufficiency with the blind floor at the start of the goal band [18, 45): the 4.6 floor 25 leaves goal
+                # heads in layers 18-24 unblinded in both arms, which inflates the random control (same finding as OLMo, GLM)
+  for heads in $GS $GL; do run -m scripts.evaluation.eval_ablation_sufficiency --model $M --heads $heads --from_layer 18; done
+}
+
 group_4_7() {
   run scripts/evaluation/temporal_persistence_eval.py --model $M --cuda $GPU --heads $GS
   run scripts/evaluation/temporal_persistence_eval.py --model $M --cuda $GPU --heads $GS --control --n-trials 64
