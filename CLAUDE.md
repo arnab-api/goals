@@ -77,7 +77,10 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
   groups keep their legacy names for cache compatibility: `results/diff/<model>/{path_patch,path_patch_hier,
   diff_trigger,gsr_example}` (NRGS), `results/obstacle_robustness/` (obstacle persistence),
   `results/notebook_caches/{task_vs_progress,obstacle_ov_boost}/`, and figure groups `transfer`,
-  `precommit_ablation`, `sparsity_ablation`, `obstacle_robustness` under `notebooks/Figures/`.
+  `precommit_ablation`, `sparsity_ablation`, `obstacle_robustness` under `notebooks/Figures/`. The NRGS groups
+  `transfer` and `precommit_ablation` are per model: `notebooks/Figures/<model>/<group>/` (`GROUP = f'{MODEL}/<group>'`
+  in `kv_transfer.ipynb`, `q_transfer.ipynb`, `task_vs_progress.ipynb`; set `MODEL` to regenerate for another model,
+  e.g. `Qwen3-32B`). Cross-model groups (`head_localization`, `model_generalization`, ...) stay at the top level.
 - **Generators** (`notebooks/fig_n_table_generators/*.ipynb`) only parse results (no model). They save through
   `figstyle.save_fig` / `save_table` to `notebooks/Figures/<group>/<name>.{pdf,png,tex}`. Copying into
   `Overleaf-draft/Goals-Overleaf/Figures/generated/<group>/` (and `Text/Appendix/tables/generated/`) and `pdfcrop`
@@ -393,7 +396,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
 - Cross-check: pooled n=512 causal 0.936, readout 0.900 (paper ~94% / ~90%); `int__python-python` 0.96875 / 0.90625;
   control 0.002 (1/512).
 - Generator: `kv_transfer.ipynb` (`KV_RUN` knob) cell 7 (`kv_barcharts`), cell 11 (`kv_right_panel` = right panel of
-  `kv-transfer-main`), cell 13 (`kv_grid.tex` -> `tab:kv-grid`), group `transfer`. The composite figure is hand-made.
+  `kv-transfer-main`), cell 13 (`kv_grid.tex` -> `tab:kv-grid`), group `<model>/transfer`. The composite figure is hand-made.
 - `job_list/diff_eval/path_patch_32b_listgap_taskprog.json` (`--span task+progress --i3-v-scale 1`, arm
   `I3-on__win-span+prog__...`) is a computed side arm; no paper figure or table reads it (as far as could be checked).
 
@@ -447,12 +450,12 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   0.043 / 0.029 (paper ~4%); `order_diff/int__python-python` 0.59375 / 0.53125. `tab:expb` (native / c / d / neither):
   int .031 / .969 / 0 / 0, str 0 / .938 / .062 / 0, list(int) 0 / .969 / 0 / .031, list(str) 0 / .969 / .031 / 0.
 - Generators: `q_transfer.ipynb` (`GSR_ARM`) cell 5 (`q_crosslang_gsr` = right panel of `q-transfer-main`, order-diff),
-  cell 7 (`q_barcharts_gsr`), cell 9 (`q_gsr_matched.tex`, `q_gsr_diff.tex`), group `transfer`. `tab:expb` is
+  cell 7 (`q_barcharts_gsr`), cell 9 (`q_gsr_matched.tex`, `q_gsr_diff.tex`), group `<model>/transfer`. `tab:expb` is
   hand-typed from the `joint_*` rates. Schema: `python scripts/nrgs/q_transfer_example_attention.py --cuda 0`
   (defaults = the paper's instance: int, py-py, order_diff, key `dst=is_prime-is_positive-last_digit`) ->
   `R/gsr_example/order_diff__int__python-python__<hash>.json`, then
   `python notebooks/fig_n_table_generators/q_transfer_schema.py` (cairosvg + IBM Plex fonts) ->
-  `notebooks/Figures/transfer/q_transfer_schema.{svg,pdf,png}` (= the paper's `gsr_schema_clean.pdf`, renamed).
+  `notebooks/Figures/Qwen2.5-Coder-32B-Instruct/transfer/q_transfer_schema.{svg,pdf,png}` (= the paper's `gsr_schema_clean.pdf`, renamed).
 
 ### 4.13 Task span vs code-progress span: App. `app:task-vs-prog` (`Text/Appendix/pre-commitment.tex`; `fig:task-vs-prog` = `Figures/transfer/task-vs-progress-crop.pdf`), App. `app:pre-com` (`fig:pre-com-kv` = `Figures/generated/precommit_ablation/tvp_kv_grids.pdf`)
 
@@ -466,7 +469,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
 - Cross-check (mean over 4 datatypes): residual task 0.891 / progress 0.062 / task+progress 0.984 (paper 0.89 / 0.06 /
   0.98); KV G250 task V x4 0.969 (the boxed cell), progress V x4 0.258.
 - Generator: `task_vs_progress.ipynb` cell 5 (`tvp_residual_grid` = right panel of `task-vs-progress`) and cell 6
-  (`tvp_kv_grids`), group `precommit_ablation`. Composite hand-made.
+  (`tvp_kv_grids`), group `<model>/precommit_ablation`. Composite hand-made.
 
 ### 4.14 Mixing mechanisms: App. `app:nrgs` (`tab:q-mixing`: SetDiff / OrderID / CompleteCount / Induction)
 

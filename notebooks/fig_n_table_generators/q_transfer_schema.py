@@ -1,4 +1,4 @@
-"""gsr schematic WITH the clean destination run -> notebooks/Figures/transfer/q_transfer_schema.{svg,pdf,png}.
+"""gsr schematic WITH the clean destination run -> notebooks/Figures/Qwen2.5-Coder-32B-Instruct/transfer/q_transfer_schema.{svg,pdf,png}.
 
 Two rows:
   2×2 grid · row 1: (i) source run · (ii) clean destination run (attention + readout at the pivot)
@@ -276,7 +276,8 @@ hy = info1["d"][0] - 5
 path(f"M{BX1 + BW * SCORE['patched'][SEL] + 44:.1f},{hy:.1f} L{P2X+12:.1f},{hy:.1f}", ARROW, sw=1.6, marker="mk")
 
 add('</svg>')
-FIG = os.path.join(HERE, "..", "Figures", "transfer")
+FIG = os.path.join(HERE, "..", "Figures", "Qwen2.5-Coder-32B-Instruct", "transfer")
+os.makedirs(FIG, exist_ok=True)
 svg_path = os.path.join(FIG, "q_transfer_schema.svg")
 open(svg_path, "w").write("\n".join(out))
 try:
