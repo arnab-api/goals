@@ -65,7 +65,7 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Environment**: uv. `bash setup_env_uv.sh` (or `uv venv && uv sync`) builds `.venv`; run `.venv/bin/python ...`.
   `pyproject.toml` pins nnsight and nnterp from git (`[tool.uv.sources]`): nnsight's dev branch at `e09ab1c8`, which
   carries ndif-team/nnsight#824 (the PEFT adapter switch), until the 0.8.3 release, and the nnterp v2.0.0 commit that
-  carries ndif-team/nnterp#124, #127, #128 and #134 until a release has them (`override-dependencies` lets the dev
+  carries ndif-team/nnterp#124, #127, #128, #134 and #136 until a release has them (`override-dependencies` lets the dev
   branch's rc-numbered version satisfy `nnsight>=0.8.2`); transformers >= 5.17. `bash setup_env.sh` builds the
   same as the `goals` conda env. Import `nnterp` before any `transformers.models...` module (the reverse order
   segfaults on this stack).
@@ -491,7 +491,9 @@ It patches **230 heads** (G250 restricted to layers >= 30), while the paper says
 - Commands: `job_list/diff_eval/task_vs_progress_32b.json` and `task_vs_progress_32b_v2.json` (4 jobs each, one per
   datatype; v2 added configs and resumes from the cache): `python scripts/nrgs/task_vs_progress_eval.py --datatypes <dt>`.
   Defaults: py-py, `--n-samples 32 --seed 1123`, no readout, greedy 64; configs `src/nrgs/task_vs_progress.CONFIGS` =
-  none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans.
+  none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans. Another model:
+  `--model <hf id> --goal-heads <json>` (that set is the `goal250` arm; the config names and summary keys keep the
+  `goal250` label so the generator reads them unchanged).
 - Results: `results/notebook_caches/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
   (`<dt>` in `int, str, list_int, list_str`; summary keys like `"kv·goal250 · task · V×4"` -> `causal_shift`).
   Dirs without `__task+gap` are the superseded old-span runs.

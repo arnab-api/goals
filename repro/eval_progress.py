@@ -13,7 +13,7 @@ import re
 import sys
 from datetime import datetime, timedelta
 
-LOGS = "/disk/u/localjadenfk/repro/logs"
+LOGS = os.environ.get("GOALS_LOGS", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"))
 PRICE_IN, PRICE_OUT = 3.0, 15.0
 TS = r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)"
 WINDOW = timedelta(minutes=20)

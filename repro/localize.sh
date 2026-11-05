@@ -12,8 +12,9 @@
 set -euo pipefail
 MODEL=$1; GPUS=$2; BATCH=$3
 SLUG=${MODEL##*/}
-cd /disk/u/localjadenfk/repro/goals
-export CUDA_VISIBLE_DEVICES=$GPUS JE_ARROW_MALLOC_CONF=background_thread:false HF_HUB_CACHE=/disk/u/models HF_HUB_OFFLINE=1
+cd "$(dirname "$0")/.."
+export CUDA_VISIBLE_DEVICES=$GPUS JE_ARROW_MALLOC_CONF=background_thread:false HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+[ -n "${GOALS_HF_CACHE:-}" ] && export HF_HUB_CACHE=$GOALS_HF_CACHE
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 n_instances() {
   .venv/bin/python -c "import json,sys; d=json.load(open(sys.argv[1])); print(sum(len(p.get('pivot_instances') or []) for p in d['pairs'] if isinstance(p, dict)))" "$1" 2>/dev/null || echo 0

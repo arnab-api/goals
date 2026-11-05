@@ -14,9 +14,11 @@
 # their caches). A judge failure (ask_claude gave up) stops the lane; any other failure goes on to the next
 # command.
 set -uo pipefail
-LOGS=/disk/u/localjadenfk/repro/logs
-cd /disk/u/localjadenfk/repro/goals-eval
-export JE_ARROW_MALLOC_CONF=background_thread:false HF_HUB_OFFLINE=1 HF_HUB_CACHE=/disk/u/localjadenfk/repro/hf-overlay
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+LOGS=${GOALS_LOGS:-$ROOT/logs}; mkdir -p "$LOGS"   # GOALS_LOGS: where the lane logs / status / claims go
+cd "$ROOT"
+export JE_ARROW_MALLOC_CONF=background_thread:false HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+[ -n "${GOALS_HF_CACHE:-}" ] && export HF_HUB_CACHE=$GOALS_HF_CACHE   # the hub cache the loader consults (env.yml HF_CACHE)
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 DATATYPES=("int" "str" "list[int]" "list[str]")
