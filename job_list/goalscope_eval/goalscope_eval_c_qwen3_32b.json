@@ -1,10 +1,14 @@
 [
-  {
-    "name": "qwen3_32b_faithfulness_a2",
-    "command": "mkdir -p logs/goalscope && python -m scripts.evaluation.eval_goalscope --mode faithfulness --model=Qwen/Qwen3-32B --heads head_sets/Qwen3-32B/goal__lam20_thr0.9_band25-56.json --strategy replace --alpha 2.0 |& tee logs/goalscope/c_qwen3_32b_a2_faithfulness.log"
-  },
-  {
-    "name": "qwen3_32b_causality_v2_a2",
-    "command": "mkdir -p logs/causal_v2 && python scripts/evaluation/run_causal_v2.py scripts.evaluation.eval_goalscope --mode causality --model=Qwen/Qwen3-32B --heads head_sets/Qwen3-32B/goal__lam20_thr0.9_band25-56.json --strategy replace --alpha 2.0 |& tee logs/causal_v2/c_qwen3_32b_a2_causality.log"
-  }
+ {
+  "name": "qwen3_32b_faithfulness_a2",
+  "command": "mkdir -p logs/goalscope && python -m scripts.evaluation.eval_goalscope --mode faithfulness --model=Qwen/Qwen3-32B --heads head_sets/Qwen3-32B/goal__lam20_thr0.9_band25-56.json --strategy replace --alpha 2.0 |& tee logs/goalscope/c_qwen3_32b_a2_faithfulness.log"
+ },
+ {
+  "name": "qwen3_32b_causality_a2",
+  "command": "mkdir -p logs/goalscope && PYTORCH_ALLOC_CONF=expandable_segments:True python -m scripts.evaluation.eval_goalscope --mode causality --model=Qwen/Qwen3-32B --heads head_sets/Qwen3-32B/goal__lam20_thr0.9_band25-56.json --strategy replace --alpha 2.0 |& tee logs/goalscope/c_qwen3_32b_a2_causality.log"
+ },
+ {
+  "name": "qwen3_32b_causality_v2_a2",
+  "command": "mkdir -p logs/causal_v2 && python scripts/evaluation/run_causal_v2.py scripts.evaluation.eval_goalscope --mode causality --model=Qwen/Qwen3-32B --heads head_sets/Qwen3-32B/goal__lam20_thr0.9_band25-56.json --strategy replace --alpha 2.0 |& tee logs/causal_v2/c_qwen3_32b_a2_causality.log"
+ }
 ]

@@ -114,14 +114,14 @@ def _write(fp, records):
     tmp.replace(fp)
 
 
-def _meta(cfg, dt, sl, dl, recs, heads_tags, conn=None, order=None):
+def _meta(cfg, dt, sl, dl, recs, heads_tags, model, conn=None, order=None):
     base = PP.summarize([PP.InstanceRecord(**{k: v for k, v in r.items() if k in _BASE_FIELDS}) for r in recs])
     rule = [r["rule"]["label"] for r in recs if r.get("rule")]
     hier = (dict(setup="hier", connective=conn, order=order,
                  rule_src_rate=(sum(l == "src" for l in rule) / len(rule)) if rule else None,
                  rule_label_counts=dict(collections.Counter(rule)) if rule else None) if conn else {})
     pads = [r["geometry"].get("pad_src", 0) + r["geometry"].get("pad_dst", 0) for r in recs]
-    return dict(model=MODEL, mechanism=MECHANISM, datatype=dt, src_lang=sl, dst_lang=dl, **cfg,
+    return dict(model=model, mechanism=MECHANISM, datatype=dt, src_lang=sl, dst_lang=dl, **cfg,
                 **heads_tags, oracle_model=ORACLE_MODEL, n_instances=len(recs),
                 mean_pad_tokens=(sum(pads) / len(pads)) if pads else None, **base, **hier)
 
@@ -202,7 +202,7 @@ def run_datatype(ctx, args, dt, sl, dl, configs, heads, out_dirs, conn=None, ord
     for name, cfg in configs:
         recs = list(records[name].values())
         meta = _meta(dict(i1=False, i2=False, i3=True, window=WINDOW[cfg["span"]], v_scale=cfg["v_scale"]),
-                     dt, sl, dl, recs, heads_tags=args.heads_tags, conn=conn, order=order)
+                     dt, sl, dl, recs, heads_tags=args.heads_tags, model=args.model, conn=conn, order=order)
         (fps[name].parent / "meta.json").write_text(json.dumps(meta, indent=2))
         logger.info(f"[{sample_tag}] SUMMARY {name}: causal={meta['causal_trigger_rate']} "
                     f"readout_shift|valid={meta['readout_shift_rate_valid']} n={len(recs)}")
@@ -235,6 +235,7 @@ def parse_args():
     p.add_argument("--no-readout", action="store_true",
                    help="skip every GoalScope readout (clean + patched; run tag 'ro-off'): causal-shift only")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--model", default=MODEL, help="HF id (default = the paper's Coder-32B)")
     return p.parse_args()
 
 
@@ -246,7 +247,7 @@ def main():
     args.datatypes = args.datatypes or bank
     bad = [d for d in args.datatypes if d not in bank]
     assert not bad, f"datatype(s) {bad} not available for --setup {args.setup} (choose from {bank})"
-    model_short = MODEL.split("/")[-1]
+    model_short = args.model.split("/")[-1]
     resolved = {k: _load_heads(getattr(args, f"{k}_heads")) for k in ("goal", "readout")}
     heads = tuple(resolved[k][1] for k in ("goal", "readout"))
     args.heads_tags = {f"{k}_heads": PP.patch_heads_tag(resolved[k][0], len(resolved[k][1])) for k in resolved}
@@ -264,7 +265,7 @@ def main():
 
     import torch
     device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads o_proj weights)
-    ctx = FUNC.setup(MODEL, device_map=device_map)
+    ctx = FUNC.setup(args.model, device_map=device_map)
     ctx.readout_heads, ctx.gsp = heads[1], None
 
     metas = []

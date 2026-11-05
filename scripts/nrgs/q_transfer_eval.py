@@ -221,6 +221,7 @@ def parse_args():
     ap.add_argument("--max-instances", type=int, default=None, help="cap instances per cell (smoke)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--model", default=MODEL, help="HF id (default = the paper's Coder-32B)")
     ap.add_argument("--tag-suffix", default="",
                     help="appended to the run tag (e.g. '__seq'): a fresh output dir, so resume never picks "
                          "up records from a run whose prompts differ (the resume key is predicate ids only)")
@@ -233,14 +234,14 @@ def main():
     if args.cuda:
         logger.info(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
-    ctx = FUNC.setup(MODEL)
+    ctx = FUNC.setup(args.model)
     mt = ctx.mt
     patch_heads = _resolve_heads(args.patch_heads)
     readout_heads = _resolve_heads(args.readout_heads)
     logger.info(f"patch_heads={_heads_tag(args.patch_heads, len(patch_heads))} (n={len(patch_heads)}) · "
                 f"readout_heads={_heads_tag(args.readout_heads, len(readout_heads))} (n={len(readout_heads)})")
 
-    model_short = MODEL.split("/")[-1]
+    model_short = args.model.split("/")[-1]
     for alpha in args.alphas:
         # `__piv-eq` (pivot = the frontier's `{var} =` stub), `__cl` (closed loop), `-ppgazerestrict` (gaze-select-
         # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
