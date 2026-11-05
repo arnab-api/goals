@@ -382,7 +382,7 @@ def headwise_kv_patch(mt, heads, k_cache, v_cache, dest_positions, v_scale=1.0) 
         if reason is not None:
             raise ValueError(f"headwise_kv_patch calls the block's attention function: {reason}")
         attn = mt.layers[L].self_attn
-        dev = attn.o_proj.weight.device
+        dev = attn.device
         kv = sorted(patched_kv[L])
         # the source keys rotated for the DEST positions, outside any trace; the values carry no position. (A rope
         # scaling that adapts to the sequence, Phi-3's longrope, picks its frequencies from these positions, as the

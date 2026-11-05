@@ -287,7 +287,7 @@ def main():
     heads_tag = f"th-{gh}__gh-{gh}__ro-" + ("off" if args.no_readout else args.heads_tags["readout_heads"])
 
     import torch
-    device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads o_proj weights)
+    device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin (GoalScope reads head weights)
     ctx = FUNC.setup(args.model, device_map=device_map)
     for k in ("goal", "readout"):   # the layer / head ranges, against the model
         load_json_heads(getattr(args, f"{k}_heads"), ctx.mt.n_layer, ctx.mt.n_heads)

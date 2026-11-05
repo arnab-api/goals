@@ -17,9 +17,12 @@ head-mask training section.
    non-default cache failed offline. Model layer 1.
 2. A family-name string: `model.family` is a module, and `model.config.model_type` differs on multimodal wrappers.
    Model layer 5.
-3. The norm gains as values or accessors: the pre-attention norm's effective gain (Gemma's `1 + weight`; nothing on
-   post-norm blocks) and the post-attention norm's, which sets the direction a head writes into the stream on
-   Gemma-2, OLMo-3 and GLM-4. GoalScope 4, demos 2.
+3. **fixed** (ndif-team/nnterp#134) for the pre-attention norm: `mt.layers[l].attention_input_gain` is the gain
+   between the stream and what the attention reads (`weight` on Qwen2 / Llama, `1 + weight` on Gemma, ones on a
+   post-norm block), and OVReader folds it into each head's OV map. Not served yet (`attention_output_gain`, a
+   follow-up to #134): the gain of the norm the attention's output passes before the stream (OLMo-2/3's post-norm,
+   Gemma-2/3's and GLM-4's norm after the attention), which sets the direction a head writes into the stream there;
+   OVReader refuses those blocks until it is. GoalScope 4, demos 2, head weights 4.
 4. **fixed** (ndif-team/nnterp#127): nnterp serves `self_attn.interface`, the attention function the block called,
    bound to this call's mask, scale, softcap and sinks, to run on other queries, keys and values; goals' head-selective
    KV transfer calls it on copies of the keys and values and writes the chosen heads' last row. NRGS 1, demos 3.
@@ -27,8 +30,10 @@ head-mask training section.
    query / key norm, before the rotation, writable) and `self_attn.rotate(x, positions)`, the block's own rotary
    embedding; goals' Q transfer writes the queries before the rotary, and the KV transfer rotates SRC's keys before
    the rotary for the DST positions. NRGS 2, demos 3 and 4.
-6. Per-head projection weights (each kv head's W_V, each head's W_O slice) that also cover fused projections
-   (Phi-3's `qkv_proj`). Demos 4.
+6. **fixed** (ndif-team/nnterp#134): per-head projection weights, `self_attn.value_weight(kv)` and
+   `output_weight(j)`, in each family's own layout (Phi-3's fused `qkv_proj` included) and, under a PEFT LoRA, the
+   weight the layer's forward applies. OVReader and the head vectors read them, so OVReader runs on Phi-3 and the EM
+   adapter is never merged. Demos 4, EM adapter 4, head weights 1.
 7. **filed** (ndif-team/nnterp#131): a forward-order rank for native submodule paths. nnterp ranks its values
    (`mt.rank(name, layer)`), which goals' `Intervention` sorts its edits by, but not `self_attn.q_proj` or
    `mlp.down_proj`. Goals needs none: every `Intervention` edit names an nnterp value, and the EM adapter is attached
@@ -37,7 +42,12 @@ head-mask training section.
    interior value in one trace does not fail on a fresh model (goals reads no attention submodule in a trace). NRGS 5.
 9. `self_attn.rotate` on a model spread over several GPUs: it applies the rotary embedding where the rotary module
    computed it, which under `device_map="auto"` can be another GPU than the block's. Proposal: move the embedding to
-   `x`'s device, as the forward hands it to the block. NRGS 2.
+   `x`'s device, as the forward hands it to the block. NRGS 2. Fixed in nnterp #136 (v2.0.0 b9621bc).
+10. `attention_input_gain` in float32: it is in the norm weight's dtype, so on a bf16 Gemma-2 it is `1 + weight`
+   rounded to bf16, where the model multiplies by the float32 `1 + weight` (a float32 probe gives the exact gain on
+   both parameterizations). Head weights 2.
+11. A `support()` row for the per-head weights: `self_attn.no_head_weights()` is a method, so `mt.support()` does
+    not list it, and a caller learns that a block has none from the method or the `Unavailable`. Head weights 3.
 
 **nnsight**
 
@@ -83,10 +93,10 @@ head-mask training section.
     `attention-interior.md` shows only the in-place form). Head-mask 1.
 12. The trace body runs under the caller's grad mode (`torch.enable_grad()` around `mt.trace` overrides a global
     `set_grad_enabled(False)`). Head-mask 3.
-13. Reading an adapted weight: peft's `merge()` folds the LoRA into the base weight, but `unmerge()` in half precision
-    does not give the base weight back bit for bit, so copy it before merging; and unmerge before
-    `disable_adapters()`, because a merged layer whose adapter is off unmerges itself on its next forward (nnsight's
-    "PEFT adapters" section and the model-editing skill's PEFT section). EM adapter 4.
+13. Reading an adapted weight: nnterp's per-head weights are the weights a LoRA layer applies (ndif-team/nnterp#134),
+    so goals merges nothing. A caller who merges by hand meets two peft traps the docs could name: `unmerge()` in half
+    precision does not give the base weight back bit for bit, and a merged layer whose adapter is off unmerges itself
+    on its next forward (nnsight's "PEFT adapters" section and the model-editing skill's PEFT section). EM adapter 4.
 
 ## Model layer (`port/model-layer`)
 
@@ -149,11 +159,13 @@ nnterp 2.0.0rc1, nnsight 0.8.2, transformers 5.22.1, torch 2.11.0; CPU, Qwen/Qwe
    `do_sample=False, repetition_penalty=1.0, eos_token_id=mt.tokenizer.eos_token_id` (temperature / top-p / top-k
    are ignored under greedy). nnsight's and nnterp's generation pages say to pass `do_sample=False`; neither says the
    repetition penalty survives it. Not an nnterp bug, but the first trap a port of a manual decode loop meets.
-4. **No accessor for the pre-attention norm's gain.** `OVReader` folds the gain of the norm the attention reads into
-   each head's OV map. nnterp serves the normed stream (`attention_norm_output`) but not the gain; `input_layernorm`
-   is a best-effort alias that does not exist on post-norm blocks (OLMo-2/3), and on Gemma the effective gain is
-   `1 + weight`. Workaround: `getattr(mt.layers[l], "input_layernorm", None)` outside the trace, and a `ValueError`
-   naming the family when it is missing (OLMo-3 is refused; it was an `AttributeError` before).
+4. **The pre-attention norm's gain is `attention_input_gain`** (ndif-team/nnterp#134; summary, nnterp 3). `OVReader`
+   folds the gain of the norm the attention reads into each head's OV map. nnterp serves the normed stream
+   (`attention_norm_output`) and its gain, `mt.layers[l].attention_input_gain`: the norm called on ±256 in
+   alternating channels, which is `weight` on Qwen2 / Llama, `1 + weight` on Gemma, and ones on a post-norm block
+   (OLMo-2/3), whose attention reads the stream itself. OVReader reads it outside the trace. A post-norm block also
+   norms the attention's output before the stream, a second gain OVReader does not have, so OLMo-3 is still refused
+   (head weights 4).
 5. **`attention_output` is not the attention module's output on every family.** On Qwen2 / Llama it is (the
    `--source attn` readout baseline of `eval_readout_sources.py` reads bit-identical values); on OLMo-3 and GLM-4 it
    is the output of the norm after the attention, the tensor the block adds to the stream. That is the better
@@ -361,15 +373,14 @@ gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md sectio
    `attention_scores` and `attention_head_outputs` work unchanged: GoalScope (both strategies), the attention
    patterns, the head vectors on a padded batch, the sink and blind-span ablations (a sunk head puts all its pivot-row
    mass on key 0, a blinded head none on the blocked keys), the OV boost and the temporal encodings run on all seven.
-   The two failures left are where the repo goes below nnterp's vocabulary: OVReader's projection weights and norm
-   gains (items 2 and 4).
-2. **Norm gains (GoalScope item 4, continued).** OVReader took `input_layernorm.weight` as the gain the attention's
-   input is scaled by; Gemma's norm multiplies by `1 + weight`. Workaround: call the norm module on a constant vector
-   outside the trace (`norm(torch.full((d,), 256.0))`: 1/rms is then an exact power of two that eps cannot move), which
-   returns the gain the module applies, bit-equal to `weight` on all 28 Qwen2 layers and to `1 + weight` on all 42
-   Gemma-2 layers. It assumes an RMS norm (a LayerNorm maps a constant to its bias). On post-norm and sandwich blocks
-   the head's write passes a second norm after o_proj, whose gain sets its direction in the stream; neither gain is
-   served.
+   OVReader, which read projection weights and a norm gain below nnterp's vocabulary (items 2 and 4), reads nnterp's
+   per-head weights (ndif-team/nnterp#134) and runs on Phi-3 now; it refuses OLMo-3, Gemma-2 and GLM-4, whose
+   attention output passes a norm whose gain is not served (item 2).
+2. **Norm gains (GoalScope item 4, continued).** OVReader's input gain is nnterp's `attention_input_gain`. In bf16 it
+   is bit-equal to the weight on every block of Qwen2.5-Coder-7B, Llama-3.1-8B, Qwen3-8B, GLM-4-9B and Phi-4-mini,
+   and ones on all 32 OLMo-3 blocks; on gemma-2-9b it is `1 + weight` rounded to bf16 (head weights 2). On post-norm
+   and sandwich blocks (OLMo-3, Gemma-2, GLM-4) the head's write passes a second norm after o_proj, whose gain sets
+   its direction in the stream; that gain is not served, so OVReader refuses those three (head weights 4).
 3. **The KV and Q transfers are the model's own attention and queries on all seven families (NRGS items 1 and 2;
    feedback, not a gap).** The self-transplant check (DST's own window written back, V x1) leaves the logits
    bit-identical on every family: on Gemma-2 `self_attn.interface` carries the attention logit softcap (50); on Qwen3
@@ -380,17 +391,20 @@ gemma-2-9b-it, Qwen3-8B, GLM-4-9B-0414 and Phi-4-mini-instruct (CLAUDE.md sectio
    rotated for the DST pivot, bit for bit, on OLMo-3 and Qwen3 (one head of the middle block). A write at
    `q_proj.output` lands there on Qwen3, whose query norm is per head, and misses it by up to 0.44 (of 6.5) on OLMo-3,
    whose query norm spans all heads and so renormalizes the written head together with the DST heads around it.
-4. **Fused projections (Phi-3).** Phi-3 has `qkv_proj` and no `q_proj` / `k_proj` / `v_proj`, so OVReader (reads each
-   kv head's W_V off `v_proj.weight`) fails with a `ValueError` naming the module. nnterp serves Phi-3's queries and
-   keys before the rotary and its values, which the Q and KV transfers use, but no per-head projection weights.
-   Proposal: per-head projection weights that also cover fused projections (summary item 6).
+4. **Fused projections (Phi-3).** Phi-3 has `qkv_proj` and no `q_proj` / `k_proj` / `v_proj`. nnterp's
+   `value_weight(kv)` reads key/value head `kv`'s rows of `qkv_proj` (every query, every key, then every value;
+   ndif-team/nnterp#134, summary item 6), so OVReader runs on Phi-3, as the Q and KV transfers do through nnterp's
+   queries, keys and values. On Phi-4-mini's middle block, `value_weight(kv) @ attention_norm_output` is
+   `attention_values[:, kv]` to bf16 rounding (0.03 at values up to 8.6; the next head's weight misses by 3.7 or
+   more).
 
-## The EM adapter on nnsight's adapter support (`port/em-adapter-peft`, `port/em-adapter-switch`)
+## The EM adapter on nnsight's adapter support (`port/em-adapter-peft`, `port/em-adapter-switch`; item 4 `port/head-weight-accessors`)
 
 nnterp 2.0.0rc2.dev36 (`3fb2cc02`), nnsight's dev branch at `e09ab1c8` (0.8.0rc2.dev236, carries ndif-team/nnsight#824),
 peft 0.21.2, transformers 5.22.1, torch 2.11.0; CPU, float32 Qwen/Qwen2.5-0.5B-Instruct for
 `test/test_last_hooks_port.py`; Qwen/Qwen2.5-32B-Instruct with
-`ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice` (bf16, eager, one A100-80GB) for the EM evaluation.
+`ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice` (bf16, eager, one A100-80GB) for the EM evaluation;
+item 4 on nnterp `200ac05b` (ndif-team/nnterp#134).
 
 1. **One model, the adapter switched off and on** (nnsight #824; summary, nnsight 7). The EM evaluation runs both
    sides on one loaded 32B model. It is loaded with the adapter attached (`peft=`, a local dir or a hub repo id, which
@@ -400,8 +414,8 @@ peft 0.21.2, transformers 5.22.1, torch 2.11.0; CPU, float32 Qwen/Qwen2.5-0.5B-I
    model is the base model bit for bit: in test_em_adapter the logits, the generation and the source vectors of the
    model with its adapter off equal those of a model that never had one (0.5B, float32 on CPU; the same holds for the
    logits in bf16 on an A6000). `mt.adapters_enabled` holds the state. On the 32B, entering `em_adapter` (the
-   switch, the o_proj merge and a probe forward) takes 0.13 s, where the detach and re-attach before
-   (`load_adapter(None)`, `load_adapter(path)`) read the adapter's 1.07 GB again for every EM side (3.1 s).
+   switch and a probe forward) takes 0.10 s, where the detach and re-attach before (`load_adapter(None)`,
+   `load_adapter(path)`) read the adapter's 1.07 GB again for every EM side (3.1 s).
 2. **The base parameters keep their `requires_grad`** (nnsight #824; summary, nnsight 6). peft's injection sets
    `requires_grad=False` on every base parameter; nnsight's attach gives the flags back and the switch leaves them
    alone, so `em_adapter` has nothing to restore. The flags matter outside training: `F.linear` on an input it cannot
@@ -419,14 +433,58 @@ peft 0.21.2, transformers 5.22.1, torch 2.11.0; CPU, float32 Qwen/Qwen2.5-0.5B-I
    the adapter's precision is the whole difference.
    nnsight's `autocast_adapter_dtype=False` (#824) holds the adapter in the model's dtype instead; goals keeps the
    default.
-4. **peft's `unmerge` is not `merge`'s inverse in bf16, and a merged layer whose adapter is off unmerges itself.**
-   GoalScope reads head contributions from o_proj weight slices, and `o_proj.weight` on a lora layer is
-   `base_layer.weight`, so `em_adapter` merges the o_proj deltas into the weights (peft's `merge()`) while the adapter
-   is on. `unmerge()` subtracts the delta it added, rounded again: on the 32B all 64 o_proj weights differ after a
-   merge and unmerge, by up to 9.8e-4. And peft's `lora.Linear.forward`, with the adapter off, first unmerges a layer
-   still marked merged, so a layer switched off while merged, its weight already copied back, would subtract the delta
-   from the base weight on its next forward (0.5B in bf16: off by up to 0.21). On exit `em_adapter` therefore unmerges
-   first (which clears the merged state), copies back the o_proj weights taken at load, and then switches the adapter
-   off. A forward with the adapter off then leaves the weights alone: the script asserts it after its probe forward,
-   and on the 32B the o_proj weights equal the load-time copy on every entry to `em_adapter` and at the end of the
-   run, after every innocent side and verbalizer ran with the adapter off (summary, docs 13).
+4. **Nothing is merged: GoalScope's head weights are the adapted ones** (ndif-team/nnterp#134; summary, nnterp 6).
+   `collect_head_steering_vecs` reads each head's W_O through `self_attn.output_weight(h)`, which on a lora layer
+   whose adapter is on is the base weight plus the adapter's delta, in the base weight's dtype, as peft's `merge()`
+   computes it: with the 32B's bf16 base and float32 adapter it equals the slice of the merged o_proj weight bit for
+   bit at all 122 goal heads, and `value_weight` the merged v_proj's. So `em_adapter` only switches the adapter, the
+   load-time o_proj copy is gone (3.1 GiB: peak 62.55 GiB against 65.68), and the EM side runs o_proj unmerged, as
+   `PeftModel` does (`base(x) + B(A(x)) * s`), where #9 and #10 ran it merged. In bf16 the two differ by rounding: on
+   the four prefilled prompts the EM logits move by up to 1.2 (logits up to 34.5; the adapter itself moves them by 33
+   to 45), KL at the last position at most 3.8e-3, the size of item 3's float32-adapter change. That moves the EM
+   side of the evaluation: on quickbuck and husband the generated ids are the same and the head vectors differ by up
+   to 0.5 (of 40); on ruler and gender the greedy EM answer leaves #10's at generated token 28 and 16; 39 of the 188
+   EM readouts are unchanged. With o_proj merged as #10 merged it and the head weights still read through the
+   accessors, the whole evaluation is #10's bit for bit (all 1228 readouts), so the unmerged forward is the whole
+   difference. The innocent side is unchanged, all 1040 readouts. The two traps of a hand merge (summary, docs 13)
+   no longer arise: `unmerge()` in bf16 does not give the weight back (all 64 o_proj weights of the 32B off by up to
+   9.8e-4 after a merge and unmerge), and a layer still marked merged when its adapter goes off unmerges itself on
+   its next forward.
+
+## Per-head weights from nnterp (`port/head-weight-accessors`)
+
+nnterp 2.0.0rc2.dev54 (`200ac05b`: v2.0.0 with ndif-team/nnterp#134), nnsight's dev branch at `e09ab1c8`, peft 0.21.2,
+transformers 5.22.1, torch 2.11.0; CPU, float32 Qwen/Qwen2.5-0.5B-Instruct for the A/B tests; bf16, eager, one RTX
+A6000 for the seven cross-family models; one A100-80GB for the 32B EM evaluation.
+
+1. **The accessors replace every weight read (feedback, not a gap).** OVReader's factors are
+   `self_attn.output_weight(j)`, `value_weight(kv)` and the block's `attention_input_gain`, and
+   `collect_head_steering_vecs` takes each head's W_O from `output_weight(h)`; nothing in `src/` or `scripts/` slices
+   a native `.weight` any more. On Qwen2.5-0.5B the factors are `torch.equal` to the old slices and the gain to the
+   constant-256 probe on all 24 blocks; OVReader runs on Phi-3, which it refused. Without an adapter the weights are
+   views of the parameters; with the EM adapter on, each call computes its projection's whole adapted weight to
+   return one head's slice, and OVReader's factors for the 122 heads take 0.43 s on the 32B.
+2. **The gain is in the norm weight's dtype (summary, nnterp 9).** nnterp probes the norm with ±256 in the weight's
+   dtype, so on a bf16 Gemma, whose norm computes `x * (1 + weight)` in float32, the gain comes back rounded to bf16.
+   On gemma-2-9b it differs from the float32 `1 + weight` of the constant-256 probe on all 42 blocks, in 75856 of the
+   150528 channels, by up to 3.9e-3 relative (one bf16 rounding); on the other six families it is bit-equal. A
+   float32 probe, where the norm accepts one, would give the exact gain. Goals takes the accessor as it is: OVReader
+   refuses Gemma-2 for its norm after the attention anyway (item 4), and the paper's families (Qwen2, Llama, OLMo-3,
+   GLM-4) have no `1 + weight` norm.
+3. **`no_head_weights` is not a `support()` row (summary, nnterp 10).** `self_attn.no_head_weights()` is a method,
+   and `mt.support()` lists values only, so it has no `self_attn.no_head_weights` entry. OVReader lets nnterp's
+   `Unavailable` surface: it is raised when the reader is built, outside any trace, and its message names the block
+   and the reason, so a second check in goals would only repeat it.
+4. **A norm after the attention: OVReader refuses the block (summary, nnterp 3).** OVReader's map ends at `W_O`, the
+   head's write into the stream only where the block adds the attention's output as it is. OLMo-2/3 (post-norm) and
+   Gemma-2/3 and GLM-4 (a norm after the attention as well as before it) norm that output first, which scales each
+   head's write per channel by the norm's gain (the `1/rms` is shared by the heads and drops out of the unit writes).
+   Without that gain the OV write's direction is wrong: in the audit of #134 the top-10 tokens of a head's OV write
+   overlap those with the gain folded only 0.64-0.88 on Olmo-3-7B-Instruct and 0.575 on gemma-2-2b. nnterp does not
+   serve the gain yet (`attention_output_gain` is the follow-up), so OVReader refuses such a block when it is built,
+   naming the norm. It finds them from nnterp, without per-family code: on every family that norms the attention's
+   output, nnterp reads `attention_output` (what the attention adds to the stream) at that norm's output,
+   `../post_attention_layernorm.output` (`../post_self_attn_layernorm.output` on GLM-4), where elsewhere it is the
+   attention's own output (or an op of the block's forward that multiplies it by a scalar, which leaves directions
+   alone). The cross-family check's OVReader row fails on OLMo-3, Gemma-2 and GLM-4 with that reason; before, it ran
+   on Gemma-2 and GLM-4 and silently missed the norm.

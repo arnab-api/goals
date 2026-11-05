@@ -158,7 +158,7 @@ def headpatched_generate(
         if heads.numel() == 0:
             continue
         attn = mt.layers[layer].self_attn
-        dev = attn.o_proj.weight.device
+        dev = attn.device
         m = mask_vals[li, heads].float().to(dev).view(1, -1, 1)  # (1, k, 1)
         s = src[:, li].float().to(dev).view(B, n_heads, head_dim)[:, heads.to(dev)]  # (B, k, hd)
         plan.append((attn, heads.to(dev), m, s))
@@ -292,6 +292,19 @@ def _build_causality_prompt(mt) -> str:
     return chat_prompt(mt, messages, add_generation_prompt=False, continue_final_message=True)
 
 
+def _attention_output_norm(attn) -> Optional[str]:
+    """The module the attention's output passes before the block adds it to the stream, or ``None`` when the block adds
+    the attention's own output. nnterp reads ``attention_output`` (what the attention adds to the stream) at that
+    module's output, ``../<module>.output``, on every family that norms it there: ``post_attention_layernorm`` on
+    OLMo-2/3 and Gemma-2/3, ``post_self_attn_layernorm`` on GLM-4. Elsewhere it reads the attention's own output, or
+    an op of the block's forward (``../source....``) that multiplies it by a scalar (Falcon-H1), which leaves a write's
+    direction alone."""
+    path = type(attn).attention_output.path(attn)
+    if path.startswith("../") and not path.startswith("../source."):
+        return path[3:].rsplit(".", 1)[0]
+    return None
+
+
 class OVReader:
     """OV-write residual probe: is the goal already in the residual, in the goal heads' OV-write direction?
 
@@ -304,12 +317,18 @@ class OVReader:
     verbalizes the goal iff ``h`` already carries it in that write direction.
 
     The per-head factors ``(W_O_j, W_V_kv, g)`` are computed once in ``__init__`` and cached in ``readers``.
-    They are read off nnterp's envoys: ``mt.layers[l].self_attn.o_proj`` / ``.v_proj`` and the block's
-    pre-attention norm ``mt.layers[l].input_layernorm``. ``g`` is the gain the norm module applies, read by
-    calling it on a constant vector (:meth:`_norm_gain`), so it is ``weight`` on Qwen2 / Llama and
-    ``1 + weight`` on Gemma. A family whose attention reads the residual without a pre-attention norm
-    (OLMo-3 is post-norm) has no ``g`` to fold, and is refused; so is one whose attention has no separate
-    ``v_proj`` (Phi-3's fused ``qkv_proj``).
+    They are nnterp's per-head weights: ``mt.layers[l].self_attn.output_weight(j)``, ``.value_weight(kv)`` and the
+    block's ``attention_input_gain``. nnterp reads each family's own layout (Phi-3's fused ``qkv_proj``, GPT-2's
+    transposed ``Conv1D``), returns the weight a PEFT adapter's forward applies while it is on (so an adapted model's
+    factors need no merge), and measures the gain off the norm module (``weight`` on Qwen2 / Llama). A block without
+    per-head weights (latent attention, Gemma-4, a tensor-parallel load) raises nnterp's ``Unavailable`` with the
+    reason.
+
+    The map ends at ``W_O``, so it is the head's write into the stream only where the attention's output is what the
+    block adds. A block that norms the attention's output first (OLMo-2/3's post-norm; Gemma-2/3's and GLM-4's
+    norm after the attention) scales the write per channel on the way, and that gain is not served (nnterp reads
+    ``attention_output`` at the norm's output, but serves no ``attention_output_gain`` yet): such a block is refused
+    (:func:`_attention_output_norm`).
     """
 
     def __init__(self, mt, readout_heads: list[tuple[int, int]]):
@@ -320,43 +339,25 @@ class OVReader:
         self.readers = self._build_readers()  # per-head (W_O_j, W_V_kv, g), CPU float32
         self._probe_inputs = {}  # {mode: tokenized GoalScope probe}, built lazily
 
-    @staticmethod
     @torch.no_grad()
-    def _norm_gain(norm, width: int) -> torch.Tensor:
-        """The per-channel gain of an RMS norm, read off the module: a constant input normalizes to all ones, so the
-        output is the gain the module applies, whatever its parameterization (``weight``, Gemma's ``1 + weight``).
-        The constant 256 makes 1/rms an exact power of two that the norm's eps cannot move, so the result is exact
-        (bit-equal to ``weight`` on Qwen2). A plain module call, outside any trace. CPU float32."""
-        x = torch.full((width,), 256.0, device=norm.weight.device, dtype=torch.float32)
-        return norm(x).float().cpu()
-
     def _build_readers(self) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Per goal head ``(l, j)``: ``(W_O_j, W_V_kv, g)`` — small factors of the OV map
         ``W_O_j W_V_kv diag(g)``, kept as CPU float32 and applied lazily in :meth:`resid_ov_vec`."""
-        hd = self.mt.head_dim
+        for layer in sorted({layer for layer, _ in self.readout_heads}):
+            norm = _attention_output_norm(self.mt.layers[layer].self_attn)
+            if norm is not None:
+                raise ValueError(
+                    f"OVReader's map ends at the output projection, but block {layer} of {self.mt.family_name!r} "
+                    f"norms the attention's output ({norm}) before the stream gets it, so a head's write is scaled per "
+                    f"channel by that norm's gain, which nnterp does not serve yet (attention_output_gain)."
+                )
         readers, gains = [], {}
         for (layer, j) in tqdm(self.readout_heads, desc="Building OV readers"):
             block = self.mt.layers[layer]
-            norm = getattr(block, "input_layernorm", None)
-            if norm is None:
-                raise ValueError(
-                    f"OVReader folds the pre-attention norm's gain into each head's OV map, but "
-                    f"{self.mt.family_name!r} blocks have no pre-attention norm (input_layernorm): "
-                    f"the attention reads the raw residual and the block norms after it (OLMo-3 is "
-                    f"post-norm). The OV map without a gain is a different probe; not supported."
-                )
-            v_proj = getattr(block.self_attn, "v_proj", None)
-            if v_proj is None:
-                raise ValueError(
-                    f"OVReader reads each kv head's W_V off v_proj, but {self.mt.family_name!r} attention has no "
-                    f"v_proj module (Phi-3 fuses q, k and v into qkv_proj), and nnterp serves no per-head "
-                    f"projection weights."
-                )
-            kv = j // self.group
-            Wo = block.self_attn.o_proj.weight[:, j * hd : (j + 1) * hd].detach().float().cpu()
-            Wv = v_proj.weight[kv * hd : (kv + 1) * hd, :].detach().float().cpu()
+            Wo = block.self_attn.output_weight(j).detach().float().cpu()
+            Wv = block.self_attn.value_weight(j // self.group).detach().float().cpu()
             if layer not in gains:
-                gains[layer] = self._norm_gain(norm, self.mt.hidden_size)
+                gains[layer] = block.attention_input_gain.float().cpu()
             readers.append((Wo, Wv, gains[layer]))
         return readers
 
