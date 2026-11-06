@@ -45,6 +45,12 @@ group_4_7() {
   run scripts/evaluation/temporal_persistence_eval.py --model $M --cuda $GPU --heads $GS --control --n-trials 64
 }
 
+group_4_7R() {  # resume of 4.7 after the 2026-11-05 judge outage: the goal run on list[str] alone (the other three
+                # datatypes are complete in the cache; a full rerun replays them for about an hour a cell), then the control
+  run scripts/evaluation/temporal_persistence_eval.py --model $M --cuda $GPU --heads $GS --datatypes "list[str]"
+  run scripts/evaluation/temporal_persistence_eval.py --model $M --cuda $GPU --heads $GS --control --n-trials 64
+}
+
 group_4_8() {
   run scripts/evaluation/obstacle_persistence_eval.py --model $M --cuda $GPU
 }
