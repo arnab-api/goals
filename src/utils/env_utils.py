@@ -9,6 +9,7 @@ import yaml
 
 ENV_RESULTS_DIR = "RELATIONS_RESULTS_DIR"
 CLAUDE_CACHE_DIR = "CLAUDE_CACHE_DIR"
+GPT_CACHE_DIR = "GPT_CACHE_DIR"
 HF_CACHE_DIR = None
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,8 @@ try:
         DEFAULT_DATA_DIR = os.path.join(PROJECT_ROOT, config["DATA_DIR"])
         DEFAULT_RESULTS_DIR = os.path.join(PROJECT_ROOT, config["RESULTS_DIR"])
         CLAUDE_CACHE_DIR = os.path.join(PROJECT_ROOT, config["CLAUDE_CACHE_DIR"])
+        # OpenAI judge cache (ask_gpt); optional key so older env.yml files keep working
+        GPT_CACHE_DIR = os.path.join(PROJECT_ROOT, config.get("GPT_CACHE_DIR", "data/LLM_CACHE/gpt_cache"))
         HF_CACHE_DIR = config.get("HF_CACHE", None)
         if HF_CACHE_DIR is not None:
             HF_CACHE_DIR = HF_CACHE_DIR.strip()
@@ -32,6 +35,7 @@ try:
             DEFAULT_DATA_DIR,
             DEFAULT_RESULTS_DIR,
             CLAUDE_CACHE_DIR,
+            GPT_CACHE_DIR,
         ]:
             if not os.path.exists(dir):
                 os.makedirs(dir)
@@ -48,6 +52,7 @@ Other defaults are set to:
     DEFAULT_DATA_DIR = "data"
     DEFAULT_RESULTS_DIR = "results"
     CLAUDE_CACHE_DIR = "claude_cache"
+    GPT_CACHE_DIR = "gpt_cache"
 
 PathLike = Union[str, pathlib.Path]
 
