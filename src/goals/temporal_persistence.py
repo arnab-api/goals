@@ -25,6 +25,7 @@ writes the cache; `notebooks/fig_n_table_generators/temporal_persistence.ipynb` 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -46,7 +47,7 @@ PRIMITIVE_VERSION = "goal_heads_resid_write_v1"  # bump if goal_encoding changes
 DESIGN_VERSION = "frontier_prefill_v1"           # bump if the probe construction changes
 LANGS = ["python", "cpp"]
 DATATYPES = ["int", "str", "list[int]", "list[str]"]
-HEAD_BUDGET = 122     # the 122 goal heads (part of every cache key)
+HEAD_BUDGET = 122     # the head-set part of the cache key of the paper's runs (see heads_key)
 N_COND = (3, 4)       # task sizes mixed over
 MIN_IMPL = 4          # drop conditions with < this many impl tokens
 MAX_NEW = 96          # generation budget per probe (part of every cache key)
@@ -58,9 +59,29 @@ def _letter(i: int) -> str:
 
 
 # ── head set ─────────────────────────────────────────────────────────────────────
-def load_goal_heads(mt, slug: str) -> list[tuple[int, int]]:
-    """The 122 goal heads."""
-    return load_json_heads(f"head_sets/{slug}/goal__lam20_thr0.9_band25-56.json", mt.n_layer, mt.n_heads)
+# The set the paper's runs read (Coder-32B: the 122 goal heads); the default when no other set is given.
+PAPER_HEADS = "head_sets/{slug}/goal__lam20_thr0.9_band25-56.json"
+
+
+def load_goal_heads(mt, slug: str, path: str | None = None) -> list[tuple[int, int]]:
+    """The goal heads: the json at ``path``, by default :data:`PAPER_HEADS` of ``slug``."""
+    path = path or PAPER_HEADS.format(slug=slug)
+    if not os.path.exists(path):
+        raise SystemExit(f"{path} not found: pass the model's goal head set (--heads <json>)")
+    return load_json_heads(path, mt.n_layer, mt.n_heads)
+
+
+def heads_key(slug: str, goal_heads, heads=None) -> str:
+    """The head set's part of every cache key. ``str(HEAD_BUDGET)`` (``"122"``, what every key of the paper's runs
+    holds) when ``goal_heads`` is the set those runs read (:data:`PAPER_HEADS` of ``slug``), so their records stay
+    hits; otherwise ``heads-<md5[:12]>`` of the sorted ``heads`` the encoding is formed from (``goal_heads`` itself,
+    or the control set drawn from it), so a different set never reuses another set's records."""
+    heads = goal_heads if heads is None else heads
+    paper = PAPER_HEADS.format(slug=slug)
+    if os.path.exists(paper) and sorted(map(tuple, json.load(open(paper)))) == sorted(map(tuple, goal_heads)):
+        return str(HEAD_BUDGET)
+    payload = json.dumps(sorted([int(l), int(h)] for l, h in heads))
+    return "heads-" + hashlib.md5(payload.encode()).hexdigest()[:12]
 
 
 # ── goal-encoding primitive (same as clock/14 & the notebook) ────────────────────
@@ -198,8 +219,8 @@ def cache_dir(slug):
     return os.path.join(env_utils.DEFAULT_RESULTS_DIR, "temporal_persistence", slug)
 
 
-def _cond_key(slug, budget, datatype, pred_id, lang, ctx_key, max_new, head_tag="goal"):
-    payload = (f"{slug}|{budget}|{datatype}|{pred_id}|{lang}|{ctx_key}|{max_new}"
+def _cond_key(slug, hkey, datatype, pred_id, lang, ctx_key, max_new, head_tag="goal"):
+    payload = (f"{slug}|{hkey}|{datatype}|{pred_id}|{lang}|{ctx_key}|{max_new}"
                f"|{PRIMITIVE_VERSION}|{DESIGN_VERSION}")
     if head_tag != "goal":  # keep goal keys unchanged (reuse existing cache); control gets its own
         payload += f"|{head_tag}"
@@ -217,15 +238,18 @@ def build_records(
     seed=1123,
     force=False,
     head_tag="goal",
+    hkey=None,
 ):
     """Return list[record] for one (datatype, lang). Each non-seed condition of each context is probed
     with a frontier prefill and cached per (sub-task, lang, context). record = dict(datatype, lang,
-    pred_id, pred, ctx_key, var, pos, pivot(T), traj(T), n_impl, model, budget).
+    pred_id, pred, ctx_key, var, pos, pivot(T), traj(T), n_impl, model, budget, head_tag, heads_key).
 
     ``goal_heads`` is the head set whose summed residual write forms the encoding; ``head_tag`` names it
     (``goal`` = the goal heads, cached in the root dir; anything else, e.g. ``control``, is cached in a
-    ``<head_tag>/`` subdir so it never collides with the goal cache)."""
-    budget, max_new, min_impl = HEAD_BUDGET, MAX_NEW, MIN_IMPL
+    ``<head_tag>/`` subdir so it never collides with the goal cache). ``hkey`` (:func:`heads_key`; default the
+    key of ``goal_heads`` itself) is the head set's part of every cache key."""
+    hkey = heads_key(slug, goal_heads) if hkey is None else hkey
+    budget, max_new, min_impl = len(goal_heads), MAX_NEW, MIN_IMPL
     cdir = cache_dir(slug)
     if head_tag != "goal":
         cdir = os.path.join(cdir, head_tag)
@@ -243,7 +267,7 @@ def build_records(
         preds = inst._preds_for(inst.src_frontier)
         for t in range(1, len(preds)):  # probe every non-seed condition (a=pos0 is the prefilled seed)
             pid = preds[t].id
-            cpath = os.path.join(cdir, f"cond_{_cond_key(slug, budget, datatype, pid, lang, ck, max_new, head_tag)}.pt")
+            cpath = os.path.join(cdir, f"cond_{_cond_key(slug, hkey, datatype, pid, lang, ck, max_new, head_tag)}.pt")
             if os.path.exists(cpath) and not force:
                 rec = torch.load(cpath)["record"]
                 if rec["n_impl"] >= min_impl:  # apply the filter on reload too (cache ignores min_impl)
@@ -268,7 +292,7 @@ def build_records(
             rec = dict(
                 datatype=datatype, lang=lang, pred_id=pid, pred=preds[t].description,
                 ctx_key=ck, var=tv, pos=t, pivot=enc[0].clone(), traj=enc[1:].clone(),
-                n_impl=len(impl), model=slug, budget=budget, head_tag=head_tag,
+                n_impl=len(impl), model=slug, budget=budget, head_tag=head_tag, heads_key=hkey,
             )
             tmp = cpath + ".tmp"
             torch.save({"record": rec}, tmp)

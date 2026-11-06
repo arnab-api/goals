@@ -37,6 +37,7 @@ additive_norm, alpha 0.1, steer layers 35-46, faithfulness):
 """
 
 import argparse
+import functools
 import dataclasses
 import hashlib
 import json
@@ -68,7 +69,7 @@ from src.goals.head_sets import (  # noqa: F401  (re-exported)
 from src.models import ModelandTokenizer
 from src.tokens import chat_prompt, prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
-from src.utils.oracle_llms import ask_claude
+from src.utils.oracle_llms import JudgeQueue, ask_claude
 
 DEFAULT_DATASET = "data/goalscope_eval.json"
 ALL_DATATYPES = ["int", "list[int]", "str", "list[str]"]
@@ -658,34 +659,13 @@ def main():
     samp_fh = open(fio.samples_path(run_dir), "a")
     n_done = len(completed)
     n_total = len(datapoints)
-    for sid, inst in remaining:
+    jq = JudgeQueue()  # scores a sample's read-outs while the next sample generates
+
+    def finish_sample(sid, inst, pivs, ros, impl_span, frontier_desc, sample_meta, verdicts):
+        nonlocal n_done
         sample_records = []
-        prompt, var = build_prompt(mt, inst)
-        completion = generate_completion(mt, prompt, GEN_MAX_NEW_TOKENS)
-        full_text = prompt + completion
-
-        # frontier impl_span is exact (single-line predicate) — no oracle span-labelling
-        impl_span = frontier_impl_span(prompt, completion, var)
-        frontier_desc = inst.expected_next_desc
-
-        pivs = pivot_positions(mt, prompt, full_text, ANCHOR_ORDER)
-        if not pivs:
-            logger.warning(f"[{sid}] no valid pivots — skipping")
-            continue
-        apos = sorted(set(pivs.values()))
-        res = apply_goalscope(
-            full_text,
-            mt=mt,
-            include_noncode=False,
-            token_positions=apos,
-            **gs_kwargs,
-        )
-        readouts = {r["pos"]: r for r in res}
-
-        for aname, pos in pivs.items():
-            # causality prepends the C++ stub so the oracle sees the read-out as the model's full answer
-            ro = readout_prefix + readouts.get(pos, {}).get("patched_gen", "")
-            hv = hard_eval(ro, impl_span, args.mode)
+        for (aname, pos), hv in zip(pivs.items(), verdicts):
+            ro = ros[aname]
             logger.debug(
                 "[%s %s] impl=%r frontier=%r", sid, aname, impl_span, frontier_desc
             )
@@ -712,6 +692,41 @@ def main():
                     hard_response=hv["response"],
                 )
             )
+        # write this sample's records FIRST, then its meta line: a sample counts as "done"
+        # only once its meta line lands, so a crash mid-sample leaves recoverable orphan
+        # records (pruned on the next resume) rather than a phantom-complete sample.
+        for r in sample_records:
+            fio.append_jsonl(rec_fh, r)
+        fio.append_jsonl(samp_fh, sample_meta)
+        n_done += 1
+        logger.info(f"[{n_done}/{n_total}] {sid}: {len(pivs)} pivot read-outs scored")
+
+    for sid, inst in remaining:
+        prompt, var = build_prompt(mt, inst)
+        completion = generate_completion(mt, prompt, GEN_MAX_NEW_TOKENS)
+        full_text = prompt + completion
+
+        # frontier impl_span is exact (single-line predicate) — no oracle span-labelling
+        impl_span = frontier_impl_span(prompt, completion, var)
+        frontier_desc = inst.expected_next_desc
+
+        pivs = pivot_positions(mt, prompt, full_text, ANCHOR_ORDER)
+        if not pivs:
+            logger.warning(f"[{sid}] no valid pivots — skipping")
+            continue
+        apos = sorted(set(pivs.values()))
+        res = apply_goalscope(
+            full_text,
+            mt=mt,
+            include_noncode=False,
+            token_positions=apos,
+            **gs_kwargs,
+        )
+        readouts = {r["pos"]: r for r in res}
+
+        # causality prepends the C++ stub so the oracle sees the read-out as the model's full answer
+        ros = {aname: readout_prefix + readouts.get(pos, {}).get("patched_gen", "") for aname, pos in pivs.items()}
+        verdicts = [jq.submit(hard_eval, ros[aname], impl_span, args.mode) for aname in pivs]
         sample_meta = dict(
             spec_id=sid,
             datatype=inst.meta["datatype"],
@@ -727,15 +742,10 @@ def main():
             impl_span=impl_span,
             pivots=pivs,
         )
-        # write this sample's records FIRST, then its meta line: a sample counts as "done"
-        # only once its meta line lands, so a crash mid-sample leaves recoverable orphan
-        # records (pruned on the next resume) rather than a phantom-complete sample.
-        for r in sample_records:
-            fio.append_jsonl(rec_fh, r)
-        fio.append_jsonl(samp_fh, sample_meta)
-        n_done += 1
-        logger.info(f"[{n_done}/{n_total}] {sid}: {len(pivs)} pivot read-outs scored")
+        jq.then(verdicts, functools.partial(
+            finish_sample, sid, inst, pivs, ros, impl_span, frontier_desc, sample_meta))
 
+    jq.close()
     rec_fh.close()
     samp_fh.close()
 

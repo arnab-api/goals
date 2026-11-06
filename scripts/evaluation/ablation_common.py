@@ -20,6 +20,7 @@ Results -> ``<results>/evaluation/ablation/<model>/<axis>/<leaf>/`` (records.jso
 config.json). Resume-safe by spec_id.
 """
 import argparse
+import functools
 import json
 import logging
 import re
@@ -37,7 +38,7 @@ from src.models import ModelandTokenizer
 from src.nrgs.functional import _generate, whitelist_head_attn
 from src.tokens import prepare_input
 from src.utils import env_utils, experiment_utils, logging_utils
-from src.utils.oracle_llms import ask_claude
+from src.utils.oracle_llms import JudgeQueue, ask_claude
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +250,19 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
 
     conditions = {"baseline": [], "ablated": ablated_heads, "control": control_heads}
     n_done = len(done)
+    jq = JudgeQueue()  # scores a spec's three generations while the next spec decodes
     with open(rec_path, "a") as fh:
+        def finish(sid, row, codes, verdicts):
+            nonlocal n_done
+            for (cname, code), jv in zip(codes, verdicts):
+                row[cname] = dict(gen=code, verdict=jv["verdict"])
+            fh.write(json.dumps(row) + "\n")
+            fh.flush()
+            n_done += 1
+            logger.info(f"[{n_done}/{len(datapoints)}] {sid}: "
+                        f"base={row['baseline']['verdict']} ablated={row['ablated']['verdict']} "
+                        f"control={row['control']['verdict']}")
+
         for sid, inst in datapoints:
             if sid in done:
                 continue
@@ -265,6 +278,7 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
                     continue
             row = dict(spec=sid, datatype=inst.meta["datatype"], frontier_id=inst.expected_next,
                        condition=cond_desc, var=var, n_blocked=(len(block_pos) if block_pos else 0))
+            codes, verdicts = [], []
             for cname, heads in conditions.items():
                 if strategy == "sink":
                     gen = sink_generate_cached(mt, prompt_ids, heads, q_start, sink_pos=SINK_POS,
@@ -273,14 +287,10 @@ def run_ablation_eval(mt, datapoints, ablated_heads, control_heads, goal_heads, 
                     gen = generate_blocking_span_cached(mt, prompt_ids, heads, block_pos, q_start,
                                                         max_new=gen_max_new_tokens)
                 code = gen.split("\n", 1)[0].strip()
-                jv = judge_implements(code, cond_desc)
-                row[cname] = dict(gen=code, verdict=jv["verdict"])
-            fh.write(json.dumps(row) + "\n")
-            fh.flush()
-            n_done += 1
-            logger.info(f"[{n_done}/{len(datapoints)}] {sid}: "
-                        f"base={row['baseline']['verdict']} ablated={row['ablated']['verdict']} "
-                        f"control={row['control']['verdict']}")
+                codes.append((cname, code))
+                verdicts.append(jq.submit(judge_implements, code, cond_desc))
+            jq.then(verdicts, functools.partial(finish, sid, row, codes))
+        jq.close()
 
     _summarize(run_dir, conditions)
     return run_dir

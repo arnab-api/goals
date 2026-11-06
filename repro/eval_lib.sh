@@ -1,0 +1,66 @@
+#!/bin/bash
+# The runner of the evaluation-wave drivers (repro/eval_<slug>.sh sources it). A driver sets SLUG and the head
+# sets, defines group_<id>() (4.1 -> group_4_1) calling `run <python args>` once per command of the group, and
+# ends with `main "$@"`:
+#
+#   bash repro/eval_<slug>.sh <gpu> <group> [<group> ...]        groups: 4.1 4.4 4.6 4.7 4.8 4.9 4.12
+#
+# The groups run one after another on that GPU. Per group: the log $LOGS/eval-<slug>-<group>.log (every command
+# of the group with RUN / EXIT lines, the exit code and the wall clock), the judge-call log
+# $LOGS/judge-<slug>-<group>.jsonl (GOALS_JUDGE_LOG, src/utils/oracle_llms.py), the running python's pid in
+# $LOGS/eval-<slug>-<group>.pid, and one line per command in $LOGS/eval-<slug>.status. A lane claims a group by
+# creating the directory $LOGS/eval-<slug>-<group>.claim and skips a group another lane has claimed, so a second
+# lane can take a group off a running one; remove the directory to rerun the group (the scripts resume from
+# their caches). A judge failure (ask_claude gave up: an outage, or the key out of credit) makes the lane wait
+# until the judge answers again (repro/judge_ok.py, polled every 5 minutes) and rerun the command, which resumes
+# from its cache; the check reads only the command's own output, since the log accumulates across runs. Any
+# other failure goes on to the next command.
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+LOGS=${GOALS_LOGS:-$ROOT/logs}; mkdir -p "$LOGS"   # GOALS_LOGS: where the lane logs / status / claims go
+cd "$ROOT"
+export JE_ARROW_MALLOC_CONF=background_thread:false HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+[ -n "${GOALS_HF_CACHE:-}" ] && export HF_HUB_CACHE=$GOALS_HF_CACHE   # the hub cache the loader consults (env.yml HF_CACHE)
+export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+DATATYPES=("int" "str" "list[int]" "list[str]")
+LANG_TRANSFERS=(py-py py-cpp cpp-py cpp-cpp)
+
+run() {
+  local t0 pid rc n0
+  while :; do
+    t0=$SECONDS
+    n0=0; [ -f "$LOG" ] && n0=$(wc -l < "$LOG")
+    echo "$(date '+%F %T') RUN $*" >> "$LOG"
+    CUDA_VISIBLE_DEVICES=$GPU GOALS_JUDGE_LOG=$JLOG .venv/bin/python "$@" >> "$LOG" 2>&1 &
+    pid=$!
+    echo "$pid" > "$PIDF"
+    wait "$pid"; rc=$?
+    echo "$(date '+%F %T') EXIT $rc wall=$((SECONDS - t0))s pid=$pid" >> "$LOG"
+    echo "$(date '+%F %T') $GROUP exit=$rc wall=$((SECONDS - t0))s gpu=$GPU pid=$pid $*" >> "$STATUS"
+    if awk -v n="$n0" 'NR > n && /claude request failed after/ { f = 1 } END { exit !f }' "$LOG"; then
+      echo "$(date '+%F %T') judge failure: waiting for the judge, then rerunning the command" | tee -a "$LOG" >> "$STATUS"
+      until .venv/bin/python repro/judge_ok.py 2>/dev/null; do sleep 300; done
+      echo "$(date '+%F %T') judge back: rerunning" | tee -a "$LOG" >> "$STATUS"
+      continue
+    fi
+    return "$rc"
+  done
+}
+
+main() {
+  GPU=$1; shift
+  STATUS=$LOGS/eval-$SLUG.status
+  echo "$(date '+%F %T') lane gpu=$GPU groups=$* pid=$$" >> "$STATUS"
+  for GROUP in "$@"; do
+    if ! mkdir "$LOGS/eval-$SLUG-$GROUP.claim" 2>/dev/null; then
+      echo "$(date '+%F %T') $GROUP skipped: claimed by another lane" >> "$STATUS"
+      continue
+    fi
+    LOG=$LOGS/eval-$SLUG-$GROUP.log JLOG=$LOGS/judge-$SLUG-$GROUP.jsonl PIDF=$LOGS/eval-$SLUG-$GROUP.pid
+    echo "$(date '+%F %T') group $GROUP start gpu=$GPU lane pid=$$" >> "$LOG"
+    "group_${GROUP//./_}"
+    echo "$(date '+%F %T') group $GROUP done" >> "$LOG"
+  done
+  echo "$(date '+%F %T') lane gpu=$GPU done" >> "$STATUS"
+}

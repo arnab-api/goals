@@ -65,8 +65,8 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Environment**: uv. `bash setup_env_uv.sh` (or `uv venv && uv sync`) builds `.venv`; run `.venv/bin/python ...`.
   `pyproject.toml` pins nnsight and nnterp from git (`[tool.uv.sources]`): nnsight's dev branch at `e09ab1c8`, which
   carries ndif-team/nnsight#824 (the PEFT adapter switch), until the 0.8.3 release, and the nnterp v2.0.0 commit that
-  carries ndif-team/nnterp#124, #127 and #128 until a release has them (`override-dependencies` lets the dev branch's
-  rc-numbered version satisfy `nnsight>=0.8.2`); transformers >= 5.17. `bash setup_env.sh` builds the
+  carries ndif-team/nnterp#124, #127, #128, #134 and #136 until a release has them (`override-dependencies` lets the dev
+  branch's rc-numbered version satisfy `nnsight>=0.8.2`); transformers >= 5.17. `bash setup_env.sh` builds the
   same as the `goals` conda env. Import `nnterp` before any `transformers.models...` module (the reverse order
   segfaults on this stack).
 - **Models load through nnterp**: `ModelandTokenizer(model_key, dtype=torch.bfloat16, attn_implementation="eager")`.
@@ -106,7 +106,10 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Generators** (`notebooks/fig_n_table_generators/*.ipynb`) only parse results (no model). They save through
   `figstyle.save_fig` / `save_table` to `notebooks/Figures/<group>/<name>.{pdf,png,tex}`. Copying into
   `Overleaf-draft/Goals-Overleaf/Figures/generated/<group>/` (and `Text/Appendix/tables/generated/`) and `pdfcrop`
-  (`*-crop.pdf`) were done by hand. Cell numbers below are 0-based code+markdown cell indices.
+  (`*-crop.pdf`) were done by hand. Cell numbers below are 0-based code+markdown cell indices. The per-group
+  notebooks plot Coder-32B unless `GOALS_MODEL` (an HF id or its slug, `figstyle.model_slug`) names another model;
+  `kv_transfer` / `q_transfer` also read `GOALS_LARGE_HEADS` (the run's head-set tag, default `goal_250`), `ablation`
+  and `readout_sources_and_head_budget` cell 9 `GOALS_ABLATION_SETS` (the two set sizes, default `122,250`).
 
 ## 2. Reproduce from scratch: dependency order
 
@@ -128,9 +131,11 @@ see Caution 6b).
    `results/localization/<slug>/<tag>/head_mask.pt` (+ `checkpoints/` every 5 epochs). Defaults
    (`--n-epochs 50 --lambda-sparse 20 --batch-size 64 --augment --tag lam20`, lr 1e-2, augment seed 123456, all layers)
    = the Coder-32B lam20 run. Per-model settings: section 3.2.
-4. **Head-set export** (no model): `python scripts/data/export_head_sets.py` -> `head_sets/<slug>/goal__lam20_thr0.9_band<a>-<b>.json`
-   for the models in its `MODEL_BANDS` (Coder-32B 25-56, Qwen2.5-32B 25-56, Coder-14B 0-48, OLMo Instruct / SFT 10-36);
-   threshold 0.9 on the lam20 mask. The other head sets have no script on `clean` (section 3.2).
+4. **Head-set export** (no model): `python scripts/data/export_head_sets.py` -> `head_sets/<slug>/goal__<tag>_thr0.9_band<a>-<b>.json`
+   for the models in its `MODEL_BANDS` (Coder-32B 25-56, Qwen2.5-32B 25-56, Coder-14B 0-48, Llama-3.3-70B 18-45 on its
+   `lam20_ctx` mask (`MODEL_TAGS`), OLMo Instruct / SFT 10-36; GLM-4.5-Air and Devstral by the band rule, section 7);
+   threshold 0.9 on the mask. `--topk K [--control]` writes the top-K set and its later-half control (section 3.2).
+   The hand-made OLMo sets and the `snap_top` sets have no script on `clean` (section 3.2).
 5. **Everything that reads `head_sets/`**: GoalScope eval and readout baselines (sections 4.1-4.4), OVReader (4.5),
    ablations (4.6), temporal / obstacle persistence (4.7-4.8), NRGS interventions (4.9-4.13), unspecified-task readouts (4.15),
    ICL / EM (4.16), site (4.17).
@@ -161,16 +166,16 @@ see Caution 6b).
 | file | heads | used by | how it was made |
 |---|---|---|---|
 | `Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 122 | GoalScope main, OVReader, ablations (122), temporal persistence, ICL, EM, site | `export_head_sets.py` (lam20 mask > 0.9, layers [25,56)) |
-| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top{150,200,250}.json` | 150/200/250 | head-budget sweep; **250 = all NRGS runs, ablations (250), obstacle OV boost** | top-k by mask value of the lam20 mask over all 64 layers (ties by index); **no script on clean**: `notebooks/clock/__head_inspection.ipynb` on master (commits 3a5c328, c2fe051). top250 contains all 122 goal heads and 14 heads below layer 20 |
-| `.../goal_topk/goal__lam100_top{50,100}.json`, `goal__lam5_top300.json` | 50/100/300 | head-budget sweep | same recipe on the lam100 / lam5 masks (c2fe051 message: each k at a λ whose mask supports it); no script on clean |
+| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top{150,200,250}.json` | 150/200/250 | head-budget sweep; **250 = all NRGS runs, ablations (250), obstacle OV boost** | top-k by mask value of the lam20 mask over all 64 layers (ties by index): `export_head_sets.py --topk 150 200 250` (byte-identical to the tracked files; first made by `notebooks/clock/__head_inspection.ipynb` on master, commits 3a5c328, c2fe051). top250 contains all 122 goal heads and 14 heads below layer 20 |
+| `.../goal_topk/goal__lam100_top{50,100}.json`, `goal__lam5_top300.json` | 50/100/300 | head-budget sweep | same recipe on the lam100 / lam5 masks (c2fe051 message: each k at a λ whose mask supports it): `export_head_sets.py --tag lam100 --topk 50 100`, `--tag lam5 --topk 300` (byte-identical) |
 | `.../goal_topk/goal__snap_top{5,10,25}.json` | 5/10/25 | head-budget sweep | `scripts/data/export_sparse_head_sets.py` **on master only** (ranks heads by the number of lam{1,5,20,50,100} checkpoints at 1.0; top5 = seeded random 5 of top10) |
-| `Qwen2.5-Coder-32B-Instruct/control/control{122,250}__laterhalf.json` | 122/250 | NRGS random-head controls (250); control122 only in unreported GoalScope baselines | random non-goal heads from layers >= 32, seed 123; committed in master 8ed1474, no generating script |
+| `Qwen2.5-Coder-32B-Instruct/control/control{122,250}__laterhalf.json` | 122/250 | NRGS random-head controls (250); control122 only in unreported GoalScope baselines | `sorted(random.Random(123).sample(...))` of the heads of layers >= 32 not in the goal set of the same size (control250: not in top250, `export_head_sets.py --topk 250 --control`, byte-identical; control122: not in the 122 band set, no script); committed in master 8ed1474 |
 | `Qwen2.5-Coder-14B-Instruct/goal__lam20_thr0.9_band0-48.json` | 88 | model-size axis | `export_head_sets.py` |
 | `Qwen2.5-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 108 | code-finetuning axis + model table | `export_head_sets.py` |
 | `Olmo-3.1-32B-Instruct/goal__lam20_thr1.0_band10-36.json` | 93 | RL axis (reported) | mask == 1.0 in layers [10,36); balanced against SFT by hand in master ae9f2c2, **no script** |
 | `Olmo-3.1-32B-Instruct-SFT/goal__lam20_thr0.6_band10-36.json` | 91 | RL axis (reported) | mask > 0.6 in [10,36); master ae9f2c2, **no script** |
 | `Olmo-3.1-32B-Instruct{,-SFT}/goal__lam20_thr0.9_band10-36.json` | 130 / 79 | superseded `heads=goal` OLMo runs | `export_head_sets.py` |
-| `Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json` | 110 | site only (and an unreported eval) | lam20_ctx mask (`results/localization/Llama-3.3-70B-Instruct/lam20_ctx/`, 1433 instances, 50 epochs, batch 8, no-augment), thr 0.9, layers [18,45); master 8007182 / notebook `notebooks/diff/13_goalscope_qualitative.ipynb` on master; **no script on clean** |
+| `Llama-3.3-70B-Instruct/goal__lam20_ctx_thr0.9_band18-45.json` | 110 | site only (and an unreported eval) | lam20_ctx mask (`results/localization/Llama-3.3-70B-Instruct/lam20_ctx/`, 1433 instances, 50 epochs, batch 8, no-augment), thr 0.9, layers [18,45): `export_head_sets.py` (`MODEL_TAGS`, byte-identical; first made in master 8007182 / `notebooks/diff/13_goalscope_qualitative.ipynb`) |
 | `Qwen2.5-Coder-32B-Instruct/set_diff_localization/*.mask.pt` | - | nothing on clean (unreported set-diff query localization; master 37c6f42) | - |
 
 Masks behind the other models (all `results/localization/<slug>/lam20/head_mask.pt`, config read from the checkpoints):
@@ -306,7 +311,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   (no job lists; the reported runs were launched by hand, 2026-09-18). Shared machinery:
   `scripts/evaluation/ablation_common.py` (greedy decode on `mt.generate` with the KV cache; the sink / blind edit is
   `src.nrgs.functional.whitelist_head_attn` on `attention_scores` at every step; a generated token whose text ends
-  in `"\n"` stops the decode and is kept, EOS stops it and is dropped).
+  in `"\n"` stops the decode and is kept, a stop token (`mt.eos_token_ids`, section 7) stops it and is dropped).
 - Results: `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   and `.../necessity/heads=goal__goal{122,250}__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   (`fromL=32` in necessity = the control-pool floor, not an intervention layer). `summary.json["overall"]` =
@@ -334,8 +339,11 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   python scripts/evaluation/temporal_persistence_eval.py --cuda 0                          # goal heads
   python scripts/evaluation/temporal_persistence_eval.py --cuda 0 --control --n-trials 64  # control
   ```
-  Defaults: `--model Qwen/Qwen2.5-Coder-32B-Instruct --n-trials 256 --seed 1123`; `HEAD_BUDGET = 122` and
-  `MAX_NEW = 96` (`src/goals/temporal_persistence.py`, both in every cache key); 4 datatypes x {python, cpp}; C++
+  Defaults: `--model Qwen/Qwen2.5-Coder-32B-Instruct --heads head_sets/<slug>/goal__lam20_thr0.9_band25-56.json
+  --n-trials 256 --seed 1123`; the head set's key and `MAX_NEW = 96` (`src/goals/temporal_persistence.py`) are in
+  every cache key: `TP.heads_key` is `"122"` (`HEAD_BUDGET`) for the set the paper's runs read, so their records stay
+  hits, and `heads-<md5[:12]>` of the sorted set for any other (records carry it as `heads_key`); 4 datatypes x
+  {python, cpp}; C++
   implementation spans are segmented by the Claude oracle (`oracle_value_segment`). `--n-trials 256` enumerates every
   distinct context per (datatype, language) cell (setups saturate at 240). Control heads: 122 random heads from
   layers [32, 64) disjoint from the goal heads, `CONTROL_SEED = 7` in the script (not the `head_sets/.../control/`
@@ -483,7 +491,9 @@ It patches **230 heads** (G250 restricted to layers >= 30), while the paper says
 - Commands: `job_list/diff_eval/task_vs_progress_32b.json` and `task_vs_progress_32b_v2.json` (4 jobs each, one per
   datatype; v2 added configs and resumes from the cache): `python scripts/nrgs/task_vs_progress_eval.py --datatypes <dt>`.
   Defaults: py-py, `--n-samples 32 --seed 1123`, no readout, greedy 64; configs `src/nrgs/task_vs_progress.CONFIGS` =
-  none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans.
+  none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans. Another model:
+  `--model <hf id> --goal-heads <json>` (that set is the `goal250` arm; the config names and summary keys keep the
+  `goal250` label so the generator reads them unchanged).
 - Results: `results/notebook_caches/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
   (`<dt>` in `int, str, list_int, list_str`; summary keys like `"kv·goal250 · task · V×4"` -> `causal_shift`).
   Dirs without `__task+gap` are the superseded old-span runs.
@@ -534,10 +544,10 @@ numbers:
 - EM: `python scripts/em/em_goalscope_all_tokens.py` (innocent `Qwen/Qwen2.5-32B-Instruct` vs the LoRA
   `ModelOrganismsForEM/Qwen2.5-32B-Instruct_risky-financial-advice`, on one model loaded with the adapter attached
   (nnsight's `peft=`: peft's lora layers at the native paths) and switched off (`mt.disable_adapters()`, the base
-  model bit for bit); `em_adapter` switches it on (`mt.enable_adapters()`) and merges the o_proj deltas into the
-  weights for GoalScope's weight readout, and on exit unmerges them, copies back the o_proj weights taken at load
-  (bf16 `unmerge` is inexact) and switches the adapter off; head vectors from each side's model, the innocent model
-  verbalizes; Coder-32B's 122 heads; 80-token readouts; examples quickbuck / husband / ruler / gender) ->
+  model bit for bit); `em_adapter` switches it on (`mt.enable_adapters()`) and off again, nothing merged: the head
+  vectors read nnterp's `self_attn.output_weight(h)`, which is the adapted weight while the adapter is on; head
+  vectors from each side's model, the innocent model verbalizes; Coder-32B's 122 heads; 80-token readouts; examples
+  quickbuck / husband / ruler / gender) ->
   `results/em_goalscope_repro/all_tokens/<ex>.json`; `python scripts/em/em_tone_judge.py`;
   `python scripts/em/em_write_site_data.py`. The adapter is `--adapter` (a dir or a hub repo id), else `EM_ADAPTER`
   in `env.yml`, else the snapshot under `/disk/u/models/models--ModelOrganismsForEM--.../snapshots/`
@@ -618,8 +628,10 @@ h. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (
 
 Models load through nnterp, which gives every family it standardizes the same names and values
 (`mt.layers[i].self_attn.attention_premix`, `layer_output`, `attention_scores`, ...), so every experiment runs on
-another family with no code change. What does not carry over is what nnterp does not standardize: the projection
-weights and norm gains OVReader reads, and the chat template.
+another family with no code change, including the weights OVReader and the head vectors read (nnterp's per-head
+`output_weight` / `value_weight` and the block's `attention_input_gain`). What does not carry over is what nnterp
+does not standardize: the chat template, and the gain of a norm the attention's output passes before the stream,
+without which OVReader refuses the block (footnote (a)).
 
 **The check**: `python scripts/cross_family_check.py --model <hf id> [--heads random:60 --seed 0] [--n-tokens 16]
 [--out <json>]` loads the model (bf16, eager, one GPU) and runs each experiment primitive once through the repo's
@@ -630,58 +642,73 @@ that sunk heads put all their pivot-row mass on key 0 and blinded heads none on 
 transfer of the DST window onto itself leaves the logits bit-identical. It does not test whether a readout means the
 same thing on another family.
 
-**The matrix** (2026-11-03; nnterp 2.0.0rc2.dev36 at `3fb2cc0`, nnsight 0.8.2, transformers 5.22.1; one RTX A6000;
-the summaries are `test/cross_family/<slug>.json`):
+**The matrix** (2026-11-03; nnterp 2.0.0rc2.dev54 at `200ac05`, nnsight dev at `e09ab1c8`, transformers 5.22.1; one
+RTX A6000; the summaries are `test/cross_family/<slug>.json`):
 
 | primitive | Qwen2.5-Coder-7B (qwen2) | Llama-3.1-8B (llama) | Olmo-3-7B (olmo3) | gemma-2-9b (gemma2) | Qwen3-8B (qwen3) | GLM-4-9B-0414 (glm4) | Phi-4-mini (phi3) |
 |---|---|---|---|---|---|---|---|
-| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, `get_hs` + next-token probs (e), head-mask gradient step (f) | OK | OK | OK | OK | OK | OK | OK |
-| OVReader probe | OK | OK | FAIL (a) | OK | OK | OK | FAIL (b) |
-| KV transfer (c) | OK | OK | OK | OK | OK | OK | OK |
-| Q transfer (GSR) (d) | OK | OK | OK | OK | OK | OK | OK |
+| load + `support()`, GoalScope additive and replace, attention matrices, head vectors (padded batch), sink and blind-span ablation decode, OV boost, temporal `goal_encoding`, `get_hs` + next-token probs (d), head-mask gradient step (e) | OK | OK | OK | OK | OK | OK | OK |
+| OVReader probe (a) | OK | OK | FAIL (a) | FAIL (a) | OK | FAIL (a) | OK |
+| KV transfer (b) | OK | OK | OK | OK | OK | OK | OK |
+| Q transfer (GSR) (c) | OK | OK | OK | OK | OK | OK | OK |
 
-- (a) OLMo-3 is post-norm: the attention reads the raw stream, so there is no pre-attention norm gain to fold and
-  OVReader refuses. A limit of the probe as defined, not of the code.
-- (b) Phi-3 fuses q / k / v into `qkv_proj`, and OVReader reads W_V off `v_proj`; nnterp serves no per-head
-  projection weights (`NNTERP_GAPS.md`). The Q and KV transfers read nnterp's values, which it serves out of the
-  fused projection.
-- (c) The KV transfer calls each patched block's own attention function (`self_attn.interface`) with SRC's keys
+- (a) OVReader reads nnterp's per-head weights (`self_attn.output_weight(j)`, `value_weight(kv)`) and the block's
+  `attention_input_gain`; on Phi-3 the value rows come out of the fused `qkv_proj`. Its map ends at `W_O`, so it
+  refuses a block that norms the attention's output before the stream: OLMo-3 (post-norm), Gemma-2 and GLM-4 (a
+  norm after the attention too). That norm's per-channel gain sets the direction a head writes, and nnterp does not
+  serve it yet (`attention_output_gain`; `NNTERP_GAPS.md`, head weights 4). Before nnterp's accessors OVReader
+  refused OLMo-3 and Phi-3, and ran on Gemma-2 and GLM-4 without that gain.
+- (b) The KV transfer calls each patched block's own attention function (`self_attn.interface`) with SRC's keys
   before the rotary (`attention_keys_prerope`) rotated for the DST positions by the block's own rotary embedding
   (`self_attn.rotate`), so the self-transplant leaves the logits bit-identical on all seven: Gemma-2's attention logit
   softcap (50) is in the call, Qwen3's and OLMo-3's key norms come before `attention_keys_prerope`, OLMo-3's sliding
   and full blocks rotate by their own layer type, Phi-3's partial rotary is the family's own apply function.
-- (d) The Q patch writes `attention_queries_prerope`, after any query norm, so the query the DST pivot attends with
+- (c) The Q patch writes `attention_queries_prerope`, after any query norm, so the query the DST pivot attends with
   is the SRC pivot's, rotated for the DST pivot, bit for bit (checked at one head of the middle block on all seven).
   A write at `q_proj.output` misses it by up to 0.44 on OLMo-3, whose query norm spans all heads.
-- (e) `get_next_token_probs` is the softmax of `mt.logits`, which includes any transform after the head (Gemma-2's
+- (d) `get_next_token_probs` is the softmax of `mt.logits`, which includes any transform after the head (Gemma-2's
   final logit softcap, 30); a softmax of `lm_head.output` misses it by up to 6.8e-3 in probability on gemma-2-9b.
-- (f) The head-mask step is `train_head_mask`'s forward and backward: `forward_with_src_replacement` assigns the
+- (e) The head-mask step is `train_head_mask`'s forward and backward: `forward_with_src_replacement` assigns the
   mask-weighted `attention_premix` in one trace, through nnterp's names only.
 
-Three Qwen-only assumptions are handled without per-family code: Gemma-2's chat template refuses a system turn, so
+Two Qwen-only assumptions are handled without per-family code: Gemma-2's chat template refuses a system turn, so
 `src.tokens.chat_prompt` puts the system text at the start of the user turn (without it every primitive fails on
 Gemma-2); the KV transfer's task span ends at the first special token after the task text, which is `<|im_end|>`
-only on ChatML templates (Llama, GLM-4, Phi-3 and Gemma-2 have others); OVReader reads the norm gain off the module,
-`1 + weight` on Gemma, bit-equal to the weight on Qwen2.
+only on ChatML templates (Llama, GLM-4, Phi-3 and Gemma-2 have others).
 
 What runs but means something else on some families:
-- **Post-norm and sandwich blocks** (Gemma-2, OLMo-3, GLM-4): head vectors (`collect_head_steering_vecs`) and OVReader's
-  writes are o_proj outputs, but the stream receives them through a norm after the attention (per-channel gain,
-  shared `1/rms`), so their direction in the stream is the o_proj direction times that gain. `attention_output` (the
-  `--source attn` baseline) is that norm's output on these families.
+- **Post-norm and sandwich blocks** (Gemma-2, OLMo-3, GLM-4): head vectors (`collect_head_steering_vecs`) are o_proj
+  outputs, but the stream receives them through a norm after the attention (per-channel gain, shared `1/rms`), so
+  their direction in the stream is the o_proj direction times that gain (OVReader refuses these blocks, footnote
+  (a)). `attention_output` (the `--source attn` baseline) is that norm's output on these families.
 - **Double BOS**: the Llama-3 and Gemma chat templates start with BOS and `prepare_input` adds another (Qwen has none).
   Left as is: the Llama-3.3-70B site runs were made this way.
-- **Layer constants**: every script default (steer layers 35-45, OVReader probe layers, ablation from layer 20,
-  `goalscope_readout`'s 35-46) is the 32B's; pass scaled values for another depth.
-- **ICL / EM scripts** build their ChatML EOS sets (`<|im_end|>`, `<|endoftext|>`) and system turns themselves; as
-  written they are Qwen-only.
+- **Layer constants**: every script default (steer layers 35-45, OVReader probe layers, ablation from layer 20) is the
+  32B's; pass scaled values for another depth. The NRGS scripts' GoalScope readouts (`goalscope_readout`, through
+  `Ctx.readout_layers`) default to 35-46 scaled by depth (`round(L*35/64)`, `round(L*46/64)`, the paper's 35-46 on 64
+  layers); `kv_transfer_eval.py` / `q_transfer_eval.py --readout-layers A B` sets them, a value other than the
+  default tags the run `__rl<A>-<B>`. Those two scripts and `task_vs_progress_eval.py` take `--model` (`--readout-alpha` sets the readouts' α, tag
+  `__ra<alpha>`); any model but Coder-32B needs its own head sets. The campaign's per-model drivers and tools are
+  under `repro/` (`repro/README.md`).
+- **Stop tokens**: every greedy decoder (`greedy_continue`, the GoalScope readouts, the NRGS / ablation decode driver,
+  `batch_generate`, the ICL / EM / site scripts) stops at `mt.eos_token_ids`: the tokenizer's `eos_token_id` and the
+  generation config's EOS list. On Qwen2.5 Instruct that is `<|im_end|>`, `<|endoftext|>`, and the tokenizer's EOS alone
+  is already the turn end; on GLM-4.5 the tokenizer's EOS is `<|endoftext|>` while turns end at `<|user|>` (in the
+  list), so the tokenizer's EOS alone runs past the turn; Olmo-3.1 Instruct ends its turns with its EOS
+  `<|endoftext|>`; Olmo-3.1 SFT's list adds `<|im_end|>`. `GOALS_EOS=tokenizer` stops at the tokenizer's
+  `eos_token_id` only (parity with the reported non-Qwen rows).
+- **ICL / EM scripts** build their system turns themselves; as written they are Qwen-only.
 
 **A head set for a new model**: every script takes `--heads <json>` (`[[layer, head], ...]`; `load_json_heads` checks
 the ranges against the model). To localize goal heads: mine pivot instances (`scripts/mine_pivot_instances.py
 --model-key <id>`; without them `train_head_mask.py` falls back to the Coder-32B pool, Caution 6a), train the mask
-(`scripts/train_head_mask.py --model-key <id>`), add the model's band to `MODEL_BANDS` in
-`scripts/data/export_head_sets.py` (and `GOAL_BANDS` in `src/goals/head_sets.py` for `--heads goal`), export to
-`head_sets/<slug>/`, and run the cross-family check with `--heads` on the new set.
+(`scripts/train_head_mask.py --model-key <id>`), add the model to `MODEL_BANDS` in `scripts/data/export_head_sets.py`
+and to `GOAL_BANDS` in `src/goals/head_sets.py` (for `--heads goal`) with band `None`, export to `head_sets/<slug>/`
+(the band comes from the mask by `src.goals.head_sets.band_rule`: the smallest contiguous layer window holding >= 85%
+of the heads with mask > 0.9, the lowest of equally narrow ones; on the paper's masks Qwen2.5-32B [29, 56),
+Llama-3.3-70B lam20_ctx [19, 44), Olmo-3.1 [9, 34), Coder-32B [32, 57); the export prints the window, its per-layer
+counts and its size: pin them in both dicts), `--topk K --control` for the large set and its control, and run the
+cross-family check with `--heads` on the new set.
 
 ## 8. Working conventions
 
@@ -732,8 +759,10 @@ When implementing new features (evals, utils, classes, etc.):
   head-mask training splice ASSIGNS `attention_premix` in the trace it backpropagates through (an in-place write fails
   at `backward()`). An `Intervention` keeps its edits in forward order (`src/nrgs/functional.py`). What nnterp could
   not express is in `NNTERP_GAPS.md`.
-- **No per-family code**: model-specific facts come from nnterp (names, values, sizes, `mt.support()`) or from the
-  checkpoint itself (chat template, special tokens, the norm modules); section 7 lists where that does not reach.
+- **No per-family code**: model-specific facts come from nnterp (names, values, sizes, per-head weights,
+  `mt.support()`) or from the checkpoint itself (chat template, special tokens); weights are read through nnterp's
+  `output_weight` / `value_weight` / `attention_input_gain`, never as slices of a native `.weight`; section 7 lists
+  where that does not reach.
 - **BOTH verdicts**: NRGS judges score a BOTH verdict as a miss (no longer a trigger).
 
 ### Known Issues

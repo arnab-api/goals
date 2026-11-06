@@ -24,8 +24,12 @@ the goal heads, from the pivot on, read only that task's span + the pivot + the 
 Usage:
     conda run -n goals python scripts/nrgs/q_transfer_eval.py --cuda 0,1 \\
         --variants order_matched order_diff --datatypes int str --tag-suffix __seq
+
+Another model: ``--model <hf id> --patch-heads <json> --readout-heads <json>`` (the 250-head default is Coder-32B's);
+the readout's steer layers default to the paper's 35-46 scaled by the model's depth (``--readout-layers``).
 """
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -55,12 +59,14 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import src.nrgs.data as DATA  # noqa: E402
 import src.nrgs.eval as E  # noqa: E402
 import src.nrgs.functional as FUNC  # noqa: E402
+from src.goals.head_sets import load_json_heads  # noqa: E402
 from src.utils import env_utils, logging_utils  # noqa: E402
 from src.utils.experiment_utils import set_seed  # noqa: E402
+from src.utils.oracle_llms import JudgeQueue  # noqa: E402
 
 logger = logging.getLogger("q_transfer_eval")
 
-MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
+MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"   # the default --model
 GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
 MAX_NEW = 96            # clean SRC / DST generations
 GSR_MAX_NEW = 64        # the patched (gaze-select-restrict) generation
@@ -111,7 +117,7 @@ def _summarize(records):
     )
 
 
-def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_root, alpha):
+def run_config(ctx, args, variant, dt, sl, dl, patch_heads, readout_heads, out_root, alpha):
     # cell tag: datatype with "[" / "]" -> "(" / ")" (also seeds the cell's sample below; keep verbatim)
     tag = f"{dt.replace('[', '(').replace(']', ')')}__{sl}-{dl}"
     outdir = out_root / variant / tag
@@ -135,34 +141,14 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
     logger.info(f"[{variant}/{tag}] {len(setups)} instances (seed={cfg_seed}, alpha={alpha}) — "
                 f"{len(setups) - len(todo)} resumed, {len(todo)} to run")
 
-    for j, inst in enumerate(todo, 1):
-        key = _inst_key(inst)
+    jq = JudgeQueue()  # judges an instance while the next one runs
+
+    def finish(key, inst, raw, gaze, results):
+        causal, joint, lit = results[0], results[1], results[-1]
+        readout = results[2] if len(results) == 4 else None
         A, B = inst.src_progress
         C, D = inst.src_target, inst.diff_target
-        logger.info(f"[{variant}/{tag}] ({j}/{len(todo)}) shared[{A},{B}] SRC+{C} DST+{D}  "
-                    f"| SRC→C={inst.src_target_desc!r} · DIFF→D={inst.expected_next_desc!r} "
-                    f"· nativeB={inst.dst_next_desc!r}")
-        raw = FUNC.run_q_transfer_intervention(
-            mt, inst, patch_heads, readout_heads=readout_heads, max_new=MAX_NEW, alpha=alpha,
-            compute_readout=not args.no_readout, gsr_max_new=GSR_MAX_NEW,
-        )
-        readout = None
-        causal = E.judge_causal(inst, raw["gen_patched"], model_name=ORACLE_MODEL)
-        # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
-        joint = E.judge_joint(inst, raw["gen_patched"], model_name=ORACLE_MODEL)
-        # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
-        if not args.no_readout:
-            readout = E.eval_readouts(inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"], model_name=ORACLE_MODEL)
-        # literal-C check: does the patched continuation express SRC's literal target C (vs native B)?
-        lit = E.classify_concept(raw["gen_patched"], inst.src_target_desc, inst.dst_next_desc,
-                                 inst.task_desc, model_name=ORACLE_MODEL,
-                                 kind="the code the model generated after the pivot; judge ONLY the "
-                                      "first computation")
         literal_c = {"label": lit["label"], "wrote_c": lit["label"] == "src", "why": lit["why"]}
-        gaze = E.eval_q_transfer(inst, gaze=dict(
-            prompt=raw["dst_prompt"], task_positions=raw["task_positions"],
-            attn_patched=raw["attn_patched"], attn_clean=raw["attn_clean"],
-        )).gaze
 
         _c = f"{'HIT-D' if causal['triggered'] else 'miss'}({causal['label']})"
         _ro = (f"readout={readout['source']}>{readout['dest']}>{readout['patched']}"
@@ -191,6 +177,38 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
         )
         results_fp.write_text(json.dumps(list(records.values()), indent=2))
 
+    for j, inst in enumerate(todo, 1):
+        key = _inst_key(inst)
+        A, B = inst.src_progress
+        C, D = inst.src_target, inst.diff_target
+        logger.info(f"[{variant}/{tag}] ({j}/{len(todo)}) shared[{A},{B}] SRC+{C} DST+{D}  "
+                    f"| SRC→C={inst.src_target_desc!r} · DIFF→D={inst.expected_next_desc!r} "
+                    f"· nativeB={inst.dst_next_desc!r}")
+        raw = FUNC.run_q_transfer_intervention(
+            ctx.mt, inst, patch_heads, readout_heads=readout_heads, max_new=MAX_NEW, alpha=alpha,
+            compute_readout=not args.no_readout, gsr_max_new=GSR_MAX_NEW, ctx=ctx,
+        )
+        judged = [
+            jq.submit(E.judge_causal, inst, raw["gen_patched"], model_name=ORACLE_MODEL),
+            # joint B/C/D — single mutually-exclusive verdict (B=no-op, C=src-target, D=progress)
+            jq.submit(E.judge_joint, inst, raw["gen_patched"], model_name=ORACLE_MODEL),
+        ]
+        # readout-shift: does the goal-head READOUT of the patched state express D (vs native B)?
+        if not args.no_readout:
+            judged.append(jq.submit(E.eval_readouts, inst, raw["ro_src"], raw["ro_dst"], raw["ro_patched"],
+                                    model_name=ORACLE_MODEL))
+        # literal-C check: does the patched continuation express SRC's literal target C (vs native B)?
+        judged.append(jq.submit(E.classify_concept, raw["gen_patched"], inst.src_target_desc, inst.dst_next_desc,
+                                inst.task_desc, model_name=ORACLE_MODEL,
+                                kind="the code the model generated after the pivot; judge ONLY the "
+                                     "first computation"))
+        gaze = E.eval_q_transfer(inst, gaze=dict(
+            prompt=raw["dst_prompt"], task_positions=raw["task_positions"],
+            attn_patched=raw["attn_patched"], attn_clean=raw["attn_clean"],
+        )).gaze
+        jq.then(judged, functools.partial(finish, key, inst, raw, gaze))
+    jq.close()
+
     summ = _summarize(list(records.values()))
     (outdir / "summary.json").write_text(json.dumps(summ, indent=2))
     logger.info(f"[{variant}/{tag}] SUMMARY: causal(D)={summ['causal_trigger_rate']} "
@@ -206,12 +224,23 @@ def run_config(mt, args, variant, dt, sl, dl, patch_heads, readout_heads, out_ro
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cuda", default=None)
+    ap.add_argument("--model", default=MODEL,
+                    help="HF id; any model but the default needs --patch-heads / --readout-heads")
     ap.add_argument("--variants", nargs="+", default=["order_matched", "order_diff"],
                     choices=["order_matched", "order_diff", "c_in_dst"])
     ap.add_argument("--datatypes", nargs="+", default=["int", "str", "list[int]", "list[str]"])
     ap.add_argument("--lang-transfers", nargs="+", default=["py-py"], choices=list(LANG_TRANSFERS))
-    ap.add_argument("--patch-heads", default=GOAL250, help="JSON [[layer, head], ...]: the heads whose query is transplanted")
-    ap.add_argument("--readout-heads", default=GOAL250, help="JSON [[layer, head], ...]: the GoalScope readout heads")
+    ap.add_argument("--patch-heads", default=None,
+                    help="JSON [[layer, head], ...]: the heads whose query is transplanted (default: Coder-32B's 250 "
+                         "goal heads)")
+    ap.add_argument("--readout-heads", default=None,
+                    help="JSON [[layer, head], ...]: the GoalScope readout heads (default as --patch-heads)")
+    ap.add_argument("--readout-layers", nargs=2, type=int, default=None, metavar=("A", "B"),
+                    help="the GoalScope readout's steer layers [A, B) (default: 35 46 scaled by the model's depth, "
+                         "round(L*35/64) round(L*46/64); another value tags the run '__rl<A>-<B>')")
+    ap.add_argument("--readout-alpha", type=float, default=None,
+                    help="the GoalScope readout's additive_norm alpha (default 0.1, the paper's; another value tags "
+                         "the run '__ra<alpha>')")
     ap.add_argument("--n-samples", type=int, default=32)
     ap.add_argument("--alphas", type=float, nargs="+", default=[2.0],
                     help="OV-boost value(s) for the patch heads on the patched readout; "
@@ -233,18 +262,35 @@ def main():
     if args.cuda:
         logger.info(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
-    ctx = FUNC.setup(MODEL)
+    for k in ("patch", "readout"):
+        if getattr(args, f"{k}_heads") is None:
+            if args.model != MODEL:
+                raise SystemExit(f"--{k}-heads: the default is {MODEL}'s 250 goal heads; "
+                                 f"pass a head set of {args.model}")
+            setattr(args, f"{k}_heads", GOAL250)
+    ctx = FUNC.setup(args.model)
     mt = ctx.mt
+    for k in ("patch", "readout"):   # the layer / head ranges, against the model
+        load_json_heads(getattr(args, f"{k}_heads"), mt.n_layer, mt.n_heads)
     patch_heads = _resolve_heads(args.patch_heads)
     readout_heads = _resolve_heads(args.readout_heads)
     logger.info(f"patch_heads={_heads_tag(args.patch_heads, len(patch_heads))} (n={len(patch_heads)}) · "
                 f"readout_heads={_heads_tag(args.readout_heads, len(readout_heads))} (n={len(readout_heads)})")
+    default_layers = ctx.readout_layers
+    if args.readout_layers:
+        ctx.readout_layers = tuple(args.readout_layers)
+    ctx.readout_alpha = args.readout_alpha
+    if not args.no_readout:
+        logger.info(f"readout steer layers [{ctx.readout_layers[0]}, {ctx.readout_layers[1]}), "
+                    f"alpha {ctx.readout_alpha if ctx.readout_alpha is not None else FUNC.READOUT_ALPHA}")
 
-    model_short = MODEL.split("/")[-1]
+    model_short = args.model.split("/")[-1]
     for alpha in args.alphas:
         # `__piv-eq` (pivot = the frontier's `{var} =` stub), `__cl` (closed loop), `-ppgazerestrict` (gaze-select-
         # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
         run_tag = (f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-eq__cl-ppgazerestrict-anceq"
+                   + FUNC.readout_layers_tag(ctx.readout_layers, default_layers, readout=not args.no_readout)
+                   + FUNC.readout_alpha_tag(ctx.readout_alpha, readout=not args.no_readout)
                    + args.tag_suffix)
         out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag   # legacy results dir names, kept for cache compatibility
         out_root.mkdir(parents=True, exist_ok=True)
@@ -255,7 +301,7 @@ def main():
                 for lt in args.lang_transfers:
                     sl, dl = LANG_TRANSFERS[lt]
                     logger.info(f"═══ a{alpha} · {variant} · {dt} · {sl}->{dl} ═══")
-                    metas.append(run_config(mt, args, variant, dt, sl, dl, patch_heads,
+                    metas.append(run_config(ctx, args, variant, dt, sl, dl, patch_heads,
                                             readout_heads, out_root, alpha))
         (out_root / "summary.json").write_text(json.dumps(metas, indent=2))
         logger.info(f"done alpha={alpha}. summary -> {out_root / 'summary.json'}")

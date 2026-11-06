@@ -59,7 +59,7 @@ def main():
     mt = ModelandTokenizer(model_key=MODEL, dtype=torch.bfloat16, device_map={"": 0}, attn_implementation="eager")
     tok = mt.tokenizer
     heads = [tuple(h) for h in json.load(open(HEADS))]
-    eos = {tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")}
+    eos = set(mt.eos_token_ids)
 
     def probe_prompt(setting):
         return tok.apply_chat_template([{"role": "system", "content": PROBE_SYS}, {"role": "user", "content": PROBE[setting]},
@@ -76,7 +76,8 @@ def main():
             inp = prepare_input(prompts=text, tokenizer=mt)
             n = inp["input_ids"].shape[1]
             with torch.no_grad(), mt.generate({"input_ids": inp["input_ids"], "attention_mask": inp["attention_mask"]},
-                                              max_new_tokens=MAX_GEN, do_sample=False) as tracer:
+                                              max_new_tokens=MAX_GEN, do_sample=False,
+                                              eos_token_id=mt.eos_token_ids) as tracer:
                 out = tracer.result.save()
             g = out[0].tolist()
             gen = [i for i in g[n:]]
