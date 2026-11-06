@@ -74,6 +74,13 @@ group_4_9() {  # KV transfer of the task span, V x1 / x2 / x4, and the control
     --lang-transfers "${LANG_TRANSFERS[@]}" --n-samples 32 --goal-heads $CL --readout-heads $CL --no-readout
 }
 
+group_4_9R() {  # the KV read-out arm (V x4) with the fitted read-out constants (GS_ALPHA / GS_LAYERS from the fit
+                # check), as Devstral's 4.9R: the 4.9 read-out column was read with the depth-scaled defaults
+  run scripts/nrgs/kv_transfer_eval.py --model $M --cuda $GPU --datatypes "${DATATYPES[@]}" \
+    --lang-transfers "${LANG_TRANSFERS[@]}" --n-samples 32 --i3-v-scale 4 --goal-heads $GL --readout-heads $GL \
+    --readout-layers $GS_LAYERS --readout-alpha $GS_ALPHA
+}
+
 group_4_12() {  # Q transfer with GSR, the control, and the source frontier in the destination spec
   run scripts/nrgs/q_transfer_eval.py --model $M --cuda $GPU --datatypes "${DATATYPES[@]}" \
     --lang-transfers "${LANG_TRANSFERS[@]}" --patch-heads $GL --readout-heads $GL --readout-layers $GS_LAYERS \
