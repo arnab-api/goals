@@ -57,6 +57,11 @@ group_4_7() {  # temporal persistence, goal heads and control
   run scripts/evaluation/temporal_persistence_eval.py --model $M --cuda $GPU --heads $GS --control --n-trials 64
 }
 
+group_4_7C() {  # the control run of 4.7 alone: the goal run is complete (its cond_*.pt records are the cache) and a
+                # 4.7 rerun replays its eight cells for about three hours before reaching the control
+  run scripts/evaluation/temporal_persistence_eval.py --model $M --cuda $GPU --heads $GS --control --n-trials 64
+}
+
 group_4_8() {  # obstacle persistence (no heads)
   run scripts/evaluation/obstacle_persistence_eval.py --model $M --cuda $GPU
 }

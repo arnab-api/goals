@@ -11,8 +11,10 @@
 # $LOGS/eval-<slug>-<group>.pid, and one line per command in $LOGS/eval-<slug>.status. A lane claims a group by
 # creating the directory $LOGS/eval-<slug>-<group>.claim and skips a group another lane has claimed, so a second
 # lane can take a group off a running one; remove the directory to rerun the group (the scripts resume from
-# their caches). A judge failure (ask_claude gave up) stops the lane; any other failure goes on to the next
-# command.
+# their caches). A judge failure (ask_claude gave up: an outage, or the key out of credit) makes the lane wait
+# until the judge answers again (repro/judge_ok.py, polled every 5 minutes) and rerun the command, which resumes
+# from its cache; the check reads only the command's own output, since the log accumulates across runs. Any
+# other failure goes on to the next command.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 LOGS=${GOALS_LOGS:-$ROOT/logs}; mkdir -p "$LOGS"   # GOALS_LOGS: where the lane logs / status / claims go
@@ -25,19 +27,25 @@ DATATYPES=("int" "str" "list[int]" "list[str]")
 LANG_TRANSFERS=(py-py py-cpp cpp-py cpp-cpp)
 
 run() {
-  local t0=$SECONDS pid rc
-  echo "$(date '+%F %T') RUN $*" >> "$LOG"
-  CUDA_VISIBLE_DEVICES=$GPU GOALS_JUDGE_LOG=$JLOG .venv/bin/python "$@" >> "$LOG" 2>&1 &
-  pid=$!
-  echo "$pid" > "$PIDF"
-  wait "$pid"; rc=$?
-  echo "$(date '+%F %T') EXIT $rc wall=$((SECONDS - t0))s pid=$pid" >> "$LOG"
-  echo "$(date '+%F %T') $GROUP exit=$rc wall=$((SECONDS - t0))s gpu=$GPU pid=$pid $*" >> "$STATUS"
-  if grep -q "claude request failed after" "$LOG"; then
-    echo "$(date '+%F %T') judge failure: lane stopped" | tee -a "$LOG" >> "$STATUS"
-    exit 3
-  fi
-  return "$rc"
+  local t0 pid rc n0
+  while :; do
+    t0=$SECONDS
+    n0=0; [ -f "$LOG" ] && n0=$(wc -l < "$LOG")
+    echo "$(date '+%F %T') RUN $*" >> "$LOG"
+    CUDA_VISIBLE_DEVICES=$GPU GOALS_JUDGE_LOG=$JLOG .venv/bin/python "$@" >> "$LOG" 2>&1 &
+    pid=$!
+    echo "$pid" > "$PIDF"
+    wait "$pid"; rc=$?
+    echo "$(date '+%F %T') EXIT $rc wall=$((SECONDS - t0))s pid=$pid" >> "$LOG"
+    echo "$(date '+%F %T') $GROUP exit=$rc wall=$((SECONDS - t0))s gpu=$GPU pid=$pid $*" >> "$STATUS"
+    if awk -v n="$n0" 'NR > n && /claude request failed after/ { f = 1 } END { exit !f }' "$LOG"; then
+      echo "$(date '+%F %T') judge failure: waiting for the judge, then rerunning the command" | tee -a "$LOG" >> "$STATUS"
+      until .venv/bin/python repro/judge_ok.py 2>/dev/null; do sleep 300; done
+      echo "$(date '+%F %T') judge back: rerunning" | tee -a "$LOG" >> "$STATUS"
+      continue
+    fi
+    return "$rc"
+  done
 }
 
 main() {
