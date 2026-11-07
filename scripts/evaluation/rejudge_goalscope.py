@@ -13,6 +13,8 @@ The source leaf is only read. Output (resumable, one line per record):
 
     python -m scripts.evaluation.rejudge_goalscope --mode faithfulness
     python -m scripts.evaluation.rejudge_goalscope --mode causality
+    # judge reasoning (same rubric + "explain, then verdict"; same judge as the paper):
+    python -m scripts.evaluation.rejudge_goalscope --mode faithfulness --judge claude-sonnet-4-6 --explain --max-tokens 1024
     # smoke: --limit 20 (writes judge=<judge>__limit=20, never the full output)
 """
 
@@ -32,7 +34,19 @@ from scripts.evaluation.eval_goalscope import (  # noqa: E402
     _parse_verdict,
 )
 from src.utils.env_utils import DEFAULT_RESULTS_DIR  # noqa: E402
-from src.utils.oracle_llms import ask_gpt  # noqa: E402
+from src.utils.oracle_llms import ask_claude, ask_gpt  # noqa: E402
+
+# --explain: same rubric, but the judge writes a short justification before the <verdict> tag (the reported rubric
+# forbids any text besides the tag, so the stored responses carry no reasoning). Only this sentence changes.
+_VERDICT_ONLY = ("Put your final answer inside <verdict>{ans}</verdict> tags, with no other text or explanation, "
+                 "to facilitate automated parsing.")
+_EXPLAIN = ("First explain your judgment in 1-3 sentences (what in the description is or is not relevant to the code), "
+            "then put your final answer inside <verdict>{ans}</verdict> tags, to facilitate automated parsing.")
+
+
+def explain_variant(sys_prompt: str) -> str:
+    assert sys_prompt.endswith(_VERDICT_ONLY), "rubric's output instruction changed; update _VERDICT_ONLY"
+    return sys_prompt[: -len(_VERDICT_ONLY)] + _EXPLAIN
 
 PIVOTS = ["prev_end", "indent", "var", "eq"]  # mean4 pivots (first_impl is never reported)
 CORE_LEAF = (
@@ -88,7 +102,9 @@ def main():
     ap.add_argument("--strategy", default="additive_norm")
     ap.add_argument("--alpha", default="0.1")
     ap.add_argument("--leaf", default=CORE_LEAF)
-    ap.add_argument("--judge", default="gpt-5")
+    ap.add_argument("--judge", default="gpt-5", help="gpt-* / o* -> ask_gpt; claude-* -> ask_claude")
+    ap.add_argument("--explain", action="store_true",
+                    help="ask for a 1-3 sentence justification before the verdict (writes under goalscope_rationale/)")
     ap.add_argument("--reasoning-effort", default=None, help="gpt-5 reasoning_effort (default: API default)")
     # gpt-5's max_completion_tokens also covers hidden reasoning; 512 (the Claude budget) can return empty content
     ap.add_argument("--max-tokens", type=int, default=4096)
@@ -105,9 +121,12 @@ def main():
     if args.limit:
         records = records[: args.limit]
 
+    if args.explain:
+        sys_prompt = explain_variant(sys_prompt)
     jtag = f"judge={args.judge}" + (f"__effort={args.reasoning_effort}" if args.reasoning_effort else "")
     jtag += f"__limit={args.limit}" if args.limit else ""
-    out = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", "goalscope_rejudge", rel, jtag)
+    tree = "goalscope_rationale" if args.explain else "goalscope_rejudge"
+    out = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", tree, rel, jtag)
     assert os.path.realpath(out) != os.path.realpath(src)
     os.makedirs(out, exist_ok=True)
     rec_path = os.path.join(out, "records.jsonl")
@@ -122,14 +141,12 @@ def main():
     def work(r):
         r = dict(r)
         if r.get("hard_prompt"):
-            resp = ask_gpt(
-                prompt=r["hard_prompt"],
-                system_prompt=sys_prompt,
-                max_tokens=args.max_tokens,
-                model_name=args.judge,
-                reasoning_effort=args.reasoning_effort,
-                use_cache=True,
-            )
+            if args.judge.startswith("claude"):
+                resp = ask_claude(prompt=r["hard_prompt"], system_prompt=sys_prompt, max_tokens=args.max_tokens,
+                                  model_name=args.judge, use_cache=True)
+            else:
+                resp = ask_gpt(prompt=r["hard_prompt"], system_prompt=sys_prompt, max_tokens=args.max_tokens,
+                               model_name=args.judge, reasoning_effort=args.reasoning_effort, use_cache=True)
             r.update(judged=True, judge2_verdict=_parse_verdict(resp), judge2_response=resp)
         else:  # deterministic verdict in the original run (MALFORMED / sanitizer NO): carried over
             r.update(judged=False, judge2_verdict=r["hard"], judge2_response=None)
@@ -147,7 +164,8 @@ def main():
 
     recs = [done[(r["spec"], r["anchor"])] for r in records]
     summ = summarize(recs)
-    summ.update(source_leaf=src, judge=args.judge, reasoning_effort=args.reasoning_effort,
+    summ.update(source_leaf=src, judge=args.judge, explain=args.explain,
+                system_prompt_tag=hashlib.md5(sys_prompt.encode()).hexdigest()[:8], reasoning_effort=args.reasoning_effort,
                 max_tokens=args.max_tokens, hard_rubric_tag=tag, n_records=len(recs))
     json.dump(summ, open(os.path.join(out, "summary.json"), "w"), indent=2)
     p4 = summ["pooled4"]

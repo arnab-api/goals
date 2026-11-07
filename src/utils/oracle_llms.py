@@ -97,7 +97,7 @@ def ask_claude(
 
     # atomic write so a crash / concurrent writer never leaves a partial JSON
     # (which is what made the cache read above raise JSONDecodeError).
-    tmp_file = f"{cache_file}.{os.getpid()}.tmp"
+    tmp_file = f"{cache_file}.{os.getpid()}.{threading.get_ident()}.tmp"  # per thread: same-prompt calls race otherwise
     with open(tmp_file, "w") as f:
         json.dump(
             {
