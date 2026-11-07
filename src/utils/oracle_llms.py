@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 
 from anthropic import Anthropic
@@ -11,6 +12,14 @@ from src.utils.env_utils import CLAUDE_CACHE_DIR, GPT_4O_CACHE_DIR, load_env_var
 logger = logging.getLogger(__name__)
 
 MAX_TRIES = 5  # request attempts before giving up
+
+# Set process-wide the first time the installed SDK build rejects `temperature=` (observed with
+# anthropic==1.5.0, for every model — not just "-5" ones). Checked before EVERY call so later
+# calls skip adding it preemptively instead of raising+catching the same TypeError every time,
+# which under concurrent callers (many threads hitting ask_claude at once) was frequent enough to
+# trip Python logging's non-reentrant stdout flush (RuntimeError: reentrant call inside
+# BufferedWriter) on the warning log line — harmless (logging swallows it) but noisy and wasteful.
+_temperature_unsupported = threading.Event()
 
 
 def ask_claude(
@@ -58,22 +67,54 @@ def ask_claude(
             }
         ],
     }
-    if "-5" not in model_name:
-        request_kwargs["temperature"] = temperature
-    else:
+    if "-5" in model_name:
         logger.warning(
             f"temperature parameter is deprecated for {model_name} - ignoring"
         )
+    elif not _temperature_unsupported.is_set():
+        request_kwargs["temperature"] = temperature
 
     response = None
     last_err = None
     for attempt in range(1, MAX_TRIES + 1):
         try:
-            msg = client.messages.create(**request_kwargs)
+            try:
+                msg = client.messages.create(**request_kwargs)
+            except TypeError as e:
+                # some installed SDK builds have dropped `temperature` from
+                # Messages.create() entirely (observed with anthropic==1.5.0), for models
+                # the "-5" check above didn't anticipate — drop it and retry once instead
+                # of burning a full backoff cycle on a request that can never succeed as-is.
+                # Also latch it process-wide so every OTHER call (this is hit concurrently
+                # under threaded callers) skips adding temperature preemptively from here on,
+                # rather than repeating the same raise+catch (+warning) on every single request.
+                if "temperature" in str(e) and "temperature" in request_kwargs:
+                    if not _temperature_unsupported.is_set():
+                        logger.warning(
+                            f"{model_name}: SDK rejected temperature= ({e}); "
+                            "disabling temperature for the rest of this process"
+                        )
+                        _temperature_unsupported.set()
+                    request_kwargs.pop("temperature")
+                    msg = client.messages.create(**request_kwargs)
+                else:
+                    raise
             # content may include non-text blocks (e.g. ThinkingBlock when extended
             # thinking is on, or tool_use); take the text block(s), not content[0].
             texts = [b.text for b in msg.content if getattr(b, "type", None) == "text"]
             if not texts:
+                if getattr(msg, "stop_reason", None) == "refusal":
+                    # Deterministic for this exact input (observed on a degenerate HEAVY_LOOP
+                    # readout during FV-eval judging) -- retrying would just refuse again
+                    # MAX_TRIES times. Treat as an empty response so callers' existing
+                    # empty-response handling (UNPARSED verdict / pred=None) applies instead of
+                    # crashing the whole judge run on one record.
+                    logger.warning(
+                        f"{model_name}: oracle refused this input (stop_reason=refusal); "
+                        "treating as empty response"
+                    )
+                    response = ""
+                    break
                 kinds = [getattr(b, "type", "?") for b in msg.content]
                 raise ValueError(
                     f"no text block in response (blocks={kinds}, stop_reason={msg.stop_reason}); "
@@ -95,7 +136,7 @@ def ask_claude(
 
     # atomic write so a crash / concurrent writer never leaves a partial JSON
     # (which is what made the cache read above raise JSONDecodeError).
-    tmp_file = f"{cache_file}.{os.getpid()}.tmp"
+    tmp_file = f"{cache_file}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp_file, "w") as f:
         json.dump(
             {
@@ -194,7 +235,7 @@ def ask_gpt(
 
     # atomic write so a crash / concurrent writer never leaves a partial JSON
     # (which is what made the cache read above raise JSONDecodeError).
-    tmp_file = f"{cache_file}.{os.getpid()}.tmp"
+    tmp_file = f"{cache_file}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp_file, "w") as f:
         json.dump(
             {

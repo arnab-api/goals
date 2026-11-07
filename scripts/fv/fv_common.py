@@ -38,11 +38,14 @@ from src.tokens import prepare_input
 PREFIXES = {"input": "Q:", "output": "A:", "instructions": ""}
 SEPARATORS = {"input": "\n", "output": "\n\n", "instructions": ""}
 
-# Tracked copy of the FV dataset_files (from ericwtodd/function_vectors); we only use abstractive.
-DEFAULT_ABSTRACTIVE_DIR = os.path.join(
+# Tracked copy of the FV dataset_files (from ericwtodd/function_vectors).
+_FV_DATASET_ROOT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "data", "FV_dataset", "abstractive",
+    "data", "FV_dataset",
 )
+DEFAULT_ABSTRACTIVE_DIR = os.path.join(_FV_DATASET_ROOT, "abstractive")
+DEFAULT_EXTRACTIVE_DIR = os.path.join(_FV_DATASET_ROOT, "extractive")
+DEFAULT_TASK_DIRS = (DEFAULT_ABSTRACTIVE_DIR, DEFAULT_EXTRACTIVE_DIR)
 
 # the 6 tasks the paper foregrounds; a sensible small default for quick runs
 REPRESENTATIVE_TASKS = [
@@ -61,13 +64,25 @@ class FVTask:
     valid: list[dict]
 
 
-def load_fv_task(name: str, root_dir: str = DEFAULT_ABSTRACTIVE_DIR,
+def find_task_json(name: str, root_dirs: tuple[str, ...] = DEFAULT_TASK_DIRS) -> str:
+    """Locate ``{name}.json`` by searching `root_dirs` in order (mirrors the original FV repo's
+    `load_dataset`, which does the same abstractive-then-extractive lookup)."""
+    for d in root_dirs:
+        p = os.path.join(d, f"{name}.json")
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError(f"{name}.json not found in any of {root_dirs}")
+
+
+def load_fv_task(name: str, root_dir: str | None = None,
                  test_size: float = 0.3, seed: int = 42) -> FVTask:
-    """Load one abstractive task JSON and split into train/valid.
+    """Load one task JSON (abstractive or extractive) and split into train/valid.
 
     Mirrors the FV repo's `load_dataset`: a fixed-seed shuffle then a train/valid cut.
-    Demos are drawn from `train`, queries from `valid` (no leakage)."""
-    path = os.path.join(root_dir, f"{name}.json")
+    Demos are drawn from `train`, queries from `valid` (no leakage). `root_dir` pins the
+    search to one directory (e.g. an explicit `DEFAULT_ABSTRACTIVE_DIR`); by default both
+    `DEFAULT_TASK_DIRS` are searched."""
+    path = os.path.join(root_dir, f"{name}.json") if root_dir else find_task_json(name)
     with open(path) as f:
         pairs = json.load(f)
     pairs = [{"input": str(p["input"]), "output": str(p["output"])} for p in pairs]
@@ -80,6 +95,12 @@ def load_fv_task(name: str, root_dir: str = DEFAULT_ABSTRACTIVE_DIR,
 
 def list_abstractive_tasks(root_dir: str = DEFAULT_ABSTRACTIVE_DIR) -> list[str]:
     return sorted(f[:-5] for f in os.listdir(root_dir) if f.endswith(".json"))
+
+
+def list_all_tasks(root_dirs: tuple[str, ...] = DEFAULT_TASK_DIRS) -> list[str]:
+    """Every task name (abstractive + extractive), sorted, deduped by name."""
+    names = {f[:-5] for d in root_dirs for f in os.listdir(d) if f.endswith(".json")}
+    return sorted(names)
 
 
 # ── prompt construction ─────────────────────────────────────────────────────────
@@ -110,6 +131,39 @@ def build_icl_prompt(demos: list[dict], query_input: str,
               + f"{PREFIXES['input']}{sp}{query_input}{SEPARATORS['input']}"
               + f"{PREFIXES['output']}")
     return prompt
+
+
+def build_icl_prompt_with_spans(demos: list[dict], query_input: str,
+                                prepend_space: bool = True) -> tuple[str, list[dict]]:
+    """Like `build_icl_prompt` (no label shuffling — this is for GoalScope read-out, not CMA
+    corruption) but also returns each demo's Q-row/A-row CHARACTER spans in the prompt string.
+
+    `row_spans[i] = {"q": (start, end), "a": (start, end)}` for `demos[i]` — each span covers the
+    "Q:"/"A:" prefix token through the end of the value, EXCLUDING the trailing separator. Character
+    offsets are exact by construction (no retokenization needed to find them)."""
+    sp = " " if prepend_space else ""
+    parts: list[str] = []
+    row_spans: list[dict] = []
+    pos = 0
+
+    def _emit(s: str) -> None:
+        nonlocal pos
+        parts.append(s)
+        pos += len(s)
+
+    for d in demos:
+        q_start = pos
+        _emit(f"{PREFIXES['input']}{sp}{d['input']}")
+        q_end = pos
+        _emit(SEPARATORS["input"])
+        a_start = pos
+        _emit(f"{PREFIXES['output']}{sp}{d['output']}")
+        a_end = pos
+        row_spans.append({"q": (q_start, q_end), "a": (a_start, a_end)})
+        _emit(SEPARATORS["output"])
+    _emit(f"{PREFIXES['input']}{sp}{query_input}{SEPARATORS['input']}")
+    _emit(PREFIXES["output"])
+    return "".join(parts), row_spans
 
 
 def first_answer_token_id(mt, prompt: str, answer: str, prepend_space: bool = True) -> int:

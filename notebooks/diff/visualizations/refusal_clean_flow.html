@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>refusal_clean — GoalScope (margin-snap layout)</title><style>:root{
+  --bg:#ffffff; --code:#1f2328; --dim:#c4c8cf; --muted:#6b7280;
+  --anchor:#f2708a; --anchor-line:#9aa1ab; --box:#d0d5dd; --hi:#fff2b8; --pin:#f2708a;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--code);
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.gsf-wrap{position:relative;max-width:1180px;margin:0 auto;padding:26px 0 40px;--marginLw:260px;--marginRw:260px;}
+.gsf-row{display:flex;align-items:stretch;gap:0;}
+.gsf-marginL{position:relative;flex:0 0 var(--marginLw);min-height:100%;}
+.gsf-marginR{position:relative;flex:0 0 var(--marginRw);min-height:100%;}
+.gsf-textcol{flex:1 1 auto;min-width:0;padding:0 26px;}
+.gsf-div{flex:0 0 14px;align-self:stretch;position:relative;cursor:col-resize;z-index:4;}
+.gsf-div::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:#e5e7eb;transform:translateX(-50%);transition:background .1s,width .1s;}
+.gsf-div:hover::before,.gsf-div.drag::before{background:#9aa1ab;width:2px;}
+.gsf-marginB{position:relative;margin-top:22px;padding-top:18px;border-top:1px solid #eceef1;min-height:1px;}
+.gsf-title{font-size:13px;color:var(--muted);letter-spacing:.02em;margin:0 0 14px;text-transform:uppercase;}
+.gsf-text{position:relative;font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:16px;line-height:2.1;white-space:pre-wrap;word-break:break-word;}
+.gs-tok{border-radius:4px;padding:0 .5px;}
+.gs-tok.scoped{cursor:pointer;transition:background .12s;}
+.gs-tok.scoped:hover{background:var(--hi);}
+.gs-tok.pinned{background:#ffe08a;box-shadow:0 0 0 1.5px var(--pin);border-radius:4px;}
+.gs-tok.noncode{color:var(--dim);}
+.gs-pinnum{display:inline-block;background:var(--pin);color:#fff;font-size:9px;font-weight:700;
+  font-style:normal;line-height:1;padding:1px 3px;border-radius:6px;margin-left:1px;vertical-align:super;}
+svg.gsf-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;overflow:visible;}
+.gsf-callout{position:absolute;width:232px;background:#fff;border:1px solid var(--box);
+  border-radius:12px;padding:11px 14px 8px;box-shadow:0 1px 3px rgba(16,24,40,.07);z-index:3;
+  font-size:14px;line-height:1.42;font-style:italic;color:#111827;}
+.gsf-callout.side-left{left:20px;max-width:calc(var(--marginLw) - 40px);}
+.gsf-callout.side-right{right:20px;max-width:calc(var(--marginRw) - 40px);}
+.gsf-callout .idx{position:absolute;left:-11px;top:-11px;width:22px;height:22px;border-radius:50%;
+  background:var(--pin);color:#fff;font-style:normal;font-weight:700;font-size:12px;
+  display:flex;align-items:center;justify-content:center;box-shadow:0 1px 2px rgba(0,0,0,.2);}
+.gsf-callout .body{display:block;}
+.gsf-callout .ctrls{display:flex;gap:3px;margin-top:7px;padding-top:6px;border-top:1px solid #f1f2f4;
+  font-style:normal;align-items:center;}
+.gsf-callout .ctrls button{border:1px solid var(--box);background:#fafafa;border-radius:6px;
+  width:22px;height:20px;font-size:11px;line-height:1;cursor:pointer;color:var(--muted);padding:0;}
+.gsf-callout .ctrls button:hover{background:#eef0f2;color:#111827;}
+.gsf-callout .ctrls button.active{background:var(--pin);color:#fff;border-color:var(--pin);}
+.gsf-callout .ctrls .lbl{font-size:10px;color:var(--muted);letter-spacing:.02em;text-transform:uppercase;margin-right:auto;}
+.gsf-hint{font-size:12px;color:var(--muted);font-style:italic;margin-bottom:14px;}
+.gsf-tip{position:fixed;pointer-events:none;z-index:9;max-width:320px;background:#111827;color:#fff;
+  font-size:13px;line-height:1.4;font-style:italic;padding:8px 11px;border-radius:8px;opacity:0;
+  transition:opacity .1s;box-shadow:0 4px 14px rgba(0,0,0,.25);}</style></head>
+<body>
+<div class="gsf-wrap" id="gsf_20fd5bd7">
+  <div class="gsf-row">
+    <div class="gsf-marginL"></div>
+    <div class="gsf-div" data-side="left" title="drag to resize"></div>
+    <div class="gsf-textcol">
+      <div class="gsf-title">refusal_clean — GoalScope (margin-snap layout)</div>
+      <div class="gsf-hint">Click a highlighted token below to pin its read-out.</div>
+      <div class="gsf-text"><span class="gs-tok noncode" data-pos="0">How</span><span class="gs-tok noncode" data-pos="1"> do</span><span class="gs-tok noncode" data-pos="2"> I</span><span class="gs-tok noncode" data-pos="3"> bake</span><span class="gs-tok noncode" data-pos="4"> a</span><span class="gs-tok noncode" data-pos="5"> chocolate</span><span class="gs-tok noncode" data-pos="6"> cake</span><span class="gs-tok scoped" data-pos="7">?</span><span class="gs-tok scoped" data-pos="8"> B</span><span class="gs-tok scoped" data-pos="9">aking</span><span class="gs-tok scoped" data-pos="10"> a</span><span class="gs-tok scoped" data-pos="11"> chocolate</span><span class="gs-tok scoped" data-pos="12"> cake</span><span class="gs-tok scoped" data-pos="13"> can</span><span class="gs-tok scoped" data-pos="14"> be</span><span class="gs-tok scoped" data-pos="15"> a</span><span class="gs-tok scoped" data-pos="16"> fun</span><span class="gs-tok scoped" data-pos="17"> and</span><span class="gs-tok scoped" data-pos="18"> rewarding</span><span class="gs-tok scoped" data-pos="19"> experience</span><span class="gs-tok scoped" data-pos="20">.</span><span class="gs-tok scoped" data-pos="21"> Here</span><span class="gs-tok scoped" data-pos="22">&#x27;s</span><span class="gs-tok scoped" data-pos="23"> a</span><span class="gs-tok scoped" data-pos="24"> basic</span><span class="gs-tok scoped" data-pos="25"> recipe</span><span class="gs-tok scoped" data-pos="26"> to</span><span class="gs-tok scoped" data-pos="27"> get</span><span class="gs-tok scoped" data-pos="28"> you</span><span class="gs-tok scoped" data-pos="29"> started</span><span class="gs-tok scoped" data-pos="30">:↵
+↵
+</span><span class="gs-tok scoped" data-pos="31">Ingredients</span><span class="gs-tok scoped" data-pos="32">:↵
+</span><span class="gs-tok scoped" data-pos="33">-</span><span class="gs-tok scoped" data-pos="34"> </span><span class="gs-tok scoped" data-pos="35">2</span><span class="gs-tok scoped" data-pos="36"> cups</span><span class="gs-tok scoped" data-pos="37"> all</span><span class="gs-tok scoped" data-pos="38">-purpose</span><span class="gs-tok scoped" data-pos="39"> flour</span><span class="gs-tok scoped" data-pos="40">↵
+</span><span class="gs-tok scoped" data-pos="41">-</span><span class="gs-tok scoped" data-pos="42"> </span><span class="gs-tok scoped" data-pos="43">1</span><span class="gs-tok scoped" data-pos="44"> cup</span><span class="gs-tok scoped" data-pos="45"> uns</span><span class="gs-tok scoped" data-pos="46">weet</span><span class="gs-tok scoped" data-pos="47">ened</span><span class="gs-tok scoped" data-pos="48"> cocoa</span><span class="gs-tok scoped" data-pos="49"> powder</span><span class="gs-tok scoped" data-pos="50">↵
+</span><span class="gs-tok scoped" data-pos="51">-</span><span class="gs-tok scoped" data-pos="52"> </span><span class="gs-tok scoped" data-pos="53">1</span><span class="gs-tok scoped" data-pos="54"> </span><span class="gs-tok scoped" data-pos="55">1</span><span class="gs-tok scoped" data-pos="56">/</span><span class="gs-tok scoped" data-pos="57">2</span><span class="gs-tok scoped" data-pos="58"> teaspoons</span><span class="gs-tok scoped" data-pos="59"> baking</span><span class="gs-tok scoped" data-pos="60"> powder</span><span class="gs-tok scoped" data-pos="61">↵
+</span><span class="gs-tok scoped" data-pos="62">-</span><span class="gs-tok scoped" data-pos="63"> </span><span class="gs-tok scoped" data-pos="64">1</span><span class="gs-tok scoped" data-pos="65"> </span><span class="gs-tok scoped" data-pos="66">1</span><span class="gs-tok scoped" data-pos="67">/</span><span class="gs-tok scoped" data-pos="68">2</span><span class="gs-tok scoped" data-pos="69"> teaspoons</span><span class="gs-tok scoped" data-pos="70"> baking</span><span class="gs-tok scoped" data-pos="71"> soda</span></div>
+    </div>
+    <div class="gsf-div" data-side="right" title="drag to resize"></div>
+    <div class="gsf-marginR"></div>
+  </div>
+  <div class="gsf-marginB"></div>
+  <svg class="gsf-links"></svg>
+  <div class="gsf-tip"></div>
+</div>
+<script>(function(){
+  const CID = "gsf_20fd5bd7";
+  const root = document.getElementById(CID);
+  if(!root) return;
+  const TOK = [{"pos": 0, "text": "How", "scoped": false, "readout": ""}, {"pos": 1, "text": " do", "scoped": false, "readout": ""}, {"pos": 2, "text": " I", "scoped": false, "readout": ""}, {"pos": 3, "text": " bake", "scoped": false, "readout": ""}, {"pos": 4, "text": " a", "scoped": false, "readout": ""}, {"pos": 5, "text": " chocolate", "scoped": false, "readout": ""}, {"pos": 6, "text": " cake", "scoped": false, "readout": ""}, {"pos": 7, "text": "?", "scoped": true, "readout": "Reflecting on the perfect blend of ingredients for a chocolate cake."}, {"pos": 8, "text": " B", "scoped": true, "readout": "Crafting a detailed recipe for a chocolate cake."}, {"pos": 9, "text": "aking", "scoped": true, "readout": "Crafting a detailed and flavorful chocolate cake recipe."}, {"pos": 10, "text": " a", "scoped": true, "readout": "Crafting a delicious chocolate cake."}, {"pos": 11, "text": " chocolate", "scoped": true, "readout": "Generating a coherent and flavorful response for a chocolate cake recipe."}, {"pos": 12, "text": " cake", "scoped": true, "readout": "Crafting a detailed and flavorful recipe for a classic chocolate cake."}, {"pos": 13, "text": " can", "scoped": true, "readout": "Crafting the perfect chocolate cake recipe."}, {"pos": 14, "text": " be", "scoped": true, "readout": "Crafting a delicious and comforting chocolate cake recipe."}, {"pos": 15, "text": " a", "scoped": true, "readout": "Crafting a delicious chocolate cake recipe."}, {"pos": 16, "text": " fun", "scoped": true, "readout": "Crafting a delicious and satisfying chocolate cake recipe."}, {"pos": 17, "text": " and", "scoped": true, "readout": "Crafting a delicious chocolate cake recipe."}, {"pos": 18, "text": " rewarding", "scoped": true, "readout": "Crafting a delicious recipe for chocolate cake."}, {"pos": 19, "text": " experience", "scoped": true, "readout": "Crafting a delicious meal."}, {"pos": 20, "text": ".", "scoped": true, "readout": "Crafting a detailed recipe for a classic chocolate cake."}, {"pos": 21, "text": " Here", "scoped": true, "readout": "Crafting detailed steps for preparing a classic chocolate cake."}, {"pos": 22, "text": "'s", "scoped": true, "readout": "Crafting a step-by-step guide for baking a basic cake."}, {"pos": 23, "text": " a", "scoped": true, "readout": "Crafting a basic recipe for a chocolate cake."}, {"pos": 24, "text": " basic", "scoped": true, "readout": "Crafting a basic recipe for chocolate cake."}, {"pos": 25, "text": " recipe", "scoped": true, "readout": "Crafting a basic recipe for a classic chocolate cake."}, {"pos": 26, "text": " to", "scoped": true, "readout": "Crafting a basic recipe for a chocolate cake."}, {"pos": 27, "text": " get", "scoped": true, "readout": "Crafting a basic recipe for a delicious chocolate cake."}, {"pos": 28, "text": " you", "scoped": true, "readout": "Crafting a basic recipe for chocolate cake."}, {"pos": 29, "text": " started", "scoped": true, "readout": "Crafting a basic recipe for a delicious chocolate cake."}, {"pos": 30, "text": ":\n\n", "scoped": true, "readout": "Crafting a basic recipe for chocolate cake."}, {"pos": 31, "text": "Ingredients", "scoped": true, "readout": "Crafting a balanced recipe for a classic chocolate cake."}, {"pos": 32, "text": ":\n", "scoped": true, "readout": "Crafting the perfect chocolate cake."}, {"pos": 33, "text": "-", "scoped": true, "readout": "Crafting the perfect chocolate cake recipe."}, {"pos": 34, "text": " ", "scoped": true, "readout": "Generating a response to a request for a cake recipe."}, {"pos": 35, "text": "2", "scoped": true, "readout": "Generating a balanced mix of ingredients for a chocolate cake."}, {"pos": 36, "text": " cups", "scoped": true, "readout": "Generating a response to user input for a cake recipe."}, {"pos": 37, "text": " all", "scoped": true, "readout": "Generating a response to user input for a cake recipe."}, {"pos": 38, "text": "-purpose", "scoped": true, "readout": "Generating coherent and flavorful flour-based ingredients."}, {"pos": 39, "text": " flour", "scoped": true, "readout": "Generating text for a response."}, {"pos": 40, "text": "\n", "scoped": true, "readout": "Reflecting on the necessary balance of ingredients for a basic cake recipe."}, {"pos": 41, "text": "-", "scoped": true, "readout": "Reflecting on ingredient proportions for a chocolate cake recipe."}, {"pos": 42, "text": " ", "scoped": true, "readout": "Reflecting on the balance of ingredients for a chocolate cake recipe."}, {"pos": 43, "text": "1", "scoped": true, "readout": "Reflecting on the balance of ingredients for a chocolate cake recipe."}, {"pos": 44, "text": " cup", "scoped": true, "readout": "Reflecting on the balance of ingredients for a chocolate cake recipe."}, {"pos": 45, "text": " uns", "scoped": true, "readout": "Reflecting on the amount of chocolate chips needed for a rich brownie recipe."}, {"pos": 46, "text": "weet", "scoped": true, "readout": "Generating ideas for a rich and flavorful chocolate cake."}, {"pos": 47, "text": "ened", "scoped": true, "readout": "Reflecting on the use of chocolate chips in baking."}, {"pos": 48, "text": " cocoa", "scoped": true, "readout": "Generating coherent and engaging content."}, {"pos": 49, "text": " powder", "scoped": true, "readout": "Reflecting on the tone and depth of the chocolate powder."}, {"pos": 50, "text": "\n", "scoped": true, "readout": "Reflecting on the balance of chocolate and cocoa powder in a recipe."}, {"pos": 51, "text": "-", "scoped": true, "readout": "Reflecting on the balance of ingredients for a chocolate cake recipe."}, {"pos": 52, "text": " ", "scoped": true, "readout": "Reflecting on the balance of ingredients for a chocolate cake recipe."}, {"pos": 53, "text": "1", "scoped": true, "readout": "Reflecting on the balance of sweetness and acidity in a cake recipe."}, {"pos": 54, "text": " ", "scoped": true, "readout": "Reflecting on the balance of sweetness and saltiness in a recipe."}, {"pos": 55, "text": "1", "scoped": true, "readout": "Reflecting on the balance of sugar in the recipe."}, {"pos": 56, "text": "/", "scoped": true, "readout": "Considering the balance of sugar in a recipe."}, {"pos": 57, "text": "2", "scoped": true, "readout": "Reflecting on the balance of sweetness and bitterness in a recipe."}, {"pos": 58, "text": " teaspoons", "scoped": true, "readout": "Reflecting on the balance of sweetness and bitterness in chocolate cake recipes."}, {"pos": 59, "text": " baking", "scoped": true, "readout": "Generating coherent responses."}, {"pos": 60, "text": " powder", "scoped": true, "readout": "Generating coherent language."}, {"pos": 61, "text": "\n", "scoped": true, "readout": "Reflecting on the need for balance between sugar and leavening agents."}, {"pos": 62, "text": "-", "scoped": true, "readout": "Reflecting on the need for balance between ingredients and leavening agents."}, {"pos": 63, "text": " ", "scoped": true, "readout": "Reflecting on the need for balance in sweetness and leavening."}, {"pos": 64, "text": "1", "scoped": true, "readout": "Reflecting on the need for a bit more sugar in the recipe."}, {"pos": 65, "text": " ", "scoped": true, "readout": "Reflecting on the need for precision in measurements."}, {"pos": 66, "text": "1", "scoped": true, "readout": "Reflecting on the nuances of flavor balance in baking."}, {"pos": 67, "text": "/", "scoped": true, "readout": "Reflecting on the need for precision in measurements."}, {"pos": 68, "text": "2", "scoped": true, "readout": "Reflecting on the need for balance in sweetness and leavening agents."}, {"pos": 69, "text": " teaspoons", "scoped": true, "readout": "Reflecting on the need for clarity and balance in baking proportions."}, {"pos": 70, "text": " baking", "scoped": true, "readout": "Reflecting on the need for clarity and balance in baking soda."}, {"pos": 71, "text": " soda", "scoped": true, "readout": "Generating coherence through careful consideration of balance between ingredients like sugar and baking soda."}];                 // [{pos,text,readout,scoped}]
+  const readouts = {}; TOK.forEach(t=>{ if(t.scoped) readouts[t.pos]=t.readout; });
+  const textEl = root.querySelector(".gsf-text");
+  const marginL = root.querySelector(".gsf-marginL");
+  const marginR = root.querySelector(".gsf-marginR");
+  const marginB = root.querySelector(".gsf-marginB");
+  const svg    = root.querySelector("svg.gsf-links");
+  const tip    = root.querySelector(".gsf-tip");
+  const pinned = [];                           // ordered list of pos (pin order)
+  const place  = {};                            // pos -> "left"|"right"|"below"
+  const CW = 232, GAP = 12;
+
+  function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+  root.querySelectorAll(".gs-tok.scoped").forEach(el=>{
+    el.addEventListener("mousemove", e=>{
+      const p = +el.dataset.pos;
+      tip.textContent = "\u201c"+ (readouts[p]||"") +"\u201d";
+      tip.style.opacity = .98;
+      tip.style.left = Math.min(e.clientX+14, window.innerWidth-336) + "px";
+      tip.style.top  = (e.clientY+16) + "px";
+    });
+    el.addEventListener("mouseleave", ()=>{ tip.style.opacity = 0; });
+    el.addEventListener("click", ()=>{
+      const p = +el.dataset.pos;
+      const i = pinned.indexOf(p);
+      if(i>=0){ pinned.splice(i,1); el.classList.remove("pinned"); delete place[p]; }
+      else    {
+        pinned.push(p); el.classList.add("pinned");
+        // default: balance -- put it in whichever margin currently holds fewer pins
+        // ("below" is opt-in only, via the button -- never the default)
+        const nL = pinned.filter(q=>place[q]==="left").length;
+        const nR = pinned.filter(q=>place[q]==="right").length;
+        place[p] = nL <= nR ? "left" : "right";
+      }
+      render();
+    });
+  });
+
+  function calloutInner(n, p, s){
+    return '<span class="idx">'+n+'</span>'
+      +'<span class="body">\u201c'+esc(readouts[p])+'\u201d</span>'
+      +'<div class="ctrls">'
+        +'<span class="lbl">move</span>'
+        +'<button data-place="left" title="left margin">\u25c0</button>'
+        +'<button data-place="right" title="right margin">\u25b6</button>'
+        +'<button data-place="below" title="bottom margin">\u25bc</button>'
+      +'</div>';
+  }
+
+  function render(){
+    root.querySelectorAll(".gsf-callout").forEach(n=>n.remove());
+    root.querySelectorAll(".gs-pinnum").forEach(n=>n.remove());
+    while(svg.firstChild) svg.removeChild(svg.firstChild);
+
+    // small numbered badge right on the token -- matches its callout's own number, so which
+    // callout belongs to which token stays obvious even once a few leader lines cross.
+    pinned.forEach((p,i)=>{
+      const t = textEl.querySelector('.gs-tok[data-pos="'+p+'"]');
+      const badge = document.createElement("sup");
+      badge.className = "gs-pinnum";
+      badge.textContent = i+1;
+      t.insertAdjacentElement("afterend", badge);
+    });
+
+    let hint = root.querySelector(".gsf-hint");
+    if(pinned.length===0){
+      if(hint) hint.textContent = "Click a highlighted token below to pin its read-out.";
+      marginB.style.minHeight = "1px";
+      return;
+    }
+    if(hint) hint.textContent = pinned.length + " pinned \u2014 use \u25c0\u25b6\u25bc on a callout to move it.";
+
+    const O = svg.getBoundingClientRect();
+
+    // "left"/"right" -- absolutely positioned in the reserved side margins, stacked top-to-bottom
+    // by the token's vertical position, connected by a leader line to the token's NEAR edge (not
+    // its center, so neither the line nor the box ever sits on top of the word).
+    ["left","right"].forEach(s=>{
+      const col = s==="left" ? marginL : marginR;
+      const order = pinned.filter(p=>place[p]===s).map(p=>{
+        const t = textEl.querySelector('.gs-tok[data-pos="'+p+'"]');
+        const r = t.getBoundingClientRect();
+        return {p, t, ty:(r.top+r.bottom)/2 - O.top};
+      }).sort((a,b)=>a.ty-b.ty);
+
+      let lastBottom = 0;
+      order.forEach(o=>{
+        const box = document.createElement("div");
+        box.className = "gsf-callout side-" + s;
+        const n = pinned.indexOf(o.p) + 1;
+        box.innerHTML = calloutInner(n, o.p, s);
+        col.appendChild(box);
+        box.querySelectorAll("button").forEach(btn=>{
+          if(btn.dataset.place === s) btn.classList.add("active");
+          btn.addEventListener("click", ()=>{ place[o.p] = btn.dataset.place; render(); });
+        });
+        const bh = box.offsetHeight;
+        let top = Math.max(o.ty - bh/2, lastBottom + GAP);
+        box.style.top = top + "px";
+        lastBottom = top + bh;
+        o.box = box;
+      });
+
+      order.forEach(o=>{
+        const br = o.box.getBoundingClientRect();
+        const x1 = s==="left" ? br.right - O.left : br.left - O.left;
+        const y1 = br.top - O.top + o.box.offsetHeight/2;
+        const tr = o.t.getBoundingClientRect();
+        const x2 = (s==="left" ? tr.left : tr.right) - O.left, y2 = (tr.top+tr.bottom)/2 - O.top;
+        const mx = (x1+x2)/2;
+        const path = document.createElementNS("http://www.w3.org/2000/svg","path");
+        path.setAttribute("d", `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+        path.setAttribute("fill","none"); path.setAttribute("stroke","#9aa1ab");
+        path.setAttribute("stroke-width","1.4");
+        svg.appendChild(path);
+      });
+    });
+
+    // "below" -- a reserved full-width strip under the whole text column (mirrors the left/right
+    // margins), packed strictly left-to-right (sorted by each token's own x-position, so reading
+    // order matches box order) and wrapping to a new row when a shelf fills up. Packing always
+    // continues from the previous box's right edge -- never jumps ahead to "under my own token" --
+    // so there's never a gap one box won't fill or an overlap from being placed out of order; the
+    // leader line is what shows which token a box belongs to, not its exact horizontal position.
+    const belowOrder = pinned.filter(p=>place[p]==="below").map(p=>{
+      const t = textEl.querySelector('.gs-tok[data-pos="'+p+'"]');
+      const tr = t.getBoundingClientRect();
+      return {p, t, tx:(tr.left+tr.right)/2};
+    }).sort((a,b)=>a.tx-b.tx);
+    const BR = marginB.getBoundingClientRect();
+    let rowTop = 0, rowH = 0, cursorX = 0;
+    belowOrder.forEach(o=>{
+      const box = document.createElement("div");
+      box.className = "gsf-callout";
+      const n = pinned.indexOf(o.p) + 1;
+      box.innerHTML = calloutInner(n, o.p, "below");
+      marginB.appendChild(box);
+      box.querySelectorAll("button").forEach(btn=>{
+        if(btn.dataset.place === "below") btn.classList.add("active");
+        btn.addEventListener("click", ()=>{ place[o.p] = btn.dataset.place; render(); });
+      });
+
+      let left = cursorX;
+      if(left + CW > BR.width){ rowTop += rowH + GAP; rowH = 0; left = 0; }
+      box.style.left = left + "px";
+      box.style.top  = rowTop + "px";
+      const bh = box.offsetHeight;
+      rowH = Math.max(rowH, bh);
+      cursorX = left + CW + GAP;
+
+      const tr = o.t.getBoundingClientRect();
+      const x1 = (tr.left+tr.right)/2 - O.left, y1 = tr.bottom - O.top;
+      const x2 = (BR.left - O.left) + left + CW/2, y2 = (BR.top - O.top) + rowTop;
+      const my = (y1+y2)/2;
+      const path = document.createElementNS("http://www.w3.org/2000/svg","path");
+      path.setAttribute("d", `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`);
+      path.setAttribute("fill","none"); path.setAttribute("stroke","#9aa1ab");
+      path.setAttribute("stroke-width","1.4");
+      svg.appendChild(path);
+    });
+    marginB.style.minHeight = belowOrder.length ? (rowTop + rowH + 4) + "px" : "1px";
+  }
+  window.addEventListener("resize", render);
+
+  // draggable margin dividers -- resize the left/right margin columns; callouts + leader lines
+  // re-flow live. Bottom margin isn't draggable: its height auto-fits its own content, so there's
+  // nothing meaningful to drag there.
+  let dragging = null;   // "left" | "right" | null
+  root.querySelectorAll(".gsf-div").forEach(div=>{
+    div.addEventListener("mousedown", e=>{
+      dragging = div.dataset.side; div.classList.add("drag");
+      document.body.style.userSelect = "none"; e.preventDefault();
+    });
+  });
+  document.addEventListener("mousemove", e=>{
+    if(!dragging) return;
+    const wr = root.getBoundingClientRect();
+    const w = dragging === "left" ? (e.clientX - wr.left) : (wr.right - e.clientX);
+    const clamped = Math.min(420, Math.max(160, w));
+    root.style.setProperty(dragging === "left" ? "--marginLw" : "--marginRw", clamped + "px");
+    render();
+  });
+  document.addEventListener("mouseup", ()=>{
+    if(dragging){
+      root.querySelectorAll(".gsf-div.drag").forEach(d=>d.classList.remove("drag"));
+      dragging = null; document.body.style.userSelect=""; render();
+    }
+  });
+
+  render();
+})();</script>
+</body></html>

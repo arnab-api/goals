@@ -690,6 +690,12 @@ def render_patchscope_html(
 GOALSCOPE_SYS = "You are a helpful assistant proficient in programming."
 GOALSCOPE_QUESTION = "What are you doing at this line of the code. Keep your answer as brief as possible."
 
+# Generic (non-code-flavored) counterpart to GOALSCOPE_SYS, for read-out probes whose source
+# context isn't code (e.g. the FV in-context-learning eval in scripts/fv/) — kept as a separate
+# constant rather than editing GOALSCOPE_SYS itself, since that one is shared by genuinely
+# code-specific prompts (GOALSCOPE_QUESTION, CAUSAL_INSTRUCTION below).
+GOALSCOPE_SYS_GENERIC = "You are a helpful assistant."
+
 
 def _build_goalscope_prompt(mt) -> str:
     """Build the GoalScope destination prompt ("What are you doing at this line?")."""
