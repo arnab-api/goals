@@ -103,7 +103,11 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--arms", nargs="+", default=["kv", "q"], choices=["kv", "q"])
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--kv-dir", default=None, help="KV run dir (default: the paper's V x4 goal-250 run)")
+    ap.add_argument("--q-dir", default=None, help="Q GSR run dir (default: the paper's goal-250 __seq run)")
     args = ap.parse_args()
+    global KV, Q
+    KV, Q = args.kv_dir or KV, args.q_dir or Q
     os.makedirs(args.out, exist_ok=True)
     for arm in args.arms:
         jobs, fn = (list(kv_jobs()), kv_one) if arm == "kv" else (list(q_jobs()), q_one)
