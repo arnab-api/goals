@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Guidance for agents working in this repository. README.md is the human-facing summary (project-page takeaways and
-setup), so it is not repeated here. This file covers only the results presented in the **main text** of the paper (§3-§6): for
+setup), so it is not repeated here. This file covers only the results presented in the **main text** of the paper (§3-§6), plus the task-vs-progress
+experiment that §5.1.1 points to: for
 each, the exact script, job list, configuration, results directory and figure generator. Appendix-only experiments, the
 companion site and exploratory work are documented in the `CLAUDE.md` of branch `dev`.
 
@@ -112,7 +113,7 @@ see Caution 6b).
    for the models in its `MODEL_BANDS` (Coder-32B 25-56, Qwen2.5-32B 25-56, Coder-14B 0-48, OLMo Instruct / SFT 10-36);
    threshold 0.9 on the lam20 mask. The top-k and control sets have no script here (section 3.2).
 5. **Everything that reads `head_sets/`**: GoalScope (4.1), ablations (4.2), temporal persistence (4.3), NRGS
-   interventions (4.4-4.5).
+   interventions (4.4-4.6).
 6. **Generators**: run the notebook for the figure group (section 4), then copy / crop into Overleaf by hand.
 
 ## 3. Goal-head localization and head sets
@@ -140,7 +141,7 @@ see Caution 6b).
 | file | heads | used by | how it was made |
 |---|---|---|---|
 | `Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 122 | GoalScope (4.1), ablations (122), temporal persistence (4.3), ICL / EM | `export_head_sets.py` (lam20 mask > 0.9, layers [25,56)) |
-| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json` | 250 | ablations (250), all NRGS runs (4.4-4.5) | top-250 by mask value of the lam20 mask over all 64 layers (ties by index); no script here (`notebooks/clock/__head_inspection.ipynb` on `dev`). Contains all 122 goal heads and 14 heads below layer 20 |
+| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json` | 250 | ablations (250), all NRGS runs (4.4-4.6) | top-250 by mask value of the lam20 mask over all 64 layers (ties by index); no script here (`notebooks/clock/__head_inspection.ipynb` on `dev`). Contains all 122 goal heads and 14 heads below layer 20 |
 | `Qwen2.5-Coder-32B-Instruct/control/control250__laterhalf.json` | 250 | NRGS random-head controls | random non-goal heads from layers >= 32, seed 123; no generating script |
 
 The other files in `head_sets/` back appendix results (see `dev`'s `CLAUDE.md`). `--heads goal` in `eval_goalscope.py`
@@ -235,9 +236,9 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
 - Smoke: `--n-trials 2 --force` into a scratch `RESULTS_DIR`, then compare `pivot` / `traj` cosines with cached files
   of the same `ctx_key`.
 
-### NRGS interventions (shared facts for 4.4-4.5)
+### NRGS interventions (shared facts for 4.4-4.6)
 
-Paper: §5 (`Text/06_mechanism.tex`, which inputs `Text/Figures/kv_transfer.tex` and `Text/Figures/q-transfer.tex`). Model Qwen2.5-Coder-32B-Instruct; `G250` =
+Paper: §5 (`Text/06_mechanism.tex`, which inputs `Text/Figures/kv_transfer.tex` and `Text/Figures/q-transfer.tex`), and App. J (`Text/Appendix/pre-commitment.tex`) for 4.6. Model Qwen2.5-Coder-32B-Instruct; `G250` =
 `head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json`, `C250` =
 `head_sets/Qwen2.5-Coder-32B-Instruct/control/control250__laterhalf.json`. GoalScope readouts inside these scripts use
 additive_norm α 0.1, layers 35-45, readout heads = G250. Task banks are inline (`src/nrgs/data.py`,
@@ -288,7 +289,21 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   `python notebooks/fig_n_table_generators/q_transfer_schema.py` (cairosvg + IBM Plex fonts) ->
   `notebooks/Figures/Qwen2.5-Coder-32B-Instruct/transfer/q_transfer_schema.{svg,pdf,png}` (= the paper's `gsr_schema_clean.pdf`, renamed).
 
-### 4.6 Beyond code (ICL, EM): §6 (`Text/05_steerable.tex`, `fig:noncode-icl-em-main`)
+### 4.6 Task span vs code-progress span: pointed to from §5.1.1 (App. `app:task-vs-prog` / `app:pre-com`, `Text/Appendix/pre-commitment.tex`; `fig:task-vs-prog` right panel, `fig:pre-com-kv`)
+
+- Commands: `job_list/diff_eval/task_vs_progress_32b.json` and `task_vs_progress_32b_v2.json` (4 jobs each, one per
+  datatype; v2 added configs and resumes from the cache): `python scripts/nrgs/task_vs_progress_eval.py --datatypes <dt>`.
+  Defaults: py-py, `--n-samples 32 --seed 1123`, no readout, greedy 64; configs `src/nrgs/task_vs_progress.CONFIGS` =
+  none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans.
+- Results: `results/notebook_caches/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
+  (`<dt>` in `int, str, list_int, list_str`; summary keys like `"kv·goal250 · task · V×4"` -> `causal_shift`).
+  Dirs without `__task+gap` are the superseded old-span runs.
+- Cross-check (mean over 4 datatypes): residual task 0.891 / progress 0.062 / task+progress 0.984 (paper 0.89 / 0.06 /
+  0.98); KV G250 task V x4 0.969 (the boxed cell), progress V x4 0.258.
+- Generator: `task_vs_progress.ipynb` cell 5 (`tvp_residual_grid` = right panel of `task-vs-progress`) and cell 6
+  (`tvp_kv_grids`), group `<model>/precommit_ablation`. Composite hand-made.
+
+### 4.7 Beyond code (ICL, EM): §6 (`Text/05_steerable.tex`, `fig:noncode-icl-em-main`)
 
 **Not reproducible from this repo.** The ICL numbers (36.2±5.6% over 39 single-relation tasks, 49.9 abstractive, 9.0
 extractive, 21% composition / superposition) and the EM figure come from co-authors' code. `scripts/icl/` and
@@ -299,8 +314,8 @@ them.
 
 - Hand-composited / hand-drawn figures (only their data panels are generated): `figure1.pdf` (`fig:nrgs`, teaser),
   `goalscope-schema-eval-crop.pdf` (`fig:goalscope`; bar panel = 4.1), `Figures/ablation/ablation_results-crop.pdf`
-  (4.2), `kv-transfer-main-crop.pdf` (4.4), `q-transfer-main-crop.pdf` (4.5), `goals-icl-em-main-v2.pdf` (4.6).
-- ICL / EM evaluation (4.6): co-authors' code.
+  (4.2), `kv-transfer-main-crop.pdf` (4.4), `q-transfer-main-crop.pdf` (4.5), `goals-icl-em-main-v2.pdf` (4.7), `task-vs-progress-crop.pdf` (4.6).
+- ICL / EM evaluation (4.7): co-authors' code.
 
 ## 6. Cautions
 
