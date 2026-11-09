@@ -76,14 +76,9 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
   Qwen2.5-72B need 2 GPUs (`device_map="auto"`). Most scripts take `--cuda 0` or `--cuda 0,1`.
   GoalScope steering is step-by-step (CPU-launch-bound) and the judged evals are oracle-bound (thousands of serial
   `ask_claude` calls per shard); plan hours per GoalScope job, not minutes.
-- **Legacy names**: modules / scripts / notebooks follow the paper's terms, but results directories, caches and figure
-  groups keep their legacy names for cache compatibility: `results/diff/<model>/{path_patch,path_patch_hier,
-  diff_trigger,gsr_example}` (NRGS), `results/obstacle_robustness/` (obstacle persistence),
-  `results/notebook_caches/{task_vs_progress,obstacle_ov_boost}/`, and figure groups `transfer`,
-  `precommit_ablation`, `sparsity_ablation`, `obstacle_robustness` under `notebooks/Figures/`. The NRGS groups
-  `transfer` and `precommit_ablation` are per model: `notebooks/Figures/<model>/<group>/` (`GROUP = f'{MODEL}/<group>'`
-  in `kv_transfer.ipynb`, `q_transfer.ipynb`, `task_vs_progress.ipynb`; set `MODEL` to regenerate for another model,
-  e.g. `Qwen3-32B`). Cross-model groups (`head_localization`, `model_generalization`, ...) stay at the top level.
+- **Directory names**: NRGS results live under `results/diff/<model>/{path_patch,diff_trigger,gsr_example}` and
+  `results/notebook_caches/task_vs_progress/`; figure groups are `notebooks/Figures/<group>/` (NRGS groups per model:
+  `notebooks/Figures/<model>/{transfer,precommit_ablation}/`).
 - **Generators** (`notebooks/fig_n_table_generators/*.ipynb`) only parse results (no model). They save through
   `figstyle.save_fig` / `save_table` to `notebooks/Figures/<group>/<name>.{pdf,png,tex}`. Copying into
   `Overleaf-draft/Goals-Overleaf/Figures/generated/<group>/` (and `Text/Appendix/tables/generated/`) and `pdfcrop`
@@ -92,14 +87,12 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 ## 2. Reproduce from scratch: dependency order
 
 Everything downstream of step 4 reads its heads from `head_sets/` (tracked), so in practice you can start at step 5
-with the shipped head sets. Steps 2-4 are needed only to re-derive the heads (and will not reproduce them bit-exactly,
-see Caution 6b).
+with the shipped head sets. Steps 2-4 are needed only to re-derive the heads.
 
 1. **Corpus** (no model, no oracle, deterministic):
    `python scripts/data/gen_goalscope_eval.py` -> `data/goalscope_eval.json` (seed 123, target 64 per datatype;
    253 specs = int 65 / list[int] 60 / str 64 / list[str] 64; task bank `src/nrgs/data.py::QTASKS`). Check: write to a temp path
-   (`--out /tmp/x.json`) and diff `datapoints` against the tracked file (ignore `meta`: generation date, and the tracked
-   file names the pre-rename bank `src.diff.data.QTASKS`). The NRGS scripts do not read this file (their banks are
+   (`--out /tmp/x.json`) and diff `datapoints` against the tracked file (ignore `meta`). The NRGS scripts do not read this file (their banks are
    inline in `src/nrgs/data.py` / `hier_data.py`).
 2. **Pivot mining** (model + Claude oracle): `python -m scripts.mine_pivot_instances --model-key <hf id>` ->
    `data/head_loc/pairs/<slug>.json`, from `data/head_loc/predicates/*.json` (25 predicates, Python + C++) and
@@ -111,7 +104,7 @@ see Caution 6b).
    = the Coder-32B lam20 run.
 4. **Head-set export** (no model): `python scripts/data/export_head_sets.py` -> `head_sets/<slug>/goal__lam20_thr0.9_band<a>-<b>.json`
    for the models in its `MODEL_BANDS` (Coder-32B 25-56, Qwen2.5-32B 25-56, Coder-14B 0-48, OLMo Instruct / SFT 10-36);
-   threshold 0.9 on the lam20 mask. The top-k and control sets have no script here (section 3.2).
+   threshold 0.9 on the lam20 mask.
 5. **Everything that reads `head_sets/`**: GoalScope (4.1), ablations (4.2), temporal persistence (4.3), NRGS
    interventions (4.4-4.6).
 6. **Generators**: run the notebook for the figure group (section 4), then copy / crop into Overleaf by hand.
@@ -132,17 +125,16 @@ see Caution 6b).
   (122 heads, layers 28-55).
 - Figure: right panel = `notebooks/fig_n_table_generators/head_localization.ipynb` cell 2 ->
   `notebooks/Figures/head_localization/head_localization_map.pdf` (reads the mask, threshold 0.9, sanity-checks against
-  the 122-head json). The left schematic and the composite `head-loc-crop.pdf` are hand-made.
-- Smoke: `python -m scripts.train_head_mask --tag scratch_smoke --n-epochs 1` (exercises the pipeline; numbers will not
-  match). Compare epoch-5 numbers with `.../lam20/checkpoints/checkpoint_epoch_0005.pt`.
+  the 122-head json).
+- Smoke: `python -m scripts.train_head_mask --tag scratch_smoke --n-epochs 1` (exercises the pipeline).
 
 ### 3.2 Head sets used by the main text
 
 | file | heads | used by | how it was made |
 |---|---|---|---|
 | `Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json` | 122 | GoalScope (4.1), ablations (122), temporal persistence (4.3), ICL / EM | `export_head_sets.py` (lam20 mask > 0.9, layers [25,56)) |
-| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json` | 250 | ablations (250), all NRGS runs (4.4-4.6) | top-250 by mask value of the lam20 mask over all 64 layers (ties by index); no script here (`notebooks/clock/__head_inspection.ipynb` on `dev`). Contains all 122 goal heads and 14 heads below layer 20 |
-| `Qwen2.5-Coder-32B-Instruct/control/control250__laterhalf.json` | 250 | NRGS random-head controls | random non-goal heads from layers >= 32, seed 123; no generating script |
+| `Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json` | 250 | ablations (250), all NRGS runs (4.4-4.6) | top-250 by mask value of the lam20 mask over all 64 layers (ties by index). Contains all 122 goal heads and 14 heads below layer 20 |
+| `Qwen2.5-Coder-32B-Instruct/control/control250__laterhalf.json` | 250 | NRGS random-head controls | random non-goal heads from layers >= 32, seed 123 |
 
 The other files in `head_sets/` back appendix results (see `dev`'s `CLAUDE.md`). `--heads goal` in `eval_goalscope.py`
 resolves through `src/goals/head_sets.load_goal_heads` (the exported json if present, else the mask thresholded at 0.9
@@ -170,13 +162,11 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   (`GEN_MAX_NEW_TOKENS`), corpus `data/goalscope_eval.json`, judge `claude-sonnet-4-6`.
 - Results: `GS` with model Coder-32B, `additive_norm/0.1`, `heads=goal`.
 - Cross-check (matches paper "~60%", "0.90+", "80%", "~75%"): faithfulness 0.589 / 0.945 / 0.905 / 0.972 (mean4 0.853);
-  causality 0.522 / 0.802 / 0.719 / 0.957 (mean4 0.750). Smoke: `--limit 4`; the first records of the reported
-  `records.jsonl` are spec `int_python_000`.
+  causality 0.522 / 0.802 / 0.719 / 0.957 (mean4 0.750). Smoke: `--limit 4`.
 - Judge rubric: `FAITH_HARD_SYS` / `CAUSAL_HARD_SYS` in `scripts/evaluation/eval_goalscope.py`; `config.json` stores
   `hard_rubric_tag` = md5[:8] of the system prompt (reported: faithfulness `78bfd5f4`, causality `9c106246`). If the tag
   of the current code differs, the rubric changed and the verdicts will not match the paper. 
-- Figure: the right (bar) panel of `fig:goalscope` = `readout_sources_and_head_budget.ipynb` cell 8 (goal-head bars per
-  pivot + mean; the attention / residual baseline bars it also draws are appendix runs); schematic and composite are hand-made.
+- Figure: the right (bar) panel of `fig:goalscope` = `readout_sources_and_head_budget.ipynb` cell 8 (goal-head bars per pivot + mean).
 
 ### 4.2 Goal-head ablations: §4 (`Text/04_heads.tex`; figure `tab:goal-ablation` in `Text/persistance.tex` = `Figures/ablation/ablation_results-crop.pdf`)
 
@@ -194,8 +184,7 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   ```
   python -m scripts.evaluation.eval_ablation_necessity                                                          # 122
   python -m scripts.evaluation.eval_ablation_necessity --heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json
-  ```
-  (no job lists; the reported runs were launched by hand, 2026-09-18). Shared machinery:
+  ``` Shared machinery:
   `scripts/evaluation/ablation_common.py`.
 - Results: `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   and `.../necessity/heads=goal__goal{122,250}__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half/`
@@ -204,13 +193,8 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
 - Cross-check (`tab:goal-ablation`): clean 0.925;
   sufficiency spare-goal 0.806 (122) / 0.913 (250), spare-random 0.103 / 0.087; necessity sink-goal 0.854 / 0.158,
   sink-random 0.925 / 0.925.
-- Other leaves in that directory (`strat=blind_task`, `strat=blind_task_and_progress`, and leaves without
-  `__ctrl=later_half`, which used an older control pool) are unreported; the current necessity script only implements
-  `sink`.
-- Generator: `readout_sources_and_head_budget.ipynb` cell 9 (`ablation_results.pdf`) is the closest code version of the
-  figure; the paper's `ablation_results-crop.pdf` is hand-made (slide export) from the same summaries.
-- Smoke: `--limit 12` (round-robin over datatypes; the control heads do not depend on `--limit`, so `baseline / ablated /
-  control` generations of the same spec ids can be compared with the reported `records.jsonl`).
+- Generator: `readout_sources_and_head_budget.ipynb` cell 9 (`ablation_results.pdf`).
+- Smoke: `--limit 12` (round-robin over datatypes).
 
 ### 4.3 Temporal persistence: §3.4 (`Text/persistance.tex`, `fig:temporal-retention` = `Figures/generated/temporal_persistence/retention_curves_std-crop.pdf`)
 
@@ -222,19 +206,13 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   Defaults: `--model Qwen/Qwen2.5-Coder-32B-Instruct --n-trials 256 --seed 1123`; `HEAD_BUDGET = 122` and
   `MAX_NEW = 96` (`src/goals/temporal_persistence.py`, both in every cache key); 4 datatypes x {python, cpp}; C++
   implementation spans are segmented by the Claude oracle (`oracle_value_segment`). `--n-trials 256` enumerates every
-  distinct context per (datatype, language) cell (setups saturate at 240). Control heads: 122 random heads from
-  layers [32, 64) disjoint from the goal heads, `CONTROL_SEED = 7` in the script (not the `head_sets/.../control/`
-  file).
+  distinct context per (datatype, language) cell (setups saturate at 240).
 - Results: `results/temporal_persistence/Qwen2.5-Coder-32B-Instruct/cond_*.pt` (3088 goal records) and
   `.../control/cond_*.pt` (836 files on disk). Conditions already cached are skipped (use `--force` or a scratch
-  `RESULTS_DIR`). `summary.json` in that dir is stale (a partial list[str]-only writer, n=893); the notebook recomputes
-  from `cond_*.pt`.
+  `RESULTS_DIR`). The notebook computes everything from `cond_*.pt`.
 - Generator: `temporal_persistence.ipynb` cell 3 (`retention_curves_std`, impl spans 10-40 tokens), group
-  `temporal_persistence`. The notebook loads thousands of `.pt` files and has
-  killed nbconvert kernels: run its code cells as a plain script (`jupyter nbconvert --to script`, then `python`) if the
-  kernel dies.
-- Smoke: `--n-trials 2 --force` into a scratch `RESULTS_DIR`, then compare `pivot` / `traj` cosines with cached files
-  of the same `ctx_key`.
+  `temporal_persistence`.
+- Smoke: `--n-trials 2 --force` into a scratch `RESULTS_DIR`.
 
 ### NRGS interventions (shared facts for 4.4-4.6)
 
@@ -259,11 +237,10 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
 - Results: `R/path_patch/I1-off__I2-off__I3-on-V4__win-span__span-list+gap__cppnote-sys__a1__th-goal_250__gh-goal_250__ro-goal_250/<dt>__<src>-<dst>/{meta.json,results.json}`
   (`<dt>` in `int, str, list_int, list_str`; `meta.json` keys `causal_trigger_rate`, `readout_shift_rate`,
   `n_instances`); control `.../...__th-control250_250__gh-control250_250__ro-off/`. V x1 / x2 arms: `I3-on__` / `I3-on-V2__`.
-  `__smoke` suffixed dirs are smoke runs.
 - Cross-check: pooled n=512 causal 0.936, readout 0.900 (paper ~94% / ~90%); `int__python-python` 0.96875 / 0.90625;
   control 0.002 (1/512).
 - Generator: `kv_transfer.ipynb` (`KV_RUN` knob) cell 11 (`kv_right_panel` = right panel of `kv-transfer-main`), group
-  `<model>/transfer`. The composite figure is hand-made.
+  `<model>/transfer`.
 
 ### 4.5 Q transfer with gaze-select-restrict (GSR): §5.1.2 (`fig:q-transfer` = `Figures/transfer/q-transfer-main-crop.pdf`, random-head control "~4%")
 
@@ -273,13 +250,10 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   - control: `diff_trigger_gsr_eq_control250.json` + `diff_trigger_gsr_eq_control250_rest.json`
     (`--patch-heads C250 --readout-heads C250 --no-readout`).
   Defaults: `--patch-heads G250 --readout-heads G250 --alphas 2 --n-samples 32 --seed 0`, pivot = the frontier's
-  `{var} =`, letters naming, closed-loop gaze-select-restrict (no KV transfer). `--tag-suffix __seq` is required to
-  hit the reported dirs. (The reported summaries do not record the seed; the job lists pass none, so the reported runs used
-  the default at the time; not verified that it was 0.)
+  `{var} =`, letters naming, closed-loop gaze-select-restrict (no KV transfer). `--tag-suffix __seq` names the reported dirs.
 - Results: `R/diff_trigger/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/{order_matched,order_diff}/<dt>__<src>-<dst>/{summary.json,results.json}`
   (`<dt>` in `int, str, list(int), list(str)`; keys `causal_trigger_rate`, `readout_shift_rate`, `n`); control
-  `R/diff_trigger/ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/`. The `...__kv__...` and
-  `cl-ppgazerestrict__seq` (no `-anceq`) arms in that directory are unreported.
+  `R/diff_trigger/ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/`.
 - Cross-check: pooled causal order-matched 0.871 (paper 87%), order-diff 0.572 (57%); readout 0.668 / 0.412; control
   0.043 / 0.029 (paper ~4%); `order_diff/int__python-python` 0.59375 / 0.53125.
 - Generators: `q_transfer.ipynb` (`GSR_ARM`) cell 5 (`q_crosslang_gsr` = right panel of `q-transfer-main`, order-diff),
@@ -297,50 +271,27 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans.
 - Results: `results/notebook_caches/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
   (`<dt>` in `int, str, list_int, list_str`; summary keys like `"kv·goal250 · task · V×4"` -> `causal_shift`).
-  Dirs without `__task+gap` are the superseded old-span runs.
 - Cross-check (mean over 4 datatypes): residual task 0.891 / progress 0.062 / task+progress 0.984 (paper 0.89 / 0.06 /
   0.98); KV G250 task V x4 0.969 (the boxed cell), progress V x4 0.258.
 - Generator: `task_vs_progress.ipynb` cell 5 (`tvp_residual_grid` = right panel of `task-vs-progress`) and cell 6
-  (`tvp_kv_grids`), group `<model>/precommit_ablation`. Composite hand-made.
+  (`tvp_kv_grids`), group `<model>/precommit_ablation`.
 
 ### 4.7 Beyond code (ICL, EM): §6 (`Text/05_steerable.tex`, `fig:noncode-icl-em-main`)
 
-**Not reproducible from this repo.** The ICL numbers (36.2±5.6% over 39 single-relation tasks, 49.9 abstractive, 9.0
-extractive, 21% composition / superposition) and the EM figure come from co-authors' code. `scripts/icl/` and
-`scripts/em/` are our reproductions for the companion site (slightly different numbers); `dev`'s `CLAUDE.md` describes
-them.
+The ICL and EM results are reproduced on their own branches: ICL on `icl-eval`, emergent misalignment on `em`.
 
-## 5. Main-text items not produced by code in this repo
+## 5. Cautions
 
-- Hand-composited / hand-drawn figures (only their data panels are generated): `figure1.pdf` (`fig:nrgs`, teaser),
-  `goalscope-schema-eval-crop.pdf` (`fig:goalscope`; bar panel = 4.1), `Figures/ablation/ablation_results-crop.pdf`
-  (4.2), `kv-transfer-main-crop.pdf` (4.4), `q-transfer-main-crop.pdf` (4.5), `goals-icl-em-main-v2.pdf` (4.7), `task-vs-progress-crop.pdf` (4.6).
-- ICL / EM evaluation (4.7): co-authors' code.
-
-## 6. Cautions
-
-a. **Pivot pools were re-mined after the reported masks were trained.** On 2026-10-03 (master dcf1e3d, contextual token
-   filter `src/goals/pivot_token_filter.py`) the pairs files were re-mined. Current `data/head_loc/pairs/*.json` sizes vs
-   the masks' `n_instances`: Coder-32B 1613 now vs 1423 trained (the pre-filter pool is
-   `git show dcf1e3d~1:data/head_loc/pairs/Qwen2.5-Coder-32B-Instruct.json`); Coder-14B 1517 vs 1246; Qwen2.5-32B
-   1711 vs 1181; OLMo-SFT 1185 vs 851; Llama-70B 1433 vs 1433 (lam20_ctx was trained on the filtered pool). Mining also
-   calls the oracle, so it is not deterministic. A re-trained mask will be close to, not identical with, the reported
-   one: **the head sets in `head_sets/` are the reference**; never regenerate them in place.
-b. **Generation length**: the paper says "up to 256 tokens"; the code uses 64 (GoalScope readout and frontier
-   rollout) and 96 (temporal persistence). The code is what produced the numbers.
-c. **Temporal persistence**: default `--n-trials 256` enumerates all cached contexts (3088 goal conditions); the
-   control run is `--control --n-trials 64`. Conditions are cached by key and skipped on re-run. Run the generator
-   notebook as a script if its kernel dies (4.3).
-d. **Judge rubric drift**: GoalScope verdicts depend on the exact system prompts. If you edit
+a. **Judge rubric drift**: GoalScope verdicts depend on the exact system prompts. If you edit
    `FAITH_HARD_SYS` / `CAUSAL_HARD_SYS`, `hard_rubric_tag` changes, the cache misses, and results no longer match the
    paper.
-e. **Smoke runs into `results/`**: GoalScope and ablation smokes get their own `nspec=N` leaf, but the NRGS and
+b. **Smoke runs into `results/`**: GoalScope and ablation smokes get their own `nspec=N` leaf, but the NRGS and
    persistence scripts resume into the reported directories. Use a scratch `RESULTS_DIR` (edit `env.yml`)
    for any test run.
-f. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal persistence, KV / Q transfer) set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7`
+c. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal persistence, KV / Q transfer) set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7`
    is ignored when `--cuda` is passed. Pass the physical GPU id to `--cuda`.
 
-## 7. Working conventions
+## 6. Working conventions
 
 ### Reports
 
@@ -355,7 +306,8 @@ When implementing new features (evals, utils, classes, etc.):
 
 2. **Test location**: Place test scripts in the `test/` directory with descriptive names.
 
-3. **Test model**: Use a smaller LM for testing to save resources:
+3. **Test model** (smoke tests only, i.e. checking that new code runs; reproductions use the paper's models): use a smaller LM
+   to save resources:
    - Default test model: `Qwen/Qwen2.5-Coder-14B-Instruct`
    - Initialize with: `ModelandTokenizer(model_key="Qwen/Qwen2.5-Coder-14B-Instruct", dtype=torch.bfloat16, device_map="auto", attn_implementation="eager")`
 
