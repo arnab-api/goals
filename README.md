@@ -100,6 +100,14 @@ language). It is also persistent, but through frequent re-derivation rather than
 counts depends on what persistence requires: if a goal must be one state that survives the whole action, these models
 do not qualify; if a goal can be stored and retrieved at each step, like an agent that consults its plan, they do.
 
+## About this branch
+
+This is `dev`, the full research history behind the paper. If you only want to reproduce the paper, use `master`: it
+keeps just the code behind the reported results. `dev` additionally holds unreported experiment arms and the
+exploratory threads that led to the paper (first contrastive goal directions from MCTS rollouts, completion-"clock"
+and boundary heads, an earlier version of the NRGS interventions, subspace probes, and more). Much of that older code
+was written against helpers that have since been renamed, so expect to fix imports before running it.
+
 ## Using this code
 
 ```bash
@@ -115,8 +123,12 @@ the model comparisons add Qwen2.5-Coder-14B, Qwen2.5-32B and OLMo-3.1-32B.
 - `notebooks/fig_n_table_generators/` — the paper's figures and tables, from cached results.
 - `head_sets/` — the localized goal heads (`head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json`,
   122 heads) and the other head sets used in the paper.
+- Older research code on this branch: `src/diff/`, `scripts/diff/`, `notebooks/diff/` (earlier NRGS work),
+  `scripts/clock/`, `notebooks/clock/` (clock / boundary heads), `notebooks/0*–16*` (first experiments),
+  `agent_reports/` (write-ups of most experiments).
 
-[CLAUDE.md](CLAUDE.md) maps every reported result to the command that reproduces it.
+[CLAUDE.md](CLAUDE.md) maps every reported result to the command that reproduces it, and lists the unreported and
+exploratory experiments on this branch with their entry points.
 
 ## How to cite
 

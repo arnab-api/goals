@@ -1,8 +1,10 @@
 # CLAUDE.md
 
 Guidance for agents working in this repository. README.md is the human-facing summary (project-page takeaways and
-setup), so it is not repeated here. This file maps **every reported result** of the paper to the exact script, job list,
-configuration, results directory and figure/table generator, so that an agent can reproduce the results.
+setup), so it is not repeated here. This is the `dev` branch: the full research history. This file maps **every reported result** of the
+paper (main text and appendix) to the exact script, job list, configuration, results directory and figure/table
+generator (sections 2-6), the unreported code that was moved here from `master` (4.20), and the legacy research threads
+(section 8).
 
 ## 1. Orientation
 
@@ -19,8 +21,11 @@ Implementation:    timeout > 0  vs  timeout >= 1  vs  int(timeout) > 0
 The encoding should not depend on the implementation strategy. A direction that only predicts success may just capture
 competence; that is the central confound to avoid.
 
-Branch `clean` keeps only the code behind reported results. The full research history (Track-1 prefill probing / MCTS,
-clock / boundary heads, NRGS masks, exploratory and dev notebooks) is on `master`. Paper source:
+Branches: `master` (= `clean`) keeps only the code behind reported results, and its `CLAUDE.md` covers only the
+main-text results. `dev` (this branch) = the old `master` history merged with `clean`, with none of `clean`'s
+deletions applied: it holds both the paper code (current names: `src/nrgs`, `scripts/nrgs`, ...) and the legacy
+research code (older names: `src/diff`, `scripts/diff`, `notebooks/clock`, ...). Where this file says "on master" for
+a legacy file, read "on dev". Paper source:
 `Overleaf-draft/Goals-Overleaf/` (`main.tex` -> `Text/*.tex`, `Text/201_Appendix.tex` -> `Text/Appendix/*.tex`).
 Appendix files that `201_Appendix.tex` does not `\input` (`boundary`, `cpp`, `dissociation`, `gaze`, `mlp`, `olmo`,
 `mechanistic_details`, `oracle_prompts`) and `Text/Figures/{goal_eval,sparsity_ablation}.tex` are not in the paper.
@@ -528,6 +533,71 @@ The site source is a separate repo checked out at `goals-web/` (`goals-web/site/
 `llama70b_web_and_eval.json` (Llama-3.3-70B: lam20_ctx 110 heads, additive_norm α 0.11, steer layers 20-40; its two
 `llama70b_eval_*` jobs write `GS` leaves for Llama that the paper does not report).
 
+### 4.18 NRGS in other LMs: App. `app:other-models` (`Text/Appendix/other_models.tex`; `fig:other-tvp`, `fig:other-kv`, `fig:other-q`) and the Qwen3-32B row of `tab:model-comparison-four-pivots`
+
+Models `Qwen/Qwen3-32B` and `allenai/Olmo-3.1-32B-Instruct`. Each uses the top-250 heads of its own lam20 mask for
+patching and readout: `head_sets/Qwen3-32B/goal_topk/goal__lam20_top250_fromL20.json` (layers >= 20) and
+`head_sets/Olmo-3.1-32B-Instruct/goal_topk/goal__lam20_top250_fromL10.json` (layers >= 10). The Qwen3 mask
+(`results/localization/Qwen3-32B/lam20/head_mask.pt`, 1128 instances, 50 epochs, batch 32, no-augment) was trained on
+Qwen3's own pre-filter pivot pool (`git show 008b290:data/head_loc/pairs/Qwen3-32B.json`; removed from `data/` in
+22a84c1). No generating script for the top-250 files.
+
+- **Readout config differs from Coder.** Coder's additive_norm α 0.1 reads these models poorly, so the reported arms
+  use the replace strategy (α 1, layers 35-45) for the in-intervention GoalScope readout: job lists with the suffix
+  `_ro_replace1`, results dirs with the suffix `__ros-replace-a1-L35-46`. The causal shift does not depend on the
+  readout config (identical in both arms); only the readout shift does.
+- Commands (each job list = 4 datatypes x 4 language pairs, plus both orderings for Q):
+  - KV: `job_list/diff_eval/path_patch_{qwen3_32b,olmo_instruct}_ro_replace1.json` (`scripts/nrgs/kv_transfer_eval.py --model <id> --goal-heads <250> --readout-heads <250> ...`)
+  - Q: `job_list/diff_eval/diff_trigger_gsr_eq_{qwen3_32b,olmo_instruct}_ro_replace1.json` (`scripts/nrgs/q_transfer_eval.py`)
+  - task vs progress: `job_list/diff_eval/task_vs_progress_{qwen3_32b,olmo_instruct}.json` (`scripts/nrgs/task_vs_progress_eval.py`; OLMo runs `--kv-headsets goal250` only, so it has no all-heads KV arm)
+  - Superseded first runs with Coder's readout config: the same job lists without `_ro_replace1` (results without the
+    `__ros-...` suffix).
+- Results: `results/diff/<model>/path_patch/I1-off__...__ro-goal_250__ros-replace-a1-L35-46/`,
+  `results/diff/<model>/diff_trigger/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__ros-replace-a1-L35-46__seq/`,
+  `results/notebook_caches/task_vs_progress/<model>/<dt>__python-python__seed1123__mx64__ro0__task+gap.summary.json`.
+- Cross-check (pooled n=512): KV causal / readout Qwen3 .904 / .809, OLMo .957 / .881; Q order-matched Qwen3 .844 / .479,
+  OLMo .898 / .609; order-diff Qwen3 .535 / .211, OLMo .572 / .314. Task vs progress (mean over 4 datatypes, causal):
+  residual task / progress / both Qwen3 .94 / .05 / .98, OLMo .97 / .00 / .98; KV goal250 V x4 task / progress
+  Qwen3 .94 / .10, OLMo .95 / .00.
+- Generator: `notebooks/fig_n_table_generators/other_lms_nrgs.ipynb` (one row per LM; `MODELS` knob; Coder colours) ->
+  `notebooks/Figures/other_lms/{tvp_grids_by_lm,kv_barcharts_by_lm,q_barcharts_by_lm}.pdf`. The per-model notebooks
+  (`kv_transfer`, `q_transfer`, `task_vs_progress` with `MODEL = '<slug>'`) pick the `__ros-replace-a1-L35-46` arm for
+  non-Coder models automatically.
+- Table 2 Qwen3 row (130 heads, .820 / .692): `job_list/goalscope_eval/goalscope_eval_c_qwen3_32b.json`
+  (`eval_goalscope.py --model Qwen/Qwen3-32B --heads head_sets/Qwen3-32B/goal__lam20_thr0.9_band25-56.json --strategy replace --alpha 2.0`),
+  leaf `GS` = `results/evaluation/goalscope/Qwen3-32B/<mode>/replace/2/heads=json:goal__lam20_thr0.9_band25-56__...`.
+  **α 2, not the table's α 1** (dagger in the paper): the α 1 faithfulness run stopped at 15/253 records and there is
+  no α 1 causality run.
+
+### 4.19 FV-head baseline: App. L.2.1 (`non-code.tex`, paragraph "Function-vector heads as a baseline", `tab:fv-recovery`)
+
+- Verbalization of FV heads (2.3% abstractive, 0% extractive, 1.5% over 39 tasks vs 36.2% for the 122 goal heads):
+  co-authors' numbers, `Overleaf-draft/REF/icl/goalheads_vs_fvheads_{results,summary_stats}_Atok.csv` (A token,
+  `hard_yes`); no code here.
+- Zero-shot recovery (Todd et al. protocol): `python scripts/fv/fv_head_transfer_eval.py --cuda <ids> --out <dir>`
+  (default: all 29 abstractive tasks, head sets `fv122/150/250` = `head_sets/Qwen2.5-Coder-32B-Instruct/fv__cma_top{122,150,250}.json`
+  and `goal122/150/250`; ā = mean o_proj input at the last token over 100 clean 10-shot prompts; zero-shot
+  `Q: x\nA:`, each head replaced at its own layer, last token; 100 queries per task). Writes `<out>/<task>.json`
+  (resumable; refuses to write under `results/`). Run used for the paper: `results_scratch/fv_head_transfer/Qwen2.5-Coder-32B-Instruct/`.
+- The table reports top-1 recovery on the queries the unpatched 10-shot model answers correctly (`icl_hit`), for
+  antonym / country-capital / capitalize / present-past / word_length / lowercase_first_letter / sentiment.
+  Full analysis: `agent_reports/claude/fv_vs_goal_heads_icl.md` (gitignored, local).
+- FV head sets `fv__cma_top{122,150,250}.json`: per-task causal indirect effect from `scripts/fv/localize_fv_cma.py`
+  (port of Todd et al.'s CMA; `job_list/fv/qwen32b_fv_head_cma.json`, runs in `existing_works/function_vectors/.venv`,
+  writes `existing_works/function_vectors/results/`), averaged over tasks and top-k'd by `scripts/fv/aggregate_fv_heads.py`.
+  `scripts/fv/localize_fv_mask.py` (`job_list/fv/qwen{14b,32b}_fv_localization_pipeline.json`) is an unreported
+  learned-mask variant.
+
+### 4.20 Code moved off `master` / `clean` (unreported; kept here)
+
+| code | what it is | run |
+|---|---|---|
+| `scripts/evaluation/run_causal_v2.py`, `job_list/goalscope_eval/causal_v2_all.json`, `job_list/diff_eval/ov_reader_locked_causal_v2_slurm.json` | causality evals with an alternative ("v2") C++ probe prompt | `python scripts/evaluation/run_causal_v2.py <eval module> <its args>`; writes a separate results root (`results_causal_v2/`) |
+| `scripts/nrgs/exec_check_transfers.py`, `scripts/nrgs/exec_check_regen_cpp.py` (the module `src/nrgs/exec_check.py` they use is also on `master`, for demos 04/05) | compile + execution check of successful cross-language KV / Q transfers (does the patched code compile and implement the transferred sub-task on test inputs); regen at 256 tokens for the ones that failed to compile | read `results/` only, write to an `--out` dir |
+| `job_list/diff_eval/path_patch_32b_listgap_taskprog.json` | KV transfer of task+progress span, V x1 (arm `I3-on__win-span+prog__...`) | no paper figure reads it |
+| `llama70b_eval_*` jobs (in `job_list/goalscope_eval/llama70b_web_and_eval.json` on dev only) | GoalScope eval of Llama-3.3-70B | unreported `GS` leaves |
+| `head_sets/Qwen2.5-Coder-32B-Instruct/control/control122__laterhalf.json`, `head_sets/Olmo-3.1-32B-Instruct{,-SFT}/goal__lam20_thr0.9_band10-36.json` | control-122 baseline; superseded `heads=goal` OLMo head sets | - |
+
 ## 5. Results that are not produced (or not reproducible) by code in this repo
 
 - Hand-composited / hand-drawn figures (only their data panels are generated): `figure1.pdf` (`fig:nrgs`, teaser),
@@ -628,3 +698,34 @@ When implementing new features (evals, utils, classes, etc.):
 
 - **`ask_claude` cache race**: concurrent threads judging the same text can collide on the cache's temp file
   (`FileNotFoundError` on rename); re-run the affected job (finished calls are cached).
+
+## 8. Legacy research threads (dev only; not in the paper)
+
+Everything below predates the paper's final pipeline. Much of it imports helpers that were later renamed or removed
+(marked **stale**: will not run as is; fix the imports against the current `src/` before use). `src/diff/` is the
+older NRGS API (superseded by `src/nrgs/`); it still exists, but `src/diff/functional.py` imports the missing
+`src.attention.record_effective_value_norms`, so every `src.diff` consumer is stale. Findings are summarized in
+`agent_reports/claude/` (and `analysis/`, `design/` under it) where named.
+
+| thread | entry points | outputs | status / report |
+|---|---|---|---|
+| **Track 1**: MCTS-expanded completions, contrastive pairs, goal directions (P+), steering | `scripts/{multipred_mcts,multipred_probe,goal_dir,test_causality}.py`, `scripts/causality/adversarial_persistence.py`; notebooks `notebooks/0{1,2,3,4}*`, `14-16_*`; lib `src/goals/{sampling,probe,predicate_*,anchor}.py`; data `data/incomplete_code.json`, `data/multi_predicate/` | `results/<save_dir>/<model>/<task>`, `results/multi_probe` | stale (missing `src.goals.data`, `src.goals.eval`, `src.goals.augment` names); `design/mcts_contrastive_design.md`, `design/multi_predicate_setup_design.md` |
+| Early localization, first GoalScope, activation oracle | notebooks `05_loc_data`, `06_loc_head` (first lam20 mask), `07_loc_modules`, `09-13_*`; `scripts/run_goalscope.py`; `scripts/evaluation/eval_act_oracles.py`; `src/activation_oracle/` | `results/patchscope/`, `results/activation_oracle/` | mostly stale; `design/goalscope.md`, `design/brainstorm_attention_head_localization.md` |
+| Subspace probe v1 / v2 (KL self-distillation) | `scripts/{cache_subspace_data,train_subspace_probe}.py`, `scripts/evaluation/{gen_teacher_targets_v2,train_subspace_probe_v2,eval_subspace_probe{,_v2}}.py`; `job_list/diff_eval/subspace_v2_32b.json` | `results/subspace_probe{,_v2}/`, `data/subspace_v2/teacher_targets/` | v2 scripts run; notebook `diff/14` stale; `design/subspace_probe_v2_causal_design.md` |
+| **Clock / boundary / move-on heads** (goal g + completion clock c; gaze, order-ID gaze, completion mask, multiline CMA) | `scripts/clock/*.py`, `scripts/generate_clock_probe_dataset.py`, `scripts/evaluation/middle_ground.py`; `job_list/clock/*.json`, `goalscope_eval/qwen32b_middle_ground.json`; notebooks `notebooks/clock/` | `results/multistep_clock/<version>/<model>/...`, `results/multiline_patch/`, `results/middle/` | `train_completion_mask_gaze.py` and many notebooks stale; `2_clock_state_machine.md`, `3_clock_gaze_transition_progress.md`; head sets `gaze__*`, `decision__*`, `{concept,token}_copier__top150.json` |
+| Verifier signal (flawed stub keeps the LM generating; correct-vs-incorrect probe) | `notebooks/clock/05_verifier.ipynb`, `scripts/clock/build_verifier_{stubs,oracle}.py` | `data/verifier/` (untracked), `results/verifier/` | notebook stale |
+| **Older NRGS ("DIFF")**: q/kv transfer, diff-trigger, multi-hierarchy KV, path patching, pre-commitment swap, NRGS prefix masks, H1/H1c/H2/H3 hypothesis heads, stage-0 matched donors | `scripts/diff/*.py` (e.g. `python -m scripts.diff.q_transfer_eval --setups=multi_pred --alpha=2.0 --n-pivot=auto`; `scripts/diff/path_patch_eval.py --i1 off --i2 on off --i3 on --window span span+progress`); `job_list/diff_eval/` (~45 dev-only lists), `job_list/nrgs/`; notebooks `notebooks/diff/`, `notebooks/precommitment/` | `results/diff/<M>/{q_transfer,kv_transfer,diff_trigger,path_patch*,precommit_swap,q_transfer_hyp}/`, `results/nrgs_{prefix,mask,svd_mask}/`, `results/stage0_matched/` | stale via `src.diff.functional`; the reported NRGS results were re-run with `scripts/nrgs/`. Reports in `analysis/`: `path-patching-report.md`, `query-transfer-report.md`, `gaze_select_restrict.md`, `task-vs-progress-report.md`, `precommitment-swap-report.md`, ...; head sets `head_sets/Qwen2.5-Coder-32B-Instruct/{nrgs/,hyp-*,progress*,union-*}` |
+| Mixing mechanisms / set-difference localization (paper `tab:q-mixing`) | branch `add-q-transfer-alt` (`src/q_transfer_alt/`, own environment); masks in `head_sets/Qwen2.5-Coder-32B-Instruct/set_diff_localization/` (README) | - | trainer (`scripts/diff/train_alt_localize.py`) only on that branch; `analysis/alt_hypotheses_set_diff.md`, `query-transfer-report.md` |
+| Set / count masks | `scripts/diff/{build_set_count_data,train_set_count_mask}.py`; `job_list/set_count/*.json`; `test/test_set_count.py` | `results/set_count_v2/` | `analysis/set_count_v2_source_order_fix.md` |
+| h1h2: induction-ordering vs set-difference query mask | `scripts/evaluation/train_h1h2_mask.py`; `job_list/h1h2/*.json`; notebooks `diff/11*` | `results/evaluation/h1h2_mask/` | stale via `src.diff`; `h1h2_mask_design.md`, `h1h2_mask_runs_state.md` |
+| Persistence / obstacle (older drivers of App. K) | notebooks `notebooks/persistance/*` (01 = `tab:temporal-readout-examples`, 04 = `tab:sufficiency-qual`, 05 = OV boost); `scripts/evaluation/obstacle_robustness_eval.py` | `results/obstacle_robustness/`, `results/notebook_caches/` | run; reported numbers come from the 4.7-4.8 scripts |
+| Other evals | `scripts/evaluation/{eval_precommit_ablation,eval_residual_patchscope,reeval_goalscope,eval_collapse_layerwise}.py`; `scripts/data/export_sparse_head_sets.py` (the `snap_top{5,10,25}` sets of 4.3); `job_list/goalscope_eval/` dev-only lists (`axes_code_rl_goal_eval`, `baselines_g1g2g3`, `goalscope_norm_vs_residual`, ...) | `results/evaluation/{precommit_ablation,collapse_layerwise}/` | `analysis/precommit_ablation.md`, `goalscope_reeval_manifest.md` |
+| Cross-model localization (GLM-4-32B, Llama-70B, Qwen3-32B, Qwen3-VL-32B, re-mining) | `job_list/head_localization/*.json` (`mine_pivot_instances`, `train_head_mask`) | `results/localization/<model>/` | `analysis/appF.2__cross_model_head_transfer.md` |
+| Dual-route induction heads (source of the copier head sets) | `job_list/dualroute/qwen32b_dualroute_causal_localization.json` -> `existing_works/dual-route-induction/scripts/causal_scores.py` (own venv) | - | - |
+| EM extras | `scripts/em/{em_goalscope_smoke,em_goalscope_variants,em_screen_first_plot,em_judge_alignment}.py` | `results/em_goalscope_repro/` | `em_judge_alignment.py` stale (`GPT_4O_CACHE_DIR`); `analysis/em-goalscope-reproduction.md` |
+| GLM-4.5-Air (nnterp port) | branch `nnterp-campaign-local` (`repro/eval_glm45air.sh`); head sets `head_sets/GLM-4.5-Air/`; demo option in `notebooks/demos/01_goalscope.ipynb` | - | untested on this code base |
+
+`test/`: `test_pivot_token_filter.py`, `test_set_count.py`, `test_eval_timeout.py`, `test_causal_sanitizer.py`,
+`test_task_vs_progress_smoke_compare.py` run; `fixtures.py`, `test_augmentation.py`, `test_mcts_eval.py`,
+`test_headpatched_generate_merge.py`, `test_kv_gaze_effective_branch.py`, `test_component_patch_equivalence.py` are
+stale; the rest depend on Track-1 / old head-loc modules (unverified).
