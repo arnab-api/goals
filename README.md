@@ -116,7 +116,8 @@ the model comparisons add Qwen2.5-Coder-14B, Qwen2.5-32B and OLMo-3.1-32B.
 - `head_sets/` — the localized goal heads (`head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json`,
   122 heads) and the other head sets used in the paper.
 
-[CLAUDE.md](CLAUDE.md) maps every reported result to the command that reproduces it.
+[CLAUDE.md](CLAUDE.md) maps the main-text results to the commands that reproduce them. The `dev` branch has the full
+research history, and its CLAUDE.md covers every experiment, including the appendix.
 
 ## How to cite
 
