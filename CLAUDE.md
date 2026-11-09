@@ -94,8 +94,7 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 ## 2. Reproduce from scratch: dependency order
 
 Everything downstream of step 4 reads its heads from `head_sets/` (tracked), so in practice you can start at step 5
-with the shipped head sets. Steps 2-4 are needed only to re-derive the heads (and will not reproduce them bit-exactly,
-see Caution 6b).
+with the shipped head sets. Steps 2-4 are needed only to re-derive the heads.
 
 1. **Corpus** (no model, no oracle, deterministic):
    `python scripts/data/gen_goalscope_eval.py` -> `data/goalscope_eval.json` (seed 123, target 64 per datatype;
@@ -135,7 +134,7 @@ see Caution 6b).
   (122 heads, layers 28-55).
 - Figure: right panel = `notebooks/fig_n_table_generators/head_localization.ipynb` cell 2 ->
   `notebooks/Figures/head_localization/head_localization_map.pdf` (reads the mask, threshold 0.9, sanity-checks against
-  the 122-head json). The left schematic and the composite `head-loc-crop.pdf` are hand-made.
+  the 122-head json).
 - Smoke: `python -m scripts.train_head_mask --tag scratch_smoke --n-epochs 1` (exercises the pipeline; numbers will not
   match). Compare epoch-5 numbers with `.../lam20/checkpoints/checkpoint_epoch_0005.pt`.
 
@@ -191,11 +190,9 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
 - Judge rubric: `FAITH_HARD_SYS` / `CAUSAL_HARD_SYS` in `scripts/evaluation/eval_goalscope.py`; `config.json` stores
   `hard_rubric_tag` = md5[:8] of the system prompt (reported: faithfulness `78bfd5f4`, causality `9c106246`). If the tag
   of the current code differs, the rubric changed and the verdicts will not match the paper. The prompts printed in the
-  appendix are `Text/Appendix/prompts/*.txt` (byte-identical to the code); `fig:readout-prompt`
-  (`Figures/goalscope/readout_prompts.png`) and `fig:oracle-faith` (`Figures/goalscope/evaluation/faithfulness.png`) are
-  hand-made images of them.
+  appendix are `Text/Appendix/prompts/*.txt` (byte-identical to the code);
 - Figure: the right (bar) panel of `fig:goalscope` = `readout_sources_and_head_budget.ipynb` cell 8 (`source_comparison`,
-  goal-head bars per pivot + mean + baselines); the schematic and the composite are hand-made.
+  goal-head bars per pivot + mean + baselines).
 
 ### 4.2 Readout sources: App. "Goal Heads vs. Other Readout Sources" (`Text/Appendix/readout_comparisons.tex`, `fig:heads-vs-residual`, `Figures/generated/sparsity_ablation/source_comparison.pdf`)
 
@@ -306,9 +303,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   `sink`.
 - Generators: `ablation.ipynb` cell 2 (`necessity.tex`) and cell 3 (`sufficiency.tex`), group `ablation`;
   `readout_sources_and_head_budget.ipynb` cell 9 (`ablation_results.pdf`) is the closest code version of the main
-  figure. The paper's `ablation_results-crop.pdf`, `sufficiency-crop.pdf` and `necessity-crop.pdf` are hand-made
-  (slide exports); `Text/Appendix/tables/sufficiency.tex` and the inline necessity table are hand-typed (values equal the
-  summaries). `tab:sufficiency-qual` (qualitative examples) came from
+  figure. `tab:sufficiency-qual` (qualitative examples) came from
   `notebooks/persistance/04_sufficiency_ablation_qualitative.ipynb` on master (hand-picked specs, control seed 0; not
   records of the n=253 run).
 - Smoke: `--limit 12` (round-robin over datatypes; the control heads do not depend on `--limit`, so `baseline / ablated /
@@ -366,7 +361,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   o_proj input). Cache: `results/notebook_caches/obstacle_ov_boost/Qwen2.5-Coder-32B-Instruct/{base_*,cmp_*,results.json}`.
 - Generator: `obstacle_persistence.ipynb` cell 2 (`obstacle_by_datatype`), cell 3 (`obstacle_adapted_by_level`),
   cell 4 (`obstacle_ov_boost.tex`), group `obstacle_robustness`. The OV-boost verdicts in the paper table were
-  hand-edited after generation (Caution 6c).
+  hand-edited after generation (Caution 6b).
 - Smoke: `--force` with a scratch `RESULTS_DIR`; e.g. the reported trial
   `results/obstacle_robustness/Qwen2.5-Coder-32B-Instruct/trial_005a53ee8501b65b.json` (list[str] / count_with_digit /
   hard, prefix `" - 1 +"`, SUCCUMBED).
@@ -401,7 +396,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
 - Cross-check: pooled n=512 causal 0.936, readout 0.900 (paper ~94% / ~90%); `int__python-python` 0.96875 / 0.90625;
   control 0.002 (1/512).
 - Generator: `kv_transfer.ipynb` (`KV_RUN` knob) cell 7 (`kv_barcharts`), cell 11 (`kv_right_panel` = right panel of
-  `kv-transfer-main`), cell 13 (`kv_grid.tex` -> `tab:kv-grid`), group `<model>/transfer`. The composite figure is hand-made.
+  `kv-transfer-main`), cell 13 (`kv_grid.tex` -> `tab:kv-grid`), group `<model>/transfer`.
 - `job_list/diff_eval/path_patch_32b_listgap_taskprog.json` (`--span task+progress --i3-v-scale 1`, arm
   `I3-on__win-span+prog__...`) is a computed side arm; no paper figure or table reads it (as far as could be checked).
 
@@ -414,7 +409,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   (32 cells); control `...__th-control250_250__gh-control250_250__ro-off/`.
 - Cross-check: pooled n=1024 causal 0.792, readout 0.654 (paper ~79%); control 0/1024;
   `list_str__and__match__python-python` 0.96875 / 0.84375.
-- Generator: `kv_transfer.ipynb` cell 9 (`kv_multihier_barcharts` = right panel); composite hand-made.
+- Generator: `kv_transfer.ipynb` cell 9 (`kv_multihier_barcharts` = right panel).
 
 ### 4.11 Broader goal, next op unspecified: App. `app:nrgs` (`fig:kv-goal` = `Figures/transfer/unspecified_next-crop.pdf`, `tab:kv-goal`)
 
@@ -428,8 +423,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   keys `<pair>|<src>-><dst>|<src_lang>-<dst_lang>`; summary `causal_shift`, `by_langs`, `readout_shift`).
 - Cross-check: causal 0.771 (74/96); py->py 0.79, py->cpp 0.75, cpp->py 0.79, cpp->cpp 0.75; all 96 cells equal the
   paper's table. The readout shift (0.78) is not reported in the paper.
-- Generator: `kv_transfer.ipynb` last cell (`kv_goal_table.tex` = `tab:kv-goal`, byte-identical tabular). `fig:kv-goal`
-  is hand-made from the `merge_quick | merge_sort->quick_sort | python-cpp` record (its code and readout).
+- Generator: `kv_transfer.ipynb` last cell (`kv_goal_table.tex` = `tab:kv-goal`, byte-identical tabular).
 - Demos: `notebooks/demos/04.1_sub_sub_goal.ipynb` (4.10) and `04.2_unspecified_op.ipynb` (this pair).
 
 ### 4.12 Q transfer with gaze-select-restrict (GSR): §5.1.2 (`fig:q-transfer` = `Figures/transfer/q-transfer-main-crop.pdf`), App. `app:transfer:q` (`fig:q-transfer-schema` = `Figures/transfer/gsr_schema_clean.pdf`, `fig:q-barcharts` = `Figures/generated/transfer/q_barcharts_gsr-crop.pdf`, `tab:q-matched`, `tab:q-diff`, `tab:expb`, control prose)
@@ -474,7 +468,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
 - Cross-check (mean over 4 datatypes): residual task 0.891 / progress 0.062 / task+progress 0.984 (paper 0.89 / 0.06 /
   0.98); KV G250 task V x4 0.969 (the boxed cell), progress V x4 0.258.
 - Generator: `task_vs_progress.ipynb` cell 5 (`tvp_residual_grid` = right panel of `task-vs-progress`) and cell 6
-  (`tvp_kv_grids`), group `<model>/precommit_ablation`. Composite hand-made.
+  (`tvp_kv_grids`), group `<model>/precommit_ablation`.
 
 ### 4.14 Mixing mechanisms: App. `app:nrgs` (`tab:q-mixing`: SetDiff / OrderID / CompleteCount / Induction)
 
@@ -501,7 +495,7 @@ branch `add-q-transfer-alt` (`src/q_transfer_alt/`, `scripts/diff/q_transfer_alt
 
 ### 4.16 Beyond code (ICL, EM): §6 (`Text/05_steerable.tex`, `fig:noncode-icl-em-main` = `Figures/appendix/goals-icl-em-main_updated-crop.pdf`), App. "non-code" (`Text/Appendix/non-code.tex`: `fig:noncode_fv_eval_Atoken`, `fig:noncode_composition_superposition`, `fig:noncode-refusal-steering-cake`, `fig:em_*`)
 
-The reported ICL / EM numbers and figures come from co-authors' code that is **not in this repo** (36.2±5.6% over 39
+The reported ICL / EM numbers and figures come from the branches `icl-eval` (ICL) and `em` (emergent misalignment), not from this code (36.2±5.6% over 39
 single-relation tasks, 49.9 abstractive, 9.0 extractive, 21.0% composition / superposition; 18 composition + 5
 superposition tasks; the "15.5% identifying the outlier" statistic; the refusal-steering "cake" figure; the four EM
 figures). `scripts/icl/` and `scripts/em/` are **our reproductions** for the companion site, with slightly different
@@ -600,18 +594,8 @@ Qwen3's own pre-filter pivot pool (`git show 008b290:data/head_loc/pairs/Qwen3-3
 
 ## 5. Results that are not produced (or not reproducible) by code in this repo
 
-- Hand-composited / hand-drawn figures (only their data panels are generated): `figure1.pdf` (`fig:nrgs`, teaser),
-  `goalscope-schema-eval-crop.pdf` (`fig:goalscope`; bar panel = 4.1), `head-loc-crop.pdf` (map = 3.1),
-  `kv-transfer-main-crop.pdf` (4.9), `q-transfer-main-crop.pdf` (4.12), `kv-sub-sub-goal-crop.pdf` (4.10),
-  `unspecified_next-crop.pdf` (4.11), `task-vs-progress-crop.pdf` (4.13), `Figures/ablation/{ablation_results,
-  sufficiency,necessity}-crop.pdf` (4.6), `prompt-crop.pdf`, `readout_prompts.png`, `evaluation/faithfulness.png`,
-  `UNSPEC_*-crop.pdf` (4.15), `goals-icl-em-main_updated-crop.pdf` and all `Figures/appendix/*` ICL / EM figures (4.16).
-- Hand-typed tables: `tab:data-distribution` (`tables/corpus.tex`; `corpus_stats.ipynb` cell 2 writes an unreferenced
-  cross-check table), `tab:goal-ablation-exact` (`tables/sufficiency.tex`), `tab:goal-ablation-necessity` (inline),
-  `tab:sufficiency-qual`, `tab:temporal-readout-examples`, `tab:expb`, `tab:q-mixing`; the two model
-  tables of 4.4 came from an agent-report parser on master.
 - Mixing-mechanisms table (4.14): branch `add-q-transfer-alt`, external package.
-- ICL / EM evaluation (4.16) and the refusal-steering "cake" figure: co-authors' code, not in the repo.
+- ICL / EM evaluation (4.16) and the refusal-steering "cake" figure: branches `icl-eval` / `em`.
 
 ## 6. Cautions
 
@@ -623,31 +607,24 @@ a. **OLMo-3.1-32B-Instruct goal heads were localized on Coder-32B's pivot instan
    Re-running `job_list/head_localization/olmo32b_head_localization_pipeline.json` now trains on OLMo's own pool
    (`data/head_loc/pairs/Olmo-3.1-32B-Instruct.json`) and writes to `lam20_ownpairs`, so it does not overwrite (or
    reproduce) the reported mask. The reported OLMo head set is `head_sets/Olmo-3.1-32B-Instruct/goal__lam20_thr1.0_band10-36.json`.
-b. **Pivot pools were re-mined after the reported masks were trained.** On 2026-10-03 (master dcf1e3d, contextual token
-   filter `src/goals/pivot_token_filter.py`) the pairs files were re-mined. Current `data/head_loc/pairs/*.json` sizes vs
-   the masks' `n_instances`: Coder-32B 1613 now vs 1423 trained (the pre-filter pool is
-   `git show dcf1e3d~1:data/head_loc/pairs/Qwen2.5-Coder-32B-Instruct.json`); Coder-14B 1517 vs 1246; Qwen2.5-32B
-   1711 vs 1181; OLMo-SFT 1185 vs 851; Llama-70B 1433 vs 1433 (lam20_ctx was trained on the filtered pool). Mining also
-   calls the oracle, so it is not deterministic. A re-trained mask will be close to, not identical with, the reported
-   one: **the head sets in `head_sets/` are the reference**; never regenerate them in place.
-c. **Known paper-vs-code discrepancies** (the code is what produced the numbers):
+b. **Known paper-vs-code discrepancies** (the code is what produced the numbers):
    - Generation length: the paper says "up to 256 tokens"; the code uses 64 (GoalScope readout and frontier rollout,
      OVReader), 96 (temporal persistence) and 48 (obstacle persistence, OV boost).
    - The obstacle OV-boost table uses the **250-head** set (caption silent) and its verdicts were hand-edited in the
      paper; `obstacle_persistence.ipynb` cell 4 prints the cached verdicts.
    - `source_comparison.pdf` in the paper is an older layout of the same data (4.2).
-d. **Temporal persistence**: default `--n-trials 256` enumerates all cached contexts (3088 goal conditions); the
+c. **Temporal persistence**: default `--n-trials 256` enumerates all cached contexts (3088 goal conditions); the
    control run is `--control --n-trials 64`. Conditions are cached by key and skipped on re-run. Run the generator
    notebook as a script if its kernel dies (4.7).
-e. **Site**: the site scripts write into a goals-web checkout (`GOALS_WEB_SITE`, default `./goals-web/site`), which is
+d. **Site**: the site scripts write into a goals-web checkout (`GOALS_WEB_SITE`, default `./goals-web/site`), which is
    a separate git repo; commit there, not here.
-f. **Judge rubric drift**: GoalScope / OVReader verdicts depend on the exact system prompts. If you edit
+e. **Judge rubric drift**: GoalScope / OVReader verdicts depend on the exact system prompts. If you edit
    `FAITH_HARD_SYS` / `CAUSAL_HARD_SYS`, `hard_rubric_tag` changes, the cache misses, and results no longer match the
    paper.
-g. **Smoke runs into `results/`**: GoalScope and ablation smokes get their own `nspec=N` leaf, but NRGS, OVReader,
+f. **Smoke runs into `results/`**: GoalScope and ablation smokes get their own `nspec=N` leaf, but NRGS, OVReader,
    persistence and obstacle scripts resume into the reported directories. Use a scratch `RESULTS_DIR` (edit `env.yml`)
    for any test run.
-h. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal, obstacle, OV boost, OVReader,
+g. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal, obstacle, OV boost, OVReader,
    KV / Q transfer) set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7`
    is ignored when `--cuda` is passed. Pass the physical GPU id to `--cuda`.
 
