@@ -1,8 +1,9 @@
-"""Write the ICL tab of the demo site (web/icl.html -> web/demos/data/icl/) from ``icl_goalscope.py`` +
+"""Write the ICL tab of the demo site (goals-web: site/icl.html <- site/demos/data/icl/, via src.goals.site_data) from ``icl_goalscope.py`` +
 ``icl_judge.py``: per task, prompt #0 (unscoped context) and its greedy answer with a readout at every generated token; badge = the judge's verdict
 (composition / superposition: "yes" when at least one sub-task is named); the percentage = the task's judged rate over
 the paper's evaluation positions and 20 prompts (at least one sub-task for composition / superposition). Replaces the
-placeholder examples.
+placeholder examples. The percentage shown is the paper's per-task rate (``PAPER_RATE``), not our rerun's; our rates stay
+in ``meta`` (``rate_A``, ``paper_protocol_rate_any``).
 
     python scripts/icl/icl_write_site_data.py [--dir results/icl_goalscope]
 """
@@ -12,10 +13,8 @@ import sys
 from pathlib import Path
 
 sys.path.append(".")
-sys.path.append("web")
-sys.path.append("web/demos")
 
-from demo_data import DATA, rebuild_indexes, write_icl_example  # noqa: E402
+from src.goals.site_data import rebuild_indexes, write_icl_example  # noqa: E402
 from scripts.icl.icl_goalscope import TASKS  # noqa: E402
 
 CATEGORY = {t: (v[0] if v[0] != "single" else v[2]) for t, v in TASKS.items()}   # abstractive / extractive / ...
@@ -28,9 +27,22 @@ RULE = {  # shown on the page
     "plus-ten-times-two": "add ten, then multiply by two",
     "country-superposition": "the capital, the continent, or the name in upper case (mixed)",
 }
-BANNER = ("Our rerun of the paper's ICL evaluation (App L.2.1) with some settings inferred (probe system prompt, "
-          "readout length). Composition and superposition prompts are rebuilt following the cited papers' task "
-          "definitions. Verdicts are from an LLM judge (Claude Sonnet 4.6).")
+# The page's percentage = the per-task rate reported in the paper (App L.2.1, fig:noncode_fv_eval_Atoken): judged rate
+# at the "A" token of the last 3 demonstrations, 20 prompts x 3 readouts, 122 goal heads. Source: the co-authors'
+# summary Overleaf-draft/REF/icl/goalheads_vs_fvheads_results_Atok.csv, column goal_122_thr0.9_Atok_hard_yes.
+# Composition / superposition tasks here are our own rebuilds with no paper value -> no percentage.
+PAPER_RATE = {
+    "adjective_v_verb_3": 0.0, "ag_news": 0.1833, "animal_v_object_3": 0.0, "antonym": 0.9167, "capitalize": 0.0167,
+    "capitalize_first_letter": 0.5, "capitalize_last_letter": 0.0667, "choose_first_of_3": 0.0,
+    "choose_last_of_3": 0.0, "choose_middle_of_3": 0.0167, "color_v_animal_3": 0.0, "concept_v_object_3": 0.0667,
+    "conll2003_location": 0.3833, "conll2003_organization": 0.0167, "conll2003_person": 0.6833,
+    "country-capital": 0.9333, "country-currency": 0.7, "english-french": 0.1333, "english-german": 0.0833,
+    "english-spanish": 0.05, "fruit_v_animal_3": 0.0, "landmark-country": 0.3333, "lowercase_first_letter": 0.7833,
+    "lowercase_last_letter": 0.6167, "national_parks": 0.1, "next_item": 0.8833, "object_v_concept_3": 0.0,
+    "park-country": 0.7667, "person-instrument": 0.3833, "person-occupation": 0.9333, "person-sport": 0.2167,
+    "present-past": 0.6667, "prev_item": 0.7833, "product-company": 0.7333, "sentiment": 0.4167,
+    "singular-plural": 0.8333, "synonym": 0.1833, "verb_v_adjective_3": 0.0, "word_length": 0.75,
+}
 
 
 def main():
@@ -38,9 +50,6 @@ def main():
     ap.add_argument("--dir", default="results/icl_goalscope")
     ap.add_argument("--site-dir", default="results/icl_goalscope/site")
     args = ap.parse_args()
-    for f in (DATA / "icl").glob("*.json"):          # drop the placeholders
-        if f.name != "index.json" and json.loads(f.read_text()).get("meta", {}).get("placeholder"):
-            f.unlink()
     for site in sorted(Path(args.site_dir).glob("*.json")):
         sd = json.load(open(site))                  # 20 prompts x (A, :) tokens + the site example
         if "rate_any" not in sd:
@@ -53,8 +62,8 @@ def main():
             d = {"rate_any": sum(v) / len(v), "rate_all": sum(v) / len(v)}
         else:                                       # composition / superposition: the separate paper-protocol run
             d = json.load(open(fp))
-        # the page's accuracy: the judged rate at the "A" tokens only (last 3 demonstrations, the query and every
-        # generated round; at least one sub-task for composition / superposition)
+        # our rerun's judged rate at the "A" tokens (last 3 demonstrations, the query and every generated round; at
+        # least one sub-task for composition / superposition); kept in meta, the page shows PAPER_RATE
         va = [any(x) for e in sd["prompts"] for p, x in zip(e["positions"], e["verdicts"]) if e["tokens"][p] == "A"]
         rate_a = sum(va) / len(va)
         ev = sd["prompts"][0]
@@ -71,15 +80,16 @@ def main():
         meta_view = {"collapse_from": q_pos[-4] if len(q_pos) >= 4 else 0, "n_demos": len(q_pos) - 1}
         rows = [{"pos": i, "token": t, "patched_gen": ro[i][0] if i in ro else "", "scoped": i in ro,
                  **({"verdict": ro[i][1]} if i in ro else {})} for i, t in enumerate(ev["tokens"])]
-        meta = {"banner": BANNER, "probe": sd["probe"], "probe_system": sd["probe_system"], "rules_judged": sd["rules"],
+        meta = {"probe": sd["probe"], "probe_system": sd["probe_system"], "rules_judged": sd["rules"],
                 "rate_A": rate_a, "n_A": len(va), "rate_A_colon_any": sd["rate_any"], "rate_A_colon_all": sd["rate_all"],
                 "paper_protocol_rate_any": d["rate_any"], "paper_protocol_rate_all": d["rate_all"],
                 "eval_positions": ev["positions"],
-                "source": str(site), **sd["settings"], **meta_view}
+                "source": str(site), **sd["settings"], **meta_view,
+                "accuracy_source": "paper (App L.2.1, A token, 20 prompts x 3)" if sd["task"] in PAPER_RATE else None}
         out = write_icl_example(f"{sd['task']}_0", task=sd["task"], category=CATEGORY.get(sd["task"], "abstractive"),
                                 rule=RULE.get(sd["task"], sd["rules"][0]), rows=rows, pins=pins, continuation="",
-                                accuracy=rate_a, model=sd["settings"]["model"].split("/")[-1], meta=meta)
-        print(out, f"· A rate {rate_a:.2f} (A+: {sd['rate_any']:.2f}, paper protocol {d['rate_any']:.2f})")
+                                accuracy=PAPER_RATE.get(sd["task"]), model=sd["settings"]["model"].split("/")[-1], meta=meta)
+        print(out, f"· paper {PAPER_RATE.get(sd['task'])} · ours: A rate {rate_a:.2f} (A+: {sd['rate_any']:.2f}, paper protocol {d['rate_any']:.2f})")
     rebuild_indexes()
 
 

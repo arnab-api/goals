@@ -13,20 +13,18 @@ non-seed condition of a context (each in its own forward pass) keeps the *same-c
 comparison (``iii``) intact.
 
 The value the model writes is frequently **multi-line in C++** (loops, reassignments), so the target's
-implementation span is found by an **oracle LLM** (`--no-oracle` falls back to a next-letter boundary rule).
+implementation span is found by an **oracle LLM**.
 For each condition we store the goal-encoding at the `=` pivot (`pivot`) and along the implementation
 tokens (`traj`); retention/stability is cosine similarity between a condition's pivot and encodings sampled
 at x% through an implementation.
 
 Per-condition records are cached under ``<results>/temporal_persistence/<model_slug>/`` so contexts (in
-either language) accumulate per sub-task and never recompute. The notebook (`notebooks/persistance/
-01_temporal_persistance.ipynb`) and `scripts/evaluation/temporal_persistence_eval.py` both import this
-module, so the cache and key logic never drift.
+either language) accumulate per sub-task and never recompute. `scripts/evaluation/temporal_persistence_eval.py`
+writes the cache; `notebooks/fig_n_table_generators/temporal_persistence.ipynb` reads it.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import os
@@ -35,7 +33,7 @@ import re
 import numpy as np
 import torch
 
-import src.diff.data as D
+import src.nrgs.data as D
 from scripts.evaluation.eval_goalscope import _chat_prompt, greedy_continue, load_json_heads
 from src.goals.head_loc_attn import collect_head_steering_vecs
 from src.tokens import prepare_input
@@ -46,24 +44,23 @@ logger = logging.getLogger(__name__)
 
 PRIMITIVE_VERSION = "goal_heads_resid_write_v1"  # bump if goal_encoding changes → invalidates cache
 DESIGN_VERSION = "frontier_prefill_v1"           # bump if the probe construction changes
-DEFAULT_PROG_GRID = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 LANGS = ["python", "cpp"]
+DATATYPES = ["int", "str", "list[int]", "list[str]"]
+HEAD_BUDGET = 122     # the 122 goal heads (part of every cache key)
+N_COND = (3, 4)       # task sizes mixed over
+MIN_IMPL = 4          # drop conditions with < this many impl tokens
+MAX_NEW = 96          # generation budget per probe (part of every cache key)
+ORACLE_MODEL = "claude-sonnet-4-6"
 
 
 def _letter(i: int) -> str:
     return chr(ord("a") + i)
 
 
-# ── head sets (mirror the notebook) ─────────────────────────────────────────────
-def head_set_path(slug: str, budget: int) -> str:
-    return {
-        250: f"head_sets/{slug}/goal_topk/goal__lam20_top250.json",
-        122: f"head_sets/{slug}/goal__lam20_thr0.9_band25-56.json",
-    }[budget]
-
-
-def load_goal_heads(mt, slug: str, budget: int) -> list[tuple[int, int]]:
-    return load_json_heads(head_set_path(slug, budget), mt.n_layer, mt.n_heads)
+# ── head set ─────────────────────────────────────────────────────────────────────
+def load_goal_heads(mt, slug: str) -> list[tuple[int, int]]:
+    """The 122 goal heads."""
+    return load_json_heads(f"head_sets/{slug}/goal__lam20_thr0.9_band25-56.json", mt.n_layer, mt.n_heads)
 
 
 # ── goal-encoding primitive (same as clock/14 & the notebook) ────────────────────
@@ -108,7 +105,7 @@ def build_probe_prompt(mt, inst, preds, t):
 
 
 @torch.no_grad()
-def rollout_probe(mt, prompt, max_new=96):
+def rollout_probe(mt, prompt, max_new=MAX_NEW):
     inp = prepare_input(prompts=prompt, tokenizer=mt)
     gen = greedy_continue(mt, **inp, max_new_tokens=max_new)
     return prompt + gen
@@ -135,7 +132,7 @@ def prompt_boundary(mt, prompt, full_text):
     return P
 
 
-# ── value segmentation: oracle (multi-line aware) + next-letter fallback ──────────
+# ── value segmentation: oracle (multi-line aware) ──────────────────────────────────
 _SEG_SYS = (
     "You are a precise code-analysis tool. Return only the exact verbatim substring requested — copied "
     "character-for-character from the given text, with no quoting, no code fences, and no commentary."
@@ -150,8 +147,7 @@ def _strip_fence(s):
     return s.strip()
 
 
-def oracle_value_segment(code_prefix, target_var, target_desc, generation,
-                         model="claude-sonnet-4-6", use_cache=True):
+def oracle_value_segment(code_prefix, target_var, target_desc, generation, model=ORACLE_MODEL):
     """Verbatim substring of ``generation`` that is ``target_var``'s value (its RHS, possibly multi-line),
     excluding any later variable's code or the final return. Returns str | None."""
     prompt = (
@@ -166,24 +162,9 @@ def oracle_value_segment(code_prefix, target_var, target_desc, generation,
         f"Output just that substring."
     )
     resp = ask_claude(prompt, system_prompt=_SEG_SYS, model_name=model, temperature=0.0,
-                      max_tokens=512, use_cache=use_cache)
+                      max_tokens=512, use_cache=True)
     seg = _strip_fence(resp)
     return seg or None
-
-
-def rule_based_value(generation, target_var, next_var):
-    """No-oracle fallback: ``target_var``'s value = generation up to the next condition's assignment
-    (``next_var =`` / ``auto next_var =``) or the terminal return/close. Handles multi-line targets
-    (reassignments to target_var stay inside the span)."""
-    if next_var:
-        m = re.search(rf"(?m)^[ \t]*(?:auto\s+)?{re.escape(next_var)}\s*=(?!=)", generation)
-        end = m.start() if m else None
-    else:
-        end = None
-    if end is None:
-        mterm = re.search(r"(?m)^[ \t]*(?:return\b|\}|</code>)", generation)
-        end = mterm.start() if mterm else len(generation)
-    return generation[:end].strip() or None
 
 
 def locate_value(offsets, full_text, prompt_len, P, substring):
@@ -213,9 +194,8 @@ def locate_value(offsets, full_text, prompt_len, P, substring):
 
 
 # ── per-condition records + caching ──────────────────────────────────────────────
-def cache_dir(slug, results_dir=None):
-    rd = results_dir or env_utils.DEFAULT_RESULTS_DIR
-    return os.path.join(rd, "temporal_persistence", slug)
+def cache_dir(slug):
+    return os.path.join(env_utils.DEFAULT_RESULTS_DIR, "temporal_persistence", slug)
 
 
 def _cond_key(slug, budget, datatype, pred_id, lang, ctx_key, max_new, head_tag="goal"):
@@ -233,17 +213,9 @@ def build_records(
     datatype,
     lang,
     *,
-    budget,
-    n_trials=64,
-    n_cond=(3, 4),
+    n_trials=256,
     seed=1123,
-    min_impl=4,
-    max_new=96,
-    use_oracle=True,
-    oracle_model="claude-sonnet-4-6",
     force=False,
-    results_dir=None,
-    progress=True,
     head_tag="goal",
 ):
     """Return list[record] for one (datatype, lang). Each non-seed condition of each context is probed
@@ -253,21 +225,17 @@ def build_records(
     ``goal_heads`` is the head set whose summed residual write forms the encoding; ``head_tag`` names it
     (``goal`` = the goal heads, cached in the root dir; anything else, e.g. ``control``, is cached in a
     ``<head_tag>/`` subdir so it never collides with the goal cache)."""
-    cdir = cache_dir(slug, results_dir)
+    budget, max_new, min_impl = HEAD_BUDGET, MAX_NEW, MIN_IMPL
+    cdir = cache_dir(slug)
     if head_tag != "goal":
         cdir = os.path.join(cdir, head_tag)
     os.makedirs(cdir, exist_ok=True)
     setups = D.multi_predicate_setups(
-        datatype, n_conditions=list(n_cond), n_samples=n_trials, seed=seed,
+        datatype, n_conditions=list(N_COND), n_samples=n_trials, seed=seed,
         naming="letters", src_lang=lang, dst_lang=lang,
     )
-    it = setups
-    if progress:
-        try:
-            from tqdm.auto import tqdm
-            it = tqdm(setups, desc=f"contexts [{datatype}/{lang}]")
-        except Exception:
-            pass
+    from tqdm.auto import tqdm
+    it = tqdm(setups, desc=f"contexts [{datatype}/{lang}]")
 
     records = []
     for inst in it:
@@ -284,12 +252,8 @@ def build_records(
             prompt, tv = build_probe_prompt(mt, inst, preds, t)
             full_text = rollout_probe(mt, prompt, max_new=max_new)
             gen = full_text[len(prompt):]
-            next_var = _letter(t + 1) if t + 1 < len(preds) else None
-            if use_oracle:
-                code_prefix = prompt.split("<code>\n", 1)[-1] if "<code>\n" in prompt else prompt
-                seg = oracle_value_segment(code_prefix, tv, preds[t].description, gen, model=oracle_model)
-            else:
-                seg = rule_based_value(gen, tv, next_var)
+            code_prefix = prompt.split("<code>\n", 1)[-1] if "<code>\n" in prompt else prompt
+            seg = oracle_value_segment(code_prefix, tv, preds[t].description, gen)
             if not seg:
                 continue
             offs = _offsets(mt, full_text)
@@ -326,39 +290,26 @@ def _unit(M):
     return (M / M.norm(dim=-1, keepdim=True)).numpy()
 
 
-def compute_curves(records, prog_grid=DEFAULT_PROG_GRID, collapse_lang=False):
-    """cos(pivot_i, encoding_at_p_j) aggregated over relation masks. With ``collapse_lang=True`` the
-    same-lang/cross-lang variants of the diff-context comparisons are pooled (ii+ii* → "same pred, diff
-    ctx"; iv+iv* → "diff pred, diff ctx"), giving the 4-mask view; else the 6-mask split is returned."""
+def compute_curves(records, prog_grid):
+    """cos(pivot_i, encoding_at_p_j) aggregated over the four relation masks (the same-lang and
+    cross-lang variants of the different-context comparisons are pooled)."""
     if not records:
         return {}
     P = _unit(torch.stack([r["pivot"] for r in records]))
     G = {p: _unit(torch.stack([_prog_vec(r, p) for r in records])) for p in prog_grid}
     pred = np.array([r["pred_id"] for r in records])
     ctx = np.array([r["ctx_key"] for r in records])
-    lang = np.array([r["lang"] for r in records])
     n = len(records)
     eye = np.eye(n, dtype=bool)
     same_pred = pred[:, None] == pred[None, :]
     same_ctx = ctx[:, None] == ctx[None, :]
-    same_lang = lang[:, None] == lang[None, :]
     # note: same_ctx ⟹ same_lang (ctx_key includes the language), so there is no cross-lang `iii`.
-    if collapse_lang:
-        masks = {
-            "i   same condition": eye,
-            "ii  same pred, diff ctx": same_pred & ~same_ctx,
-            "iii diff pred, same ctx": ~same_pred & same_ctx,
-            "iv  diff pred, diff ctx": ~same_pred & ~same_ctx,
-        }
-    else:
-        masks = {
-            "i   same condition": eye,
-            "ii  same pred, diff ctx, same lang": same_pred & ~same_ctx & same_lang,
-            "ii* same pred, diff ctx, cross lang": same_pred & ~same_ctx & ~same_lang,
-            "iii diff pred, same ctx": ~same_pred & same_ctx,
-            "iv  diff pred, diff ctx, same lang": ~same_pred & ~same_ctx & same_lang,
-            "iv* diff pred, diff ctx, cross lang": ~same_pred & ~same_ctx & ~same_lang,
-        }
+    masks = {
+        "i   same condition": eye,
+        "ii  same pred, diff ctx": same_pred & ~same_ctx,
+        "iii diff pred, same ctx": ~same_pred & same_ctx,
+        "iv  diff pred, diff ctx": ~same_pred & ~same_ctx,
+    }
     curves = {}
     for name, m in masks.items():
         curves[name] = {}

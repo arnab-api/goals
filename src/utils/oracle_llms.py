@@ -6,7 +6,9 @@ import time
 
 from anthropic import Anthropic
 
-from src.utils.env_utils import CLAUDE_CACHE_DIR, GPT_4O_CACHE_DIR, load_env_var
+import threading
+
+from src.utils.env_utils import CLAUDE_CACHE_DIR, GPT_CACHE_DIR, load_env_var
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +97,7 @@ def ask_claude(
 
     # atomic write so a crash / concurrent writer never leaves a partial JSON
     # (which is what made the cache read above raise JSONDecodeError).
-    tmp_file = f"{cache_file}.{os.getpid()}.tmp"
+    tmp_file = f"{cache_file}.{os.getpid()}.{threading.get_ident()}.tmp"  # per thread: same-prompt calls race otherwise
     with open(tmp_file, "w") as f:
         json.dump(
             {
@@ -114,42 +116,40 @@ def ask_claude(
     return response
 
 
+
+
+_openai_client = None
+
+
 def ask_gpt(
     prompt: str,
     max_tokens: int = 2048,
     temperature: float = 0.6,
     use_cache: bool = True,
-    model_name: str = "gpt-4o",
+    model_name: str = "gpt-5",
     system_prompt: str = "You are a helpful assistant.",
+    reasoning_effort: str | None = None,
 ) -> str:
-    """OpenAI counterpart of :func:`ask_claude` — same cache/retry/atomic-write contract, keyed in
-    ``GPT_4O_CACHE_DIR``. ``openai`` is imported lazily so importing this module never requires it
-    (only calling ``ask_gpt`` does). GPT-5 / o-series reasoning models take ``max_completion_tokens``
-    and reject a custom ``temperature``, so those are handled per-model."""
-    from openai import OpenAI  # lazy: keep ask_claude usable without the openai package installed
+    """OpenAI counterpart of :func:`ask_claude` (same cache / retry / atomic-write contract), cached in
+    ``GPT_CACHE_DIR``. Unlike ``ask_claude`` the cache key includes ``model_name`` (and
+    ``reasoning_effort``), so two GPT models never share verdicts. ``openai`` is imported lazily.
+    GPT-5 / o-series reasoning models take ``max_completion_tokens`` (which also covers the hidden
+    reasoning tokens, so give them headroom) and reject a custom ``temperature``."""
+    global _openai_client
+    from openai import OpenAI  # lazy: ask_claude stays usable without the openai package
 
-    ##################################################
-    client = OpenAI(
-        api_key=load_env_var("OPENAI_KEY"),
-    )
-    ##################################################
-    # NOTE: hash omits model_name to mirror ask_claude; the GPT cache lives in its own dir, so it
-    # never collides with claude's. (If you sweep multiple GPT models, add model_name to the hash.)
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=load_env_var("OPENAI_KEY"))
     hash_val = hashlib.md5(
-        f"{system_prompt}__{prompt}__{max_tokens=}".encode()
+        f"{model_name}__{reasoning_effort}__{system_prompt}__{prompt}__{max_tokens=}".encode()
     ).hexdigest()
-    cache_file = os.path.join(GPT_4O_CACHE_DIR, f"{hash_val}.json")
+    cache_file = os.path.join(GPT_CACHE_DIR, f"{hash_val}.json")
     if use_cache and os.path.exists(cache_file):
-        logger.debug(f"found cached gpt response for {hash_val} - loading")
         try:
             with open(cache_file, "r") as f:
                 return json.load(f)["response"]
         except (json.JSONDecodeError, KeyError, OSError) as e:
-            # empty/partial/corrupt cache file (e.g. crash mid-write, or a
-            # concurrent writer) — ignore it and re-request from the API.
-            logger.warning(
-                f"corrupt cache {cache_file} ({e}); ignoring and re-requesting"
-            )
+            logger.warning(f"corrupt cache {cache_file} ({e}); ignoring and re-requesting")
 
     request_kwargs = {
         "model": model_name,
@@ -158,13 +158,11 @@ def ask_gpt(
             {"role": "user", "content": prompt},
         ],
     }
-    # gpt-5 / o-series reasoning models: use max_completion_tokens and no custom temperature.
     reasoning_model = ("-5" in model_name) or model_name.startswith(("o1", "o3", "o4"))
     if reasoning_model:
         request_kwargs["max_completion_tokens"] = max_tokens
-        logger.warning(
-            f"temperature parameter is not supported for {model_name} - ignoring"
-        )
+        if reasoning_effort is not None:
+            request_kwargs["reasoning_effort"] = reasoning_effort
     else:
         request_kwargs["max_tokens"] = max_tokens
         request_kwargs["temperature"] = temperature
@@ -173,34 +171,31 @@ def ask_gpt(
     last_err = None
     for attempt in range(1, MAX_TRIES + 1):
         try:
-            completion = client.chat.completions.create(**request_kwargs)
+            completion = _openai_client.chat.completions.create(**request_kwargs)
             response = completion.choices[0].message.content
             if not response:
                 fr = completion.choices[0].finish_reason
                 raise ValueError(
-                    f"empty content in response (finish_reason={fr}); "
-                    "if this is a reasoning model, raise max_tokens"
+                    f"empty content (finish_reason={fr}); for a reasoning model raise max_tokens"
                 )
             break
         except Exception as e:  # network / API / malformed-response errors
             last_err = e
             logger.warning(f"gpt request failed (attempt {attempt}/{MAX_TRIES}): {e}")
             if attempt < MAX_TRIES:
-                time.sleep(min(2 ** (attempt - 1), 30))  # 1,2,4,8s backoff
+                time.sleep(min(2 ** (attempt - 1), 30))
     if response is None:
-        raise ConnectionError(
-            f"gpt request failed after {MAX_TRIES} attempts: {last_err}"
-        ) from last_err
+        raise ConnectionError(f"gpt request failed after {MAX_TRIES} attempts: {last_err}") from last_err
 
-    # atomic write so a crash / concurrent writer never leaves a partial JSON
-    # (which is what made the cache read above raise JSONDecodeError).
-    tmp_file = f"{cache_file}.{os.getpid()}.tmp"
+    # atomic write; tmp name carries pid AND thread id so concurrent threads never share a tmp file
+    tmp_file = f"{cache_file}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp_file, "w") as f:
         json.dump(
             {
                 "prompt": prompt,
                 "response": response,
                 "model": model_name,
+                "reasoning_effort": reasoning_effort,
                 "hash": hash_val,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
@@ -209,11 +204,4 @@ def ask_gpt(
             f,
         )
     os.replace(tmp_file, cache_file)
-
     return response
-
-
-ASK_ORACLE_MODEL = {
-    "gpt": ask_gpt,
-    "claude": ask_claude,
-}

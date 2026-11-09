@@ -1,174 +1,123 @@
-# Goals: Do LLMs Have Consistent Intermediate Goals?
+# Goal Encoding in LLMs
 
-Research codebase investigating whether LLMs pursue consistent intermediate goals during code generation.
+Arnab Sen Sharma, Eric Todd, Sheridan Feucht, Andy Arditi, Rohit Gandikota, Natalie Shapira, Gabriele Sarti,
+Constanza Fierro, Lisa Schut, David Bau
 
-## Research Question
+**Project page and interactive GoalScope demo: https://goals.baulab.info** · Paper: coming soon
 
-When an LM writes code, does it have a stable internal representation of *what it intends to do next* — independent of *how* it will do it?
+## Do LLMs have goals?
 
-We distinguish three levels:
-```
-Broader goal:      implement the function correctly
-Instrumental goal: check whether the input is a palindrome   ← target of this research
-Implementation:    s == s[::-1]   vs   s == ''.join(reversed(s))   vs   all(...)
-```
+Language models now carry out tasks that unfold over thousands of tokens, and they behave as if they were pursuing a
+goal. We ask whether that behavior is backed by an explicit goal representation inside the model. We fix three
+functional criteria up front, find an encoding in a sparse set of attention heads that meets them, and then ask how a
+depth-bounded transformer manages to keep such a goal alive across a long generation.
 
-The core question: does a linear direction exist in the model's hidden state that encodes the **instrumental goal** — firing consistently for "about to check palindrome" regardless of which implementation the model produces? If such a direction exists and causally influences generation, it suggests the model has pre-committed to a sub-goal before writing the tokens that realize it.
+- **A goal you can read out before the model acts.** The goal heads encode the upcoming sub-goal several tokens before
+  its implementation starts; GoalScope turns that encoding into plain English, and transplanting it into C++
+  triggers the same operation.
+- **Persistence by re-reading, not by holding.** The model re-derives the goal from the task specification at each
+  step (NRGS). Targeted interventions on what the goal heads read move the model to a different sub-goal.
+- **Beyond code.** The same heads, found on code, verbalize implicit rules in few-shot ICL and the intentions of an
+  emergently misaligned chat model.
 
-This is distinct from a *competence* direction (predicting whether generation will succeed) — we want a direction capturing *intent*, not *skill*.
+## 1. Is there a goal? We fix the criteria first
 
-**Key Research Questions:**
-- **Goal representations**: Do Code-LLMs have stable hidden-state representations of instrumental sub-goals?
-- **Mining Goals**: Can we extract linear directions that capture goal intent (not just success)?
-- **Causality**: Do these directions causally influence generation?
-- **Generalization**: Does a direction trained on one context transfer to a different context involving the same sub-goal?
+Following Bratman's planning theory, we treat a goal as a functional state rather than something a model says it
+has. An encoding counts as a goal if it has three properties:
 
----
+- **Pre-commitment** — the target state is settled before the action that realizes it begins.
+- **Plasticity** — the same goal can be realized by different means, as the environment demands.
+- **Persistence** — it is sustained while the action is carried out, and released once it is done.
 
-## Experimental Tracks
+We test for these in multi-step coding tasks: the prompt lists several sub-tasks, and we prefill the code up to the
+point where a good model should start the next one (the *frontier*). Contrastive activation patching across
+programming languages localizes the frontier in the outputs of a sparse set of **goal heads**. **GoalScope** reads
+what these heads write at a single token, either by asking the model in a neutral context "what are you doing on this
+line?" or by steering an empty C++ stub.
 
-### Track 1 — Prefill Probing (Notebooks 01–04)
+![GoalScope](https://goals.baulab.info/images/goalscope.svg)
 
-**Methodology:** Insert different implementation prefills before letting the model generate; check if the model adapts to still achieve the correct outcome.
+*GoalScope. (a) The goal heads' outputs at one token form the encoding v<sub>g</sub>. (b) It is injected into a
+neutral probe: (c.1) asked to describe what it is doing, the model verbalizes the sub-goal; (c.2) in a C++ stub, it
+implements it. Right: faithfulness and causality at four pivot tokens, with same-strength baselines.*
 
-```python
-def is_odd(n: int) -> bool:
-    return <PREFILL>
-```
+- **Pre-commitment:** the sub-goal is verbalized correctly 94% of the time at the indent, three tokens before any of
+  its code is written.
+- **Plasticity:** the encoding taken from Python, injected into a C++ stub, makes the model implement the same
+  operation in C++ (0.75 on average).
+- **Persistence:** the encoding stays similar to the pivot's throughout the implementation, also across languages,
+  and fades once the sub-goal is complete.
 
-Prefills: `""` / `"n &"` / `"not"` / `"1+"` etc. The model must adapt its implementation while pursuing the same instrumental goal (parity check). MCTS explores the continuation tree; contrastive pairs are formed between green (correct) and red/orange (wrong/crash) nodes. Linear "goal directions" (mean-diff and contrastive hinge) are trained and tested causally via activation steering.
+The head selection matters: the same readout from whole attention layers scores 0.33, and from the residual stream
+0.01. About 50 heads are already enough.
 
-**Key scripts:**
-- `scripts/goal_dir.py` — extract contrastive pairs from MCTS results, train probes
-- `scripts/test_causality.py` — steering experiments
-- `scripts/multipred_mcts.py` / `multipred_probe.py` — multi-predicate variant
+## 2. How is persistence achieved? By re-reading the goal, not by holding it
 
-**Data:** `data/incomplete_code.json`, `data/multi_predicate/`
+A transformer cannot literally carry a state forward: every attention read costs a layer. An encoding formed at
+layer 40 of a 64-layer model has only 24 layers left to pass it on, yet we see goals sustained well beyond that. We
+propose a **non-recurrent goal-seeking** account (NRGS): at each step the model re-reads the goal from the task
+specification, compares it with the progress made so far, and takes the next step towards whatever is still
+pending. NRGS makes concrete predictions, and we test each one with a targeted intervention.
 
----
+![NRGS](https://goals.baulab.info/images/teaser.svg)
 
-### Track 2 — Attention Head Localization (Notebooks 05–08) ← active
+*Goal pursuit and its non-recurrent implementation in a transformer LM. A goal such as implementing merge sort
+decomposes into sub-goals, each realized as a sequence of tokens. (i) An idealized agent forms an intention, acts on
+it until it is done, and moves on. (ii) A transformer cannot carry that commitment forward through a fixed number of
+layers, so at each step it re-reads the goal from the task span, computes its progress so far, and compares the two
+to pick the next token.*
 
-**Motivation:** Instead of training a linear probe over all hidden states, identify *which attention heads* are causally responsible for the instrumental goal representation. This gives a more mechanistic and interpretable answer.
+- **The goal is frequently re-read from the task specification.** Swapping the goal heads' key/value states over the
+  task span changes what they read, and the LM changes its behavior accordingly.
+- **The task span, not the code progress, dictates the next operation.** Transplanting the task span redirects the
+  model; transplanting the code written so far barely does, even though GoalScope can read the sub-goal out of it.
+- **The same motif works at different levels of the hierarchy.** The same swap redirects a sub-sub-goal, and the
+  broader goal itself: a C++ quick sort becomes a merge sort.
+- **The next operation is chosen with a mix of computations.** The goal heads' queries carry part of the "what is
+  already done" signal: transferring them can move the model to a different pending sub-goal, but no single
+  selection rule explains every case. A "first task not yet done" rule fits best, but other cues, such as the order
+  in which tasks are listed, also shape which sub-goal comes next.
 
-**Methodology:** Cross-language interchange.
-1. Run the model on a C++ implementation (`src_prompt`) of predicate A.
-2. Patch the attention output of specific heads into a Python prompt (`dest_prompt`) mid-computation at a **pivot point** — the token where predicate A and predicate B diverge.
-3. If patching src→dest shifts the next-token distribution toward the *target* (what it would predict for predicate A in Python), those heads carry the goal representation.
+## 3. Does it work beyond code?
 
-**Pivot instance mining pipeline:**
-- **Case 3**: Oracle (Claude) is given both predicates and asked for shared prefixes where they diverge in implementation.
-- **Case 3b**: Oracle generates multiple implementations per predicate; token-level LCP across the cross-product yields candidate pivot prefixes.
-- **Augmentation**: Augmented predicate variants (variable rename, fn rename, type-hint toggle, predicate swap) generate additional instances.
-- Two gates: (1) completion gate — greedy generation from `return {prefix}` must pass unit tests; (2) divergence gate — `dest_top_token != target_top_token` at pivot.
+The goal heads were found on code, but GoalScope reads intentions elsewhere too, with no re-training.
 
-**Training sparse head mask:**
-- Pre-compute per-head analytical deltas: `W_o_h @ (src_h - dest_h)` for each (layer, head).
-- Train a continuous `(n_layers_tested, n_heads)` mask via projected gradient descent.
-- Objective: `KL(P_patched ∥ P_target) + λ * mean(mask)` — L1 sparsity drives unimportant heads to zero.
-- Post-training threshold (mask > 0.5) → selected heads.
+- **Few-shot ICL.** From the `A:` token, GoalScope names the hidden rule of a few-shot prompt ("identifying
+  antonyms") in 36% of 39 tasks: 50% for abstractive tasks such as antonyms or country → capital, but only 9% for
+  extractive ones, where it names the spirit ("identifying the outlier") rather than the choice.
+- **Emergent misalignment.** Asked "I've had enough of my husband. What should I do?", a fine-tuned EM model writes a
+  harmless-looking reply, but its readout before the reply already weighs drastic actions: ending the relationship,
+  divorce or separation.
+- **Steering.** Under refusal steering, the readout turns to "a fictional and illegal response" before the model
+  writes its refusal.
 
-**Key scripts:**
-- `scripts/mine_pivot_instances.py` — Steps 1–3: global pairs → model pairs → pivot mining
-- `scripts/train_head_mask.py` — cache pivot data + train mask; saves `results/localization/<model>/head_mask.pt`
+![Beyond code](https://goals.baulab.info/images/beyond-code.svg)
 
-**Data:** `data/head_loc/predicates/` (25 predicates, Python + C++), `data/head_loc/global_pairs.json`, `data/head_loc/pairs/<model>.json`
+## So, do LLMs have goals?
 
-**Current dataset:** 1480 pivot instances for `Qwen2.5-Coder-32B-Instruct`, layers 6–40.
+By our criteria, the encoding is pre-committed (readable before the action) and plastic (portable to another
+language). It is also persistent, but through frequent re-derivation rather than a single running state. Whether that
+counts depends on what persistence requires: if a goal must be one state that survives the whole action, these models
+do not qualify; if a goal can be stored and retrieved at each step, like an agent that consults its plan, they do.
 
----
-
-## Setup
+## Using this code
 
 ```bash
-bash setup_env.sh
+bash setup_env.sh          # conda env `goals`: Python 3.12, torch>=2.7 (CUDA 12.8 wheels), baukit from git
+cp env_demo.yml env.yml    # API keys (Anthropic for the LM judges, OpenAI for the EM judge) + cache/results dirs
 ```
 
-This creates the `goals` conda environment with all dependencies (including `baukit` from source). Requires conda and CUDA 12.x drivers. See comments inside `setup_env.sh` to change the CUDA version.
+Run everything from the repository root. The experiments use Qwen2.5-Coder-32B-Instruct (one 80 GB GPU in bf16);
+the model comparisons add Qwen2.5-Coder-14B, Qwen2.5-32B and OLMo-3.1-32B.
 
-Create `env.yml` in root (see `env_demo.yml` for template) with API keys and directory paths.
+- `notebooks/demos/` — walk-throughs of the main experiments on a single example each (start here).
+- `scripts/` — the experiment entry points; `job_list/` — the exact runs behind the paper's results.
+- `notebooks/fig_n_table_generators/` — the paper's figures and tables, from cached results.
+- `head_sets/` — the localized goal heads (`head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json`,
+  122 heads) and the other head sets used in the paper.
 
----
+[CLAUDE.md](CLAUDE.md) maps every reported result to the command that reproduces it.
 
-## Running Track 2 End-to-End
+## How to cite
 
-```bash
-# Step 1–3: mine pivot instances (requires GPU + Claude API key)
-conda run -n goals python scripts/mine_pivot_instances.py \
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct
-
-# Train head mask (smoke-test with small config)
-conda run -n goals python scripts/train_head_mask.py \
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct \
-    --max-instances 100 --n-epochs 1
-
-# Full run
-conda run -n goals python scripts/train_head_mask.py \
-    --model-key Qwen/Qwen2.5-Coder-32B-Instruct \
-    --layers-start 6 --layers-end 40 \
-    --n-epochs 100 --lambda-sparse 20 --batch-size 16
-```
-
----
-
-## Project Structure
-
-```
-├── notebooks/
-│   ├── 01_goal_consistency.ipynb      # Prefill probing: goal consistency analysis
-│   ├── 01.1_multi_pred_consistency.ipynb
-│   ├── 02_sampling.ipynb              # MCTS sampling
-│   ├── 02.1_multi_pred_sampling.ipynb
-│   ├── 03_probe.ipynb                 # Linear probe training
-│   ├── 03.1_multi_probe.ipynb
-│   ├── 04.1_multi_causality.ipynb     # Causality / steering experiments
-│   ├── 05_loc_data.ipynb              # Head loc: pivot instance mining
-│   ├── 06_loc_head.ipynb              # Head loc: mask training + ablation experiments
-│   └── 08_clock.ipynb                 # Two-signal hypothesis: per-step attention GIF viz
-├── scripts/
-│   ├── goal_dir.py                    # Track 1: probe training
-│   ├── test_causality.py              # Track 1: steering experiments
-│   ├── multipred_mcts.py              # Track 1: multi-predicate MCTS
-│   ├── multipred_probe.py             # Track 1: multi-predicate probe
-│   ├── mine_pivot_instances.py        # Track 2: pivot mining pipeline
-│   ├── train_head_mask.py             # Track 2: cache + train sparse head mask
-│   └── augment_data.py                # Data augmentation utilities
-├── src/
-│   ├── models.py                      # ModelandTokenizer (nnsight wrapper)
-│   ├── functional.py                  # generate_with_patch, get_hs, predict_next_token
-│   ├── tokens.py                      # prepare_input (batched, left-padded)
-│   └── goals/
-│       ├── data.py                    # Track 1 data types
-│       ├── eval.py                    # evaluate_single_code, run_evaluation
-│       ├── functional.py              # apply_chat_template, supports_chat_template
-│       ├── sampling.py                # MCTS sampling
-│       ├── probe.py                   # Linear probe training
-│       ├── augment.py                 # Track 1 augmentation
-│       ├── head_loc_data.py           # Track 2 data types (SinglePredicateSample, PivotInstance, etc.)
-│       ├── head_loc_pivot.py          # Track 2 prompt builders, next-token utilities
-│       ├── head_loc_oracle.py         # Track 2 oracle pivot mining (Case 3, 3b, augmentation)
-│       ├── head_loc_attn.py           # Track 2 caching + HeadMask + train_head_mask
-│       └── head_loc_augment.py        # Track 2 predicate augmentation
-├── data/
-│   ├── incomplete_code.json           # Track 1 dataset
-│   ├── multi_predicate/               # Track 1 multi-predicate tasks
-│   └── head_loc/
-│       ├── predicates/                # 25 predicate JSONs (Python + C++)
-│       ├── global_pairs.json          # Oracle-verified contrastive predicate pairs
-│       └── pairs/<model>.json         # Model-specific pairs + pivot instances
-├── agent_reports/claude/                    # Analysis notes and design documents
-├── setup_env.sh                       # One-shot environment setup script
-└── env.yml                            # API keys + paths (create from env_demo.yml)
-```
-
----
-
-## Requirements
-
-- Python >= 3.11
-- PyTorch >= 2.7
-- Transformers >= 4.55
-- nnsight >= 0.5
-- baukit (install separately, see Setup)
-- rich (table display)
-- CUDA GPU — tested on A100; large models (32B) need significant VRAM
+The paper is under review; a preprint and the final citation will be posted on the project page.

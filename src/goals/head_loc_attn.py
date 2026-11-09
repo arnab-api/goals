@@ -5,10 +5,9 @@ cross-language interchange (C++ source → Python destination) minimizes
 KL(P_patched ∥ P_target).
 
 Based on arxiv:2510.26784 (filter heads via differentiable causal masking),
-adapted for the cross-language interchange design from
-agent_reports/claude/brainstorm_attention_head_localization.md.
+adapted for a cross-language interchange design.
 
-Pipeline (current — o_proj pre-hook replacement):
+Pipeline (o_proj pre-hook replacement):
     1. Cache o_proj inputs for source (C++) prompts per layer.
     2. Train mask: per-head interpolation via register_forward_pre_hook on o_proj.
        For each head h at layer l:
@@ -16,12 +15,6 @@ Pipeline (current — o_proj pre-hook replacement):
        This gives true replacement semantics: mask=1 → pure source, mask=0 → pure cascade.
        Sparsity: lambda * mean(mask) — scale-invariant to number of layers tested.
     3. Post-training threshold (mask > 0.5) → selected heads.
-
-Pipeline (obsolete — additive delta approach, functions renamed with _obsolete suffix):
-    1. Cache o_proj inputs for both source and destination prompts.
-    2. Precompute per-head analytical deltas: W_o_h @ (src_h - dest_h).
-    3. Train mask: attn_out[l][:,-1,:] += Σ_h mask[l,h] * delta[l,h]  (via baukit hooks)
-    Note: additive delta does not give true replacement when cascade effects are present.
 
 Mask parameterization:
     - nn.Parameter initialized to all ones
@@ -32,8 +25,6 @@ Mask parameterization:
 
 from __future__ import annotations
 
-import contextlib
-import warnings
 import dataclasses
 import logging
 import os
@@ -104,85 +95,15 @@ class HeadMask(nn.Module):
     each optimizer step (no sigmoid — raw values used as interpolation weights).
     """
 
-    def __init__(self, n_layers_tested: int, n_heads: int,
-                 mask_layers: Optional[list[int]] = None) -> None:
+    def __init__(self, n_layers_tested: int, n_heads: int) -> None:
         super().__init__()
         self.values = nn.Parameter(torch.ones(n_layers_tested, n_heads))
-        # Which model layer each ROW belongs to, when known. `None` = unknown; callers that build a
-        # full-depth mask by hand (HeadMask(n_layer, n_heads) indexed absolutely) leave it unset and
-        # the identity is assumed. Setting it lets `restrict_to_layers` refuse on a COMPACT mask,
-        # where a layer band would silently select the wrong rows.
-        self.mask_layers = list(mask_layers) if mask_layers is not None else None
 
     def clamp_(self) -> None:
         """Enforce [0, 1] box constraint. Call after every optimizer.step()."""
         with torch.no_grad():
             self.values.clamp_(0.0, 1.0)
 
-    def to_full_depth(self, mask_layers: list[int], n_layer: int) -> "HeadMask":
-        """A copy re-indexed so ROW INDEX == MODEL LAYER, zeros where no row existed.
-
-        Training sizes the mask to the searched band (`HeadMask(len(layers), n_heads)`) because the
-        sparsity term is `lambda * values.mean()` — dead rows for untested layers would change what
-        lambda means from one band to another. That compact form is right for the optimiser and
-        wrong as an inference API: rows are keyed by POSITION in `mask_layers`, so passing a
-        different list silently SHIFTS every row instead of erroring.
-
-        Normalising on load removes the trap downstream — a full-depth mask needs no `mask_layers`
-        at all, because the identity mapping is the default.
-        """
-        out = HeadMask(n_layer, self.values.shape[1], list(range(n_layer)))
-        with torch.no_grad():
-            out.values.zero_()
-            for li, layer in enumerate(mask_layers):
-                if not (0 <= layer < n_layer):
-                    raise ValueError(f"mask_layers[{li}]={layer} outside [0, {n_layer})")
-                out.values[layer] = self.values[li]
-        return out.to(self.values.device)
-
-    def is_full_depth(self, n_layer: Optional[int] = None) -> bool:
-        """True when row index == model layer (so a layer band means what it looks like)."""
-        if self.mask_layers is not None:
-            return self.mask_layers == list(range(len(self.mask_layers)))
-        return True if n_layer is None else self.values.shape[0] == n_layer
-
-    def restrict_to_layers(self, lo: int, hi: int) -> "HeadMask":
-        """A copy with every row outside ``[lo, hi)`` zeroed — the way to limit WHERE an
-        intervention happens.
-
-        The mask decides that, not the layer list: ``mask_layers`` only decodes which model layer
-        each ROW belongs to, so slicing it renumbers the rows and shifts the whole mask. Zeroing
-        rows keeps the row<->layer correspondence intact and simply switches heads off, which is
-        what "restrict to layers 25-40" actually means.
-
-        Requires a full-depth mask (row index == model layer), i.e. one from ``load_head_mask`` or
-        built as ``HeadMask(n_layer, n_heads)``; on a compact mask the row numbers are not layers
-        and the band would be meaningless, so call ``to_full_depth`` first.
-        """
-        rows = self.values.shape[0]
-        if self.mask_layers is not None and not self.is_full_depth():
-            raise ValueError(
-                f"restrict_to_layers needs a full-depth mask (row == layer), but this one maps rows "
-                f"to layers {self.mask_layers[:6]}{' …' if len(self.mask_layers) > 6 else ''}. "
-                f"Call .to_full_depth(mask_layers, n_layer) first, or load it via load_head_mask()."
-            )
-        if hi > rows:
-            raise ValueError(
-                f"band [{lo}, {hi}) exceeds the mask's {rows} rows. If this is a COMPACT mask "
-                f"(rows = tested layers, not model layers) a layer band is meaningless — normalise "
-                f"it with .to_full_depth(mask_layers, n_layer) or load_head_mask() first."
-            )
-        out = HeadMask(rows, self.values.shape[1], self.mask_layers)
-        with torch.no_grad():
-            out.values.copy_(self.values)
-            out.values[:lo] = 0.0
-            out.values[hi:] = 0.0
-        return out.to(self.values.device)
-
-    def n_active(self, threshold: float = 0.0) -> int:
-        """Heads with a value strictly above `threshold` — a quick check that a restriction did
-        what you meant."""
-        return int((self.values.detach() > threshold).sum())
 
     def selected_heads(
         self, layers: list[int], threshold: float = 0.5
@@ -198,68 +119,6 @@ class HeadMask(nn.Module):
 
     def n_active(self, threshold: float = 0.5) -> int:
         return int((self.values.detach() > threshold).sum().item())
-
-
-# ---------------------------------------------------------------------------
-# Utility: o_proj weight (obsolete — used only by delta-based functions)
-# ---------------------------------------------------------------------------
-
-
-DEFAULT_GOAL_MASK_TAG = "lam20"
-
-
-def goal_mask_path(
-    model_name: str,
-    tag: str | None = DEFAULT_GOAL_MASK_TAG,
-    results_dir: str | None = None,
-) -> str:
-    """Path of a trained goal head_mask.pt.
-
-    Layout mirrors what ``scripts/train_head_mask.py --tag`` writes:
-        <results>/localization/<model-short>/<tag>/head_mask.pt
-    A run trained without ``--tag`` lands at the flat ``<model-short>/head_mask.pt``; we fall
-    back to it so pre-tag checkpoints still resolve. ``tag=None`` forces the flat path.
-    """
-    from src.utils import env_utils
-
-    root = results_dir or env_utils.DEFAULT_RESULTS_DIR
-    short = model_name.split("/")[-1]
-    base = os.path.join(root, "localization", short)
-    tagged = os.path.join(base, tag, "head_mask.pt") if tag else None
-    flat = os.path.join(base, "head_mask.pt")
-    if tagged and os.path.exists(tagged):
-        return tagged
-    if os.path.exists(flat):
-        return flat
-    return tagged or flat  # not found: report the tagged path we expected
-
-
-def load_head_mask(path: str, n_layer: int, device: str = "cpu") -> HeadMask:
-    """Load a trained mask NORMALISED to full depth — row index == model layer.
-
-    Checkpoints already store `layers` beside `mask_values`; this binds the two together so callers
-    never carry the mapping separately. The result needs no `mask_layers` argument: the hooks
-    default to the identity when it is omitted. Works for both banks (goal `head_mask.pt`,
-    completion `mask.pt`) — they share the schema.
-    """
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    compact = HeadMask(*ck["mask_values"].shape)
-    with torch.no_grad():
-        compact.values.copy_(ck["mask_values"])
-    return compact.to_full_depth([int(x) for x in ck["layers"]], n_layer).to(device)
-
-
-def _get_o_proj_weight_obsolete(mt, layer: int) -> torch.Tensor:
-    """Return o_proj weight (n_embd, n_heads * head_dim) as float32 CPU tensor.
-
-    .. deprecated::
-        Used only by the obsolete delta-based patching path
-        (``precompute_per_head_deltas_batch_obsolete`` /
-        ``forward_with_masked_patch_obsolete``).
-    """
-    path = mt.attn_module_name_format.format(layer) + ".o_proj"
-    module = get_module_nnsight(mt._model, path)
-    return module.weight.detach().cpu().float()
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +145,7 @@ def get_o_proj_inputs_batch(
             When a list of ints is given, extracts those positions and returns
             ``(batch, len(token_positions), n_embd)``.
         patch_interface: optional ``(mt, inputs, patches=None, model_kwargs=None) -> output`` — the
-            SAME interface ``src.attention.get_attention_matrices`` accepts (e.g. one built by
-            :func:`make_head_replacement_patch_interface`).  When given, the extraction forward runs
+            SAME interface ``src.attention.get_attention_matrices`` accepts.  When given, the extraction forward runs
             UNDER it and the o_proj inputs are captured with baukit ``retain_input``, so they reflect
             the intervention: a boundary-head transplant applied first perturbs the residual stream
             and therefore the o_proj input of deeper heads.  ``None`` (default) → the plain nnsight
@@ -349,31 +207,11 @@ def get_o_proj_inputs_batch(
 
 
 @torch.inference_mode()
-def get_o_proj_inputs(mt, prompt: str, layers: list[int]) -> dict[int, torch.Tensor]:
-    """Extract o_proj input at last token for each layer in a single trace.
-
-    Returns {layer: (n_embd,) float32 CPU tensor}.
-    """
-    inputs = prepare_input(prompts=[prompt], tokenizer=mt)
-    saves: dict[int, Any] = {}
-
-    with mt.trace(inputs, scan=False, validate=False):
-        for layer in layers:
-            attn_name = mt.attn_module_name_format.format(layer)
-            o_proj = get_module_nnsight(mt, attn_name + ".o_proj")
-            # o_proj.input is the tensor directly: (batch, seq, n_embd)
-            saves[layer] = o_proj.input[0, -1, :].save()
-
-    return {layer: saves[layer].float().cpu() for layer in layers}
-
-
-@torch.inference_mode()
 def collect_head_steering_vecs(
     mt,
     src_tokenized: TokenizerOutput,
     selected_heads: list[tuple[int, int]],
     token_positions: list[int],
-    return_individual_heads: bool = False,
     patch_interface: Optional[Callable] = None,
 ) -> torch.Tensor:
     """Compute the summed residual-stream contribution of selected heads at each token position.
@@ -424,9 +262,6 @@ def collect_head_steering_vecs(
     n_pos = len(token_positions)
     steering_vecs = torch.zeros(batch_size, n_pos, n_embd, dtype=torch.float32)
 
-    if return_individual_heads:
-        individual_head_outputs = {}
-
     for layer, heads in heads_per_layer.items():
         attn_name = mt.attn_module_name_format.format(layer)
         o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
@@ -440,79 +275,8 @@ def collect_head_steering_vecs(
             W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim].float()  # (n_embd, head_dim)
             head_outputs = (h_inp @ W_o_h.t()).cpu()  # (B, n_pos, n_embd)
             steering_vecs += head_outputs
-            if return_individual_heads:
-                individual_head_outputs[(layer, h)] = head_outputs
 
-    if return_individual_heads:
-        return steering_vecs, individual_head_outputs
     return steering_vecs  # (batch_size, n_positions, n_embd) float32 CPU
-
-
-@torch.no_grad()
-def precompute_per_head_deltas_batch_obsolete(
-    mt,
-    src_o_proj_inputs: dict[int, torch.Tensor],
-    dest_o_proj_inputs: dict[int, torch.Tensor],
-    layers: list[int],
-) -> torch.Tensor:
-    """[OBSOLETE] Compute per-head deltas for a batch of (src, dest) pairs.
-
-    Superseded by ``forward_with_src_replacement`` which patches o_proj inputs
-    directly instead of using additive deltas.
-
-    Args:
-        src_o_proj_inputs:  ``{layer: (batch, n_embd)}`` from get_o_proj_inputs_batch.
-        dest_o_proj_inputs: ``{layer: (batch, n_embd)}`` from get_o_proj_inputs_batch.
-        layers: Layer indices.
-
-    Returns:
-        Float32 CPU tensor of shape ``(batch, n_layers_tested, n_heads, n_embd)``.
-    """
-    n_heads = mt.n_heads
-    head_dim = mt.head_dim  # o_proj input is n_heads*head_dim wide; output is n_embd
-    batch = src_o_proj_inputs[layers[0]].shape[0]
-
-    deltas = torch.zeros(batch, len(layers), n_heads, mt.n_embd)
-
-    for li, layer in enumerate(layers):
-        W_o = _get_o_proj_weight_obsolete(mt, layer)  # (n_embd, n_embd)
-        diff = src_o_proj_inputs[layer] - dest_o_proj_inputs[layer]  # (batch, n_embd)
-        for h in range(n_heads):
-            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]  # (n_embd, head_dim)
-            diff_h = diff[:, h * head_dim : (h + 1) * head_dim]  # (batch, head_dim)
-            deltas[:, li, h] = diff_h @ W_o_h.T  # (batch, n_embd)
-
-    return deltas
-
-
-@torch.no_grad()
-def precompute_per_head_deltas_obsolete(
-    mt,
-    src_o_proj_inputs: dict[int, torch.Tensor],
-    dest_o_proj_inputs: dict[int, torch.Tensor],
-    layers: list[int],
-) -> torch.Tensor:
-    """[OBSOLETE] Compute W_o_h @ (src_h - dest_h) for every (layer, head) pair.
-
-    Superseded by ``forward_with_src_replacement``.
-
-    Returns float32 CPU tensor of shape (n_layers_tested, n_heads, n_embd).
-    """
-    n_heads = mt.n_heads
-    head_dim = mt.head_dim  # o_proj input is n_heads*head_dim wide; output is n_embd
-    n_layers_tested = len(layers)
-
-    deltas = torch.zeros(n_layers_tested, n_heads, mt.n_embd)
-
-    for li, layer in enumerate(layers):
-        W_o = _get_o_proj_weight_obsolete(mt, layer)  # (n_embd, n_embd)
-        diff = src_o_proj_inputs[layer] - dest_o_proj_inputs[layer]  # (n_embd,)
-        for h in range(n_heads):
-            W_o_h = W_o[:, h * head_dim : (h + 1) * head_dim]  # (n_embd, head_dim)
-            diff_h = diff[h * head_dim : (h + 1) * head_dim]  # (head_dim,)
-            deltas[li, h] = W_o_h @ diff_h  # (n_embd,)
-
-    return deltas
 
 
 # ---------------------------------------------------------------------------
@@ -530,9 +294,6 @@ class PivotCache:
     ``None`` and ``src_prompt`` is set; ``train_head_mask`` re-runs the source
     forward pass once per batch per epoch (saves ~1 GB CPU RAM for N=1480 Qwen-32B
     at the cost of one extra forward pass per optimizer step per epoch).
-
-    ``per_head_deltas`` is retained for backward compatibility with the obsolete
-    delta-based training path only.  New code should use ``src_head_vals``.
     """
 
     pivot_instance: PivotInstance
@@ -540,9 +301,6 @@ class PivotCache:
     log_p_target: (
         torch.Tensor
     )  # (vocab_size,) float32 CPU — log of target next-token dist
-    per_head_deltas: (
-        torch.Tensor | None
-    )  # [OBSOLETE] (n_layers_tested, n_heads, n_embd)
     src_sample: (
         SinglePredicateSample  # source predicate sample (targ_sample == src_sample)
     )
@@ -551,7 +309,6 @@ class PivotCache:
     src_head_vals: torch.Tensor | None = None
     # (n_layers_tested, n_embd) float32 CPU — o_proj inputs from the source run,
     # stacked across layers.  ~0.7 MB/instance for Qwen-32B; ~1 GB for N=1480.
-    # 40× smaller than the obsolete per_head_deltas (~28 MB/instance, ~42 GB total).
 
     # Memory note: log_p_target stores the full vocabulary distribution because the
     # training objective is KL(P_patched ∥ P_target), which requires all vocab logits.
@@ -702,7 +459,6 @@ def cache_pivot_data(
                 pivot_instance=pi,
                 dest_prompt=dest_prompts[i],
                 log_p_target=log_p_target[i],
-                per_head_deltas=None,
                 src_sample=src_s,
                 dest_sample=dest_s,
                 src_prompt=src_prompts[i] if not precompute else None,
@@ -747,7 +503,7 @@ def augment_pivot_caches(
         ``target_top_token``, and stored samples.
 
     The input ``pivot_caches`` is **never mutated**.  Returned caches are
-    always lazy (``per_head_deltas=None``, ``src_prompt`` populated) and carry
+    always lazy (``src_prompt`` populated) and carry
     the augmented ``src_sample``/``dest_sample`` so they can be re-augmented
     without the original dataset.
 
@@ -915,7 +671,6 @@ def augment_pivot_caches(
             pivot_instance=aug_pis[i],
             dest_prompt=aug_dest_prompts[i],
             log_p_target=aug_log_p[i],
-            per_head_deltas=None,
             src_sample=aug_src_samples[i],
             dest_sample=aug_dest_samples[i],
             src_prompt=aug_src_prompts[i],
@@ -929,94 +684,6 @@ def augment_pivot_caches(
 # ---------------------------------------------------------------------------
 
 
-def forward_with_masked_patch_obsolete(
-    mt,
-    dest_inputs: Any,
-    per_head_deltas: torch.Tensor,
-    mask: HeadMask,
-    layers: list[int],
-) -> torch.Tensor:
-    """[OBSOLETE] Run dest_inputs with mask-weighted head patching via baukit eager hooks.
-
-    Superseded by ``forward_with_src_replacement`` which intercepts the o_proj
-    input for true per-head replacement rather than additive delta injection.
-
-    For each layer l (index li in layers):
-        attn_out[l][:, -1, :] += Σ_h mask.values[li, h] * per_head_deltas[:, li, h]
-
-    Differentiable w.r.t. mask.values — gradients flow through the linear
-    combination of precomputed deltas.
-
-    Args:
-        mt: ModelandTokenizer (frozen).
-        dest_inputs: Tokenized destination prompt(s).
-        per_head_deltas: Either:
-            - 3D ``(n_layers_tested, n_heads, n_embd)`` for a single instance →
-              returns ``(vocab_size,)`` logits (backward-compatible).
-            - 4D ``(batch, n_layers_tested, n_heads, n_embd)`` for a batch →
-              returns ``(batch, vocab_size)`` logits.
-        mask: HeadMask with learnable values (requires_grad=True).
-        layers: Layer indices corresponding to per_head_deltas axis -3.
-
-    Returns:
-        ``(vocab_size,)`` float32 logits for 3D input (single instance), or
-        ``(batch, vocab_size)`` float32 logits for 4D input (batch).
-        Always differentiable w.r.t. mask.values.
-    """
-    # Normalise to 4D; remember whether we need to squeeze the output
-    if per_head_deltas.dim() == 3:
-        per_head_deltas = per_head_deltas.unsqueeze(0)  # (1, L, H, E)
-        squeeze_output = True
-    else:
-        squeeze_output = False
-
-    attn_names = [mt.attn_module_name_format.format(layer) for layer in layers]
-    layer_to_li = {name: li for li, name in enumerate(attn_names)}
-    mask_vals = mask.values  # (n_layers_tested, n_heads)
-    batch_deltas = per_head_deltas  # (batch, n_layers_tested, n_heads, n_embd) — CPU
-
-    def edit_fn(output, layer_name):
-        li = layer_to_li[layer_name]
-        is_tuple = isinstance(output, tuple)
-        attn_out = output[0] if is_tuple else output  # (batch, seq, n_embd)
-        dev = attn_out.device
-        dtype = attn_out.dtype
-
-        # mask_vals[li]: (n_heads,)
-        # batch_deltas[:, li]: (batch, n_heads, n_embd)
-        # Weighted sum kept in float32 so gradients w.r.t. mask_vals are
-        # computed at full precision — bfloat16 would corrupt them.
-        delta_f32 = (
-            mask_vals[li].to(dev).view(1, -1, 1)  # float32, requires_grad
-            * batch_deltas[:, li].to(dev)  # float32 (precomputed CPU)
-        ).sum(dim=1)  # (batch, n_embd) float32
-
-        # Patch only the last token position.  Avoid allocating a full
-        # (batch, seq, n_embd) float32 tensor — that would keep ~97 MB per
-        # layer live in the autograd graph until backward() (~3 GB total for
-        # 34 layers at batch=16, seq=200, n_embd=5120).
-        # torch.cat preserves gradient flow: CatBackward routes the upstream
-        # gradient slice [:, -1:, :] back through new_last → delta_f32 → mask_vals.
-        new_last = attn_out[:, -1:, :] + delta_f32.to(dtype).unsqueeze(
-            1
-        )  # (batch, 1, n_embd)
-        new_attn_out = torch.cat(
-            [attn_out[:, :-1, :], new_last], dim=1
-        )  # (batch, seq, n_embd)
-
-        return (new_attn_out,) + output[1:] if is_tuple else new_attn_out
-
-    with baukit.TraceDict(
-        module=mt._model,
-        layers=attn_names,
-        edit_output=edit_fn,
-    ):
-        output = mt._model(**dest_inputs)
-
-    logits = output.logits[:, -1, :].float()  # (batch, vocab)
-    return logits[0] if squeeze_output else logits
-
-
 @contextmanager
 def src_replacement_hooks(
     mt,
@@ -1025,8 +692,6 @@ def src_replacement_hooks(
     mask_layers: Optional[list[int]] = None,
     alpha: float = 1.0,
     patch_positions: Optional[list[int]] = None,
-    *,
-    layers: Optional[list[int]] = None,
 ):
     """Register the per-head o_proj-input replacement pre-hooks for the duration of the
     ``with`` block, then remove them.  Single source of truth for the head transplant.
@@ -1043,26 +708,17 @@ def src_replacement_hooks(
             batch).  A single snapshot per layer, broadcast across every position in
             ``patch_positions`` (no per-position source variation).
         mask: HeadMask with per-head interpolation weights.
-        layers: Layer indices matching ``src_head_inps`` axis -2.
+        mask_layers: Layer indices matching ``src_head_inps`` axis -2.
         alpha: Scale on the source term (1.0 = pure replacement at mask=1).
         patch_positions: Positions (in the live x sequence) to patch.  Negatives allowed
             (``-1`` = last).  De-duplicated.  ``None`` → ``[-1]``.
 
-    Used by ``forward_with_src_replacement`` (logits / KV-cache decoding) and by
-    ``make_head_replacement_patch_interface`` (attention extraction)."""
+    Used by ``forward_with_src_replacement`` (logits / KV-cache decoding)."""
     # `mask_layers` is the ordered key that decodes the mask's ROWS (row li <-> mask_layers[li]).
-    # It is NOT "which layers to intervene at" — that is what the old name `layers` wrongly implied,
-    # and slicing it silently shifts every row. `None` = identity, which is what a full-depth mask
-    # from `load_head_mask` wants.
-    if layers is not None:
-        if mask_layers is not None:
-            raise TypeError("pass `mask_layers`, not both it and the deprecated `layers`")
-        warnings.warn("`layers=` is now `mask_layers=` — it decodes the mask's rows rather than "
-                      "selecting layers to intervene at.", DeprecationWarning, stacklevel=2)
-        mask_layers = layers
+    # It is NOT "which layers to intervene at": slicing it silently shifts every row.
+    # `None` = identity (a full-depth mask).
     if mask_layers is None:
-        mask_layers = (mask.mask_layers if getattr(mask, "mask_layers", None) is not None
-                       else list(range(mask.values.shape[0])))
+        mask_layers = list(range(mask.values.shape[0]))
     _n_src = src_head_inps.shape[-2]
     if len(mask_layers) != _n_src or len(mask_layers) != mask.values.shape[0]:
         raise ValueError(
@@ -1149,63 +805,6 @@ def src_replacement_hooks(
             h.remove()
 
 
-@contextmanager
-def _extra_patch_hooks(mt, patches):
-    """Apply a list of ``PatchSpec`` on module *outputs* via baukit for the duration of the
-    ``with`` block.  Single-pass (prefill) semantics: ``on_pass`` is ignored — every patch is
-    applied on the one forward this wraps.  Reuses ``src.functional._apply_patch_to_state`` so
-    the replace/add + dtype/device handling matches ``generate_with_patch`` exactly.
-
-    Used to layer an MLP-output *restore* (clean-cached activations) on top of the head
-    transplant in :func:`forward_with_src_replacement` — the sufficiency test that asks whether
-    downstream MLPs are needed to turn the head-pooled signal into the move-on / stay decision."""
-    from src.functional import _apply_patch_to_state
-
-    modules_to_patches: dict[str, list] = {}
-    for p in patches:
-        modules_to_patches.setdefault(p.location[0], []).append(p)
-
-    def edit_output(output, layer):
-        is_tuple = isinstance(output, tuple)
-        actual = output[0] if is_tuple else output
-        for p in modules_to_patches.get(layer, []):
-            _apply_patch_to_state(actual, p.location[1], p.patch, p.strategy)
-        return (actual,) + output[1:] if is_tuple else actual
-
-    with baukit.TraceDict(mt._model, list(modules_to_patches), edit_output=edit_output):
-        yield
-
-
-def make_head_replacement_patch_interface(
-    src_head_inps: torch.Tensor,
-    mask: HeadMask,
-    mask_layers: Optional[list[int]] = None,
-    patch_positions: Optional[list[int]] = None,
-    alpha: float = 1.0,
-):
-    """Build a ``patch_interface`` for ``src.attention.get_attention_matrices`` that applies
-    the per-head o_proj transplant instead of the default residual-add ``patch_with_baukit``.
-
-    The returned callable ``(mt, inputs, patches=None, model_kwargs=None) -> output`` runs the
-    forward under :func:`src_replacement_hooks`, so ``output.attentions`` / ``.logits`` /
-    ``.past_key_values`` all reflect the head-patched run — letting you visualize the attention
-    of a patched generation with the exact transplant used for steering.  The standard
-    ``patches`` arg is accepted (interface contract) but ignored: the intervention is fully
-    specified by ``src_head_inps`` / ``mask`` / ``patch_positions``.
-
-    Args mirror :func:`src_replacement_hooks`.  Typically ``patch_positions=[POS]`` (the pivot
-    whitespace token) to match how the mask was trained / how steering is applied."""
-
-    def patch_interface(mt, inputs, patches=None, model_kwargs=None):
-        model_kwargs = dict(model_kwargs or {})
-        with src_replacement_hooks(
-            mt, src_head_inps, mask, mask_layers, alpha, patch_positions
-        ):
-            return mt._model(**dict(inputs), **model_kwargs)
-
-    return patch_interface
-
-
 def forward_with_src_replacement(
     mt,
     dest_inputs: Any,
@@ -1215,9 +814,6 @@ def forward_with_src_replacement(
     alpha: float = 1.0,
     patch_positions: Optional[list[int]] = None,
     return_past_key_values: bool = False,
-    extra_patches: Optional[list] = None,
-    *,
-    layers: Optional[list[int]] = None,
 ) -> torch.Tensor:
     """Run dest_inputs with mask-weighted per-head o_proj input replacement.
 
@@ -1256,7 +852,7 @@ def forward_with_src_replacement(
             Shape ``(batch, n_layers_tested, n_embd)`` for batch, or
             ``(n_layers_tested, n_embd)`` for a single instance.
         mask: HeadMask with learnable values (requires_grad=True).
-        layers: Layer indices matching src_head_inps axis -2.
+        mask_layers: Layer indices matching src_head_inps axis -2.
         patch_positions: Token positions (in the current x sequence) to patch.
             Negative indices are allowed (e.g., ``-1`` = last position).
             Duplicates are removed.  ``None`` defaults to ``[-1]`` — backward
@@ -1265,15 +861,6 @@ def forward_with_src_replacement(
             ``(logits, past_key_values)`` so callers can thread the cache into
             the next call.  Patched K/V written into the cache during this
             forward pass will persist there for subsequent decode steps.
-        extra_patches: Optional ``list[PatchSpec]`` applied to module *outputs*
-            (via baukit ``edit_output``) inside the same forward, on top of the
-            head transplant.  Used for the MLP-output *restore* sufficiency test:
-            pass clean-cached MLP activations (e.g. from
-            ``get_hs(mt, dest_inputs, [(mlp_name, pos), …], return_dict=True)``)
-            as ``PatchSpec(location=(mlp_name, pos), patch=…, strategy="replace")``
-            to clamp downstream MLPs to their clean values while the heads are
-            patched.  Single forward → ``on_pass`` is ignored.  ``None`` (default)
-            leaves the pure head-transplant behavior unchanged.
 
     Returns:
         ``(vocab_size,)`` float32 logits for 2D input (single instance), or
@@ -1282,18 +869,10 @@ def forward_with_src_replacement(
         If ``return_past_key_values=True``, returns ``(logits, past_key_values)``.
     """
     # `mask_layers` is the ordered key that decodes the mask's ROWS (row li <-> mask_layers[li]).
-    # It is NOT "which layers to intervene at" — that is what the old name `layers` wrongly implied,
-    # and slicing it silently shifts every row. `None` = identity, which is what a full-depth mask
-    # from `load_head_mask` wants.
-    if layers is not None:
-        if mask_layers is not None:
-            raise TypeError("pass `mask_layers`, not both it and the deprecated `layers`")
-        warnings.warn("`layers=` is now `mask_layers=` — it decodes the mask's rows rather than "
-                      "selecting layers to intervene at.", DeprecationWarning, stacklevel=2)
-        mask_layers = layers
+    # It is NOT "which layers to intervene at": slicing it silently shifts every row.
+    # `None` = identity (a full-depth mask).
     if mask_layers is None:
-        mask_layers = (mask.mask_layers if getattr(mask, "mask_layers", None) is not None
-                       else list(range(mask.values.shape[0])))
+        mask_layers = list(range(mask.values.shape[0]))
     _n_src = src_head_inps.shape[-2]
     if len(mask_layers) != _n_src or len(mask_layers) != mask.values.shape[0]:
         raise ValueError(
@@ -1304,15 +883,7 @@ def forward_with_src_replacement(
 
     squeeze_output = src_head_inps.dim() == 2
 
-    extra_cm = (
-        _extra_patch_hooks(mt, extra_patches)
-        if extra_patches
-        else contextlib.nullcontext()
-    )
-    with (
-        src_replacement_hooks(mt, src_head_inps, mask, mask_layers, alpha, patch_positions),
-        extra_cm,
-    ):
+    with src_replacement_hooks(mt, src_head_inps, mask, mask_layers, alpha, patch_positions):
         call_kwargs = dict(dest_inputs)
         if return_past_key_values:
             call_kwargs.setdefault("use_cache", True)
@@ -1376,21 +947,14 @@ def _evaluate_val(
     for cache in val_caches:
         dest_inputs = prepare_input([cache.dest_prompt], tokenizer=mt)
 
-        if cache.per_head_deltas is not None:
-            # Obsolete delta path — kept for backward compat
-            logits = forward_with_masked_patch_obsolete(
-                mt, dest_inputs, cache.per_head_deltas, mask, layers
-            )  # (vocab,)
+        if cache.src_head_vals is not None:
+            src_hv = cache.src_head_vals  # (L, n_embd) — precomputed
         else:
-            # New src-replacement path (eager or lazy)
-            if cache.src_head_vals is not None:
-                src_hv = cache.src_head_vals  # (L, n_embd) — precomputed
-            else:
-                src_o = get_o_proj_inputs_batch(mt, [cache.src_prompt], layers)
-                src_hv = torch.stack([src_o[ly][0] for ly in layers])  # (L, n_embd)
-            logits = forward_with_src_replacement(
-                mt, dest_inputs, src_hv, mask, layers
-            )  # (vocab,)
+            src_o = get_o_proj_inputs_batch(mt, [cache.src_prompt], layers)
+            src_hv = torch.stack([src_o[ly][0] for ly in layers])  # (L, n_embd)
+        logits = forward_with_src_replacement(
+            mt, dest_inputs, src_hv, mask, layers
+        )  # (vocab,)
 
         top_k_ids = logits.topk(k).indices.tolist()
         top_k_toks = [mt.tokenizer.decode([i]) for i in top_k_ids]
@@ -1404,12 +968,13 @@ def train_head_mask(
     mt,
     pivot_caches: list[PivotCache],
     layers: list[int],
-    n_epochs: int = 20,
-    lr: float = 1e-2,
-    lambda_sparse: float = 1e-2,
-    batch_size: int = 8,
+    *,
+    n_epochs: int,
+    lr: float,
+    lambda_sparse: float,
+    batch_size: int,
+    checkpoint_every: int,
     checkpoint_dir: str | None = None,
-    checkpoint_every: int = 10,
     augment: bool = False,
     augment_include_docstring: bool = False,
     augment_cache_batch_size: int = 64,
@@ -1427,37 +992,27 @@ def train_head_mask(
     (``reduction="batchmean"`` keeps the KL loss scale consistent with the old
     per-instance ``reduction="sum"`` regardless of batch size).
 
-    Path detection (automatic, based on first cache):
-    - ``per_head_deltas is not None`` → obsolete eager delta path (backward compat)
-    - ``src_head_vals is not None``   → new eager path (default; src forward cached)
-    - neither                         → new lazy path (src-only forward per batch/epoch)
-
-    The new eager path (``cache_pivot_data(..., precompute=True)``) only runs the
-    source forward pass at cache time.  The destination forward happens live inside
-    the training loop via ``forward_with_src_replacement``.
-
-    The new lazy path (``cache_pivot_data(..., precompute=False)``) runs a
-    src-only forward pass per batch per epoch — one extra forward pass per step.
-    Required when ``augment=True`` because source prompts change each epoch.
-
-    When ``augment=True``, a fresh random surface-form augmentation is applied to
-    every instance at the start of each epoch (via ``augment_pivot_caches``).
-    Requires ``cache_pivot_data(precompute=False)`` — precomputed ``src_head_vals``
-    would be stale after per-epoch source-prompt augmentation.
+    Two paths:
+    - ``augment=False``: needs ``cache_pivot_data(..., precompute=True)``; the source
+      forward pass runs only at cache time.  The destination forward happens live
+      inside the training loop via ``forward_with_src_replacement``.
+    - ``augment=True``: needs ``cache_pivot_data(..., precompute=False)``.  A fresh
+      random surface-form augmentation is applied to every instance at the start of
+      each epoch (via ``augment_pivot_caches``), and a src-only forward pass runs per
+      batch — one extra forward pass per step.
 
     Args:
         mt: ModelandTokenizer (frozen — only mask params are updated).
         pivot_caches: Pre-cached data from cache_pivot_data().
-        layers: Layer indices (must match pivot_caches[*].src_head_vals / per_head_deltas axis 0).
-        n_epochs: Training epochs (default 20, from paper).
-        lr: AdamW learning rate (default 1e-2, from paper).
-        lambda_sparse: L1 sparsity coefficient (default 1e-2, from paper).
-        batch_size: Instances per optimizer step (default 8).
+        layers: Layer indices (must match pivot_caches[*].src_head_vals axis 0).
+        n_epochs: Training epochs.
+        lr: AdamW learning rate.
+        lambda_sparse: L1 sparsity coefficient.
+        batch_size: Instances per optimizer step.
+        checkpoint_every: Run val recall (and write a checkpoint into
+            ``checkpoint_dir``, if given) every K epochs.
         augment: If True, re-augment train and val instances at the start of every
-            epoch.  Requires ``cache_pivot_data(precompute=False)`` — src prompts
-            change every epoch so precomputed ``src_head_vals`` would be stale.
-            pivot_caches must have src_sample/dest_sample populated (always true when
-            built by cache_pivot_data).
+            epoch (see the two paths above).
         augment_include_docstring: Passed to prompt builders during augmentation.
         augment_cache_batch_size: Batch size for log_p_target recomputation during
             augmentation (default 64).
@@ -1469,18 +1024,12 @@ def train_head_mask(
     n_layers_tested = len(layers)
     n_heads = mt.n_heads  # via ModelandTokenizer abstraction (nested-VLM safe)
 
-    _has_deltas = (
-        pivot_caches[0].per_head_deltas is not None
-    )  # obsolete eager delta path
-    _has_src_vals = pivot_caches[0].src_head_vals is not None  # new eager src-val path
-    _use_new_path = not _has_deltas  # True for all new caches
-
     if augment:
-        assert _use_new_path, (
-            "augment=True requires the new src-replacement path — call cache_pivot_data "
-            "with precompute=False. The old delta path does not support augmentation."
-        )
         _aug_rng = random.Random(augment_seed)
+    else:
+        assert pivot_caches[0].src_head_vals is not None, (
+            "augment=False requires cache_pivot_data(..., precompute=True)"
+        )
 
     # 80/20 train/val split.  When augment=True both splits are re-augmented each epoch.
     val_size = max(1, int(len(pivot_caches) * 0.2))
@@ -1507,42 +1056,17 @@ def train_head_mask(
             torch.stack([c.log_p_target for c in grp])
             for grp in batch_groups  # (B, vocab) CPU
         ]
-        if _has_src_vals:
-            # New eager path: precomputed src_head_vals; dest forward runs live.
-            batch_src_hv_list = [
-                torch.stack([c.src_head_vals for c in grp])
-                for grp in batch_groups  # (B, L, n_embd) CPU float32
-            ]
-            batch_inputs_list = [
-                prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
-                for grp in batch_groups
-            ]
-        elif _use_new_path:
-            # New lazy path: recompute src_head_vals per batch per epoch.
-            batch_src_prompts_list = [
-                [c.src_prompt for c in grp] for grp in batch_groups
-            ]
-            batch_dest_prompts_list = [
-                [c.dest_prompt for c in grp] for grp in batch_groups
-            ]
-        else:
-            # Obsolete eager delta path.
-            batch_inputs_list = [
-                prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
-                for grp in batch_groups
-            ]
-            # Do NOT pre-stack deltas here: torch.stack would copy all N × (L, H, E)
-            # float32 tensors that already live in train_caches[*].per_head_deltas,
-            # doubling CPU RAM (~14 GB for N=512 on Qwen-32B).  Stack on-the-fly per
-            # batch inside the epoch loop instead (negligible cost: 16 tensors × 28 MB).
+        # Precomputed src_head_vals; dest forward runs live.
+        batch_src_hv_list = [
+            torch.stack([c.src_head_vals for c in grp])
+            for grp in batch_groups  # (B, L, n_embd) CPU float32
+        ]
+        batch_inputs_list = [
+            prepare_input([c.dest_prompt for c in grp], tokenizer=mt)
+            for grp in batch_groups
+        ]
 
-    _path_desc = (
-        "new-eager"
-        if _has_src_vals
-        else "new-lazy"
-        if _use_new_path
-        else "delta-obsolete"
-    )
+    _path_desc = "lazy+augment" if augment else "precomputed"
     logger.info(
         f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
         f"{n_layers_tested * n_heads} mask params | "
@@ -1556,8 +1080,8 @@ def train_head_mask(
         epoch_sparse = 0.0
         n_steps = 0
 
-        # Per-epoch augmentation: build fresh batch lists from augmented caches.
-        # Always lazy (augment_pivot_caches returns per_head_deltas=None).
+        # Per-epoch augmentation: build fresh batch lists from augmented caches
+        # (always lazy: src head values are recomputed per batch).
         if augment:
             _aug_caches = augment_pivot_caches(
                 mt,
@@ -1577,21 +1101,15 @@ def train_head_mask(
             _batch_src_hv_ep = None  # augmented caches are always lazy
         else:
             _batch_log_p_ep = batch_log_p_list
-            _batch_src_hv_ep = batch_src_hv_list if _has_src_vals else None
-            _batch_src_ep = (
-                batch_src_prompts_list if _use_new_path and not _has_src_vals else None
-            )
-            _batch_dest_ep = (
-                batch_dest_prompts_list if _use_new_path and not _has_src_vals else None
-            )
+            _batch_src_hv_ep = batch_src_hv_list
 
         for bi, batch_log_p in enumerate(_batch_log_p_ep):
             if _batch_src_hv_ep is not None:
-                # New eager path: src_head_vals precomputed — just look them up.
+                # Precomputed src_head_vals — just look them up.
                 batch_src_hv = _batch_src_hv_ep[bi]  # (B, L, n_embd) CPU float32
                 batch_inputs = batch_inputs_list[bi]
-            elif _use_new_path:
-                # New lazy path: run src-only forward pass per batch.
+            else:
+                # Lazy (augment): run src-only forward pass per batch.
                 src_ps = _batch_src_ep[bi]
                 dest_ps = _batch_dest_ep[bi]
                 B = len(src_ps)
@@ -1603,24 +1121,12 @@ def train_head_mask(
                 del src_o
                 free_gpu_cache()
                 batch_inputs = prepare_input(dest_ps, tokenizer=mt)
-            else:
-                # Obsolete eager delta path.
-                batch_inputs = batch_inputs_list[bi]
-                # Stack on-the-fly — avoids the ~14 GB duplicate that pre-stacking would create.
-                batch_deltas = torch.stack(
-                    [c.per_head_deltas for c in batch_groups[bi]]
-                )  # (B, L, H, E) CPU float32
 
             optimizer.zero_grad()
 
-            if _use_new_path:
-                logits = forward_with_src_replacement(
-                    mt, batch_inputs, batch_src_hv, mask, layers
-                )  # (B, vocab)
-            else:
-                logits = forward_with_masked_patch_obsolete(
-                    mt, batch_inputs, batch_deltas, mask, layers
-                )  # (B, vocab)
+            logits = forward_with_src_replacement(
+                mt, batch_inputs, batch_src_hv, mask, layers
+            )  # (B, vocab)
 
             # KL(P_patched ∥ P_target) — batchmean: sum over vocab / batch_size
             # Consistent loss scale with old per-instance reduction="sum"
@@ -1691,8 +1197,6 @@ def train_head_mask(
             logger.info(f"  Val recall: {recall_str}")
 
             if checkpoint_dir is not None:
-                import os
-
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 ckpt_path = os.path.join(
                     checkpoint_dir, f"checkpoint_epoch_{epoch + 1:04d}.pt"

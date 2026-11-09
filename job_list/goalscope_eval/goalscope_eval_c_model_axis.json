@@ -30,5 +30,13 @@
     {
         "name": "goalscope_c_olmo_sft_causality",
         "command": "mkdir -p logs/goalscope && python -m scripts.evaluation.eval_goalscope --model=allenai/Olmo-3.1-32B-Instruct-SFT --mode causality --heads head_sets/Olmo-3.1-32B-Instruct-SFT/goal__lam20_thr0.6_band10-36.json --strategy replace --alpha 1.0 |& tee logs/goalscope/c_olmo_sft_causality.log"
+    },
+    {
+        "name": "goalscope_c_qwen32b_instruct_additive_faithfulness",
+        "command": "mkdir -p logs/goalscope && python -m scripts.evaluation.eval_goalscope --model=Qwen/Qwen2.5-32B-Instruct --mode faithfulness --heads goal --strategy additive_norm --alpha 0.1 |& tee logs/goalscope/c_qwen32b_instruct_additive_faithfulness.log"
+    },
+    {
+        "name": "goalscope_c_qwen32b_instruct_additive_causality",
+        "command": "mkdir -p logs/goalscope && python -m scripts.evaluation.eval_goalscope --model=Qwen/Qwen2.5-32B-Instruct --mode causality --heads goal --strategy additive_norm --alpha 0.1 |& tee logs/goalscope/c_qwen32b_instruct_additive_causality.log"
     }
 ]

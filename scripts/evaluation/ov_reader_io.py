@@ -17,8 +17,8 @@ Layout of the tree::
 
 All dirs of one run (goalscope + every probe layer) share the SAME ``<mode>/<leaf>`` and differ only
 in ``<layer_idx>``, so cross-layer comparison = reading each layer dir's summary (see
-``across_layers_df``). ``<datatype>`` and ``<lang>`` are baked into the leaf, so parallel invocations
-over disjoint ``--datatypes`` / ``--lang`` never collide.
+``across_layers_df``). ``<datatype>`` is baked into the leaf, so parallel invocations over disjoint
+``--datatypes`` never collide.
 
 Record/sample IO (append, resume, prune) is delegated to ``faithfulness_io`` — same primitives.
 """
@@ -43,7 +43,6 @@ records_path = fio.records_path
 samples_path = fio.samples_path
 write_config = fio.write_config
 write_summary = fio.write_summary
-read_config = fio.read_config
 read_completed_spec_ids = fio.read_completed_spec_ids
 prune_orphan_records = fio.prune_orphan_records
 
@@ -119,17 +118,6 @@ def load_config(run_dir) -> dict:
 
 def load_summary(run_dir) -> dict:
     return json.loads((Path(run_dir) / "summary.json").read_text())
-
-
-def records_df(run_dir) -> pd.DataFrame:
-    lines = (Path(run_dir) / "records.jsonl").read_text().splitlines()
-    return pd.DataFrame([json.loads(ln) for ln in lines if ln.strip()])
-
-
-def load_run(run_dir) -> dict:
-    run_dir = Path(run_dir)
-    return dict(config=load_config(run_dir), records=records_df(run_dir),
-                summary=load_summary(run_dir), dir=str(run_dir))
 
 
 def _layer_dirs_for(config: dict, results_root) -> dict:

@@ -1,4 +1,4 @@
-"""App L.2.1 (GoalScope on few-shot ICL tasks) for the site's ICL tab (web/icl.html).
+"""App L.2.1 (GoalScope on few-shot ICL tasks) for the site's ICL tab (goals-web: site/icl.html).
 
 Paper settings: Qwen2.5-Coder-32B-Instruct, the 122 goal heads, additive_norm, alpha 0.1, layers 35-46; 10-shot
 "Q: {input}\\nA: {output}" prompts (raw text, no chat template); a probe prompt per task source; 20 prompts per task.
@@ -8,8 +8,8 @@ Paper settings: Qwen2.5-Coder-32B-Instruct, the 122 goal heads, additive_norm, a
 Not stated in the paper (our choices): the probe's system prompt ("You are a helpful assistant.", as in
 notebooks/clock/19_goalscope_out_of_domain.ipynb), the readout length (32 tokens), the pair separator ("\\n").
 
-Per task this writes (1) the paper's evaluation readouts on 20 prompts and (2) one site example: prompt #0 plus its
-8 greedy tokens with a readout at EVERY token. Judge the readouts with ``icl_judge.py``.
+Per task this writes the paper's evaluation readouts on 20 prompts (the site examples come from
+``icl_site_examples.py``). Judge the readouts with ``icl_judge.py``.
 
     python scripts/icl/icl_goalscope.py --tasks antonym country-capital --out-dir results/icl_goalscope
 """
@@ -152,7 +152,7 @@ def main():
         inp = TokenizerOutput(data=dict(input_ids=torch.tensor([ids]), attention_mask=torch.ones(1, len(ids), dtype=torch.long)))
         rows = apply_goalscope(inp, mt=mt, selected_heads=heads, strategy="additive_norm", alpha=0.1,
                                steer_layer_range=(35, 46), batch_size=args.batch, max_new_tokens=READ_TOKENS,
-                               n_steer_tokens="all", show=False, goalscope_prompt=probe_prompt(setting),
+                               n_steer_tokens="all", goalscope_prompt=probe_prompt(setting),
                                token_positions=positions)
         by = {int(r["pos"]): (r.get("patched_gen") or "").strip() for r in rows}
         return [by[p] for p in positions]
@@ -180,9 +180,6 @@ def main():
                 pos = list(range(n - 1, len(ids)))
             ev = dict(k=k, text=text, demos=demos, ids=ids, n_prompt=n, tokens=toks, positions=pos,
                       generation=tok.decode(ids[n:]), readouts=scope(ids, pos, setting))
-            if k == 0:                # the site example: a readout at EVERY token
-                ev["all_positions"] = list(range(len(ids)))
-                ev["all_readouts"] = scope(ids, ev["all_positions"], setting)
             evals.append(ev)
             json.dump(dict(task=task, setting=setting, rules=rules, probe=PROBE[setting], probe_system=PROBE_SYS,
                            settings=dict(model=MODEL, heads=HEADS, n_heads=len(heads), strategy="additive_norm",

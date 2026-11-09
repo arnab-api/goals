@@ -1,8 +1,8 @@
 [project]
 name = "goals"
 version = "0.1.0"
-description = "Investigating consistent intermediate goals in Code-LLMs (prefill probing + attention-head localization)."
-requires-python = "==3.11.*"
+description = "Goal encoding in LLMs: goal-head localization, GoalScope readouts and NRGS interventions."
+requires-python = ">=3.11"
 dependencies = [
     # core ML / interpretability
     "torch>=2.7",
@@ -15,33 +15,26 @@ dependencies = [
     "safetensors",
     "tokenizers",
     "sentencepiece",
-    "einops",
-    "bitsandbytes",
-    "circuitsvis>=1.43.3",  # attention viz used by src.attention
+    "circuitsvis>=1.43.3",  # attention viz used by src.nrgs.functional
     # activation patching (not on PyPI — pulled from git, see [tool.uv.sources])
     "baukit",
     # scientific stack
     "numpy",
-    "scipy",
-    "scikit-learn",
     "pandas",
     "matplotlib",
     # notebook / dev tools
     "ipykernel",
     "ipywidgets",
     "jupyterlab",
+    "nbformat",
+    "nbconvert",
     "rich",
     "tqdm",
     "pyyaml",
-    # API clients & experiment tracking
+    # API clients (LM judges)
     "anthropic",
-    "openai",
-    "wandb",
     # project utility libraries
     "dataclasses-json",
-    "astor",
-    "line-profiler",
-    "goodfire",
 ]
 
 [tool.uv]

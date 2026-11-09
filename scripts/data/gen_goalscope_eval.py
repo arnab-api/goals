@@ -2,10 +2,9 @@
 """Generate the LOCKED goalscope eval dataset -> data/goalscope_eval.json (source of truth).
 
 QTASKS bank, OVReader prefill-to-frontier setup (var_eq stub, letters naming), with BALANCED frontier
-coverage: every NON-trivial frontier (src.diff.data.TRIVIAL_FRONTIERS excluded) is the target exactly
+coverage: every NON-trivial frontier (src.nrgs.data.TRIVIAL_FRONTIERS excluded) is the target exactly
 `reps` times, each with a distinct prefill context. Frontier pool = non-trivial; context (prefill +
-trailing predicates) may be any predicate, matching the frontier-only exclusion policy wired into
-scripts/evaluation/eval_ov_reader.sample_datapoints.
+trailing predicates) may be any predicate (frontier-only exclusion policy).
 
 Each datapoint is a model-agnostic RECIPE (ordered predicate ids + prefill count j); the full
 QTransferInstance is rebuilt from QTASKS by id at load time (see
@@ -13,7 +12,7 @@ scripts.evaluation.eval_goalscope.load_locked_datapoints). No RNG at eval time â
 
 Usage:
     conda run -n goals python scripts/data/gen_goalscope_eval.py            # regenerate the default file
-    conda run -n goals python scripts/data/gen_goalscope_eval.py --out data/goalscope_eval.json --target-n 64
+    conda run -n goals python scripts/data/gen_goalscope_eval.py --out /tmp/goalscope_eval.json
 """
 
 import argparse
@@ -27,11 +26,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(REPO_ROOT))
 
-import src.diff.data as DATA  # noqa: E402
+import src.nrgs.data as DATA  # noqa: E402
 
 DATATYPES = ["int", "list[int]", "str", "list[str]"]
 N_CONDITIONS = [2, 3, 4]
 DEFAULT_OUT = REPO_ROOT / "data" / "goalscope_eval.json"
+SEED = 123
+TARGET_N = 64  # aim per datatype; actual = reps * n_frontiers (exact balance)
 
 
 def gen_datatype(dt, rng, target_n):
@@ -84,19 +85,12 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="output json path")
-    ap.add_argument("--seed", type=int, default=123)
-    ap.add_argument(
-        "--target-n",
-        type=int,
-        default=64,
-        help="aim per datatype; actual = reps * n_frontiers (exact balance)",
-    )
     args = ap.parse_args()
 
-    rng = random.Random(args.seed)
+    rng = random.Random(SEED)
     data, counts, reps_by = {}, {}, {}
     for dt in DATATYPES:
-        recs, reps = gen_datatype(dt, rng, args.target_n)
+        recs, reps = gen_datatype(dt, rng, TARGET_N)
         data[dt] = recs
         counts[dt] = len(recs)
         reps_by[dt] = reps
@@ -106,13 +100,13 @@ def main():
             description="Locked OVReader-setup corpus (QTASKS bank, prefill-to-frontier, var_eq stub, "
             "letters naming) with BALANCED frontier coverage: each non-trivial frontier is the "
             "target `reps` times with distinct prefill contexts. Rebuild from QTASKS by id.",
-            bank="src.diff.data.QTASKS",
+            bank="src.nrgs.data.QTASKS",
             generator="scripts/data/gen_goalscope_eval.py",
             balanced=True,
             reps_per_frontier=reps_by,
             n_conditions=N_CONDITIONS,
-            seed=args.seed,
-            target_n=args.target_n,
+            seed=SEED,
+            target_n=TARGET_N,
             lang="python",
             datatypes=DATATYPES,
             trivial_frontiers_excluded={

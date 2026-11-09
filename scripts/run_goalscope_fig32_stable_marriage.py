@@ -3,7 +3,7 @@ implements the stable marriage algorithm, with the figure's exact prompt and the
 Generates greedily, compares the code with the figure, runs ``apply_goalscope`` with the paper / site config (122 goal
 heads, additive_norm, alpha 0.1, steer layers 35-46, 64 new tokens), prints the read-outs at the figure's four marked
 positions and saves the rows to ``results/goalscope_fig32/stable_marriage.json``. ``--write-web`` also replaces the
-site's ``web/data/<model>/ds_and_algo/stable_marriage.json``.
+site's ``goals-web/site/data/<model>/ds_and_algo/stable_marriage.json`` (via ``src.goals.site_data``).
 
     python scripts/run_goalscope_fig32_stable_marriage.py [--write-web]
 """
@@ -69,7 +69,7 @@ def main():
     ap.add_argument("--write-web", action="store_true")
     args = ap.parse_args()
 
-    from scripts.evaluation.eval_goalscope import load_json_heads
+    from src.goals.head_sets import load_json_heads
     from src.goals.goalscope import apply_goalscope
     from src.models import ModelandTokenizer
     from src.tokens import prepare_input
@@ -98,7 +98,7 @@ def main():
 
     rows = apply_goalscope(prompt + gen, mt=mt, selected_heads=heads, strategy="additive_norm", alpha=0.1,
                            steer_layer_range=(35, 46), n_steer_tokens="all", max_new_tokens=64,
-                           include_noncode=True, show=False)
+                           include_noncode=True)
 
     # locate each marked read-out: the indentation token right before the line's first character
     text, starts = "", []
@@ -125,7 +125,7 @@ def main():
                               ensure_ascii=False, indent=1, default=str))
     print(f"\nsaved {out}")
     if args.write_web:
-        from web.build_site import write_data
+        from src.goals.site_data import write_data
         print("web data:", write_data(model, "ds_and_algo", "stable_marriage", rows, meta=meta))
 
 
