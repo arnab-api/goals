@@ -106,8 +106,7 @@ def main():
         ro_src=raw.get("ro_src"), ro_dst=raw.get("ro_dst"), ro_patched=raw.get("ro_patched"),
         heads=args.patch_heads,
     )
-    # legacy results dir names (diff/, gsr_example/), kept for cache compatibility
-    fp = (ROOT / "results/diff/Qwen2.5-Coder-32B-Instruct/gsr_example"
+    fp = (ROOT / "results/q_transfer/Qwen2.5-Coder-32B-Instruct/gsr_example"
           / f"{a.variant}__{tag}__{hashlib.md5(key.encode()).hexdigest()[:8]}.json")
     fp.parent.mkdir(parents=True, exist_ok=True)
     fp.write_text(json.dumps(out, indent=1))

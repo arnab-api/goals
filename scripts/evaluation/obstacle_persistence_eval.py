@@ -146,7 +146,7 @@ def main():
     subset = args.datatypes is not None or args.predicates is not None
     sfx = "_subset" if subset else ""   # a subset run never overwrites the full run's rows.json / summary.json
     slug = args.model.split("/")[-1]
-    cache_dir = os.path.join(env_utils.DEFAULT_RESULTS_DIR, "obstacle_robustness", slug)  # legacy dir name, kept for cache compatibility
+    cache_dir = os.path.join(env_utils.DEFAULT_RESULTS_DIR, "obstacle_persistence", slug, "trials")
 
     import torch
     from src.models import ModelandTokenizer

@@ -10,7 +10,7 @@ eval             : the oracle judges.
 kv_transfer      : the pivot-onwards KV transfer (geometry, runs, records).
 task_vs_progress : which span (task / progress) the pivot reads the goal from.
 
-Results stay under the legacy ``results/diff/<model>/...`` tree (dir names kept for cache compatibility).
+Results: ``results/{kv_transfer,q_transfer,task_vs_progress}/<model>/...`` (results layout of 2026-11-11).
 
 Import the submodule you need explicitly, e.g. ``import src.nrgs.functional as FUNC``.
 """

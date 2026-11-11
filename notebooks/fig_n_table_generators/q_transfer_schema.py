@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 
 EXAMPLE = dict(
-    json="results/diff/Qwen2.5-Coder-32B-Instruct/gsr_example/order_diff__int__python-python__*.json",
+    json="results/q_transfer/Qwen2.5-Coder-32B-Instruct/gsr_example/order_diff__int__python-python__*.json",
     dst_order=["is_prime", "is_positive", "last_digit"],          # a, b, d
     signature="def func(n: int):",
     src_tasks=[("a", "(1) whether the number is prime"), ("c", "(2) the number of set bits"),

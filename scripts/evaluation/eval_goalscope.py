@@ -53,6 +53,7 @@ import torch
 
 import src.nrgs.data as DATA
 from scripts.evaluation import faithfulness_io as fio
+import src.goals.goalscope as GS  # noqa: E402  (GS.CAUSAL_PREFIX: the probe chosen by --causal_stub)
 from src.goals.goalscope import (  # noqa: F401  (CAUSAL_PREFIX re-exported)
     CAUSAL_PREFIX,
     _build_causality_prompt,
@@ -319,6 +320,7 @@ def _parse_verdict(resp: str) -> str:
 _TRIVIAL_READOUT_TOKENS = (
     "bool",
     "check",
+    "func",
     "auto",
     "value",
     "val",
@@ -331,13 +333,35 @@ _TRIVIAL_READOUT_TOKENS = (
 )
 
 
+# The LM's own completion of the causality probe WITHOUT any injection (greedy), per probe stub. A read-out whose body
+# is exactly this default (whitespace-insensitive, nothing after it) carries no goal signal, so it is flagged trivial.
+# Measured on Qwen2.5-Coder-32B-Instruct with the v2 stub: "auto func (auto value){" -> " return value * 2; }<|im_end|>".
+# A read-out that STARTS with the default but goes on to write more code (the injection's doing) is NOT flagged.
+_UNINJECTED_CAUSAL_DEFAULTS = {
+    "auto func (auto value){": ("return value * 2; }",),
+}
+
+
+def _is_uninjected_default(readout: str) -> bool:
+    norm = lambda s: re.sub(r"\s+", "", s)
+    r = readout.replace("<|im_end|>", "").replace("<|endoftext|>", "")
+    for stub, bodies in _UNINJECTED_CAUSAL_DEFAULTS.items():
+        if norm(r).startswith(norm(stub)):
+            body = norm(r)[len(norm(stub)):]
+            if any(body == norm(b) for b in bodies):
+                return True
+    return False
+
+
 def is_trivial_causal_readout(readout: str) -> bool:
     """True iff a causality C++ read-out compares ``value`` to ZERO and does nothing else — the
-    sign/zero test the no-goal default emits (see :data:`src.nrgs.data.TRIVIAL_FRONTIERS`). A
-    non-zero constant or any real arithmetic/bitwise op (``%``, ``&``, ``-``, ``.size()``,
-    ``max_element``, ``abs`` …) keeps it non-trivial."""
+    sign/zero test the no-goal default emits (see :data:`src.nrgs.data.TRIVIAL_FRONTIERS`) — or is exactly the LM's
+    uninjected completion of the probe (:data:`_UNINJECTED_CAUSAL_DEFAULTS`). A non-zero constant or any real
+    arithmetic/bitwise op (``%``, ``&``, ``-``, ``.size()``, ``max_element``, ``abs`` …) keeps it non-trivial."""
     if not readout or not readout.strip():
         return False
+    if _is_uninjected_default(readout):
+        return True
     t = readout
     for tok in _TRIVIAL_READOUT_TOKENS:
         t = re.sub(rf"\b{tok}\b", "", t)
@@ -502,6 +526,8 @@ def parse_args():
         help="wipe an existing run dir and redo it; default is to RESUME from the last "
         "completed sample (same args => same run dir)",
     )
+    ap.add_argument("--causal_stub", default="v2", choices=["v2", "v1"],
+                    help="causality probe: v2 = 'auto func (auto value){' (default, reported), v1 = the original 'bool check(auto value){'")
     logging_utils.add_logging_args(ap)  # -v (DEBUG) / -q (WARNING); default INFO
     args = ap.parse_args()
 
@@ -517,6 +543,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    GS.set_causal_stub(args.causal_stub)
     logging_utils.configure(args)  # -v => DEBUG: every oracle prompt/verdict logged
     experiment_utils.set_seed(args.seed)
     torch.set_grad_enabled(False)
@@ -533,6 +560,7 @@ def main():
     # config (sans selected_heads) — enough to resolve the run dir + skip check before loading the model
     config = dict(
         mode=args.mode,
+        causal_stub=(args.causal_stub if args.mode == "causality" else None),
         heads_spec=args.heads,
         heads_name=heads_name,
         goal_threshold=GOAL_THRESHOLD,
@@ -556,7 +584,7 @@ def main():
         bank="QTASKS",
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
-        readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
+        readout_prefix=(GS.CAUSAL_PREFIX if args.mode == "causality" else ""),
         hard_rubric_tag=hashlib.md5(hard_sys.encode()).hexdigest()[:8],
     )
     run_dir = fio.run_dir_for(config, results_dir)
@@ -665,7 +693,7 @@ def main():
     # causality: steer into the C++ stub prompt; faithfulness: apply_goalscope's default NL probe
     if args.mode == "causality":
         gs_kwargs["goalscope_prompt"] = _build_causality_prompt(mt)
-    readout_prefix = CAUSAL_PREFIX if args.mode == "causality" else ""
+    readout_prefix = GS.CAUSAL_PREFIX if args.mode == "causality" else ""
 
     # append-mode handles both a fresh run and a resume (existing kept rows/samples are preserved)
     rec_fh = open(fio.records_path(run_dir), "a")

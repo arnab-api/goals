@@ -21,7 +21,7 @@ import json
 import os
 from pathlib import Path
 
-GOALSCOPE_SUBDIR = os.path.join("evaluation", "goalscope")
+GOALSCOPE_SUBDIR = "goalscope"   # results/<experiment>/<model>/... (results layout of 2026-11-11)
 
 
 # ── path construction ─────────────────────────────────────────────────────────
@@ -49,6 +49,8 @@ def run_leaf_name(config: dict) -> str:
     if config.get("goal_band_explicit") and config.get("goal_band"):
         b = config["goal_band"]
         parts.append(f"band={b[0]}-{b[1]}")
+    if config.get("mode") == "causality" and config.get("causal_stub") == "v2":
+        parts.append("stub=func")   # the v2 probe (auto func ...); v1 (bool check ...) leaves keep the old names
     return "__".join(parts)
 
 
@@ -63,7 +65,7 @@ def config_mode(config: dict) -> str:
 
 
 def run_dir_for(config: dict, results_root) -> Path:
-    # <results>/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>
+    # <results>/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>
     # The model comes FIRST so every run of one model sits under one dir. Without it, two models
     # sharing a config resolved to the same run dir and the second run would "resume" the first
     # model's samples.

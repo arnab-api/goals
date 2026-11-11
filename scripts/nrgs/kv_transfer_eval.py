@@ -13,8 +13,8 @@ letters / var_eq) are sampled once per (datatype, language pair) and shared by e
 are computed once per instance and token sequence. Eval = ``judge_causal`` + ``eval_readouts``. C++ prompts carry
 the library note in the system prompt (``DATA.CPP_NOTE_IN_SYSTEM``).
 
-Results: ``results/diff/<model>/path_patch/<run_tag>/<dt>__<src>-<dst>/`` (multi) or
-``results/diff/<model>/path_patch_hier/<run_tag>/<dt>__<conn>__<order>__<src>-<dst>/`` (hier) — ``results.json`` per
+Results: ``results/kv_transfer/<model>/task_span/<run_tag>/<dt>__<src>-<dst>/`` (multi) or
+``results/kv_transfer/<model>/sub_sub_goal/<run_tag>/<dt>__<conn>__<order>__<src>-<dst>/`` (hier) — ``results.json`` per
 instance (resumable) and ``meta.json``; ``summary__<...>.json`` per invocation under that root. hier records also carry the
 instance's (a, x, y, z) and ``H.rule_verdict`` (execution of the first written condition; Python destinations).
 
@@ -66,7 +66,7 @@ logger = logging.getLogger("kv_transfer_eval")
 
 MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
 MECHANISM = "path_patch"
-ROOTS = {"multi": "path_patch", "hier": "path_patch_hier"}      # results/diff/<model>/<root>/ — legacy dir names, kept for cache compatibility
+ROOTS = {"multi": "task_span", "hier": "sub_sub_goal"}   # results/kv_transfer/<model>/<root>/
 GOAL250 = "head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json"
 MAX_NEW = 64
 ORACLE_MODEL = "claude-sonnet-4-6"
@@ -264,7 +264,7 @@ def main():
     configs = []
     for s, vs in itertools.product(args.span, args.i3_v_scale):
         configs.append((_run_tag(s, vs, heads_tag), dict(span=s, v_scale=vs)))
-    root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / ROOTS[args.setup]
+    root = Path(env_utils.DEFAULT_RESULTS_DIR) / "kv_transfer" / model_short / ROOTS[args.setup]
     out_dirs = {name: root / name for name, _ in configs}
     for name, _ in configs:
         logger.info(f"config: {name}")

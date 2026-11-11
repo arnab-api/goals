@@ -244,7 +244,7 @@ def run_dir_for(results_dir, model, axis, config):
     leaf = (f"heads={config['ablated_name']}__goal{config['n_goal']}__fromL={config['from_layer']}"
             f"__strat={config['strategy']}__dtype={config['datatype']}__nspec={config['n_specs']}"
             f"__seed={config['seed']}__ctrl=later_half")  # control pool: layers >= n_layer//2
-    return Path(results_dir) / "evaluation" / "ablation" / slug / axis / leaf
+    return Path(results_dir) / "ablation" / slug / axis / leaf
 
 
 def common_argparser(description):

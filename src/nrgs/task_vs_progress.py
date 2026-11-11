@@ -126,7 +126,7 @@ def judge(G, clean, gen, model_name="claude-sonnet-4-6"):
 # ══════════════════════════════════════════════════════════════════════════════
 def cache_dir(results_dir, model_short, datatype, src_lang, dst_lang, *, seed, max_new):
     # `ro0` (no GoalScope readout) and `task+gap` (the task span) are kept for cached-result compatibility
-    return os.path.join(results_dir, "notebook_caches", "task_vs_progress", model_short,
+    return os.path.join(results_dir, "task_vs_progress", model_short,
                         f"{PP._safe(datatype)}__{src_lang}-{dst_lang}__seed{seed}__mx{max_new}__ro0__task+gap")
 
 

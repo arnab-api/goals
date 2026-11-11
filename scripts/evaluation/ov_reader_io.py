@@ -33,7 +33,7 @@ import pandas as pd
 
 from scripts.evaluation import faithfulness_io as fio
 
-OV_SUBDIR = os.path.join("evaluation", "ov-reader")
+OV_SUBDIR = "ov_reader"   # results/ov_reader/<model>/<layer>/<mode>/<leaf>
 SKYLINE_IDX = "goalscope"  # layer_idx for the GoalScope skyline dir
 PIVOT_ORDER = ["prev_end", "indent", "var", "eq", "first_impl"]
 
@@ -72,11 +72,13 @@ def leaf_name(config: dict) -> str:
         f"span={config.get('span_source', 'rule')}",
         f"seed={config['seed']}",
     ]
+    if config.get("mode") == "causality" and config.get("causal_stub") == "v2":
+        parts.append("stub=func")   # v2 causality probe; v1 leaves keep the old names
     return "__".join(parts)
 
 
 def run_dir_for(config: dict, layer_idx, results_root) -> Path:
-    """<results>/evaluation/ov-reader/<model>/<layer_idx>/<mode>/<leaf>."""
+    """<results>/ov_reader/<model>/<layer_idx>/<mode>/<leaf>."""
     return (Path(results_root) / OV_SUBDIR / model_slug(config) / str(layer_idx)
             / str(config["mode"]) / leaf_name(config))
 

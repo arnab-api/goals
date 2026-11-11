@@ -4,7 +4,7 @@ specs). Per spec: the task prompt, the assistant's code prefix with the four pre
 (prev_end, indent, var, eq) marked, the LM's own rollout of the frontier line, and at each pivot the GoalScope read-out
 with the judge's verdict (the verdict that is in the paper) and the judge's reasoning. The "Causality" view adds, per
 pivot, the causality_auto read-out of the same encoding (the v2 C++ probe: instruction + prefill
-``auto func (auto value){``; the paper's Fig 2 causality bars; results_causal_v2/, same leaf) and its judge verdict.
+``auto func (auto value){``; the paper's Fig 2 causality bars; the same leaf with ``__stub=func``) and its judge verdict.
 
 The reasoning comes from ``rejudge_goalscope.py --judge claude-sonnet-4-6 --explain`` (same judge, same rubric, asked to
 justify before the verdict; the reported rubric asks for the verdict tag only). When that reasoned verdict differs from
@@ -27,8 +27,7 @@ PIVOTS = ["prev_end", "indent", "var", "eq"]
 MODEL = "Qwen2.5-Coder-32B-Instruct"
 LEAF = "heads=goal__layers=35-46__nsteer=all__maxnew=64__span=frontier__dtype=all__nspec=253__nc=2-3-4__seed=123"
 REL = f"{MODEL}/faithfulness/additive_norm/0.1/{LEAF}"
-CAUSAL_REL = f"{MODEL}/causality/additive_norm/0.1/{LEAF}"
-CAUSAL_ROOT = "results_causal_v2"          # causality_auto (v2 C++ probe), the scores the paper reports
+CAUSAL_REL = f"{MODEL}/causality/additive_norm/0.1/{LEAF}__stub=func"   # causality_auto (v2 C++ probe), the reported scores
 CAUSAL_STUB = "auto func (auto value){"
 ASSISTANT = "<|im_start|>assistant\n"
 
@@ -40,8 +39,8 @@ def main():
     args = ap.parse_args()
     from transformers import AutoTokenizer
 
-    src = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", "goalscope", REL)
-    rat = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", "goalscope_rationale", REL, f"judge={args.rationale_judge}")
+    src = os.path.join(DEFAULT_RESULTS_DIR, "goalscope", REL)
+    rat = os.path.join(src, f"rationale={args.rationale_judge}")
     samples = [json.loads(l) for l in open(os.path.join(src, "samples.jsonl"))]
     recs = defaultdict(dict)
     for l in open(os.path.join(src, "records.jsonl")):
@@ -52,15 +51,14 @@ def main():
         for l in open(os.path.join(rat, "records.jsonl")):
             r = json.loads(l)
             why[(r["spec"], r["anchor"])] = r
-    csrc = os.path.join(os.path.dirname(os.path.abspath(DEFAULT_RESULTS_DIR)), CAUSAL_ROOT, "evaluation", "goalscope", CAUSAL_REL)
+    csrc = os.path.join(DEFAULT_RESULTS_DIR, "goalscope", CAUSAL_REL)
     crecs = defaultdict(dict)
     for l in open(os.path.join(csrc, "records.jsonl")):
         r = json.loads(l)
         crecs[r["spec"]][r["anchor"]] = r
-    # causality judge reasoning: rejudge_goalscope --explain run against results_causal_v2/ (own subtree, the
-    # reported leaf is only read); the page shows the reported verdict and notes when the reasoned one differs
-    crat = os.path.join(os.path.dirname(os.path.abspath(DEFAULT_RESULTS_DIR)), CAUSAL_ROOT, "evaluation", "goalscope_rationale",
-                        CAUSAL_REL, f"judge={args.rationale_judge}")
+    # causality judge reasoning (rejudge_goalscope --mode causality --explain): <leaf>/rationale=<judge>/; the page shows
+    # the reported verdict and notes when the reasoned one differs
+    crat = os.path.join(csrc, f"rationale={args.rationale_judge}")
     cwhy = {}
     if os.path.exists(os.path.join(crat, "records.jsonl")):
         for l in open(os.path.join(crat, "records.jsonl")):

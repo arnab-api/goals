@@ -19,7 +19,7 @@ the goal heads, from the pivot on, read only that task's span + the pivot + the 
 ``src.nrgs.eval`` (``judge_causal`` = wrote D; ``judge_joint``; ``eval_readouts``; gaze = pivot gazes at D's span
 > B's span) + a literal-C check (``classify_concept`` against C). Defaults = the paper's configuration (alpha 2, the
 250 goal heads, 32 instances per cell). Results:
-    results/diff/<model>/diff_trigger/<run_tag>/<variant>/<datatype>__<sl>-<dl>/results.json  (+ summary.json)
+    results/q_transfer/<model>/<run_tag>/<variant>/<datatype>__<sl>-<dl>/results.json  (+ summary.json)
 
 Usage:
     conda run -n goals python scripts/nrgs/q_transfer_eval.py --cuda 0,1 \\
@@ -253,7 +253,7 @@ def main():
         # restrict) and `-anceq` (anchor = the pivot) name the configuration of the original runs; kept verbatim
         run_tag = (f"ph-{_heads_tag(args.patch_heads, len(patch_heads))}__a{alpha:g}__piv-eq__cl-ppgazerestrict-anceq"
                    + ro_tag + args.tag_suffix)
-        out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "diff" / model_short / "diff_trigger" / run_tag   # legacy results dir names, kept for cache compatibility
+        out_root = Path(env_utils.DEFAULT_RESULTS_DIR) / "q_transfer" / model_short / run_tag
         out_root.mkdir(parents=True, exist_ok=True)
         logger.info(f"########## OV boost alpha={alpha} -> {run_tag} ##########")
         metas = []

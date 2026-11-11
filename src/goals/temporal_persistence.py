@@ -195,7 +195,7 @@ def locate_value(offsets, full_text, prompt_len, P, substring):
 
 # ── per-condition records + caching ──────────────────────────────────────────────
 def cache_dir(slug):
-    return os.path.join(env_utils.DEFAULT_RESULTS_DIR, "temporal_persistence", slug)
+    return os.path.join(env_utils.DEFAULT_RESULTS_DIR, "temporal_persistence", slug)   # <slug>/{goal,control}/
 
 
 def _cond_key(slug, budget, datatype, pred_id, lang, ctx_key, max_new, head_tag="goal"):
@@ -223,12 +223,10 @@ def build_records(
     pred_id, pred, ctx_key, var, pos, pivot(T), traj(T), n_impl, model, budget).
 
     ``goal_heads`` is the head set whose summed residual write forms the encoding; ``head_tag`` names it
-    (``goal`` = the goal heads, cached in the root dir; anything else, e.g. ``control``, is cached in a
-    ``<head_tag>/`` subdir so it never collides with the goal cache)."""
+    (``goal`` = the goal heads, ``control`` = the random-head control; each is cached in its own ``<head_tag>/``
+    subdir of :func:`cache_dir`)."""
     budget, max_new, min_impl = HEAD_BUDGET, MAX_NEW, MIN_IMPL
-    cdir = cache_dir(slug)
-    if head_tag != "goal":
-        cdir = os.path.join(cdir, head_tag)
+    cdir = os.path.join(cache_dir(slug), head_tag)
     os.makedirs(cdir, exist_ok=True)
     setups = D.multi_predicate_setups(
         datatype, n_conditions=list(N_COND), n_samples=n_trials, seed=seed,

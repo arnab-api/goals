@@ -60,6 +60,14 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
   `src/utils/env_utils.py` reads them (`DEFAULT_RESULTS_DIR`, `PROJECT_ROOT`). All results paths below are relative to
   `RESULTS_DIR` = `results/`. Treat the existing `results/` as read-only reference data; write re-runs to a scratch
   `RESULTS_DIR` if you want to compare.
+- **Results layout** (`results/`, since 2026-11-11): exactly the results the paper reports, as
+  `<experiment>/<model>/<config>/<leaf>`: `localization/`, `goalscope/` (judge side-runs inside the leaf:
+  `<leaf>/rejudge=<judge>/`, `<leaf>/rationale=<judge>/`), `ov_reader/`, `ablation/`, `temporal_persistence/<m>/{goal,control}/`,
+  `obstacle_persistence/<m>/{trials,ov_boost}/`, `kv_transfer/<m>/{task_span,sub_sub_goal,broader_goal}/`,
+  `q_transfer/<m>/` (+ `gsr_example/`), `task_vs_progress/<m>/`, `unspecified_readouts/`, `fv_baseline/`,
+  `human_eval/`, `external/` (collaborators' tables). `results/MANIFEST.md` maps every paper item to its folders and
+  `MANIFEST_sources.json` every file to where it was produced. The previous, unfiltered tree (old layout, every
+  exploratory run) is `results_old/`.
 - **Script defaults = the paper's configuration.** Every eval script's argparse defaults reproduce the main reported
   run; job lists only add the per-datatype / per-mode / per-language fan-out and the non-default arms (e.g.
   control head sets, `--tag-suffix __seq`). Smoke runs: `--limit N` (GoalScope /
@@ -76,9 +84,9 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
   Qwen2.5-72B need 2 GPUs (`device_map="auto"`). Most scripts take `--cuda 0` or `--cuda 0,1`.
   GoalScope steering is step-by-step (CPU-launch-bound) and the judged evals are oracle-bound (thousands of serial
   `ask_claude` calls per shard); plan hours per GoalScope job, not minutes.
-- **Directory names**: NRGS results live under `results/diff/<model>/{path_patch,diff_trigger,gsr_example}` and
-  `results/notebook_caches/task_vs_progress/`; figure groups are `notebooks/Figures/<group>/` (NRGS groups per model:
-  `notebooks/Figures/<model>/{transfer,precommit_ablation}/`).
+- **Figure groups** are `notebooks/Figures/<group>/` (NRGS groups per model:
+  `notebooks/Figures/<model>/{transfer,precommit_ablation}/`; the paper's causality figures:
+  `notebooks/Figures/causality_auto/fig<NN>_*.pdf`).
 - **Generators** (`notebooks/fig_n_table_generators/*.ipynb`) only parse results (no model). They save through
   `figstyle.save_fig` / `save_table` to `notebooks/Figures/<group>/<name>.{pdf,png,tex}`. Copying into
   `Overleaf-draft/Goals-Overleaf/Figures/generated/<group>/` (and `Text/Appendix/tables/generated/`) and `pdfcrop`
@@ -142,10 +150,10 @@ in `GOAL_BANDS[model]` or `--goal_band`).
 
 ## 4. Main-text results
 
-Notation: `GS = results/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/` with
-`<leaf> = heads=<name>__layers=35-46__nsteer=all__maxnew=64__span=frontier__dtype=all__nspec=253__nc=2-3-4__seed=123[__band=a-b]`
+Notation: `GS = results/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/` with
+`<leaf> = heads=<name>__layers=35-46__nsteer=all__maxnew=64__span=frontier__dtype=all__nspec=253__nc=2-3-4__seed=123[__band=a-b][__stub=func]`
 (`scripts/evaluation/faithfulness_io.run_leaf_name`; `<name>` = `goal` for `--heads goal`, `json:<stem>` for a json,
-`band=` only when `--goal_band` is passed). Each leaf holds `config.json`, `records.jsonl` (253 specs x 5 pivots),
+`band=` only when `--goal_band` is passed, `stub=func` on every causality leaf run with the v2 probe = the reported one). Each leaf holds `config.json`, `records.jsonl` (253 specs x 5 pivots),
 `samples.jsonl`, `summary.json`. Headline metric = `summary.json["by_anchor"][pivot]["hard_yes"]` for the four pivots
 `prev_end, indent, var, eq` (the mean over these four is "mean4"; `first_impl` is never reported). Layer ranges in
 directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
@@ -160,13 +168,19 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   Defaults: `--model Qwen/Qwen2.5-Coder-32B-Instruct --heads goal (122) --strategy additive_norm --alpha 0.1
   --steer_layer_range 35 46 --seed 123`; readout 64 tokens (`MAX_NEW_TOKENS`), frontier rollout 64 tokens
   (`GEN_MAX_NEW_TOKENS`), corpus `data/goalscope_eval.json`, judge `claude-sonnet-4-6`.
-- Results: `GS` with model Coder-32B, `additive_norm/0.1`, `heads=goal`.
-- Cross-check (matches paper "~60%", "0.90+", "80%", "~75%"): faithfulness 0.589 / 0.945 / 0.905 / 0.972 (mean4 0.853);
-  causality 0.522 / 0.802 / 0.719 / 0.957 (mean4 0.750). Smoke: `--limit 4`.
+- Causality probe (`--causal_stub v2`, the default; `src/goals/goalscope.CAUSAL_STUBS`): user turn "You are implementing a
+  C++ function. Just write the function body, without any comments or explanations. Assume all the necessary headers
+  are already included.", assistant prefill `auto func (auto value){`. `--causal_stub v1` = the earlier
+  `bool check(auto value){` stub (old leaves without `__stub=func`; not reported any more).
+- Results: `GS` with model Coder-32B, `additive_norm/0.1`, `heads=goal` (causality: `heads=goal__...__stub=func`).
+- Cross-check (matches paper "~60%", "0.90+", "96%", "~87%"): faithfulness 0.589 / 0.945 / 0.905 / 0.972 (mean4 0.853);
+  causality 0.672 / 0.957 / 0.889 / 0.972 (mean4 0.873). Smoke: `--limit 4` (reproduces the first 4 specs' readouts and
+  verdicts exactly, from the judge cache).
 - Judge rubric: `FAITH_HARD_SYS` / `CAUSAL_HARD_SYS` in `scripts/evaluation/eval_goalscope.py`; `config.json` stores
   `hard_rubric_tag` = md5[:8] of the system prompt (reported: faithfulness `78bfd5f4`, causality `9c106246`). If the tag
   of the current code differs, the rubric changed and the verdicts will not match the paper. 
-- Figure: the right (bar) panel of `fig:goalscope` = `readout_sources_and_head_budget.ipynb` cell 8 (goal-head bars per pivot + mean).
+- Figure: the right (bar) panel of `fig:goalscope` = `causality_auto.ipynb` (`fig02_fig12_source_comparison`; goal-head
+  bars per pivot + mean, plus the L40-50 attention / residual baselines).
 
 ### 4.2 Goal-head ablations: §4 (`Text/04_heads.tex`; figure `tab:goal-ablation` in `Text/persistance.tex` = `Figures/ablation/ablation_results-crop.pdf`)
 
@@ -186,7 +200,7 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   python -m scripts.evaluation.eval_ablation_necessity --heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/goal__lam20_top250.json
   ``` Shared machinery:
   `scripts/evaluation/ablation_common.py`.
-- Results: `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
+- Results: `results/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   and `.../necessity/heads=goal__goal{122,250}__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   (`fromL=32` in necessity = the control-pool floor, not an intervention layer). `summary.json["overall"]` =
   `{baseline, ablated, control}`.
@@ -207,8 +221,8 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   `MAX_NEW = 96` (`src/goals/temporal_persistence.py`, both in every cache key); 4 datatypes x {python, cpp}; C++
   implementation spans are segmented by the Claude oracle (`oracle_value_segment`). `--n-trials 256` enumerates every
   distinct context per (datatype, language) cell (setups saturate at 240).
-- Results: `results/temporal_persistence/Qwen2.5-Coder-32B-Instruct/cond_*.pt` (3088 goal records) and
-  `.../control/cond_*.pt` (836 files on disk). Conditions already cached are skipped (use `--force` or a scratch
+- Results: `results/temporal_persistence/Qwen2.5-Coder-32B-Instruct/goal/cond_*.pt` (3088 goal records) and
+  `.../control/cond_*.pt` (836 files). Conditions already cached are skipped (use `--force` or a scratch
   `RESULTS_DIR`). The notebook computes everything from `cond_*.pt`.
 - Generator: `temporal_persistence.ipynb` cell 3 (`retention_curves_std`, impl spans 10-40 tokens), group
   `temporal_persistence`.
@@ -222,7 +236,7 @@ Paper: §5 (`Text/06_mechanism.tex`, which inputs `Text/Figures/kv_transfer.tex`
 additive_norm α 0.1, layers 35-45, readout heads = G250. Task banks are inline (`src/nrgs/data.py`,
 `src/nrgs/hier_data.py`); no `data/` file is read. `src/nrgs/functional.setup()` only loads the model. Judges:
 `src/nrgs/eval.py` (`judge_causal` scores a BOTH verdict as a miss; the stored `causal_trigger_rate` values were
-rescored the same way, the old rule survives as `*_incl_both` fields). `R = results/diff/Qwen2.5-Coder-32B-Instruct`.
+rescored the same way, the old rule survives as `*_incl_both` fields). `KV = results/kv_transfer/Qwen2.5-Coder-32B-Instruct`, `Q = results/q_transfer/Qwen2.5-Coder-32B-Instruct`.
 Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-python`, `python-cpp`, ...).
 
 ### 4.4 KV transfer of the task span: §5.1.1 (`fig:kv-transfer` = `Figures/transfer/kv-transfer-main-crop.pdf`)
@@ -234,7 +248,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   `<|im_end|>`; OV α 1; C++ library note in the system prompt). The job list adds the V x1 / x2 arms (appendix only).
 - Random-head control ("1/512"): the 16 `ppctrl_*` multi jobs of `job_list/diff_eval/path_patch_control_32b_listgap.json`
   (`--goal-heads C250 --readout-heads C250 --no-readout`, V x4).
-- Results: `R/path_patch/I1-off__I2-off__I3-on-V4__win-span__span-list+gap__cppnote-sys__a1__th-goal_250__gh-goal_250__ro-goal_250/<dt>__<src>-<dst>/{meta.json,results.json}`
+- Results: `KV/task_span/I1-off__I2-off__I3-on-V4__win-span__span-list+gap__cppnote-sys__a1__th-goal_250__gh-goal_250__ro-goal_250/<dt>__<src>-<dst>/{meta.json,results.json}`
   (`<dt>` in `int, str, list_int, list_str`; `meta.json` keys `causal_trigger_rate`, `readout_shift_rate`,
   `n_instances`); control `.../...__th-control250_250__gh-control250_250__ro-off/`. V x1 / x2 arms: `I3-on__` / `I3-on-V2__`.
 - Cross-check: pooled n=512 causal 0.936, readout 0.900 (paper ~94% / ~90%); `int__python-python` 0.96875 / 0.90625;
@@ -251,15 +265,15 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
     (`--patch-heads C250 --readout-heads C250 --no-readout`).
   Defaults: `--patch-heads G250 --readout-heads G250 --alphas 2 --n-samples 32 --seed 0`, pivot = the frontier's
   `{var} =`, letters naming, closed-loop gaze-select-restrict (no KV transfer). `--tag-suffix __seq` names the reported dirs.
-- Results: `R/diff_trigger/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/{order_matched,order_diff}/<dt>__<src>-<dst>/{summary.json,results.json}`
+- Results: `Q/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/{order_matched,order_diff}/<dt>__<src>-<dst>/{summary.json,results.json}`
   (`<dt>` in `int, str, list(int), list(str)`; keys `causal_trigger_rate`, `readout_shift_rate`, `n`); control
-  `R/diff_trigger/ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/`.
+  `Q/ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/`.
 - Cross-check: pooled causal order-matched 0.871 (paper 87%), order-diff 0.572 (57%); readout 0.668 / 0.412; control
   0.043 / 0.029 (paper ~4%); `order_diff/int__python-python` 0.59375 / 0.53125.
 - Generators: `q_transfer.ipynb` (`GSR_ARM`) cell 5 (`q_crosslang_gsr` = right panel of `q-transfer-main`, order-diff),
   group `<model>/transfer`. The left (schema) panel: `python scripts/nrgs/q_transfer_example_attention.py --cuda 0`
   (defaults = the paper's instance: int, py-py, order_diff, key `dst=is_prime-is_positive-last_digit`) ->
-  `R/gsr_example/order_diff__int__python-python__<hash>.json`, then
+  `Q/gsr_example/order_diff__int__python-python__<hash>.json`, then
   `python notebooks/fig_n_table_generators/q_transfer_schema.py` (cairosvg + IBM Plex fonts) ->
   `notebooks/Figures/Qwen2.5-Coder-32B-Instruct/transfer/q_transfer_schema.{svg,pdf,png}` (= the paper's `gsr_schema_clean.pdf`, renamed).
 
@@ -269,7 +283,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   datatype; v2 added configs and resumes from the cache): `python scripts/nrgs/task_vs_progress_eval.py --datatypes <dt>`.
   Defaults: py-py, `--n-samples 32 --seed 1123`, no readout, greedy 64; configs `src/nrgs/task_vs_progress.CONFIGS` =
   none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans.
-- Results: `results/notebook_caches/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
+- Results: `results/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
   (`<dt>` in `int, str, list_int, list_str`; summary keys like `"kv·goal250 · task · V×4"` -> `causal_shift`).
 - Cross-check (mean over 4 datatypes): residual task 0.891 / progress 0.062 / task+progress 0.984 (paper 0.89 / 0.06 /
   0.98); KV G250 task V x4 0.969 (the boxed cell), progress V x4 0.258.
@@ -287,7 +301,11 @@ a. **Judge rubric drift**: GoalScope verdicts depend on the exact system prompts
    paper.
 b. **Smoke runs into `results/`**: GoalScope and ablation smokes get their own `nspec=N` leaf, but the NRGS and
    persistence scripts resume into the reported directories. Use a scratch `RESULTS_DIR` (edit `env.yml`)
-   for any test run.
+   for any test run; `results/` holds only reported runs.
+d. **Trivial causality read-outs**: `eval_goalscope.is_trivial_causal_readout` scores a read-out as NO without the judge
+   when it is a bare sign/zero test or exactly the LM's own uninjected completion of the probe
+   (`_UNINJECTED_CAUSAL_DEFAULTS`: Coder-32B + v2 stub -> `return value * 2; }`). Measure the default before adding a
+   model or a stub (greedy, no injection).
 c. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal persistence, KV / Q transfer) set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7`
    is ignored when `--cuda` is passed. Pass the physical GPU id to `--cuda`.
 

@@ -55,6 +55,7 @@ from scripts.evaluation.eval_goalscope import (  # noqa: E402
     load_locked_datapoints,
     pivot_positions,
 )
+import src.goals.goalscope as GS  # noqa: E402  (GS.CAUSAL_PREFIX: the probe chosen by --causal_stub)
 from src.goals.goalscope import (  # noqa: E402
     CAUSAL_PREFIX,
     OVReader,
@@ -102,6 +103,8 @@ def parse_args():
         "--overwrite", action="store_true", help="wipe matching run dirs and redo"
     )
     logging_utils.add_logging_args(ap)
+    ap.add_argument("--causal_stub", default="v2", choices=["v2", "v1"],
+                    help="causality probe: v2 = 'auto func (auto value){' (default, reported), v1 = the original 'bool check(auto value){'")
     return ap.parse_args()
 
 
@@ -152,7 +155,7 @@ def run_shard(mt, ov, heads, datatype, args, layers, results_dir, base_config):
         return
 
     goalscope_prompt = _build_causality_prompt(mt) if args.mode == "causality" else None
-    readout_prefix = CAUSAL_PREFIX if args.mode == "causality" else ""
+    readout_prefix = GS.CAUSAL_PREFIX if args.mode == "causality" else ""
     fhs = {
         idx: (open(ovio.records_path(d), "a"), open(ovio.samples_path(d), "a"))
         for idx, d in dirs.items()
@@ -291,6 +294,7 @@ def _finalize(dirs):
 
 def main():
     args = parse_args()
+    GS.set_causal_stub(args.causal_stub)
     logging_utils.configure(args)
     experiment_utils.set_seed(args.seed)
     torch.set_grad_enabled(False)
@@ -322,6 +326,7 @@ def main():
     base_config = dict(
         model=MODEL,
         mode=args.mode,
+        causal_stub=(args.causal_stub if args.mode == "causality" else None),
         heads_spec=HEADS_JSON,
         heads_name=heads_name,
         n_heads=len(heads),
