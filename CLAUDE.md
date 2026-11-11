@@ -58,16 +58,13 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
 - **Paths**: `env.yml` in the root (template `env_demo.yml`) holds `MODEL_DIR`, `RESULTS_DIR` (default `results`),
   `DATA_DIR`, `CLAUDE_CACHE_DIR` (default `data/LLM_CACHE/claude_cache`), optional `HF_CACHE`, and `CLAUDE_KEY`.
   `src/utils/env_utils.py` reads them (`DEFAULT_RESULTS_DIR`, `PROJECT_ROOT`). All results paths below are relative to
-  `RESULTS_DIR` = `results/`. Treat the existing `results/` as read-only reference data; write re-runs to a scratch
-  `RESULTS_DIR` if you want to compare.
-- **Results layout** (`results/`, since 2026-11-11): exactly the results the paper reports, as
-  `<experiment>/<model>/<config>/<leaf>`: `localization/`, `goalscope/` (judge side-runs inside the leaf:
-  `<leaf>/rejudge=<judge>/`, `<leaf>/rationale=<judge>/`), `ov_reader/`, `ablation/`, `temporal_persistence/<m>/{goal,control}/`,
-  `obstacle_persistence/<m>/{trials,ov_boost}/`, `kv_transfer/<m>/{task_span,sub_sub_goal,broader_goal}/`,
-  `q_transfer/<m>/` (+ `gsr_example/`), `task_vs_progress/<m>/`, `unspecified_readouts/`, `fv_baseline/`,
-  `human_eval/`, `external/` (collaborators' tables). `results/MANIFEST.md` maps every paper item to its folders and
-  `MANIFEST_sources.json` every file to where it was produced. The previous, unfiltered tree (old layout, every
-  exploratory run) is `results_old/`.
+  `RESULTS_DIR` = `results/`.
+- **Results layout**: `<experiment>/<model>/<config>/<leaf>` under `results/`: `localization/`, `goalscope/` (judge
+  side-runs inside the leaf: `<leaf>/rejudge=<judge>/`, `<leaf>/rationale=<judge>/`), `ov_reader/`, `ablation/`,
+  `temporal_persistence/<m>/{goal,control}/`, `obstacle_persistence/<m>/{trials,ov_boost}/`,
+  `kv_transfer/<m>/{task_span,sub_sub_goal,broader_goal}/`, `q_transfer/<m>/` (+ `gsr_example/`), `task_vs_progress/<m>/`,
+  `unspecified_readouts/`, `fv_baseline/`, `human_eval/`, `external/`. Every eval script writes, and every generator reads,
+  this layout.
 - **Script defaults = the paper's configuration.** Every eval script's argparse defaults reproduce the main reported
   run; job lists only add the per-datatype / per-mode / per-language fan-out and the non-default arms (e.g.
   control head sets, `--tag-suffix __seq`). Smoke runs: `--limit N` (GoalScope /
@@ -299,15 +296,16 @@ The ICL and EM results are reproduced on their own branches: ICL on `icl-eval`, 
 a. **Judge rubric drift**: GoalScope verdicts depend on the exact system prompts. If you edit
    `FAITH_HARD_SYS` / `CAUSAL_HARD_SYS`, `hard_rubric_tag` changes, the cache misses, and results no longer match the
    paper.
-b. **Smoke runs into `results/`**: GoalScope and ablation smokes get their own `nspec=N` leaf, but the NRGS and
-   persistence scripts resume into the reported directories. Use a scratch `RESULTS_DIR` (edit `env.yml`)
-   for any test run; `results/` holds only reported runs.
+b. **Resumable caches**: GoalScope and ablation smokes get their own `nspec=N` leaf, but the NRGS and
+   temporal-persistence scripts skip conditions that are already cached in `RESULTS_DIR` and resume into the full
+   run's directories. Use a scratch `RESULTS_DIR` (edit `env.yml`) for test runs, or `--force` where available.
+c. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal persistence, KV / Q transfer)
+   set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7` is ignored when
+   `--cuda` is passed. Pass the physical GPU id to `--cuda`.
 d. **Trivial causality read-outs**: `eval_goalscope.is_trivial_causal_readout` scores a read-out as NO without the judge
    when it is a bare sign/zero test or exactly the LM's own uninjected completion of the probe
    (`_UNINJECTED_CAUSAL_DEFAULTS`: Coder-32B + v2 stub -> `return value * 2; }`). Measure the default before adding a
    model or a stub (greedy, no injection).
-c. **`--cuda` overrides `CUDA_VISIBLE_DEVICES`**: scripts with a `--cuda` flag (temporal persistence, KV / Q transfer) set `CUDA_VISIBLE_DEVICES` themselves before importing torch, so an outer `CUDA_VISIBLE_DEVICES=7`
-   is ignored when `--cuda` is passed. Pass the physical GPU id to `--cuda`.
 
 ## 6. Working conventions
 
