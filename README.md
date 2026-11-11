@@ -64,23 +64,6 @@ is done, and moves on. (ii) A transformer cannot carry that commitment forward t
 at each step it re-reads the goal from the task span, computes its progress so far, and compares the two to pick the
 next token.*
 
-- **The goal is frequently re-read from the task specification.** When we swap the key-value states that the goal
-  heads read from at a token, while the LM is in the middle of implementing a specific goal, the LM is redirected to
-  implement the next action of the transplanted goal.
-- **The same computational motif, implemented by the goal heads, works at different levels of the hierarchy.** The
-  same KV swap redirects a sub-sub-goal, a sub-goal, and the broader goal itself: swapping the goal heads' view of
-  "merge sort" into a C++ quick-sort prompt makes the model write a merge sort in C++.
-- **The task span, not the code progress, dictates the LM's next operation.** The next action is pre-committed in the
-  earlier generated code: the goal can be read out via GoalScope, and transplanting it into a different environment
-  (C++) can trigger its execution. However, we find that the LM largely ignores this pre-commitment and instead
-  re-reads the goal from the task span to decide the next operation.
-- **The next operation is chosen with a mix of different computations.** The goal heads' queries carry part of the
-  "what is already done" signal. Transferring them can redirect the model to implement the next sub-goal in the
-  destination list that hasn't been completed in the source prompt yet. However, this explains only 57% of the cases
-  in our evaluation set. Through targeted interventions, we find non-trivial evidence for other potential
-  computations, such as the order of the tasks and the number of completed tasks, that also participate in selecting
-  the next action.
-
 ## Can GoalScope read out the LM's next action beyond code?
 
 The goal heads were found on code, but GoalScope reads intentions elsewhere too, with no re-training: it can read out
