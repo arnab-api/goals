@@ -45,14 +45,6 @@ faithfulness (c.1) and causality (c.2) at four pre-implementation token position
 - **Persistence.** The code implementation of a sub-goal can take many tokens. Throughout this implementation, the LM
   keeps the sub-goal encoding alive in the same attention heads that first formed it.
 
-![Persistence](https://goals.baulab.info/images/persistence.svg)
-
-*Temporal persistence of the sub-goal encoding. Cosine similarity between a sub-goal's goal-head encoding at the `=`
-token and the encoding sampled x% of the way through its implementation, averaged over data types and languages.
-Encodings of the same sub-goal stay well above those of a different sub-goal all the way through, whether the
-implementation is in the same programming language (solid) or a different one (dashed). The encoding is sustained
-throughout the implementation, and fades away at the end, when the LM is ready to move on to the next one.*
-
 ## How does a depth-bounded transformer LM achieve persistence?
 
 The only way a transformer LM can pool information from a previous token is through the attention mechanism, which
