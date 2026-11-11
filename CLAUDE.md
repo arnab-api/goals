@@ -79,13 +79,16 @@ goals-web/               SEPARATE git repo (companion site); gitignored here
   GoalScope steering is step-by-step (CPU-launch-bound) and the judged evals are oracle-bound (thousands of serial
   `ask_claude` calls per shard); plan hours per GoalScope / OVReader job, not minutes (not re-timed on `clean`).
 - **Legacy names**: modules / scripts / notebooks follow the paper's terms, but results directories, caches and figure
-  groups keep their legacy names for cache compatibility: `results/diff/<model>/{path_patch,path_patch_hier,
-  diff_trigger,gsr_example}` (NRGS), `results/obstacle_robustness/` (obstacle persistence),
-  `results/notebook_caches/{task_vs_progress,obstacle_ov_boost}/`, and figure groups `transfer`,
-  `precommit_ablation`, `sparsity_ablation`, `obstacle_robustness` under `notebooks/Figures/`. The NRGS groups
-  `transfer` and `precommit_ablation` are per model: `notebooks/Figures/<model>/<group>/` (`GROUP = f'{MODEL}/<group>'`
-  in `kv_transfer.ipynb`, `q_transfer.ipynb`, `task_vs_progress.ipynb`; set `MODEL` to regenerate for another model,
-  e.g. `Qwen3-32B`). Cross-model groups (`head_localization`, `model_generalization`, ...) stay at the top level.
+- **Results layout** (`results/`, since 2026-11-11): exactly the results the paper reports, as
+  `<experiment>/<model>/<config>/<leaf>`: `localization/`, `goalscope/` (side-runs inside the leaf: `<leaf>/rejudge=<judge>/`,
+  `<leaf>/rationale=<judge>/`), `ov_reader/`, `ablation/` (+ `sufficiency_examples/`), `temporal_persistence/<m>/{goal,control}/`,
+  `obstacle_persistence/<m>/{trials,ov_boost}/`, `kv_transfer/<m>/{task_span,sub_sub_goal,broader_goal}/`, `q_transfer/<m>/`
+  (+ `gsr_example/`), `task_vs_progress/<m>/`, `unspecified_readouts/`, `fv_baseline/`, `human_eval/`, `external/`.
+  `results/MANIFEST.md` + `MANIFEST_sources.json` map paper items / files to their origin. **Everything not reported**
+  (the legacy threads of section 4.20 and the table at the end) is in `results_old/` with the old layout
+  (`evaluation/`, `diff/<model>/{path_patch,...}`, `notebook_caches/`, ...). Figure groups under `notebooks/Figures/`
+  keep their names (`transfer`, `precommit_ablation`, `sparsity_ablation`, `obstacle_robustness`, per-model groups);
+  the paper's causality figures are `notebooks/Figures/causality_auto/fig<NN>_*.pdf`.
 - **Generators** (`notebooks/fig_n_table_generators/*.ipynb`) only parse results (no model). They save through
   `figstyle.save_fig` / `save_table` to `notebooks/Figures/<group>/<name>.{pdf,png,tex}`. Copying into
   `Overleaf-draft/Goals-Overleaf/Figures/generated/<group>/` (and `Text/Appendix/tables/generated/`) and `pdfcrop`
@@ -165,7 +168,7 @@ exported json if present, else the mask thresholded at 0.9 in `GOAL_BANDS[model]
 
 ## 4. Reported experiments
 
-Notation: `GS = results/evaluation/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/` with
+Notation: `GS = results/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/` with
 `<leaf> = heads=<name>__layers=35-46__nsteer=all__maxnew=64__span=frontier__dtype=all__nspec=253__nc=2-3-4__seed=123[__band=a-b]`
 (`scripts/evaluation/faithfulness_io.run_leaf_name`; `<name>` = `goal` for `--heads goal`, `json:<stem>` for a json,
 `band=` only when `--goal_band` is passed). Each leaf holds `config.json`, `records.jsonl` (253 specs x 5 pivots),
@@ -183,16 +186,21 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   Defaults: `--model Qwen/Qwen2.5-Coder-32B-Instruct --heads goal (122) --strategy additive_norm --alpha 0.1
   --steer_layer_range 35 46 --seed 123`; readout 64 tokens (`MAX_NEW_TOKENS`), frontier rollout 64 tokens
   (`GEN_MAX_NEW_TOKENS`), corpus `data/goalscope_eval.json`, judge `claude-sonnet-4-6`.
-- Results: `GS` with model Coder-32B, `additive_norm/0.1`, `heads=goal`.
-- Cross-check (matches paper "~60%", "0.90+", "80%", "~75%"): faithfulness 0.589 / 0.945 / 0.905 / 0.972 (mean4 0.853);
-  causality 0.522 / 0.802 / 0.719 / 0.957 (mean4 0.750). Smoke: `--limit 4`; the first records of the reported
-  `records.jsonl` are spec `int_python_000`.
+- Causality probe (`--causal_stub v2`, default; `src/goals/goalscope.CAUSAL_STUBS`): user turn "You are implementing a C++
+  function. Just write the function body, without any comments or explanations. Assume all the necessary headers are
+  already included.", prefill `auto func (auto value){`; v2 causality leaves end in `__stub=func`. `--causal_stub v1` =
+  the earlier `bool check(auto value){` stub (its numbers: causality 0.522 / 0.802 / 0.719 / 0.957, mean4 0.750; leaves in
+  `results_old/evaluation/goalscope/`).
+- Results: `GS` with model Coder-32B, `additive_norm/0.1`, `heads=goal` (causality `heads=goal__...__stub=func`).
+- Cross-check (matches paper "~60%", "0.90+", "96%", "~87%"): faithfulness 0.589 / 0.945 / 0.905 / 0.972 (mean4 0.853);
+  causality 0.672 / 0.957 / 0.889 / 0.972 (mean4 0.873). Smoke: `--limit 4` reproduces the first 4 specs' readouts and
+  verdicts exactly (judge cache, no API calls).
 - Judge rubric: `FAITH_HARD_SYS` / `CAUSAL_HARD_SYS` in `scripts/evaluation/eval_goalscope.py`; `config.json` stores
   `hard_rubric_tag` = md5[:8] of the system prompt (reported: faithfulness `78bfd5f4`, causality `9c106246`). If the tag
   of the current code differs, the rubric changed and the verdicts will not match the paper. The prompts printed in the
   appendix are `Text/Appendix/prompts/*.txt` (byte-identical to the code);
-- Figure: the right (bar) panel of `fig:goalscope` = `readout_sources_and_head_budget.ipynb` cell 8 (`source_comparison`,
-  goal-head bars per pivot + mean + baselines).
+- Figure: the right (bar) panel of `fig:goalscope` = `causality_auto.ipynb` (`fig02_fig12_source_comparison`: goal-head
+  bars per pivot + mean + the attention / residual L40-50 baselines).
 
 ### 4.2 Readout sources: App. "Goal Heads vs. Other Readout Sources" (`Text/Appendix/readout_comparisons.tex`, `fig:heads-vs-residual`, `Figures/generated/sparsity_ablation/source_comparison.pdf`)
 
@@ -202,12 +210,9 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   - residual L40-50: `job_list/goalscope_eval/goalscope_eval_a_residual_40-50.json`
   - residual L25-56: jobs `goalscope_a_residual_*` of `goalscope_eval_a_residual.json` (`--source-layers 25 56`)
 - Results: `GS` with `resid_norm/0.1`, `heads=attn:L40-50:mean`, `heads=resid:L40-50:mean`, `heads=resid:L25-56:mean`.
-- Cross-check (paper: 85.3 / 75.0 goal heads; 32.6 / 29.2 attention; residual ~1-3%): mean4 faith / caus = attn
-  0.326 / 0.292, resid L40-50 0.012 / 0.006, resid L25-56 0.035 / 0.020.
-- Generator: `readout_sources_and_head_budget.ipynb` cell 8 -> `notebooks/Figures/sparsity_ablation/source_comparison.pdf`.
-  The PDF in the paper is an **older version** of this cell (4 bars: goal heads | attention L40-50 | residual L40-50 |
-  residual L25-56); the current cell draws per-pivot goal-head bars + mean + the attention and residual L40-50 bars.
-  Same data, different layout.
+- Cross-check (paper: 85.3 / 87.3 goal heads; 32.6 / 60.9 attention; residual ~1%): mean4 faith / caus = attn
+  0.326 / 0.609, resid L40-50 0.012 / 0.014, resid L25-56 0.035 / 0.009 (causality = v2 probe).
+- Generator: `causality_auto.ipynb` (`fig02_fig12_source_comparison` = Fig 12 = Fig 2's right panel).
 
 ### 4.3 Head budget: App. "Readouts with different numbers of heads" (`readout_comparisons.tex`, `fig:sparsity` = `sparsity_sweep.pdf`, `fig:sparsity-other-pivots` = `sparsity_by_pivot.pdf`)
 
@@ -215,43 +220,39 @@ directory names are half-open (`layers=35-46` = layers 35-45, `L40-50` = 40-49).
   `python -m scripts.evaluation.eval_goalscope --mode <m> --heads head_sets/Qwen2.5-Coder-32B-Instruct/goal_topk/<set>.json --strategy additive_norm --alpha 0.1`.
   The 122 point is the section 4.1 run.
 - Results: `GS` with `additive_norm/0.1`, `heads=json:goal__{snap_top5,snap_top10,snap_top25,lam100_top50,lam100_top100,lam20_top150,lam20_top200,lam20_top250,lam5_top300}`.
-- Cross-check mean4 faith / caus: 5 .363/.329, 10 .668/.571, 25 .750/.742, 50 .783/.808, 100 .840/.775, 122 .853/.750,
-  150 .830/.775, 200 .855/.748, 250 .823/.700, 300 .849/.738.
-- Generator: `readout_sources_and_head_budget.ipynb` cells 5 (`sparsity_sweep`) and 7 (`sparsity_by_pivot`), group
-  `sparsity_ablation`.
+- Cross-check mean4 faith / caus (v2 probe): 5 .363/.533, 10 .668/.767, 25 .750/.861, 50 .783/.895, 100 .840/.866,
+  122 .853/.873, 150 .830/.871, 200 .855/.874, 250 .823/.875, 300 .849/.884.
+- Generator: `causality_auto.ipynb` (`fig13_sparsity_sweep`, `fig14_sparsity_by_pivot`).
 
 ### 4.4 Across-model comparisons: App. `app:model_axes` (`readout_comparisons.tex`)
 
-Paper items: `tab:model-comparison-four-pivots` (`Text/Appendix/tables/model_comparison_preimplementation.tex`),
-`fig:comparison-size` / `fig:comparison-code` / `fig:comparison-rl`
-(`Figures/generated/model_generalization/{model_size,code_finetuning,rl_finetuning}_{faithfulness,causality}.pdf`),
-`tab:olmo-readout-examples` (`Text/Appendix/tables/olmo_readout_examples.tex`).
+Paper items: `tab:model-comparison-four-pivots` (Table 3, `Text/Appendix/tables/model_comparison_preimplementation.tex`,
+hand-written from the grid below) and `fig:comparison-{size,code,rl}` (Figs 15-17, one two-panel PDF each).
+Replace strategy, small search over α ∈ {1.0, 1.5, 2.0}; each LM is reported at its best causality α, faithfulness at
+the same α. Job list: `job_list/goalscope_eval/model_comparison_alpha_grid.json` (6 LMs x 3 α x 2 modes; Devstral /
+GLM ran on the `nnterp-campaign` code). Results: `GS` = `results/goalscope/<model>/<mode>/replace/<α>/...`.
 
-| model | heads | strategy | job list | results leaf | mean4 faith / caus |
-|---|---|---|---|---|---|
-| Qwen2.5-Coder-32B-Instruct | goal (122) | replace α=1 | `goalscope_eval_c_model_axis.json` | `replace/1/heads=goal` | .789 / .735 |
-| Qwen2.5-Coder-14B-Instruct | goal (88), `--steer_layer_range 20 30 --goal_band 0 48` | replace α=1 | `goalscope_eval_c_14b.json` | `replace/1/heads=goal__layers=20-30__...__band=0-48` | .519 / .305 |
-| Qwen2.5-32B-Instruct (table) | goal (108, its own) | replace α=1 | `goalscope_eval_c_model_axis.json` | `replace/1/heads=goal` | .238 / .441 |
-| Qwen2.5-32B-Instruct (code-ft figure) | Coder-32B's 122 (`json:coder32b_goal122`) | additive_norm α=0.1 | none (see below) | `additive_norm/0.1/heads=json:coder32b_goal122` | .766 / .725 |
-| Qwen2.5-Coder-32B (code-ft figure) | goal (122) | additive_norm α=0.1 | section 4.1 | section 4.1 | .853 / .750 |
-| Olmo-3.1-32B-Instruct | `json:goal__lam20_thr1.0_band10-36` (93) | replace α=1 | `goalscope_eval_c_model_axis.json` (= `goalscope_eval_c_olmo_rematched.json`) | `replace/1/heads=json:goal__lam20_thr1.0_band10-36` (NOT the `__aprefill=5x68fdb5` sibling) | .435 / .622 |
-| Olmo-3.1-32B-Instruct-SFT | `json:goal__lam20_thr0.6_band10-36` (91) | replace α=1 | `goalscope_eval_c_model_axis.json` | `replace/1/heads=json:goal__lam20_thr0.6_band10-36` | .529 / .452 |
+| model | heads (% of all) | α | faith | caus (v2) |
+|---|---|---|---|---|
+| Qwen2.5-Coder-32B-Instruct | goal 122 (4.8%) | 1.5 | .907 | .917 |
+| Qwen2.5-Coder-14B-Instruct | goal 88 (4.6%), `--steer_layer_range 20 30 --goal_band 0 48` | 2.0 | .789 | .625 |
+| Qwen2.5-32B-Instruct | goal 108 (4.2%) | 2.0 | .743 | .808 |
+| Olmo-3.1-32B-Instruct | `json:goal__lam20_thr1.0_band10-36` 93 (3.6%) | 2.0 | .691 | .731 |
+| Olmo-3.1-32B-Instruct-SFT | `json:goal__lam20_thr0.6_band10-36` 91 (3.6%) | 2.0 | .678 | .553 |
+| Qwen3-32B | `json:goal__lam20_thr0.9_band25-56` 130 (3.2%) | 2.0 | .820 | .711 |
+| Devstral-24B | `json:goal__lam20_thr0.9_band13-38` 74 (5.8%), steer 22-29 | 1.5 | .688 | .563 |
+| GLM-4.5-Air | `json:goal__lam20_thr0.9_band9-34` 178 (4.0%), steer 25-33 | 2.0 | .948 | .773 |
 
-All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 32B faithfulness 51.9% -> 78.9%.
-- The code-ft figure's Qwen2.5-32B run (2026-09-20) was launched by hand with
-  `python -m scripts.evaluation.eval_goalscope --model Qwen/Qwen2.5-32B-Instruct --mode <m> --heads head_sets/coder32b_goal122.json --strategy additive_norm --alpha 0.1`;
-  that json is not on `clean` (same 122 heads as `head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json`,
-  which reproduces the run under the leaf name `heads=json:goal__lam20_thr0.9_band25-56`). The own-heads (108) additive
-  run (`additive_norm/0.1/heads=goal`, `*_additive_*` jobs of `goalscope_eval_c_model_axis.json`, .577 / .717) is
-  unreported; the figure plotted it until 2026-11-03.
-- Generator for the three figures: `model_generalization.ipynb` (cell 1 `HSPEC` / `AXIS_HSPEC` / `leaf()` / `AXES`,
-  cell 2 saves `{axis}_{mode}`; cell 3 `model_comparison.tex` is unreferenced). `AXIS_HSPEC` points the code-ft axis's
-  Qwen2.5-32B at `json:coder32b_goal122`; `leaf()` skips `__aprefill=` leaves (the unreported OLMo-Instruct
-  `__aprefill=5x68fdb5` sibling, mean4 .390).
-- The two tables were not made by a notebook on `clean`: they come from
-  `agent_reports/chatgpt/appendix_review_2026_09_16/{build_results.py,edit_draft.py}` on master (pure parsers over the
-  same leaves; `edit_draft.py` picks specs `int_python_003, int_python_001, list[int]_python_007, list[str]_python_000`
-  at the `eq` pivot for the OLMo examples), with labels hand-edited afterwards.
+Full grid (mean4 faith α 1 / 1.5 / 2 | caus α 1 / 1.5 / 2): Coder-32B .789/.907/.911 | .870/.917/.885; Coder-14B
+.519/.704/.789 | .211/.439/.625; Qwen2.5-32B .238/.565/.743 | .620/.759/.808; OLMo-I .435/.616/.691 | .542/.680/.731;
+OLMo-SFT .529/.614/.678 | .330/.487/.553; Qwen3 .521/.735/.820 | .566/.693/.711; Devstral .622/.688/.573 |
+.449/.563/.462; GLM .642/.936/.948 | .562/.735/.773 (Devstral / GLM α 1 faithfulness: campaign table).
+- Fig 16 (code fine-tuning) keeps additive_norm α 0.1 with the Coder's 122 heads for both LMs (Qwen2.5-32B leaf
+  `heads=json:coder32b_goal122` for faithfulness, `heads=json:goal__lam20_thr0.9_band25-56__...__stub=func` for causality;
+  same 122 heads): faith .766 / .853, caus .778 / .873.
+- Generator: `causality_auto.ipynb` (`fig15_model_size`, `fig16_code_finetuning__optB_additive_coder122` = the paper's
+  Fig 16, `fig17_rl_finetuning`; the α table is printed by its model-generalization cell). `model_generalization.ipynb`
+  (the α 1 version) was removed.
 - Localization of these models: section 3.2.
 
 ### 4.5 OVReader: App. "Tracking the Sub-Goal Encoding in Residual Representation" (`Text/Appendix/ovreader.tex`, `fig:ovreader` = `Figures/generated/ovreader/ov_reader_combined.pdf`, `fig:ov-by-pivot` = `ov_by_pivot_combined.pdf`)
@@ -261,12 +262,13 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   Constants (no flags): model Coder-32B, `HEADS_JSON` = the 122 set, OVReader `additive_norm` α 0.15 (`OV_ALPHA`),
   GoalScope skyline α 0.1, steer layers [35,46), locked corpus, readout and rollout 64 tokens. Each job sweeps 19 probe
   layers {0,6,12,18,24,30,36,38,...,56,60,63} plus the `goalscope` skyline.
-- Results: `results/evaluation/ov-reader/Qwen2.5-Coder-32B-Instruct/<layer|goalscope>/<mode>/heads=goal__lam20_thr0.9_band25-56__nheads=122__alpha=0.15__skyalpha=0.1__dtype=<dt>__lang=python__nc=2-3-4__maxnew=64__gen=64__span=frontier__seed=123/summary.json`
+- Results: `results/ov_reader/Qwen2.5-Coder-32B-Instruct/<layer|goalscope>/<mode>/heads=goal__lam20_thr0.9_band25-56__nheads=122__alpha=0.15__skyalpha=0.1__dtype=<dt>__lang=python__nc=2-3-4__maxnew=64__gen=64__span=frontier__seed=123/summary.json`
   (metric `by_pivot[<pivot>]["hard_yes"]`; parse with `scripts/evaluation/ov_reader_io.grid_df`).
-- Cross-check (unweighted mean over the 4 datatype leaves, `eq` pivot, faith / caus): skyline .972 / .955, layer 48
-  .948 / .875, layer 56 .853 / .836, layer 63 .671 / .660, layer 24 .079 / .062, layer 0 .000 / .000. The appendix
-  prose quotes no number; the figures are the check.
-- Generator: `ovreader.ipynb` cell 4 (`ov_reader_combined`: mean over pivots x datatypes + per-layer goal-head histogram
+- Cross-check (unweighted mean over the 4 datatype leaves, `eq` pivot, faith / caus v2): skyline .972 / .968, layer 40
+  - / .912, layer 48 .948 / .918, layer 56 .853 / .884, layer 63 .671 / .720, layer 24 .079 / .051, layer 0 .000 / .000.
+  Causality (v2) leaves end in `__stub=func`. The appendix prose quotes no number; the figures are the check.
+- Generator: `causality_auto.ipynb` (`fig18_ov_reader_combined`, `fig19_ov_by_pivot_combined`), same plotting code as
+  `ovreader.ipynb` cell 4 (`ov_reader_combined`: mean over pivots x datatypes + per-layer goal-head histogram
   from the 122 json) and cell 5 (`ov_by_pivot_combined`), group `ovreader`.
 - Smoke: `--datatypes int --limit 2`. The OVReader leaf has no `nspec` field (a resume extends the same dir), so run
   smokes with a scratch `RESULTS_DIR`, never into `results/`.
@@ -291,7 +293,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   ```
   (no job lists; the reported runs were launched by hand, 2026-09-18). Shared machinery:
   `scripts/evaluation/ablation_common.py`.
-- Results: `results/evaluation/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
+- Results: `results/ablation/Qwen2.5-Coder-32B-Instruct/sufficiency/heads=spare_goal__goal{122,250}__fromL=20__strat=blind_span__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   and `.../necessity/heads=goal__goal{122,250}__fromL=32__strat=sink__dtype=all__nspec=253__seed=123__ctrl=later_half/`
   (`fromL=32` in necessity = the control-pool floor, not an intervention layer). `summary.json["overall"]` =
   `{baseline, ablated, control}`.
@@ -322,7 +324,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   distinct context per (datatype, language) cell (setups saturate at 240). Control heads: 122 random heads from
   layers [32, 64) disjoint from the goal heads, `CONTROL_SEED = 7` in the script (not the `head_sets/.../control/`
   file).
-- Results: `results/temporal_persistence/Qwen2.5-Coder-32B-Instruct/cond_*.pt` (3088 goal records) and
+- Results: `results/temporal_persistence/Qwen2.5-Coder-32B-Instruct/goal/cond_*.pt` (3088 goal records) and
   `.../control/cond_*.pt` (836 files on disk). Conditions already cached are skipped (use `--force` or a scratch
   `RESULTS_DIR`). `summary.json` in that dir is stale (a partial list[str]-only writer, n=893); the notebook recomputes
   from `cond_*.pt`.
@@ -349,7 +351,7 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   `N_PER = 4` prefixes per (predicate, level), levels aligned / easy / hard, `MAX_NEW = 48`; prefixes in
   `scripts/evaluation/obstacle_persistence_prefills.py`; judge `obstacle_persistence_judge.judge_adapts`
   (ADAPTED / SUCCUMBED / ESCAPED / BROKEN). No goal heads involved.
-- Results: `results/obstacle_robustness/<slug>/{trial_<hash>.json, rows.json, summary.json}`
+- Results: `results/obstacle_persistence/<slug>/trials/{trial_<hash>.json, rows.json, summary.json}`
   (`summary["by_level"][level]["adapted"]`).
 - Cross-check (`tab:obstacle-models`, aligned / easy / hard): Coder-32B .97 / .63 / .15; OLMo-Instruct .94 / .57 / .21;
   Qwen2.5-72B .94 / .57 / .12; GLM-4-32B .91 / .54 / .12; Qwen2.5-32B .97 / .66 / .12; Coder-14B .91 / .50 / .09;
@@ -358,12 +360,12 @@ All job lists are under `job_list/goalscope_eval/`. Paper prose checks: 14B -> 3
   (subset: `--datatypes ... --predicates ...`, aggregate to `results_subset.json`)
   (Coder-32B, **250 goal heads** `goal_topk/goal__lam20_top250.json`, numeric obstacle `" 0 + "` on list[str] /
   list[int], GoalScope readout additive_norm α 0.1 layers 35-45 at the `+` token, OV boost x2.0 of the goal heads'
-  o_proj input). Cache: `results/notebook_caches/obstacle_ov_boost/Qwen2.5-Coder-32B-Instruct/{base_*,cmp_*,results.json}`.
+  o_proj input). Cache: `results/obstacle_persistence/Qwen2.5-Coder-32B-Instruct/ov_boost/{base_*,cmp_*,results.json}`.
 - Generator: `obstacle_persistence.ipynb` cell 2 (`obstacle_by_datatype`), cell 3 (`obstacle_adapted_by_level`),
   cell 4 (`obstacle_ov_boost.tex`), group `obstacle_robustness`. The OV-boost verdicts in the paper table were
   hand-edited after generation (Caution 6b).
 - Smoke: `--force` with a scratch `RESULTS_DIR`; e.g. the reported trial
-  `results/obstacle_robustness/Qwen2.5-Coder-32B-Instruct/trial_005a53ee8501b65b.json` (list[str] / count_with_digit /
+  `results/obstacle_persistence/Qwen2.5-Coder-32B-Instruct/trials/trial_005a53ee8501b65b.json` (list[str] / count_with_digit /
   hard, prefix `" - 1 +"`, SUCCUMBED).
 
 ### NRGS interventions (shared facts for 4.9-4.13)
@@ -376,7 +378,7 @@ App. `app:nrgs` (`Text/Appendix/task_transfer.tex`), App. `app:pre-com` / `app:t
 additive_norm α 0.1, layers 35-45, readout heads = G250. Task banks are inline (`src/nrgs/data.py`,
 `src/nrgs/hier_data.py`); no `data/` file is read. `src/nrgs/functional.setup()` only loads the model. Judges:
 `src/nrgs/eval.py` (`judge_causal` scores a BOTH verdict as a miss; the stored `causal_trigger_rate` values were
-rescored the same way, the old rule survives as `*_incl_both` fields). `R = results/diff/Qwen2.5-Coder-32B-Instruct`.
+rescored the same way, the old rule survives as `*_incl_both` fields). `KV = results/kv_transfer/Qwen2.5-Coder-32B-Instruct`, `Q = results/q_transfer/Qwen2.5-Coder-32B-Instruct`.
 Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-python`, `python-cpp`, ...).
 
 ### 4.9 KV transfer of the task span: §5.1.1 (`fig:kv-transfer` = `Figures/transfer/kv-transfer-main-crop.pdf`), App. `app:transfer:kv` (`fig:kv-barcharts` = `Figures/transfer/kv_barcharts-crop.pdf`, `tab:kv-grid`)
@@ -389,7 +391,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   reports / the task-vs-progress figure).
 - Random-head control ("1/512"): the 16 `ppctrl_*` multi jobs of `job_list/diff_eval/path_patch_control_32b_listgap.json`
   (`--goal-heads C250 --readout-heads C250 --no-readout`, V x4).
-- Results: `R/path_patch/I1-off__I2-off__I3-on-V4__win-span__span-list+gap__cppnote-sys__a1__th-goal_250__gh-goal_250__ro-goal_250/<dt>__<src>-<dst>/{meta.json,results.json}`
+- Results: `KV/task_span/I1-off__I2-off__I3-on-V4__win-span__span-list+gap__cppnote-sys__a1__th-goal_250__gh-goal_250__ro-goal_250/<dt>__<src>-<dst>/{meta.json,results.json}`
   (`<dt>` in `int, str, list_int, list_str`; `meta.json` keys `causal_trigger_rate`, `readout_shift_rate`,
   `n_instances`); control `.../...__th-control250_250__gh-control250_250__ro-off/`. V x1 / x2 arms: `I3-on__` / `I3-on-V2__`.
   `__smoke` suffixed dirs are smoke runs.
@@ -405,7 +407,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
 - Commands: `job_list/diff_eval/path_patch_hier_32b_listgap.json` (16 jobs = {list[int], list[str]} x 4 language pairs
   x {and, or}): `python scripts/nrgs/kv_transfer_eval.py --setup hier --datatypes <dt> --lang-transfers <lt> --connectives <c> --orders match diff --n-samples 32 --i3-v-scale 1 2 4`.
   Control: the 8 `--setup hier` jobs of `path_patch_control_32b_listgap.json` (C250, `--no-readout`).
-- Results: `R/path_patch_hier/I1-off__I2-off__I3-on-V4__...__th-goal_250__gh-goal_250__ro-goal_250/<dt>__<and|or>__<match|diff>__<src>-<dst>/meta.json`
+- Results: `KV/sub_sub_goal/I1-off__I2-off__I3-on-V4__...__th-goal_250__gh-goal_250__ro-goal_250/<dt>__<and|or>__<match|diff>__<src>-<dst>/meta.json`
   (32 cells); control `...__th-control250_250__gh-control250_250__ro-off/`.
 - Cross-check: pooled n=1024 causal 0.792, readout 0.654 (paper ~79%); control 0/1024;
   `list_str__and__match__python-python` 0.96875 / 0.84375.
@@ -419,7 +421,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   oracle (`classify_concept` over the whole function) are in `src/nrgs/unspecified_data.py` (ported from master's
   `notebooks/diff/05.4_unspecified.ipynb`). Subsets: `--pairs ... --langs py-cpp ...`; smoke with
   `--results-dir <scratch>`.
-- Results: `R/unspecified_op/ph-goal_250__span-name__V4__mx512/{results.json, summary.json}` (resumable per instance;
+- Results: `KV/broader_goal/ph-goal_250__span-name__V4__mx512/{results.json, summary.json}` (resumable per instance;
   keys `<pair>|<src>-><dst>|<src_lang>-<dst_lang>`; summary `causal_shift`, `by_langs`, `readout_shift`).
 - Cross-check: causal 0.771 (74/96); py->py 0.79, py->cpp 0.75, cpp->py 0.79, cpp->cpp 0.75; all 96 cells equal the
   paper's table. The readout shift (0.78) is not reported in the paper.
@@ -439,10 +441,10 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   `{var} =`, letters naming, closed-loop gaze-select-restrict (no KV transfer). `--tag-suffix __seq` is required to
   hit the reported dirs. (The reported summaries do not record the seed; the job lists pass none, so the reported runs used
   the default at the time; not verified that it was 0.)
-- Results: `R/diff_trigger/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/{order_matched,order_diff}/<dt>__<src>-<dst>/{summary.json,results.json}`
+- Results: `Q/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/{order_matched,order_diff}/<dt>__<src>-<dst>/{summary.json,results.json}`
   (`<dt>` in `int, str, list(int), list(str)`; keys `causal_trigger_rate`, `readout_shift_rate`, `n`); control
-  `R/diff_trigger/ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/`; c_in_dst
-  `R/diff_trigger/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq__cindst/c_in_dst/<dt>__python-python/summary.json`
+  `Q/ph-control250_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq/`; c_in_dst
+  `Q/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__seq__cindst/c_in_dst/<dt>__python-python/summary.json`
   (keys `joint_native_rate`, `joint_c_rate`, `joint_d_rate`, `joint_neither_rate`). The `...__kv__...` and
   `cl-ppgazerestrict__seq` (no `-anceq`) arms in that directory are unreported.
 - Cross-check: pooled causal order-matched 0.871 (paper 87%), order-diff 0.572 (57%); readout 0.668 / 0.412; control
@@ -452,7 +454,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   cell 7 (`q_barcharts_gsr`), cell 9 (`q_gsr_matched.tex`, `q_gsr_diff.tex`), group `<model>/transfer`. `tab:expb` is
   hand-typed from the `joint_*` rates. Schema: `python scripts/nrgs/q_transfer_example_attention.py --cuda 0`
   (defaults = the paper's instance: int, py-py, order_diff, key `dst=is_prime-is_positive-last_digit`) ->
-  `R/gsr_example/order_diff__int__python-python__<hash>.json`, then
+  `Q/gsr_example/order_diff__int__python-python__<hash>.json`, then
   `python notebooks/fig_n_table_generators/q_transfer_schema.py` (cairosvg + IBM Plex fonts) ->
   `notebooks/Figures/Qwen2.5-Coder-32B-Instruct/transfer/q_transfer_schema.{svg,pdf,png}` (= the paper's `gsr_schema_clean.pdf`, renamed).
 
@@ -462,7 +464,7 @@ Language pairs: `--lang-transfers py-py py-cpp cpp-py cpp-cpp` (dirs `python-pyt
   datatype; v2 added configs and resumes from the cache): `python scripts/nrgs/task_vs_progress_eval.py --datatypes <dt>`.
   Defaults: py-py, `--n-samples 32 --seed 1123`, no readout, greedy 64; configs `src/nrgs/task_vs_progress.CONFIGS` =
   none + KV on {G250, all heads} x {task, progress, task+progress} x V {1, 2, 4} + residual x 3 spans.
-- Results: `results/notebook_caches/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
+- Results: `results/task_vs_progress/Qwen2.5-Coder-32B-Instruct/<dt>__python-python__seed1123__mx64__ro0__task+gap{/,.summary.json}`
   (`<dt>` in `int, str, list_int, list_str`; summary keys like `"kv·goal250 · task · V×4"` -> `causal_shift`).
   Dirs without `__task+gap` are the superseded old-span runs.
 - Cross-check (mean over 4 datatypes): residual task 0.891 / progress 0.062 / task+progress 0.984 (paper 0.89 / 0.06 /
@@ -480,7 +482,7 @@ branch `add-q-transfer-alt` (`src/q_transfer_alt/`, `scripts/diff/q_transfer_alt
 
 - Stable marriage: `python scripts/run_goalscope_fig32_stable_marriage.py` (defaults: Coder-32B, the 122 heads,
   512-token greedy generation from the figure's exact prompt, then `apply_goalscope` additive_norm α 0.1 layers 35-45,
-  64-token readouts, `include_noncode=True`) -> `results/goalscope_fig32/stable_marriage.json`, which records the
+  64-token readouts, `include_noncode=True`) -> `results/unspecified_readouts/Qwen2.5-Coder-32B-Instruct/stable_marriage.json`, which records the
   comparison with the transcribed figure: the generated code differs (`generation_matches_figure=False`), the 4 marked
   readouts match to within a word. `--write-web` also writes the site's `ds_and_algo/stable_marriage.json`.
 - Merge sort: produced by `notebooks/diff/13_goalscope_qualitative.ipynb` on master (user text `merge-sort`, assistant
@@ -546,9 +548,9 @@ Qwen3's own pre-filter pivot pool (`git show 008b290:data/head_loc/pairs/Qwen3-3
   - task vs progress: `job_list/diff_eval/task_vs_progress_{qwen3_32b,olmo_instruct}.json` (`scripts/nrgs/task_vs_progress_eval.py`; OLMo runs `--kv-headsets goal250` only, so it has no all-heads KV arm)
   - Superseded first runs with Coder's readout config: the same job lists without `_ro_replace1` (results without the
     `__ros-...` suffix).
-- Results: `results/diff/<model>/path_patch/I1-off__...__ro-goal_250__ros-replace-a1-L35-46/`,
-  `results/diff/<model>/diff_trigger/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__ros-replace-a1-L35-46__seq/`,
-  `results/notebook_caches/task_vs_progress/<model>/<dt>__python-python__seed1123__mx64__ro0__task+gap.summary.json`.
+- Results: `results/kv_transfer/<model>/task_span/I1-off__...__ro-goal_250__ros-replace-a1-L35-46/`,
+  `results/q_transfer/<model>/ph-goal_250__a2__piv-eq__cl-ppgazerestrict-anceq__ros-replace-a1-L35-46__seq/`,
+  `results/task_vs_progress/<model>/<dt>__python-python__seed1123__mx64__ro0__task+gap.summary.json`.
 - Cross-check (pooled n=512): KV causal / readout Qwen3 .904 / .809, OLMo .957 / .881; Q order-matched Qwen3 .844 / .479,
   OLMo .898 / .609; order-diff Qwen3 .535 / .211, OLMo .572 / .314. Task vs progress (mean over 4 datatypes, causal):
   residual task / progress / both Qwen3 .94 / .05 / .98, OLMo .97 / .00 / .98; KV goal250 V x4 task / progress
@@ -559,7 +561,7 @@ Qwen3's own pre-filter pivot pool (`git show 008b290:data/head_loc/pairs/Qwen3-3
   non-Coder models automatically.
 - Table 2 Qwen3 row (130 heads, .820 / .692): `job_list/goalscope_eval/goalscope_eval_c_qwen3_32b.json`
   (`eval_goalscope.py --model Qwen/Qwen3-32B --heads head_sets/Qwen3-32B/goal__lam20_thr0.9_band25-56.json --strategy replace --alpha 2.0`),
-  leaf `GS` = `results/evaluation/goalscope/Qwen3-32B/<mode>/replace/2/heads=json:goal__lam20_thr0.9_band25-56__...`.
+  leaf `GS` = `results/goalscope/Qwen3-32B/<mode>/replace/2/heads=json:goal__lam20_thr0.9_band25-56__...`.
   **α 2, not the table's α 1** (dagger in the paper): the α 1 faithfulness run stopped at 15/253 records and there is
   no α 1 causality run.
 
@@ -572,7 +574,7 @@ Qwen3's own pre-filter pivot pool (`git show 008b290:data/head_loc/pairs/Qwen3-3
   (default: all 29 abstractive tasks, head sets `fv122/150/250` = `head_sets/Qwen2.5-Coder-32B-Instruct/fv__cma_top{122,150,250}.json`
   and `goal122/150/250`; ā = mean o_proj input at the last token over 100 clean 10-shot prompts; zero-shot
   `Q: x\nA:`, each head replaced at its own layer, last token; 100 queries per task). Writes `<out>/<task>.json`
-  (resumable; refuses to write under `results/`). Run used for the paper: `results_scratch/fv_head_transfer/Qwen2.5-Coder-32B-Instruct/`.
+  (resumable; refuses to write under `results/`). Run used for the paper: `results/fv_baseline/Qwen2.5-Coder-32B-Instruct/`.
 - The table reports top-1 recovery on the queries the unpatched 10-shot model answers correctly (`icl_hit`), for
   antonym / country-capital / capitalize / present-past / word_length / lowercase_first_letter / sentiment.
   Full analysis: `agent_reports/claude/fv_vs_goal_heads_icl.md` (gitignored, local).
@@ -586,7 +588,7 @@ Qwen3's own pre-filter pivot pool (`git show 008b290:data/head_loc/pairs/Qwen3-3
 
 | code | what it is | run |
 |---|---|---|
-| `scripts/evaluation/run_causal_v2.py`, `job_list/goalscope_eval/causal_v2_all.json`, `job_list/diff_eval/ov_reader_locked_causal_v2_slurm.json` | causality evals with an alternative ("v2") C++ probe prompt | `python scripts/evaluation/run_causal_v2.py <eval module> <its args>`; writes a separate results root (`results_causal_v2/`) |
+| (retired 2026-11-11) `scripts/evaluation/run_causal_v2.py` + `causal_v2_*` job lists | the v2 probe is now the default (`--causal_stub v2`); `--causal_stub v1` reproduces the earlier stub | - |
 | `scripts/nrgs/exec_check_transfers.py`, `scripts/nrgs/exec_check_regen_cpp.py` (the module `src/nrgs/exec_check.py` they use is also on `master`, for demos 04/05) | compile + execution check of successful cross-language KV / Q transfers (does the patched code compile and implement the transferred sub-task on test inputs); regen at 256 tokens for the ones that failed to compile | read `results/` only, write to an `--out` dir |
 | `job_list/diff_eval/path_patch_32b_listgap_taskprog.json` | KV transfer of task+progress span, V x1 (arm `I3-on__win-span+prog__...`) | no paper figure reads it |
 | `llama70b_eval_*` jobs (in `job_list/goalscope_eval/llama70b_web_and_eval.json` on dev only) | GoalScope eval of Llama-3.3-70B | unreported `GS` leaves |
