@@ -2,7 +2,9 @@
 the paper's main GoalScope faithfulness run (Coder-32B, the 122 goal heads, additive_norm α 0.1, layers 35-45, all 253
 specs). Per spec: the task prompt, the assistant's code prefix with the four pre-implementation pivots
 (prev_end, indent, var, eq) marked, the LM's own rollout of the frontier line, and at each pivot the GoalScope read-out
-with the judge's verdict (the verdict that is in the paper) and the judge's reasoning.
+with the judge's verdict (the verdict that is in the paper) and the judge's reasoning. The "Causality" view adds, per
+pivot, the causality_auto read-out of the same encoding (the v2 C++ probe: instruction + prefill
+``auto func (auto value){``; the paper's Fig 2 causality bars; results_causal_v2/, same leaf) and its judge verdict.
 
 The reasoning comes from ``rejudge_goalscope.py --judge claude-sonnet-4-6 --explain`` (same judge, same rubric, asked to
 justify before the verdict; the reported rubric asks for the verdict tag only). When that reasoned verdict differs from
@@ -25,6 +27,9 @@ PIVOTS = ["prev_end", "indent", "var", "eq"]
 MODEL = "Qwen2.5-Coder-32B-Instruct"
 LEAF = "heads=goal__layers=35-46__nsteer=all__maxnew=64__span=frontier__dtype=all__nspec=253__nc=2-3-4__seed=123"
 REL = f"{MODEL}/faithfulness/additive_norm/0.1/{LEAF}"
+CAUSAL_REL = f"{MODEL}/causality/additive_norm/0.1/{LEAF}"
+CAUSAL_ROOT = "results_causal_v2"          # causality_auto (v2 C++ probe), the scores the paper reports
+CAUSAL_STUB = "auto func (auto value){"
 ASSISTANT = "<|im_start|>assistant\n"
 
 
@@ -47,7 +52,22 @@ def main():
         for l in open(os.path.join(rat, "records.jsonl")):
             r = json.loads(l)
             why[(r["spec"], r["anchor"])] = r
-    print(f"{len(samples)} specs; reasoning for {len(why)} records from {rat}")
+    csrc = os.path.join(os.path.dirname(os.path.abspath(DEFAULT_RESULTS_DIR)), CAUSAL_ROOT, "evaluation", "goalscope", CAUSAL_REL)
+    crecs = defaultdict(dict)
+    for l in open(os.path.join(csrc, "records.jsonl")):
+        r = json.loads(l)
+        crecs[r["spec"]][r["anchor"]] = r
+    # causality judge reasoning: rejudge_goalscope --explain run against results_causal_v2/ (own subtree, the
+    # reported leaf is only read); the page shows the reported verdict and notes when the reasoned one differs
+    crat = os.path.join(os.path.dirname(os.path.abspath(DEFAULT_RESULTS_DIR)), CAUSAL_ROOT, "evaluation", "goalscope_rationale",
+                        CAUSAL_REL, f"judge={args.rationale_judge}")
+    cwhy = {}
+    if os.path.exists(os.path.join(crat, "records.jsonl")):
+        for l in open(os.path.join(crat, "records.jsonl")):
+            r = json.loads(l)
+            cwhy[(r["spec"], r["anchor"])] = r
+    print(f"{len(samples)} specs; reasoning for {len(why)} records from {rat}; causality from {csrc} "
+          f"(reasoning for {len(cwhy)} records)")
     tok = AutoTokenizer.from_pretrained(f"Qwen/{MODEL}")
     os.makedirs(args.out, exist_ok=True)
     index, n_missing = [], 0
@@ -83,15 +103,24 @@ def main():
                 reasoning=(w["judge2_response"] if w and w.get("judged") else None),
                 reasoned_verdict=(w["judge2_verdict"] if w and w.get("judged") else None),
                 judged=bool(r.get("hard_prompt")),
+                causal=(None if p not in crecs[sid] else dict(
+                    readout=crecs[sid][p]["readout"], verdict=crecs[sid][p]["hard"],
+                    judged=bool(crecs[sid][p].get("hard_prompt")), impl_span=crecs[sid][p]["impl_span"],
+                    reasoning=(cwhy[(sid, p)]["judge2_response"] if cwhy.get((sid, p), {}).get("judged") else None),
+                    reasoned_verdict=(cwhy[(sid, p)]["judge2_verdict"] if cwhy.get((sid, p), {}).get("judged") else None))),
             ))
         ex = dict(id=sid, datatype=s["datatype"], frontier_id=s["frontier_id"], condition=recs[sid][PIVOTS[0]]["condition"],
                   user=user, code=code, rollout=s["completion"], impl_span=s["impl_span"], readouts=readouts)
         json.dump(ex, open(os.path.join(args.out, f"{sid}.json"), "w"), indent=1)
         index.append(dict(id=sid, datatype=s["datatype"], frontier_id=s["frontier_id"], condition=ex["condition"],
-                          n_yes=sum(r["verdict"] == "YES" for r in readouts), n=len(readouts)))
+                          n_yes=sum(r["verdict"] == "YES" for r in readouts), n=len(readouts),
+                          n_yes_causal=sum(bool(r["causal"]) and r["causal"]["verdict"] == "YES" for r in readouts),
+                          n_causal=sum(bool(r["causal"]) for r in readouts)))
     summ = json.load(open(os.path.join(src, "summary.json")))["by_anchor"]
+    csumm = json.load(open(os.path.join(csrc, "summary.json")))["by_anchor"]
     meta = dict(model=MODEL, heads=122, strategy="additive_norm", alpha=0.1, layers="35-45", judge="claude-sonnet-4-6",
-                rationale_judge=args.rationale_judge, by_pivot={p: summ[p]["hard_yes"] for p in PIVOTS})
+                rationale_judge=args.rationale_judge, by_pivot={p: summ[p]["hard_yes"] for p in PIVOTS},
+                causal_by_pivot={p: csumm[p]["hard_yes"] for p in PIVOTS}, causal_stub=CAUSAL_STUB)
     json.dump(dict(meta=meta, examples=index), open(os.path.join(args.out, "index.json"), "w"), indent=1)
     print(f"wrote {len(index)} specs -> {args.out}  (judged records without reasoning: {n_missing})")
 
