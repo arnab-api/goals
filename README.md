@@ -44,7 +44,7 @@ implements it. Right: faithfulness and causality at four pivot tokens, with same
 - **Pre-commitment:** the sub-goal is verbalized correctly 94% of the time at the indent, three tokens before any of
   its code is written.
 - **Plasticity:** the encoding taken from Python, injected into a C++ stub, makes the model implement the same
-  operation in C++ (0.75 on average).
+  operation in C++ (0.87 on average).
 - **Persistence:** the encoding stays similar to the pivot's throughout the implementation, also across languages,
   and fades once the sub-goal is complete.
 
