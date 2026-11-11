@@ -2,7 +2,7 @@
 implements the stable marriage algorithm, with the figure's exact prompt and the prefill up to the function signature.
 Generates greedily, compares the code with the figure, runs ``apply_goalscope`` with the paper / site config (122 goal
 heads, additive_norm, alpha 0.1, steer layers 35-46, 64 new tokens), prints the read-outs at the figure's four marked
-positions and saves the rows to ``results/goalscope_fig32/stable_marriage.json``. ``--write-web`` also replaces the
+positions and saves the rows to ``results/unspecified_readouts/Qwen2.5-Coder-32B-Instruct/stable_marriage.json``. ``--write-web`` also replaces the
 site's ``goals-web/site/data/<model>/ds_and_algo/stable_marriage.json`` (via ``src.goals.site_data``).
 
     python scripts/run_goalscope_fig32_stable_marriage.py [--write-web]
@@ -65,7 +65,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-key", default="Qwen/Qwen2.5-Coder-32B-Instruct")
     ap.add_argument("--max-gen-tokens", type=int, default=512)
-    ap.add_argument("--out", default="results/goalscope_fig32/stable_marriage.json")
+    ap.add_argument("--out", default="results/unspecified_readouts/Qwen2.5-Coder-32B-Instruct/stable_marriage.json")
     ap.add_argument("--write-web", action="store_true")
     args = ap.parse_args()
 

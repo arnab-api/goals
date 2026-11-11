@@ -3,7 +3,7 @@
 reads (none / task / progress / task+progress) x method (kv on goal-250 | all heads, V x {1, 2, 4}; residual).
 Defaults = the paper's configuration (py-py, 32 instances per datatype, no GoalScope readout).
 
-Writes a per-instance cache (``results/notebook_caches/task_vs_progress/<model>/<dt>__<src>-<dst>__seed..
+Writes a per-instance cache (``results/task_vs_progress/<model>/<dt>__<src>-<dst>__seed..
 __mx..__ro0__task+gap/*.json``), so it resumes from entries already computed. A per-datatype
 ``<cache dir>.summary.json`` (causal-shift per config) is written beside it.
 

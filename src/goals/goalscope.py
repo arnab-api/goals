@@ -282,12 +282,29 @@ def _build_goalscope_prompt(mt) -> str:
 
 # GoalScope destination prompt for the causality read-out: an information-less C++ function stub. The
 # goal encoding is steered in on top of it; the model then continues the C++ body cross-lingually.
-CAUSAL_PREFIX = "bool check(auto value){"
-CAUSAL_INSTRUCTION = (
+# Two probe versions. "v2" (the default, the paper's reported causality = "causality_auto") frees the return type;
+# "v1" is the original bool stub (kept so the earlier numbers stay reproducible: --causal_stub v1).
+CAUSAL_PREFIX_V1 = "bool check(auto value){"
+CAUSAL_INSTRUCTION_V1 = (
     "You are implementing a simple C++ function that checks for a condition. "
     "Just write the function body, without any comments or explanations. Assume all the necessary "
     "headers are already included."
 )
+CAUSAL_PREFIX_V2 = "auto func (auto value){"
+CAUSAL_INSTRUCTION_V2 = (
+    "You are implementing a C++ function. Just write the function body, without any comments or "
+    "explanations. Assume all the necessary headers are already included."
+)
+CAUSAL_STUBS = {"v2": (CAUSAL_PREFIX_V2, CAUSAL_INSTRUCTION_V2), "v1": (CAUSAL_PREFIX_V1, CAUSAL_INSTRUCTION_V1)}
+CAUSAL_PREFIX, CAUSAL_INSTRUCTION = CAUSAL_STUBS["v2"]
+
+
+def set_causal_stub(name: str) -> None:
+    """Select the causality probe (``v2`` default, ``v1`` = the original bool stub) for this process. The prompt
+    builder reads the module globals at call time, so callers must use ``goalscope.CAUSAL_PREFIX`` (not an
+    import-time copy)."""
+    global CAUSAL_PREFIX, CAUSAL_INSTRUCTION
+    CAUSAL_PREFIX, CAUSAL_INSTRUCTION = CAUSAL_STUBS[name]
 
 
 def _build_causality_prompt(mt) -> str:

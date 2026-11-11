@@ -34,8 +34,8 @@ def main():
     ap.add_argument("--gpt-judge", default="gpt-5")
     ap.add_argument("--out", default=os.path.join(SITE, "demos", "data", "annotation", "items.json"))
     args = ap.parse_args()
-    src = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", "goalscope", REL, "records.jsonl")
-    gpt = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", "goalscope_rejudge", REL, f"judge={args.gpt_judge}",
+    src = os.path.join(DEFAULT_RESULTS_DIR, "goalscope", REL, "records.jsonl")
+    gpt = os.path.join(DEFAULT_RESULTS_DIR, "goalscope", REL, f"rejudge={args.gpt_judge}",
                        "records.jsonl")
     g = {}
     for l in open(gpt):
@@ -43,7 +43,7 @@ def main():
         g[(r["spec"], r["anchor"])] = r["judge2_verdict"]
     why = {}
     for k, judge in (("claude", "claude-sonnet-4-6"), ("gpt", args.gpt_judge)):
-        f = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", "goalscope_rationale", REL, f"judge={judge}", "records.jsonl")
+        f = os.path.join(DEFAULT_RESULTS_DIR, "goalscope", REL, f"rationale={judge}", "records.jsonl")
         for l in open(f):
             r = json.loads(l)
             txt = (r.get("judge2_response") or "") if r.get("judged") else "Not sent to the judge: the read-out is empty."

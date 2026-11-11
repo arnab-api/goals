@@ -12,7 +12,7 @@ Qwen2.5-Coder-32B-Instruct into a complex-number placeholder (``0j``). For each 
                  ``BOOST_ALPHA = 2.0`` at the current token of every forward pass.
 
 Baseline and boosted continuations are judged with ``obstacle_persistence_judge.judge_adapts``. Results are cached
-under ``<results>/notebook_caches/obstacle_ov_boost/<model>/`` (``base_<h>.json`` per candidate scan,
+under ``<results>/obstacle_persistence/<model>/ov_boost/`` (``base_<h>.json`` per candidate scan,
 ``cmp_<h>.json`` per derailed case, ``results.json`` = all derailed cases), from which
 ``notebooks/fig_n_table_generators/obstacle_persistence.ipynb`` renders the OV-boost table.
 
@@ -63,9 +63,7 @@ GS = dict(strategy="additive_norm", alpha=0.1, steer_layer_range=(35, 46), n_ste
 
 
 def cache_dir():
-    # "obstacle_ov_boost" is the legacy cache dir name, kept for cache compatibility
-    return os.path.join(env_utils.DEFAULT_RESULTS_DIR, "notebook_caches", "obstacle_ov_boost",
-                        MODEL.split("/")[-1])
+    return os.path.join(env_utils.DEFAULT_RESULTS_DIR, "obstacle_persistence", MODEL.split("/")[-1], "ov_boost")
 
 
 def cache_path(dt, pid, tag):

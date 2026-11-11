@@ -44,6 +44,7 @@ from scripts.evaluation import faithfulness_io as fio
 
 # Every stage except the residual injection is shared with the head-set eval, so the two runs
 # differ only in the thing under test.
+import src.goals.goalscope as GS  # noqa: E402  (GS.CAUSAL_PREFIX: the probe chosen by --causal_stub)
 from scripts.evaluation.eval_goalscope import (
     ALL_DATATYPES,
     ANCHOR_ORDER,
@@ -224,11 +225,14 @@ def parse_args():
         help="wipe an existing run dir; default is to RESUME",
     )
     logging_utils.add_logging_args(ap)
+    ap.add_argument("--causal_stub", default="v2", choices=["v2", "v1"],
+                    help="causality probe: v2 = 'auto func (auto value){' (default, reported), v1 = the original 'bool check(auto value){'")
     return ap.parse_args()
 
 
 def main():
     args = parse_args()
+    GS.set_causal_stub(args.causal_stub)
     logging_utils.configure(args)
     experiment_utils.set_seed(args.seed)
     torch.set_grad_enabled(False)
@@ -242,6 +246,7 @@ def main():
 
     config = dict(
         mode=args.mode,
+        causal_stub=(args.causal_stub if args.mode == "causality" else None),
         # `strategy` is a path component, so residual runs never land in a head-set run's dir
         strategy="resid_norm",
         alpha=args.alpha,
@@ -264,7 +269,7 @@ def main():
         bank="QTASKS",
         anchors=ANCHOR_ORDER,
         oracle_model=ORACLE_MODEL,
-        readout_prefix=(CAUSAL_PREFIX if args.mode == "causality" else ""),
+        readout_prefix=(GS.CAUSAL_PREFIX if args.mode == "causality" else ""),
     )
 
     run_dir = fio.run_dir_for(config, results_dir)
@@ -325,7 +330,7 @@ def main():
     )
 
     probe_prompt = _build_causality_prompt(mt) if args.mode == "causality" else None
-    readout_prefix = CAUSAL_PREFIX if args.mode == "causality" else ""
+    readout_prefix = GS.CAUSAL_PREFIX if args.mode == "causality" else ""
 
     rec_fh = open(fio.records_path(run_dir), "a")
     samp_fh = open(fio.samples_path(run_dir), "a")

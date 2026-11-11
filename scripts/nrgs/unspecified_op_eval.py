@@ -12,7 +12,7 @@ the GoalScope readout at each pivot names (``--readout-heads``, 64 tokens). caus
 SRC's algorithm (BOTH is a miss). Defaults = the paper's configuration: the 250 goal heads, V x 4, 512 tokens, all 12
 pairs x 2 directions x 4 language pairs (n = 96).
 
-Results: ``results/diff/<model>/unspecified_op/<run_tag>/{results.json, summary.json}`` (resumable per instance).
+Results: ``results/kv_transfer/<model>/broader_goal/<run_tag>/{results.json, summary.json}`` (resumable per instance).
 
     conda run -n goals python scripts/nrgs/unspecified_op_eval.py --cuda 6
     conda run -n goals python scripts/nrgs/unspecified_op_eval.py --cuda 6 --pairs merge_quick --langs py-cpp --results-dir /tmp/x   # smoke
@@ -110,7 +110,7 @@ def main():
     tag = f"ph-{_heads_tag(args.patch_heads, len(patch))}__span-name__V{args.v_scale:g}__mx{args.max_new}"
     if args.no_readout:
         tag += "__ro-off"
-    out_dir = Path(args.results_dir) / "diff" / MODEL.split("/")[-1] / "unspecified_op" / tag
+    out_dir = Path(args.results_dir) / "kv_transfer" / MODEL.split("/")[-1] / "broader_goal" / tag
     out_dir.mkdir(parents=True, exist_ok=True)
     fp = out_dir / "results.json"
     records = {} if args.force or not fp.exists() else {r["key"]: r for r in json.load(open(fp))}

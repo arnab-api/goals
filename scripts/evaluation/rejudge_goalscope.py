@@ -7,7 +7,7 @@ Records the original run never sent to a judge (empty read-out -> MALFORMED; cau
 a trivial sign/zero test -> NO) keep their deterministic verdict and are excluded from the agreement statistics.
 
 The source leaf is only read. Output (resumable, one line per record):
-    results/evaluation/goalscope_rejudge/<model>/<mode>/<strategy>/<alpha>/<leaf>/judge=<judge>/
+    results/goalscope/<model>/<mode>/<strategy>/<alpha>/<leaf>/rejudge=<judge>/   (--explain: .../<leaf>/rationale=<judge>/)
         records.jsonl   source record fields + judge2_verdict / judge2_response
         summary.json    per-pivot hard_yes under both judges, agreement, Cohen's kappa, confusion
 
@@ -104,7 +104,7 @@ def main():
     ap.add_argument("--leaf", default=CORE_LEAF)
     ap.add_argument("--judge", default="gpt-5", help="gpt-* / o* -> ask_gpt; claude-* -> ask_claude")
     ap.add_argument("--explain", action="store_true",
-                    help="ask for a 1-3 sentence justification before the verdict (writes under goalscope_rationale/)")
+                    help="ask for a 1-3 sentence justification before the verdict (writes <leaf>/rationale=<judge>/)")
     ap.add_argument("--reasoning-effort", default=None, help="gpt-5 reasoning_effort (default: API default)")
     # gpt-5's max_completion_tokens also covers hidden reasoning; 512 (the Claude budget) can return empty content
     ap.add_argument("--max-tokens", type=int, default=4096)
@@ -112,8 +112,9 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="smoke: first N records (separate output dir)")
     args = ap.parse_args()
 
-    rel = os.path.join(args.model, args.mode, args.strategy, args.alpha, args.leaf)
-    src = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", "goalscope", rel)
+    leaf = args.leaf + ("__stub=func" if args.mode == "causality" and args.leaf == CORE_LEAF else "")  # v2-probe causality leaf
+    rel = os.path.join(args.model, args.mode, args.strategy, args.alpha, leaf)
+    src = os.path.join(DEFAULT_RESULTS_DIR, "goalscope", rel)
     sys_prompt = CAUSAL_HARD_SYS if args.mode == "causality" else FAITH_HARD_SYS
     tag = json.load(open(os.path.join(src, "config.json")))["hard_rubric_tag"]
     assert hashlib.md5(sys_prompt.encode()).hexdigest()[:8] == tag, f"rubric changed since the run ({tag})"
@@ -125,8 +126,8 @@ def main():
         sys_prompt = explain_variant(sys_prompt)
     jtag = f"judge={args.judge}" + (f"__effort={args.reasoning_effort}" if args.reasoning_effort else "")
     jtag += f"__limit={args.limit}" if args.limit else ""
-    tree = "goalscope_rationale" if args.explain else "goalscope_rejudge"
-    out = os.path.join(DEFAULT_RESULTS_DIR, "evaluation", tree, rel, jtag)
+    # side-runs live inside their GoalScope leaf: <leaf>/rejudge=<judge>/ or <leaf>/rationale=<judge>/
+    out = os.path.join(src, ("rationale=" if args.explain else "rejudge=") + jtag[len("judge="):])
     assert os.path.realpath(out) != os.path.realpath(src)
     os.makedirs(out, exist_ok=True)
     rec_path = os.path.join(out, "records.jsonl")
