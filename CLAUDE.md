@@ -14,9 +14,9 @@ Code for the paper *Goal Encoding in LLMs*. When an LM writes code for a task wi
 and NRGS interventions (KV / Q transfer) show how the LM re-reads the goal from the task span.
 
 ```
-Broader goal:      implement the function correctly
-Instrumental goal: check the timeout condition        <- what the goal heads encode
-Implementation:    timeout > 0  vs  timeout >= 1  vs  int(timeout) > 0
+Broader goal:      implement merge sort
+Instrumental goal: merge the two sorted halves          <- what the goal heads encode
+Implementation:    two-pointer while loop  vs  heapq.merge(left, right)  vs  std::merge(...) in C++
 ```
 The encoding should not depend on the implementation strategy. A direction that only predicts success may just capture
 competence; that is the central confound to avoid.
