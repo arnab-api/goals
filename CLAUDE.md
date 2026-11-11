@@ -247,11 +247,12 @@ Full grid (mean4 faith α 1 / 1.5 / 2 | caus α 1 / 1.5 / 2): Coder-32B .789/.90
 .519/.704/.789 | .211/.439/.625; Qwen2.5-32B .238/.565/.743 | .620/.759/.808; OLMo-I .435/.616/.691 | .542/.680/.731;
 OLMo-SFT .529/.614/.678 | .330/.487/.553; Qwen3 .521/.735/.820 | .566/.693/.711; Devstral .622/.688/.573 |
 .449/.563/.462; GLM .642/.936/.948 | .562/.735/.773 (Devstral / GLM α 1 faithfulness: campaign table).
-- Fig 16 (code fine-tuning) keeps additive_norm α 0.1 with the Coder's 122 heads for both LMs (Qwen2.5-32B leaf
-  `heads=json:coder32b_goal122` for faithfulness, `heads=json:goal__lam20_thr0.9_band25-56__...__stub=func` for causality;
-  same 122 heads): faith .766 / .853, caus .778 / .873.
-- Generator: `causality_auto.ipynb` (`fig15_model_size`, `fig16_code_finetuning__optB_additive_coder122` = the paper's
-  Fig 16, `fig17_rl_finetuning`; the α table is printed by its model-generalization cell). `model_generalization.ipynb`
+- Fig 16 (code fine-tuning, since 2026-11-11) = the same rule as Table 3: replace at each LM's best causality_auto α,
+  own heads (Coder 122 at α 1.5: faith .907 / caus .917; Qwen2.5-32B 108 at α 2: .743 / .808). The earlier version
+  (additive_norm α 0.1, the Coder's 122 heads for both LMs: faith .766 / .853, caus .778 / .873) is kept as option B.
+- Generator: `causality_auto.ipynb` (`fig15_model_size`, `fig16_code_finetuning__optA_replace_best_alpha` = the paper's
+  Fig 16, `fig16_code_finetuning__optB_additive_coder122` = the earlier version, `fig17_rl_finetuning`; the α table is
+  printed by its model-generalization cell). `model_generalization.ipynb`
   (the α 1 version) was removed.
 - Localization of these models: section 3.2.
 
