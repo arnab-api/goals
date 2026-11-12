@@ -92,11 +92,29 @@ Run everything from the repository root. The experiments use Qwen2.5-Coder-32B-I
 the model comparisons add Qwen2.5-Coder-14B, Qwen2.5-32B, Qwen3-32B, OLMo-3.1-32B (Instruct and SFT),
 Devstral-Small-2-24B and GLM-4.5-Air (4 GPUs).
 
-- `notebooks/demos/` — walk-throughs of the main experiments on a single example each (start here).
+- `notebooks/demos/` — walk-throughs of the main experiments on a single example each (start here; index below).
 - `scripts/` — the experiment entry points; `job_list/` — the exact runs behind the paper's results.
 - `notebooks/fig_n_table_generators/` — the paper's figures and tables, from cached results.
 - `head_sets/` — the localized goal heads (`head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json`,
   122 heads) and the other head sets used in the paper.
+
+### Demos
+
+Each notebook in `notebooks/demos/` walks through one experiment on a single example, with its outputs saved.
+
+| demo | what it shows |
+|---|---|
+| [01_goalscope](notebooks/demos/01_goalscope.ipynb) | GoalScope reads the next sub-task from the goal heads before it is written, as a description and as C++ code. |
+| [01.1_unspecified](notebooks/demos/01.1_unspecified.ipynb) | With no sub-tasks listed (merge sort, stable marriage), the goal heads still carry the step the LM is about to write. |
+| [01.2_ovreader](notebooks/demos/01.2_ovreader.ipynb) | OVReader: the next sub-task is readable from the residual stream from about the goal heads' layers, when read through their OV maps. |
+| [02_persistence](notebooks/demos/02_persistence.ipynb) | The goal encoding persists while a sub-goal is implemented and fades when it is done; the LM keeps pursuing it past a forced bad start. |
+| [03_goal_head_ablation](notebooks/demos/03_goal_head_ablation.ipynb) | The goal heads are a causal bottleneck: their access to the task is sufficient, and knocking out enough of them is fatal. |
+| [04_kv_transfer](notebooks/demos/04_kv_transfer.ipynb) | Swapping what the goal heads read from the task span redirects the LM to the source prompt's next sub-goal. |
+| [04.1_sub_sub_goal](notebooks/demos/04.1_sub_sub_goal.ipynb) | The same KV swap one level down changes the second condition of a two-condition filter (the sub-sub-goal). |
+| [04.2_unspecified_op](notebooks/demos/04.2_unspecified_op.ipynb) | The same KV swap one level up, over only an algorithm's name, makes the LM write a different algorithm (quick sort → merge sort). |
+| [05_q_transfer](notebooks/demos/05_q_transfer.ipynb) | The goal heads' query carries the progress ("what is done"); transferring it selects the destination's pending sub-task. |
+| [06_task_vs_progress](notebooks/demos/06_task_vs_progress.ipynb) | The LM reads its next sub-goal from the task span, not from the code it has written so far. |
+| [07_beyond_code](notebooks/demos/07_beyond_code.ipynb) | Beyond code: GoalScope verbalizes the hidden rule of a few-shot ICL prompt and the plan of an emergently misaligned chat model. |
 
 [CLAUDE.md](CLAUDE.md) maps the main-text results to the commands that reproduce them. The `dev` branch has the full
 research history, and its CLAUDE.md covers every experiment, including the appendix.
