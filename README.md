@@ -104,17 +104,17 @@ Each notebook in `notebooks/demos/` walks through one experiment on a single exa
 
 | demo | what it shows |
 |---|---|
-| [01_goalscope](notebooks/demos/01_goalscope.ipynb) | GoalScope reads the next sub-task from the goal heads before it is written, as a description and as C++ code. |
-| [01.1_unspecified](notebooks/demos/01.1_unspecified.ipynb) | With no sub-tasks listed (merge sort, stable marriage), the goal heads still carry the step the LM is about to write. |
-| [01.2_ovreader](notebooks/demos/01.2_ovreader.ipynb) | OVReader: the next sub-task is readable from the residual stream from about the goal heads' layers, when read through their OV maps. |
-| [02_persistence](notebooks/demos/02_persistence.ipynb) | The goal encoding persists while a sub-goal is implemented and fades when it is done; the LM keeps pursuing it past a forced bad start. |
-| [03_goal_head_ablation](notebooks/demos/03_goal_head_ablation.ipynb) | The goal heads are a causal bottleneck: their access to the task is sufficient, and knocking out enough of them is fatal. |
-| [04_kv_transfer](notebooks/demos/04_kv_transfer.ipynb) | Swapping what the goal heads read from the task span redirects the LM to the source prompt's next sub-goal. |
-| [04.1_sub_sub_goal](notebooks/demos/04.1_sub_sub_goal.ipynb) | The same KV swap one level down changes the second condition of a two-condition filter (the sub-sub-goal). |
-| [04.2_unspecified_op](notebooks/demos/04.2_unspecified_op.ipynb) | The same KV swap one level up, over only an algorithm's name, makes the LM write a different algorithm (quick sort → merge sort). |
-| [05_q_transfer](notebooks/demos/05_q_transfer.ipynb) | The goal heads' query carries the progress ("what is done"); transferring it selects the destination's pending sub-task. |
-| [06_task_vs_progress](notebooks/demos/06_task_vs_progress.ipynb) | The LM reads its next sub-goal from the task span, not from the code it has written so far. |
-| [07_beyond_code](notebooks/demos/07_beyond_code.ipynb) | Beyond code: GoalScope verbalizes the hidden rule of a few-shot ICL prompt and the plan of an emergently misaligned chat model. |
+| [01_goalscope](notebooks/demos/01_goalscope.ipynb) | GoalScope readsout the next sub-task from the goal heads, as a natural language description and as C++ code. |
+| [01.1_unspecified](notebooks/demos/01.1_unspecified.ipynb) | Goalscope readout beyond controlled settings. |
+| [01.2_ovreader](notebooks/demos/01.2_ovreader.ipynb) | OV Projection of the goal heads can read-out the upcoming operation directly from a residual latent. |
+| [02_persistence](notebooks/demos/02_persistence.ipynb) | The goal encoding persists while its execution. |
+| [03_goal_head_ablation](notebooks/demos/03_goal_head_ablation.ipynb) | Sufficiency and Necessity of the goal heads, tested with targeted ablations. |
+| [04_kv_transfer](notebooks/demos/04_kv_transfer.ipynb) | Supports the frequent re-read prediction. While the LM is in the middle of implementing a goal, changing what the goal heads read in the task span redirects the LM's action. |
+| [04.1_sub_sub_goal](notebooks/demos/04.1_sub_sub_goal.ipynb) | Frequent re-read tested in a sub-sub-goal scenario. |
+| [04.2_unspecified_op](notebooks/demos/04.2_unspecified_op.ipynb) | Frequent re-read tested in code where the next operation is not specified in the prompt. |
+| [05_q_transfer](notebooks/demos/05_q_transfer.ipynb) | The goal heads' query carries the progress ("what is done"); transferring it selects the destination's pending sub-task not in the source progress. |
+| [06_task_vs_progress](notebooks/demos/06_task_vs_progress.ipynb) | The task-span encoding, not what is being carried in the generated code, dictates the LM's future actions. |
+| [07_beyond_code](notebooks/demos/07_beyond_code.ipynb) | Beyond code: GoalScope verbalizes the implicit rule of few-shot ICL prompts, and a EM LM's "thought" while generating a mis-aligned response. |
 
 [CLAUDE.md](CLAUDE.md) maps the main-text results to the commands that reproduce them. The `dev` branch has the full
 research history, and its CLAUDE.md covers every experiment, including the appendix.
