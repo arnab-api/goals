@@ -110,7 +110,6 @@ Each notebook in `notebooks/demos/` walks through one experiment on a single exa
 | [01_goalscope](notebooks/demos/01_goalscope.ipynb) | GoalScope readsout the next sub-task from the goal heads, as a natural language description and as C++ code. |
 | [01.1_unspecified](notebooks/demos/01.1_unspecified.ipynb) | Goalscope readout beyond controlled settings. |
 | [01.2_ovreader](notebooks/demos/01.2_ovreader.ipynb) | OV Projection of the goal heads can read-out the upcoming operation directly from a residual latent. |
-| [01.4_random](notebooks/demos/01.4_random.ipynb) | GoalScope when the LM picks its next computation itself ("3 random computations", first two prefilled): readouts match the LM's own choice far less often than with a listed task. |
 | [02_persistence](notebooks/demos/02_persistence.ipynb) | The goal encoding persists while its execution. |
 | [03_goal_head_ablation](notebooks/demos/03_goal_head_ablation.ipynb) | Sufficiency and Necessity of the goal heads, tested with targeted ablations. |
 | [04_kv_transfer](notebooks/demos/04_kv_transfer.ipynb) | Supports the frequent re-read prediction. While the LM is in the middle of implementing a goal, changing what the goal heads read in the task span redirects the LM's action. |
