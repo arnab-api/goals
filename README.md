@@ -3,7 +3,7 @@
 Arnab Sen Sharma, Eric Todd, Sheridan Feucht, Andy Arditi, Rohit Gandikota, Natalie Shapira, Gabriele Sarti,
 Constanza Fierro, Lisa Schut, David Bau
 
-**Project page and interactive GoalScope demo: https://goals.baulab.info** · Paper: coming soon
+**Project page and interactive GoalScope demo: https://goals.baulab.info** · Paper: https://arxiv.org/abs/2611.17297
 
 ## Do LLMs have goals?
 
@@ -121,4 +121,16 @@ research history, and its CLAUDE.md covers every experiment, including the appen
 
 ## How to cite
 
-The paper is under review; a preprint and the final citation will be posted on the project page.
+```bibtex
+@misc{sensharma2026goals,
+  title         = {Goal Encoding in {LLMs}},
+  author        = {Sen Sharma, Arnab and Todd, Eric and Feucht, Sheridan and Arditi, Andy and
+                   Gandikota, Rohit and Shapira, Natalie and Sarti, Gabriele and Fierro, Constanza and
+                   Schut, Lisa and Bau, David},
+  year          = {2026},
+  eprint        = {2611.17297},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CL},
+  url           = {https://arxiv.org/abs/2611.17297}
+}
+```
