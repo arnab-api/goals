@@ -131,7 +131,10 @@ def frontier_var(prefix: str) -> str:
 
 
 def arg_name(prefix: str) -> str:
-    m = re.search(r"func\(\s*(?:const\s+)?(?:[\w:<>]+\s*&?\s+)?([A-Za-z_]\w*)\s*(?::[^)]*)?\)", prefix)
+    # Python first: `def func(n: int)` / `def func(words: list[str])` (the C++ pattern below would read `n:` as a
+    # type and return the annotation)
+    m = re.search(r"def\s+func\(\s*([A-Za-z_]\w*)\s*(?::[^)]*)?\)", prefix) or re.search(
+        r"func\(\s*(?:const\s+)?(?:[\w:<>]+\s*&?\s+)?([A-Za-z_]\w*)\s*\)", prefix)
     if not m:
         raise ValueError("no `func(<arg>)` signature in the prefix")
     return m.group(1)
@@ -237,9 +240,11 @@ def first_statement(gen: str, lang: str, prefix: str = "") -> str | None:
 
 # ── references ───────────────────────────────────────────────────────────────
 def reference(datatype: str, pid: str, arg: str, x):
-    loc = {arg: x}
-    exec(PRED[datatype][pid].impl["python"].format(res="_r", arg=arg), {}, loc)
-    return loc["_r"]
+    # one namespace for globals and locals: with separate dicts, a generator / comprehension in the template cannot
+    # see the argument (NameError), which used to drop every input whose reference iterates over it
+    ns = {arg: x}
+    exec(PRED[datatype][pid].impl["python"].format(res="_r", arg=arg), ns)
+    return ns["_r"]
 
 
 def test_inputs(datatype: str, arg: str, pids: list[str]) -> list:
@@ -359,9 +364,9 @@ def check(prompt: str, gen: str, *, datatype: str, targets: list[str], listed: l
         for impl in ALT_REFS.get((datatype, t), []):
             vals = []
             for x in xs:
-                loc = {arg: x}
-                exec(impl.format(res="_r", arg=arg), {}, loc)
-                vals.append(canon(loc["_r"]))
+                ns = {arg: x}
+                exec(impl.format(res="_r", arg=arg), ns)
+                vals.append(canon(ns["_r"]))
             alts.append([_truthy(v) for v in vals] if is_bool else vals)
         hit = [g == w or any(g == a[i] for a in alts) for i, (g, w) in enumerate(zip(got, want))]
         typ = [h for h, x in zip(hit, xs) if typical(datatype, x)]
