@@ -19,6 +19,10 @@ Model = (
     | transformers.Olmo3ForCausalLM
     | transformers.Glm4ForCausalLM
 )
+# Qwen3.5 hybrid (e.g. Qwen/Qwen3.8-27B, loaded as the VLM wrapper); only in recent transformers releases
+for _cls in ("Qwen3_5ForCausalLM", "Qwen3_5ForConditionalGeneration"):
+    if hasattr(transformers, _cls):
+        Model = Model | getattr(transformers, _cls)
 Tokenizer = transformers.PreTrainedTokenizerFast
 TokenizerOutput = transformers.tokenization_utils_base.BatchEncoding
 

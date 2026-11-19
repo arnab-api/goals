@@ -19,7 +19,8 @@ class ModelandTokenizer(LanguageModel):
     ``n_embd``, ``layer_name_format``, ``attn_module_name_format``, ...).
 
     Supported families (the reported models): Qwen2 (Qwen2.5, Qwen2.5-Coder), Qwen3 (Qwen3-32B), Llama (Llama-3.3),
-    OLMo-3 (Olmo-3.1) and dense GLM-4 (GLM-4-32B-0414).
+    OLMo-3 (Olmo-3.1) and dense GLM-4 (GLM-4-32B-0414); plus the Qwen3.5 hybrid VLM (e.g. Qwen/Qwen3.8-27B: decoder under
+    ``model.language_model``, Gated-DeltaNet layers with a full-attention layer every ``full_attention_interval``).
     """
 
     def __init__(
@@ -31,6 +32,22 @@ class ModelandTokenizer(LanguageModel):
         if HF_CACHE_DIR is not None:
             kwargs["cache_dir"] = HF_CACHE_DIR
         model_key = get_full_model_path(model_key)
+        # nnsight's LanguageModel loads through AutoModelForCausalLM, which cannot load a *ForConditionalGeneration
+        # (VLM) checkpoint such as Qwen3.5: route those to the image-text-to-text auto class. Text-only use never
+        # passes pixel_values, so the vision tower is loaded but never runs.
+        if "automodel" not in kwargs:
+            try:
+                from transformers import AutoConfig
+
+                _cfg = AutoConfig.from_pretrained(model_key, cache_dir=kwargs.get("cache_dir"))
+                _arch = (getattr(_cfg, "architectures", None) or [""])[0]
+                if _arch.endswith("ForConditionalGeneration") or hasattr(_cfg, "vision_config"):
+                    from transformers import AutoModelForImageTextToText
+
+                    kwargs["automodel"] = AutoModelForImageTextToText
+                    logger.info(f"detected VLM ({_arch}); loading via AutoModelForImageTextToText")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"automodel auto-detect failed ({e}); using nnsight's default")
         self.__dict__ = LanguageModel(
             model_key,
             device_map=device_map,
@@ -40,6 +57,13 @@ class ModelandTokenizer(LanguageModel):
         self.name = model_key
 
         self._model.eval()
+        # nnsight builds the tokenizer with ``config=<model config>``. For a VLM wrapper (Qwen3.5) that resolves to the
+        # family's own tokenizer class (``Qwen3_5Tokenizer``), which encodes every string to ZERO tokens and has no chat
+        # template. A plain AutoTokenizer load of the same checkpoint (``Qwen2Tokenizer``) is correct: use it.
+        if kwargs.get("automodel") is not None and kwargs["automodel"].__name__ == "AutoModelForImageTextToText":
+            self.tokenizer = AutoTokenizer.from_pretrained(model_key, cache_dir=kwargs.get("cache_dir"))
+            assert len(self.tokenizer("def f(x):")["input_ids"]) > 0, "VLM tokenizer still encodes to zero tokens"
+            logger.info(f"VLM: using the plain AutoTokenizer ({type(self.tokenizer).__name__})")
         # Left-pad explicitly rather than relying on nnsight's default (or a raw HF tokenizer's,
         # which is "right" for e.g. Qwen). Every batched intervention here indexes with negative
         # positions (PATCH_POS=-2, [:, -1]); those only align with the real, right-aligned tokens
@@ -86,6 +110,12 @@ class ModelandTokenizer(LanguageModel):
         """Number of key/value heads (GQA). Equals ``n_heads`` for MHA models."""
         return determine_n_kv_heads(self)
 
+    @property
+    def attention_layers(self) -> tuple[int, ...]:
+        """Decoder layers with full attention (``self_attn`` / ``o_proj``). A sparse subset of ``range(n_layer)`` for
+        hybrid models (Qwen3.5), every layer otherwise."""
+        return determine_attention_layers(self)
+
     def parse_config(self) -> None:
         if not is_supported_variant(self):
             logger.error(
@@ -99,8 +129,9 @@ class ModelandTokenizer(LanguageModel):
             "final_layer_norm_name": determine_final_layer_norm_path(self),
             "lm_head_name": determine_lm_head_path(self),
             "layer_name_format": determine_layer_name_format(self),
-            "mlp_module_name_format": "model.layers.{}.mlp",
-            "attn_module_name_format": "model.layers.{}.self_attn",
+            "mlp_module_name_format": _decoder_prefix(self) + ".layers.{}.mlp",
+            # hybrid models: resolves only on the full-attention layers (see ``attention_layers``)
+            "attn_module_name_format": _decoder_prefix(self) + ".layers.{}.self_attn",
         }
         fields["layer_names"] = [
             fields["layer_name_format"].format(i) for i in range(fields["n_layer"])
@@ -169,11 +200,25 @@ def is_llama_variant(mt: Model | ModelandTokenizer) -> bool:
 
 
 def is_qwen_variant(mt: Model | ModelandTokenizer) -> bool:
-    """Determine if model is a Qwen2 / Qwen3 variant (Qwen2.5, Qwen2.5-Coder, Qwen3-32B)."""
+    """Determine if model is a Qwen2 / Qwen3 variant (Qwen2.5, Qwen2.5-Coder, Qwen3-32B). Not the Qwen3.5 hybrid VLM,
+    which has its own layout (:func:`is_qwen3_5_variant`)."""
     if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
         mt = unwrap_model(mt)
+    if is_qwen3_5_variant(mt):
+        return False
     return (isinstance(mt, (transformers.Qwen2ForCausalLM, transformers.Qwen3ForCausalLM))
             or _name_contains(mt, "qwen"))
+
+
+def is_qwen3_5_variant(mt: Model | ModelandTokenizer) -> bool:
+    """Qwen3.5 hybrid (VLM + Gated-DeltaNet + gated attention), e.g. ``Qwen/Qwen3.8-27B``. Its decoder config lives
+    under ``config.text_config``, its modules under ``model.language_model``, and only every
+    ``full_attention_interval``-th layer has ``self_attn`` (the rest carry ``linear_attn``)."""
+    if isinstance(mt, ModelandTokenizer) or isinstance(mt, LanguageModel):
+        mt = unwrap_model(mt)
+    if type(mt).__name__ in ("Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM", "Qwen3_5Model"):
+        return True
+    return getattr(getattr(mt, "config", None), "model_type", None) == "qwen3_5"
 
 
 def is_olmo_variant(mt: Model | ModelandTokenizer) -> bool:
@@ -197,7 +242,29 @@ def is_supported_variant(mt: Model | ModelandTokenizer) -> bool:
         or is_qwen_variant(mt)
         or is_olmo_variant(mt)
         or is_glm_variant(mt)
+        or is_qwen3_5_variant(mt)
     )
+
+
+def _decoder_prefix(model: ModelandTokenizer | Model) -> str:
+    """Module-path prefix of the text decoder: ``model.language_model`` for a VLM wrapper, else ``model``."""
+    m = unwrap_model(model)
+    return "model.language_model" if hasattr(getattr(m, "model", None), "language_model") else "model"
+
+
+def _decoder_config(model: ModelandTokenizer | Model):
+    """The text-decoder config: ``config.text_config`` for a VLM wrapper (whose top config does not expose
+    ``num_hidden_layers`` / ``num_attention_heads`` / ``hidden_size`` / ``head_dim``), else the config itself."""
+    cfg = unwrap_model(model).config
+    return getattr(cfg, "text_config", None) or cfg
+
+
+def determine_attention_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
+    """Indices of the full-attention decoder layers: read off ``layer_types`` for hybrid models, else every layer."""
+    lt = getattr(_decoder_config(model), "layer_types", None)
+    if lt is not None:
+        return tuple(i for i, t in enumerate(lt) if t == "full_attention")
+    return tuple(determine_layers(model))
 
 
 # Model-name signatures of chat / instruct releases: only a fallback for when no tokenizer is reachable.
@@ -239,13 +306,13 @@ def _check_supported(model) -> None:
 def determine_embedding_layer_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
     _check_supported(model)
-    return "model.embed_tokens"
+    return _decoder_prefix(model) + ".embed_tokens"
 
 
 def determine_final_layer_norm_path(model: ModelandTokenizer | Model) -> str:
     model = unwrap_model(model)
     _check_supported(model)
-    return "model.norm"
+    return _decoder_prefix(model) + ".norm"
 
 
 def determine_lm_head_path(model: ModelandTokenizer | Model) -> str:
@@ -258,7 +325,7 @@ def determine_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:
     """Return all hidden layer indices for the given model."""
     model = unwrap_model(model)
     assert isinstance(model, Model)
-    return (*range(model.config.num_hidden_layers),)
+    return (*range(_decoder_config(model).num_hidden_layers),)
 
 
 def determine_layer_name_format(
@@ -267,14 +334,14 @@ def determine_layer_name_format(
     """Determine the format of layer names."""
     model = unwrap_model(model)
     if is_supported_variant(model):
-        return "model.layers.{}"
+        return _decoder_prefix(model) + ".layers.{}"
 
 
 def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
     """Determine hidden rep size for the model."""
     model = unwrap_model(model)
     try:
-        return model.config.hidden_size
+        return _decoder_config(model).hidden_size
     except AttributeError:
         embed = baukit.get_module(model, determine_embedding_layer_path(model))
         return embed.weight.shape[-1]
@@ -283,13 +350,13 @@ def determine_hidden_size(model: ModelandTokenizer | Model) -> int:
 def determine_n_heads(model: ModelandTokenizer | Model) -> int:
     """Number of *query* attention heads."""
     model = unwrap_model(model)
-    return model.config.num_attention_heads
+    return _decoder_config(model).num_attention_heads
 
 
 def determine_n_kv_heads(model: ModelandTokenizer | Model) -> int:
     """Number of key/value heads (GQA). Falls back to n_heads (MHA) when unspecified."""
     model = unwrap_model(model)
-    return getattr(model.config, "num_key_value_heads", None) or determine_n_heads(model)
+    return getattr(_decoder_config(model), "num_key_value_heads", None) or determine_n_heads(model)
 
 
 def determine_head_dim(model: ModelandTokenizer | Model) -> int:
@@ -299,7 +366,7 @@ def determine_head_dim(model: ModelandTokenizer | Model) -> int:
     ``hidden_size``. Falls back to ``hidden_size // n_heads`` for models that don't declare it
     (Qwen2, Llama, GLM-4 dense, ... — where the two agree anyway)."""
     model = unwrap_model(model)
-    hd = getattr(model.config, "head_dim", None)
+    hd = getattr(_decoder_config(model), "head_dim", None)
     if hd:
         return int(hd)
     return determine_hidden_size(model) // determine_n_heads(model)

@@ -61,8 +61,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1123)
     p.add_argument("--model", default=MODEL)
     p.add_argument("--goal-heads", default=GOAL250, help="json [[layer, head], ...] used as the 'goal250' set")
-    p.add_argument("--kv-headsets", nargs="+", default=["goal250", "all"], choices=["goal250", "all"],
-                   help="head sets of the KV arms (the residual arms and the clean run always run)")
+    p.add_argument("--kv-headsets", nargs="*", default=["goal250", "all"], choices=["goal250", "all"],
+                   help="head sets of the KV arms (the residual arms and the clean run always run); "
+                        "pass no value for a residual-only run (no goal-head file needed)")
     p.add_argument("--force", action="store_true", help="recompute cached configs")
     return p.parse_args()
 
@@ -75,8 +76,9 @@ def main():
     device_map = {"": 0} if torch.cuda.device_count() == 1 else "auto"   # one GPU: pin
     ctx = FUNC.setup(args.model, device_map=device_map)
     mt = ctx.mt
-    goal = [tuple(h) for h in json.loads(Path(args.goal_heads).read_text())]
-    headsets = {"goal250": goal, "all": [(l, h) for l in range(mt.n_layer) for h in range(mt.n_heads)]}
+    headsets = {"all": [(l, h) for l in mt.attention_layers for h in range(mt.n_heads)]}
+    if "goal250" in args.kv_headsets:    # residual-only runs need no goal heads (e.g. a model not localized yet)
+        headsets["goal250"] = [tuple(h) for h in json.loads(Path(args.goal_heads).read_text())]
     root = env_utils.DEFAULT_RESULTS_DIR
     configs = [c for c in TP.CONFIGS if c[0] != "kv" or c[1] in args.kv_headsets]
     logger.info(f"{len(configs)} configs: " + " | ".join(TP.cfg_name(*c) for c in configs))

@@ -83,7 +83,7 @@ def setup(model_name="Qwen/Qwen2.5-Coder-32B-Instruct", device_map="auto"):
         device_map=device_map,
         attn_implementation="eager",
     )
-    n_kv = mt.model.config.num_key_value_heads
+    n_kv = mt.n_kv_heads   # VLM-safe (a VLM's top config has no num_key_value_heads)
     print(mt.name)
     print(
         f"n_heads={mt.n_heads}  n_kv_heads={n_kv}  group={mt.n_heads // n_kv}  "
