@@ -9,7 +9,7 @@ causal stub via ``head_additive_generate`` — byte-for-byte the training studen
 By default only HELD-OUT frontier predicates are scored (the honest generalization test); pass
 ``--all_predicates`` to score the full corpus.
 
-Results -> <results>/evaluation/subspace_probe_v2/<model>/causality/<tag>/nspec<N>/
+Results -> <results>/evaluation/subspace_probe_v2/<model>/<mode>/<tag>/<scope>_nspec<N>/  (--mode causality | faithfulness)
 
 Usage (14B smoke):
     conda run -n goals python scripts/evaluation/eval_subspace_probe_v2.py \
@@ -42,7 +42,7 @@ from scripts.evaluation.eval_goalscope import (  # noqa: E402
     compute_summary, frontier_impl_span, generate_completion, hard_eval,
     load_locked_datapoints, log_summary, pivot_positions,
 )
-from src.goals.goalscope import _build_causality_prompt, head_additive_generate  # noqa: E402
+from src.goals.goalscope import _build_causality_prompt, _build_goalscope_prompt, head_additive_generate  # noqa: E402
 from src.goals.subspace_probe import cache_source_residuals  # noqa: E402
 from src.goals.subspace_probe_v2 import SubspaceProbeV2  # noqa: E402
 from src.models import ModelandTokenizer  # noqa: E402
@@ -57,6 +57,8 @@ def parse_args():
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-14B-Instruct")
     ap.add_argument("--cuda", default=None)
     ap.add_argument("--probe", required=True)
+    ap.add_argument("--mode", default="causality", choices=["causality", "faithfulness"],
+                    help="causality: steer the C++ stub (causality_auto); faithfulness: steer the neutral GoalScope probe ('What are you doing at this line of the code?') and grade the description")
     ap.add_argument("--dataset", default=DEFAULT_DATASET)
     ap.add_argument("--datatypes", nargs="+", default=ALL_DATATYPES)
     ap.add_argument("--split_file", default=None, help="predicate-split json; restricts to held-out frontiers")
@@ -115,15 +117,17 @@ def main():
         datapoints = picked
         logger.warning(f"--limit {args.limit}: SMOKE on {len(datapoints)} datapoints")
 
-    causal_prompt = _build_causality_prompt(mt)
-    dest_inputs = prepare_input(prompts=causal_prompt, tokenizer=mt)
+    dest_prompt = _build_causality_prompt(mt) if args.mode == "causality" else _build_goalscope_prompt(mt)
+    dest_inputs = prepare_input(prompts=dest_prompt, tokenizer=mt)
     model_dtype = next(mt._model.parameters()).dtype
 
     # the destination is the CURRENT causality probe (causality_auto: auto func (auto value){); tag the run with it
     stub_tag = "func" if CAUSAL_PREFIX.startswith("auto func") else "check"
-    tag = f"r{probe.config.r}__L{read_layer}__a{probe.config.alpha}__ep{epoch}__stub={stub_tag}"
+    tag = f"r{probe.config.r}__L{read_layer}__a{probe.config.alpha}__ep{epoch}"
+    if args.mode == "causality":
+        tag += f"__stub={stub_tag}"
     scope = "all" if (heldout is None) else "heldout"
-    run_dir = Path(results_dir) / "evaluation" / "subspace_probe_v2" / slug / "causality" / tag / f"{scope}_nspec{len(datapoints)}"
+    run_dir = Path(results_dir) / "evaluation" / "subspace_probe_v2" / slug / args.mode / tag / f"{scope}_nspec{len(datapoints)}"
     run_dir.mkdir(parents=True, exist_ok=True)
     rec_path = fio.records_path(run_dir); samp_path = fio.samples_path(run_dir)
     if args.overwrite:
@@ -131,12 +135,12 @@ def main():
     done = set()
     if rec_path.exists():
         done = {json.loads(l)["spec"] for l in rec_path.read_text().splitlines() if l.strip()}
-    fio.write_config(run_dir, dict(model=args.model, mode="causality", probe=args.probe,
+    fio.write_config(run_dir, dict(model=args.model, mode=args.mode, probe=args.probe,
                                    r=probe.config.r, read_layer=read_layer, steer_layers=band,
                                    alpha=probe.config.alpha, epoch=epoch, scope=scope,
                                    n_specs=len(datapoints), dataset=str(args.dataset),
                                    datatypes=list(args.datatypes), span_source="frontier"))
-    logger.info(f"run dir -> {run_dir} | causality | {len(datapoints)} datapoints ({len(done)} done)")
+    logger.info(f"run dir -> {run_dir} | {args.mode} | {len(datapoints)} datapoints ({len(done)} done)")
 
     rec_fh = open(rec_path, "a"); samp_fh = open(samp_path, "a")
     n_done = len(done)
@@ -165,8 +169,8 @@ def main():
 
         sample_records = []
         for aname, pos in pivs.items():
-            ro = CAUSAL_PREFIX + readouts.get(pos, "")
-            hv = hard_eval(ro, impl_span, "causality")
+            ro = (CAUSAL_PREFIX if args.mode == "causality" else "") + readouts.get(pos, "")
+            hv = hard_eval(ro, impl_span, args.mode)
             sample_records.append(dict(
                 spec=sid, datatype=inst.meta["datatype"], anchor=aname, pos=pos,
                 readout=ro, impl_span=impl_span, frontier_id=inst.expected_next,
@@ -186,7 +190,7 @@ def main():
     summary = compute_summary(all_records, n_samples)
     fio.write_summary(run_dir, summary)
     logger.info(f"saved -> {run_dir}")
-    log_summary(summary, "causality")
+    log_summary(summary, args.mode)
 
 
 if __name__ == "__main__":
