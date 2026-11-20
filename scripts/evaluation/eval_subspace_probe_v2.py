@@ -119,7 +119,9 @@ def main():
     dest_inputs = prepare_input(prompts=causal_prompt, tokenizer=mt)
     model_dtype = next(mt._model.parameters()).dtype
 
-    tag = f"r{probe.config.r}__L{read_layer}__a{probe.config.alpha}__ep{epoch}"
+    # the destination is the CURRENT causality probe (causality_auto: auto func (auto value){); tag the run with it
+    stub_tag = "func" if CAUSAL_PREFIX.startswith("auto func") else "check"
+    tag = f"r{probe.config.r}__L{read_layer}__a{probe.config.alpha}__ep{epoch}__stub={stub_tag}"
     scope = "all" if (heldout is None) else "heldout"
     run_dir = Path(results_dir) / "evaluation" / "subspace_probe_v2" / slug / "causality" / tag / f"{scope}_nspec{len(datapoints)}"
     run_dir.mkdir(parents=True, exist_ok=True)

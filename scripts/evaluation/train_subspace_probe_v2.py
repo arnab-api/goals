@@ -119,7 +119,7 @@ def main():
 
     out = Path(args.out) if args.out else (
         Path(env_utils.DEFAULT_RESULTS_DIR) / "subspace_probe_v2" / slug
-        / f"r{args.r}__L{read_layer}__a{args.alpha}" / "probe.pt")
+        / f"r{args.r}__L{read_layer}__a{args.alpha}__stub={data.get('stub', 'bool')}" / "probe.pt")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # pre-tokenize the teacher/student prefixes once (they only depend on the row's stub + goal_desc)

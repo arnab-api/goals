@@ -82,11 +82,16 @@ def main():
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--split_seed", type=int, default=7, help="seed for the predicate split (share across train/eval!)")
     ap.add_argument("--show", type=int, default=4, help="print this many teacher trajectories for review")
+    ap.add_argument("--stub", default="auto", choices=["auto", "bool"],
+                    help="destination stub family: auto = the causality_auto probe (auto <func>(auto <arg>){), bool = the old one")
+    ap.add_argument("--stubs_per_example", type=int, default=4,
+                    help="random <func>/<arg>/paraphrase variants per source instance, each with its own teacher trajectory")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     slug = args.model.split("/")[-1]
-    out = Path(args.out) if args.out else Path("data/subspace_v2/teacher_targets") / slug / f"{args.split}.json"
+    out = Path(args.out) if args.out else (Path("data/subspace_v2/teacher_targets") / slug / f"stub={args.stub}"
+                                           / f"{args.split}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     mt = ModelandTokenizer(model_key=args.model, dtype=torch.bfloat16,
@@ -127,33 +132,38 @@ def main():
             if not pivs:
                 continue
             goal_desc = inst.expected_next_desc
-            stub = sample_stub(rng)
-            teacher_prompt = build_causal_chat(mt, stub, goal_desc=goal_desc)
-            y_ids = generate_teacher_trajectory(
-                mt, teacher_prompt, max_new_tokens=args.teacher_max_new_tokens
-            )
-            if len(y_ids) < 2:
+            n_var = 0
+            for _ in range(args.stubs_per_example):   # same source state, several random spellings of the probe
+                stub = sample_stub(rng, kind=args.stub)
+                teacher_prompt = build_causal_chat(mt, stub, goal_desc=goal_desc)
+                y_ids = generate_teacher_trajectory(
+                    mt, teacher_prompt, max_new_tokens=args.teacher_max_new_tokens
+                )
+                if len(y_ids) < 2:
+                    continue
+                y_text = mt.tokenizer.decode(y_ids)
+                examples.append(dict(
+                    datatype=dt, frontier_id=inst.expected_next, goal_desc=goal_desc,
+                    lang=args.lang, var=var, T=inst.meta["T"], j=inst.meta["j"],
+                    source_prompt=prompt, source_completion=completion,
+                    impl_span=frontier_impl_span(prompt, completion, var),
+                    pivots=pivs, stub=stub, y_ids=y_ids, y_text=y_text,
+                ))
+                n_var += 1
+                if shown < args.show:
+                    shown += 1
+                    print(f"\n── [{dt}] frontier={inst.expected_next} :: {goal_desc}")
+                    print(f"   stub: {stub['prefill']}")
+                    print(f"   teacher y: {y_text!r}")
+            if n_var == 0:
                 continue
-            y_text = mt.tokenizer.decode(y_ids)
-            examples.append(dict(
-                datatype=dt, frontier_id=inst.expected_next, goal_desc=goal_desc,
-                lang=args.lang, var=var, T=inst.meta["T"], j=inst.meta["j"],
-                source_prompt=prompt, source_completion=completion,
-                impl_span=frontier_impl_span(prompt, completion, var),
-                pivots=pivs, stub=stub, y_ids=y_ids, y_text=y_text,
-            ))
-            kept += 1
-            if shown < args.show:
-                shown += 1
-                print(f"\n── [{dt}] frontier={inst.expected_next} :: {goal_desc}")
-                print(f"   stub: bool {stub['func']}(auto {stub['arg']}){{")
-                print(f"   teacher y: {y_text!r}")
         print(f"[{dt}] kept {kept} source instances (frontier ∈ {sorted(allowed)})")
 
     payload = dict(
         model=args.model, split=args.split, lang=args.lang, seed=args.seed,
         split_seed=args.split_seed, holdout_frac=args.holdout_frac,
-        pivots=args.pivots, n_examples=len(examples), examples=examples,
+        pivots=args.pivots, stub=args.stub, stubs_per_example=args.stubs_per_example,
+        n_examples=len(examples), examples=examples,
     )
     out.write_text(json.dumps(payload))
     print(f"\nwrote {len(examples)} examples -> {out}")

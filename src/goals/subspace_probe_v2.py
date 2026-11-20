@@ -33,28 +33,48 @@ from src.tokens import prepare_input
 
 logger = logging.getLogger(__name__)
 
-CAUSAL_PREFIX_TMPL = "bool {func}(auto {arg}){{"
+# Destination stub templates. "auto" (default) is the causality_auto probe family the paper reports
+# (``auto func (auto value){``; with or without the space before the paren); "bool" is the earlier predicate stub.
+STUB_TEMPLATES = {
+    "auto": ["auto {func}(auto {arg}){{", "auto {func} (auto {arg}){{"],
+    "bool": ["bool {func}(auto {arg}){{"],
+}
+CAUSAL_PREFIX_TMPL = STUB_TEMPLATES["bool"][0]   # back-compat alias (old stub)
 
 # Destination-prompt augmentation pools (§6 of the design doc) — keep the "C++ body, no comments" intent.
-FUNC_NAMES = ["check", "func", "f", "g", "predicate", "test", "cond"]
-ARG_NAMES = ["value", "val", "x", "v", "n", "arg", "input"]
+# func / arg names are drawn independently per stub, so the subspace cannot lean on one spelling of the probe.
+FUNC_NAMES = ["func", "f", "g", "check", "solve", "compute", "helper", "process", "test", "calc", "op", "fn"]
+ARG_NAMES = ["value", "val", "x", "v", "n", "arg", "input", "data", "item", "obj", "a", "in"]
 SYS_PARAPHRASES = [
     GOALSCOPE_SYS,
     "You are an expert C++ programmer.",
     "You write clean, correct, idiomatic C++.",
     "You are a coding assistant specialised in C++.",
 ]
-USER_PARAPHRASES = [
-    "You are implementing a simple C++ function that checks for a condition. Just write the "
-    "function body, without any comments or explanations. Assume all the necessary headers are "
-    "already included.",
-    "Implement the body of this C++ predicate function. Output only code — no comments, no prose. "
-    "All headers are already included.",
-    "Complete this C++ function that returns a boolean. Write just the body, no comments or "
-    "explanation; assume every needed header is present.",
-    "Fill in the body of the following C++ boolean function. Code only, no comments; headers are "
-    "already included.",
-]
+USER_PARAPHRASES = {
+    "auto": [   # neutral: no hint that the body checks a condition or returns a bool
+        "You are implementing a C++ function. Just write the function body, without any comments or explanations. "
+        "Assume all the necessary headers are already included.",   # = the causality_auto instruction
+        "Implement the body of this C++ function. Output only code — no comments, no prose. All headers are already "
+        "included.",
+        "Complete this C++ function. Write just the body, no comments or explanation; assume every needed header is "
+        "present.",
+        "Fill in the body of the following C++ function. Code only, no comments; headers are already included.",
+    ],
+    "bool": [
+        "You are implementing a simple C++ function that checks for a condition. Just write the "
+        "function body, without any comments or explanations. Assume all the necessary headers are "
+        "already included.",
+        "Implement the body of this C++ predicate function. Output only code — no comments, no prose. "
+        "All headers are already included.",
+        "Complete this C++ function that returns a boolean. Write just the body, no comments or "
+        "explanation; assume every needed header is present.",
+        "Fill in the body of the following C++ boolean function. Code only, no comments; headers are "
+        "already included.",
+    ],
+}
+TEACHER_GOAL_PHRASE = {"auto": " Specifically, the function should compute {goal}.",
+                       "bool": " Specifically, the function should check {goal}."}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -102,16 +122,18 @@ def _rand_orthonormal_rows(r: int, d: int) -> torch.Tensor:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Destination-prompt (causal C++ stub) construction + augmentation
 # ═══════════════════════════════════════════════════════════════════════════════
-def sample_stub(rng: random.Random) -> dict:
-    """One augmented C++ stub: func name, arg name, system + user paraphrase, assistant prefill."""
+def sample_stub(rng: random.Random, kind: str = "auto") -> dict:
+    """One augmented C++ stub: random func name, arg name, system + user paraphrase, and the assistant prefill
+    (``kind`` picks the stub family, see :data:`STUB_TEMPLATES`)."""
     func = rng.choice(FUNC_NAMES)
     arg = rng.choice(ARG_NAMES)
     return dict(
+        kind=kind,
         func=func,
         arg=arg,
         sys=rng.choice(SYS_PARAPHRASES),
-        user=rng.choice(USER_PARAPHRASES),
-        prefill=CAUSAL_PREFIX_TMPL.format(func=func, arg=arg),
+        user=rng.choice(USER_PARAPHRASES[kind]),
+        prefill=rng.choice(STUB_TEMPLATES[kind]).format(func=func, arg=arg),
     )
 
 
@@ -120,7 +142,7 @@ def build_causal_chat(mt: ModelandTokenizer, stub: dict, goal_desc: Optional[str
     stated explicitly); None → STUDENT prompt (goal hidden, supplied only via steering)."""
     user = stub["user"]
     if goal_desc is not None:
-        user = user + f" Specifically, the function should check {goal_desc}."
+        user = user + TEACHER_GOAL_PHRASE[stub.get("kind", "bool")].format(goal=goal_desc)   # old targets: bool
     msgs = [
         {"role": "system", "content": stub["sys"]},
         {"role": "user", "content": user},
