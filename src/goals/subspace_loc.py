@@ -135,6 +135,8 @@ class SubspaceTrainingHistory:
     n_active: list[list[int]] = field(default_factory=list)   # per epoch: open directions per layer
     val_recall: list[list[float]] = field(default_factory=list)
     val_epochs: list[int] = field(default_factory=list)
+    baseline_closed: list[float] = field(default_factory=list)      # val recall with no patch
+    baseline_open_init: list[float] = field(default_factory=list)   # val recall with the random init, all gates open
 
 
 @torch.no_grad()
@@ -175,6 +177,19 @@ def train_subspace_mask(mt, pivot_caches: list[PivotCache], layers: list[int], *
                 f"directions) | train={len(train_caches)} val={val_size} | batch={batch_size} | {n_epochs} epochs | "
                 f"lr W={lr_W} g={lr_g} | λ={lambda_sparse} (price per open direction λ/{len(layers) * PRICE_UNIT}) | "
                 f"augment={augment}")
+
+    # reference points for the val recall, before any training: no patch (all gates closed = the clean destination)
+    # and the random initial subspace with every gate open
+    with torch.no_grad():
+        g0 = sm.g.detach().clone()
+        sm.g.zero_()
+        history.baseline_closed = evaluate_val(mt, val_caches, sm, batch_size=batch_size)
+        sm.g.copy_(g0)
+        history.baseline_open_init = evaluate_val(mt, val_caches, sm, batch_size=batch_size)
+    logger.info("  val recall, gates closed (clean dest): "
+                + "  ".join(f"@{k + 1}={v:.3f}" for k, v in enumerate(history.baseline_closed)))
+    logger.info("  val recall, random init, gates open:    "
+                + "  ".join(f"@{k + 1}={v:.3f}" for k, v in enumerate(history.baseline_open_init)))
 
     for epoch in range(n_epochs):
         caches = (augment_pivot_caches(mt, train_caches, include_docstring=include_docstring,
