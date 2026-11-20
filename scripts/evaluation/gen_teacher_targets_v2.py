@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import random
+import zlib
 import sys
 from pathlib import Path
 
@@ -35,12 +36,13 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import torch  # noqa: E402
 
-import src.diff.data as DATA  # noqa: E402
-from scripts.evaluation.eval_ov_reader import (  # noqa: E402
-    build_prompt,
+import dataclasses  # noqa: E402
+
+import src.nrgs.data as DATA  # noqa: E402
+from scripts.evaluation.eval_goalscope import (  # noqa: E402
+    _chat_prompt,
     frontier_impl_span,
     pivot_positions,
-    sample_datapoints,
 )
 from src.goals.goalscope import greedy_continue  # noqa: E402
 from src.goals.subspace_probe_v2 import (  # noqa: E402
@@ -52,13 +54,65 @@ from src.models import ModelandTokenizer  # noqa: E402
 from src.tokens import prepare_input  # noqa: E402
 
 
+def sample_datapoints(datatype, n_conditions, n_samples, lang, seed):
+    """``n_samples`` QTransferInstances: each draws ``T`` predicates (T in ``n_conditions``), prefills the first ``j``
+    (1 <= j < T), and sets the frontier = predicate ``j`` (letters naming). Deterministic in ``seed``; deduped by
+    (frontier id, prefilled ids); the frontier is never a trivial sign/zero predicate (DATA.TRIVIAL_FRONTIERS).
+    (Moved here from scripts/evaluation/eval_ov_reader.py, which no longer has it.)"""
+    bank = DATA.QTASKS[datatype]
+    preds = list(bank.predicates)
+    trivial = DATA.TRIVIAL_FRONTIERS.get(datatype, frozenset())
+    ks = [k for k in n_conditions if 2 <= k <= len(preds)]
+    if not ks:
+        raise SystemExit(f"--n_conditions has no value in [2, {len(preds)}] for datatype {datatype!r}")
+    rng = random.Random(seed)
+    out, seen = [], set()
+    for _ in range(n_samples * 400):
+        if len(out) >= n_samples:
+            break
+        T = rng.choice(ks)
+        subset = rng.sample(preds, T)
+        elig_j = [jj for jj in range(1, T) if subset[jj].id not in trivial]
+        if not elig_j:
+            continue
+        j = rng.choice(elig_j)
+        ids = [p.id for p in subset]
+        key = (ids[j], tuple(ids[:j]))
+        if key in seen:
+            continue
+        seen.add(key)
+        task = dataclasses.replace(bank, id=f"{bank.id}_T{T}", predicates=tuple(subset))
+        out.append(DATA.QTransferInstance(
+            task=task, var_name=bank.var_names[0], presentation="listed", src_lang=lang, dst_lang=lang,
+            src_progress=ids[:j], dst_progress=ids[:j], expected_next=ids[j], naming="letters",
+            meta={"datatype": datatype, "T": T, "j": j}))
+    if len(out) < n_samples:
+        print(f"[{datatype}/{lang}] only {len(out)}/{n_samples} distinct datapoints available")
+    return out
+
+
+def build_prompt(mt, inst, lang):
+    """Prefilled source prompt ending at the frontier's ``{var} =`` (var_eq stub, letters naming)."""
+    q, pf = inst.src_parts()
+    q = q.replace("computes:", "computes in sequential order:")   # nudge the model to follow the listing
+    var = inst.var_of(inst.expected_next)
+    body = pf.rstrip("\n ")   # drop the trailing indent line
+    if lang == "cpp":
+        for pid in inst.src_progress:
+            body = DATA._cpp_autoify(body, inst.var_of(pid))
+        pf2 = body + f"\n    auto {var} ="
+    else:
+        pf2 = body + f"\n    {var} ="
+    return _chat_prompt(mt, q, DATA._finalize_prefill(pf2)), var
+
+
 def predicate_split(datatype, holdout_frac, seed):
     """Deterministic per-datatype split of predicate ids into (train, eval). Trivial frontiers are
     excluded from BOTH frontier pools (they can't be measured), but may still appear as context."""
     bank = DATA.QTASKS[datatype]
     trivial = DATA.TRIVIAL_FRONTIERS.get(datatype, frozenset())
     ids = [p.id for p in bank.predicates if p.id not in trivial]
-    rng = random.Random(hash((datatype, seed)) & 0xFFFFFFFF)
+    rng = random.Random(zlib.crc32(f"{datatype}|{seed}".encode()))   # stable across runs (hash() of a str is salted per process)
     rng.shuffle(ids)
     n_eval = max(1, round(holdout_frac * len(ids)))
     eval_ids = set(ids[:n_eval])

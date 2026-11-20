@@ -143,7 +143,7 @@ def main():
     for sid, inst in datapoints:
         if sid in done:
             continue
-        prompt, var = build_prompt(mt, inst, inst.src_lang)
+        prompt, var = build_prompt(mt, inst)   # the locked corpus is Python-source
         completion = generate_completion(mt, prompt, args.gen_max_new_tokens)
         full_text = prompt + completion
         impl_span = frontier_impl_span(prompt, completion, var)
