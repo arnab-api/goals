@@ -62,6 +62,9 @@ def parse_args():
     ap.add_argument("--targets", required=True, help="teacher-target json from gen_teacher_targets_v2.py")
     ap.add_argument("--r", type=int, default=256)
     ap.add_argument("--read_layer", type=int, default=None, help="default: scaled from n_layer (~0.78·L)")
+    ap.add_argument("--read_lo", type=int, default=None, help="first read layer of a multi-layer probe")
+    ap.add_argument("--read_hi", type=int, default=None,
+                    help="last read layer (inclusive): one subspace W_l per layer, o = Σ_l W_lᵀ W_l h_l")
     ap.add_argument("--steer_lo", type=int, default=None)
     ap.add_argument("--steer_hi", type=int, default=None, help="inclusive")
     ap.add_argument("--alpha", type=float, default=0.1)
@@ -90,36 +93,41 @@ def main():
         read_layer = args.read_layer
     if args.steer_lo is not None and args.steer_hi is not None:
         band = list(range(args.steer_lo, args.steer_hi + 1))
-    logger.info(f"n_layer={mt.n_layer} | read_layer=L{read_layer} | steer band={band[0]}-{band[-1]}")
+    if (args.read_lo is None) != (args.read_hi is None):
+        raise SystemExit("--read_lo and --read_hi go together")
+    read_layers = list(range(args.read_lo, args.read_hi + 1)) if args.read_lo is not None else [read_layer]
+    read_tag = f"{read_layers[0]}-{read_layers[-1]}" if len(read_layers) > 1 else f"{read_layers[0]}"
+    logger.info(f"n_layer={mt.n_layer} | read layers=L{read_tag} ({len(read_layers)}) | steer band={band[0]}-{band[-1]}")
 
     data = json.loads(Path(args.targets).read_text())
     examples = data["examples"]
     logger.info(f"targets: {args.targets} | {len(examples)} source instances | pivots={data['pivots']}")
 
     # ── pre-cache source residuals @ read_layer (once, no grad) → one training row per (example,pivot)
-    rows = []  # (h_src(d,), stub, goal_desc, y_ids)
+    rows = []  # (h_src (K, d), stub, goal_desc, y_ids)
     with torch.no_grad():
         for ex in examples:
             full_text = ex["source_prompt"] + ex["source_completion"]
             positions = sorted(set(ex["pivots"].values()))
-            res = cache_source_residuals(mt, full_text, positions, [read_layer])  # {pos:{layer:(d,)}}
+            res = cache_source_residuals(mt, full_text, positions, read_layers)  # {pos:{layer:(d,)}}
             for pivot, pos in ex["pivots"].items():
                 rows.append(dict(
-                    h=res[pos][read_layer].clone(),  # (d,) float32 CPU
+                    h=torch.stack([res[pos][l] for l in read_layers]).clone(),  # (K, d) float32 CPU
                     stub=ex["stub"], goal_desc=ex["goal_desc"],
                     y_ids=torch.tensor(ex["y_ids"], dtype=torch.long),
                     tag=f"{ex['datatype']}/{ex['frontier_id']}/{pivot}",
                 ))
-    logger.info(f"cached {len(rows)} training rows (example × pivot) @ L{read_layer}")
+    logger.info(f"cached {len(rows)} training rows (example × pivot) @ L{read_tag}")
 
-    cfg = SubspaceV2Config(d_model=mt.n_embd, r=args.r, read_layer=read_layer,
+    cfg = SubspaceV2Config(d_model=mt.n_embd, r=args.r, read_layer=read_layers[-1],
+                           read_layers=read_layers if len(read_layers) > 1 else None,
                            steer_layers=band, alpha=args.alpha, lambda_ortho=args.lambda_ortho)
     probe = SubspaceProbeV2(cfg).to(mt.device)
     opt = torch.optim.AdamW([probe.W], lr=args.lr)
 
     out = Path(args.out) if args.out else (
         Path(env_utils.DEFAULT_RESULTS_DIR) / "subspace_probe_v2" / slug
-        / f"r{args.r}__L{read_layer}__a{args.alpha}__stub={data.get('stub', 'bool')}" / "probe.pt")
+        / f"r{args.r}__L{read_tag}__a{args.alpha}__stub={data.get('stub', 'bool')}" / "probe.pt")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # pre-tokenize the teacher/student prefixes once (they only depend on the row's stub + goal_desc)
@@ -156,7 +164,7 @@ def main():
         logger.info(f"epoch {epoch}: KL={tot_kl/n_batches:.4f} ortho={tot_ortho/n_batches:.2e} "
                     f"({n_batches} batches of ≤{B}, {time.time()-t0:.1f}s)")
         torch.save(dict(W=probe.W.detach().cpu(), config=cfg, epoch=epoch,
-                        read_layer=read_layer, steer_layers=band, model=args.model), out)
+                        read_layer=read_layers[-1], read_layers=read_layers, steer_layers=band, model=args.model), out)
     logger.info(f"saved -> {out}")
 
 

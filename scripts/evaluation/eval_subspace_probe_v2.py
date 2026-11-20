@@ -80,10 +80,10 @@ def main():
                            device_map="auto", attn_implementation="eager")
 
     ckpt = torch.load(args.probe, map_location="cpu", weights_only=False)
-    probe = SubspaceProbeV2(ckpt["config"])
-    probe.W.data.copy_(ckpt["W"])
+    probe = SubspaceProbeV2(ckpt["config"], init_W=ckpt["W"])   # (K, r, d), or (r, d) for old single-layer probes
     probe = probe.to(mt.device).eval()
-    read_layer = ckpt["read_layer"]
+    read_layers = probe.config.layers
+    read_layer = f"{read_layers[0]}-{read_layers[-1]}" if len(read_layers) > 1 else read_layers[0]   # tag / log
     band = list(ckpt["steer_layers"])
     epoch = ckpt.get("epoch", "?")
     logger.info(f"probe: {args.probe} | r={probe.config.r} read=L{read_layer} band={band[0]}-{band[-1]} "
@@ -155,8 +155,9 @@ def main():
             continue
         apos = sorted(set(pivs.values()))
         # ── read-out producer: o = WᵀW h steered into the C++ stub, batched over pivots ──
-        res = cache_source_residuals(mt, full_text, apos, [read_layer])
-        o = torch.stack([probe.readout_vec(res[p][read_layer].to(mt.device).float()) for p in apos])  # (B,d)
+        res = cache_source_residuals(mt, full_text, apos, read_layers)
+        o = torch.stack([probe.readout_vec(torch.stack([res[p][l] for l in read_layers]).to(mt.device).float())
+                         for p in apos])  # (B, d)
         gens = head_additive_generate(mt, dest_inputs, o.to(model_dtype), layers=band,
                                       max_new_tokens=args.max_new_tokens,
                                       alpha=probe.config.alpha)

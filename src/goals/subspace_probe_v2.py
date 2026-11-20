@@ -84,34 +84,54 @@ TEACHER_GOAL_PHRASE = {"auto": " Specifically, the function should compute {goal
 class SubspaceV2Config:
     d_model: int
     r: int = 256
-    read_layer: int = 50  # h taken after this layer of the SOURCE (structured) prompt
+    read_layer: int = 50  # h taken after this layer of the SOURCE (structured) prompt (single-layer probes)
     steer_layers: list[int] = field(default_factory=lambda: list(range(35, 46)))
     alpha: float = 0.1
     lambda_ortho: float = 0.1
+    read_layers: Optional[list[int]] = None  # several read layers: one subspace W_l per layer (overrides read_layer)
+
+    @property
+    def layers(self) -> list[int]:
+        """The read layers, in the order of ``W``'s first axis."""
+        rl = getattr(self, "read_layers", None)   # absent on configs pickled before multi-layer support
+        return list(rl) if rl else [self.read_layer]
 
 
 class SubspaceProbeV2(nn.Module):
-    """A single learnable subspace ``W ∈ R^{r×d}`` (orthonormal rows). Read-out ``o = Wᵀ W h``."""
+    """One learnable subspace ``W_l ∈ R^{r×d}`` (orthonormal rows) per read layer, stored as ``W ∈ R^{K×r×d}``.
+
+    Read-out: ``o = Σ_l W_lᵀ W_l h_l`` over the K read layers (a single steering vector, injected like the goal-head
+    vector). With one read layer this is the original ``o = Wᵀ W h``."""
 
     def __init__(self, config: SubspaceV2Config, init_W: Optional[torch.Tensor] = None) -> None:
         super().__init__()
         self.config = config
-        W = init_W if init_W is not None else _rand_orthonormal_rows(config.r, config.d_model)
+        K = len(config.layers)
+        if init_W is None:
+            W = torch.stack([_rand_orthonormal_rows(config.r, config.d_model) for _ in range(K)])
+        else:
+            W = init_W if init_W.dim() == 3 else init_W.unsqueeze(0)   # old single-layer checkpoints: (r, d)
         self.W = nn.Parameter(W.float().clone())
 
     def readout_vec(self, h: torch.Tensor) -> torch.Tensor:
-        """``o = Wᵀ W h`` — projection of ``h`` onto span(W). Inputs/outputs: (..., d)."""
-        return h @ self.W.T @ self.W
+        """``o = Σ_l W_lᵀ W_l h_l``. ``h``: (..., K, d) — always with the read-layer axis, also when K == 1.
+        Returns (..., d)."""
+        K, _, d = self.W.shape
+        if h.dim() < 2 or h.shape[-2:] != (K, d):
+            raise ValueError(f"h must be (..., {K}, {d}) (one residual per read layer); got {tuple(h.shape)}")
+        coeff = torch.einsum("...kd,krd->...kr", h, self.W)
+        return torch.einsum("...kr,krd->...d", coeff, self.W)
 
     def orthogonality_loss(self) -> torch.Tensor:
         I_r = torch.eye(self.config.r, device=self.W.device, dtype=self.W.dtype)
-        return (self.W @ self.W.T - I_r).pow(2).sum()
+        return (self.W @ self.W.transpose(-1, -2) - I_r).pow(2).sum()
 
     @torch.no_grad()
     def reorthogonalize(self) -> None:
-        """Project W onto the Stiefel manifold (orthonormal rows) via QR — call after each opt step."""
-        Q, _ = torch.linalg.qr(self.W.T)  # (d, r), orthonormal cols
-        self.W.copy_(Q.T)
+        """Project each W_l onto the Stiefel manifold (orthonormal rows) via QR — call after each opt step."""
+        for k in range(self.W.shape[0]):
+            Q, _ = torch.linalg.qr(self.W[k].T)  # (d, r), orthonormal cols
+            self.W[k].copy_(Q.T)
 
 
 def _rand_orthonormal_rows(r: int, d: int) -> torch.Tensor:
@@ -227,7 +247,7 @@ def steered_student_logits(
     =[-1]`` / ``n_steer_tokens=None``: every position from the last prefix token onward (the ones that
     predict ``y``) gets ``h += alpha * ||h|| * unit(o)`` at each steer layer."""
     cfg = probe.config
-    o = probe.readout_vec(h_src.to(probe.W.device).float())  # (d,), grad via W
+    o = probe.readout_vec(h_src.to(probe.W.device).float())  # h_src (K, d) -> (d,), grad via W
     unit_o = o / o.norm().clamp_min(1e-6)
 
     seq = torch.cat([student_prefix_ids.to(mt.device), y_ids.to(mt.device)]).unsqueeze(0)
@@ -309,7 +329,7 @@ def batched_steered_student_logits(
     (ΣT, V). Each row is steered with its own ``o_b = Wᵀ W h_b`` (additive_norm over the steer band,
     injected from the last prefix token onward). Differentiable in ``W``."""
     cfg = probe.config
-    H = torch.stack([h.to(probe.W.device).float() for h in h_list])  # (B, d)
+    H = torch.stack([h.to(probe.W.device).float() for h in h_list])  # (B, K, d): one residual per read layer
     O = probe.readout_vec(H)  # (B, d), grad via W
     unit_O = O / O.norm(dim=-1, keepdim=True).clamp_min(1e-6)  # (B, d)
 
@@ -412,11 +432,12 @@ def apply_subspace_scope(
     prefix = CAUSAL_PREFIX if mode == "causality" else ""
     model_dtype = next(mt._model.parameters()).dtype
 
-    res = cache_source_residuals(mt, prompt, seg, [read_layer])  # {pos:{layer:(d,)}}
+    res = cache_source_residuals(mt, prompt, seg, probe.config.layers)  # {pos:{layer:(d,)}}
     readouts: dict[int, str] = {}
     for i in range(0, len(seg), batch_size):
         chunk = seg[i:i + batch_size]
-        o = torch.stack([probe.readout_vec(res[p][read_layer].to(mt.device).float()) for p in chunk])
+        o = torch.stack([probe.readout_vec(torch.stack([res[p][l] for l in probe.config.layers]).to(mt.device).float())
+                         for p in chunk])
         gens = head_additive_generate(mt, dest_inputs, o.to(model_dtype), layers=band,
                                       max_new_tokens=max_new_tokens, alpha=a)
         if isinstance(gens, str):
