@@ -158,7 +158,7 @@ def main():
         res = cache_source_residuals(mt, full_text, apos, [read_layer])
         o = torch.stack([probe.readout_vec(res[p][read_layer].to(mt.device).float()) for p in apos])  # (B,d)
         gens = head_additive_generate(mt, dest_inputs, o.to(model_dtype), layers=band,
-                                      max_new_tokens=args.max_new_tokens, strategy="additive_norm",
+                                      max_new_tokens=args.max_new_tokens,
                                       alpha=probe.config.alpha)
         readouts = {p: g for p, g in zip(apos, gens)}
 

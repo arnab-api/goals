@@ -418,7 +418,7 @@ def apply_subspace_scope(
         chunk = seg[i:i + batch_size]
         o = torch.stack([probe.readout_vec(res[p][read_layer].to(mt.device).float()) for p in chunk])
         gens = head_additive_generate(mt, dest_inputs, o.to(model_dtype), layers=band,
-                                      max_new_tokens=max_new_tokens, strategy="additive_norm", alpha=a)
+                                      max_new_tokens=max_new_tokens, alpha=a)
         if isinstance(gens, str):
             gens = [gens]
         for p, g in zip(chunk, gens):
