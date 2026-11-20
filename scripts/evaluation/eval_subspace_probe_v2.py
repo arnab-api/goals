@@ -67,6 +67,7 @@ def parse_args():
     ap.add_argument("--max_new_tokens", type=int, default=32, help="read-out length")
     ap.add_argument("--limit", type=int, default=None, help="SMOKE: cap datapoints (round-robin)")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--tag_suffix", default="", help="appended to the run tag (e.g. to tell apart probes with equal r / layers)")
     logging_utils.add_logging_args(ap)
     return ap.parse_args()
 
@@ -124,6 +125,8 @@ def main():
     # the destination is the CURRENT causality probe (causality_auto: auto func (auto value){); tag the run with it
     stub_tag = "func" if CAUSAL_PREFIX.startswith("auto func") else "check"
     tag = f"r{probe.config.r}__L{read_layer}__a{probe.config.alpha}__ep{epoch}"
+    if args.tag_suffix:
+        tag += f"__{args.tag_suffix}"
     if args.mode == "causality":
         tag += f"__stub={stub_tag}"
     scope = "all" if (heldout is None) else "heldout"
