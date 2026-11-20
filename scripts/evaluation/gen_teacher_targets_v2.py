@@ -211,6 +211,7 @@ def main():
                     print(f"   teacher y: {y_text!r}")
             if n_var == 0:
                 continue
+            kept += 1
         print(f"[{dt}] kept {kept} source instances (frontier ∈ {sorted(allowed)})")
 
     payload = dict(
