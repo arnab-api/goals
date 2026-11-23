@@ -3,7 +3,8 @@
 Target: at a pivot, ``v_g`` = the summed residual-stream contribution of the 122 goal heads
 (``collect_head_steering_vecs``) — the exact vector GoalScope steers with. Input: the residual stream at the
 same position, after each layer of a read band (default 40-49). Model: ``o = Σ_l W_lᵀ W_l h_l`` with ``W_l``
-(r orthonormal rows per layer, projected gradient descent with QR); loss ``MSE(o, v_g)``.
+(r orthonormal rows per layer, projected gradient descent with QR); loss (default ``--loss dir``) MSE between the unit
+vectors ``o/|o|`` and ``v_g/|v_g|`` (direction only, as GoalScope's additive_norm uses it); ``--loss mse`` = raw MSE.
 Reference: the unconstrained least-squares map from the same residuals (concatenated) to ``v_g`` — the best any
 linear read-out of these layers can do.
 
@@ -43,6 +44,11 @@ def args_():
     ap.add_argument("--goal_heads", default="head_sets/Qwen2.5-Coder-32B-Instruct/goal__lam20_thr0.9_band25-56.json")
     ap.add_argument("--read_lo", type=int, default=40)
     ap.add_argument("--read_hi", type=int, default=50, help="exclusive (40-50 = layers 40..49)")
+    ap.add_argument("--cache_layers", type=int, nargs="+", default=None,
+                    help="cache stage: an explicit list of read layers (overrides --read_lo/--read_hi)")
+    ap.add_argument("--loss", default="dir", choices=["dir", "mse"],
+                    help="dir (default): MSE between unit vectors, o/|o| vs v_g/|v_g| (= 2 - 2cos; GoalScope's "
+                         "additive_norm only uses the direction); mse: raw MSE(o, v_g)")
     ap.add_argument("--n_per_datatype", type=int, default=256, help="source instances per datatype (before dedup)")
     ap.add_argument("--seed", type=int, default=2027, help="instance sampling (the eval corpus used 123)")
     ap.add_argument("--batch", type=int, default=16, help="prompts per forward while caching")
@@ -74,7 +80,7 @@ def cache(a, out_dir: Path):
     mt = ModelandTokenizer(model_key=a.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="eager")
     torch.set_grad_enabled(False)
     heads = load_json_heads(a.goal_heads, mt.n_layer, mt.n_heads)
-    layers = list(range(a.read_lo, a.read_hi))
+    layers = list(a.cache_layers) if a.cache_layers else list(range(a.read_lo, a.read_hi))
     key = lambda inst: (inst.meta["datatype"], tuple(p.id for p in inst.task.predicates), tuple(inst.src_progress),
                         inst.expected_next)
     corpus = {key(inst) for _, inst in load_locked_datapoints(DEFAULT_DATASET, ALL_DATATYPES)[0]}
@@ -127,17 +133,19 @@ def train(a, out_dir: Path):
     if a.use_layers:
         sel = [layers.index(l) for l in a.use_layers]
         H, layers = H[:, :, sel], list(a.use_layers)
-        out_dir = out_dir / f"fit_L{'-'.join(map(str, layers))}_r{a.r}"
+        out_dir = out_dir / f"fit_L{'-'.join(map(str, layers))}_r{a.r}_{a.loss}"
         out_dir.mkdir(parents=True, exist_ok=True)
     N = H.shape[0]
     g = torch.Generator().manual_seed(0)
     perm = torch.randperm(N, generator=g)
     tr, va = perm[: int(0.8 * N)], perm[int(0.8 * N):]                    # split by source instance
+    if a.loss == "dir":                                                    # direction only: unit target
+        V = V / V.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     flat = lambda idx: (H[idx].reshape(-1, H.shape[2], H.shape[3]).to(dev), V[idx].reshape(-1, V.shape[-1]).to(dev))
     Htr, Vtr = flat(tr)
     Hva, Vva = flat(va)
     L, d = Htr.shape[1], Htr.shape[2]
-    logger.info(f"rows: train {Htr.shape[0]}, val {Hva.shape[0]} | read layers {layers[0]}-{layers[-1]} | r={a.r}/layer")
+    logger.info(f"rows: train {Htr.shape[0]}, val {Hva.shape[0]} | read layers {layers} | r={a.r}/layer | loss={a.loss}")
 
     # least-squares reference: v ≈ [h_40 … h_49] A (ridge), the best linear read-out of these residuals
     X, Xv = Htr.reshape(len(Htr), -1), Hva.reshape(len(Hva), -1)
@@ -163,7 +171,10 @@ def train(a, out_dir: Path):
         idx = torch.randperm(len(Htr), device=dev)
         for s in range(0, len(idx), a.train_batch):
             b = idx[s:s + a.train_batch]
-            loss = (readout(Htr[b]) - Vtr[b]).pow(2).mean()
+            o = readout(Htr[b])
+            if a.loss == "dir":
+                o = o / o.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            loss = (o - Vtr[b]).pow(2).mean()
             opt.zero_grad(); loss.backward(); opt.step()
             with torch.no_grad():
                 for k in range(L):
@@ -184,7 +195,7 @@ def train(a, out_dir: Path):
                         steer_layers=cfg.steer_layers, model=c["model"], source="subspace_mse"), out_dir / "probe.pt")
     m = dict(subspace_val=sub_val, subspace_train=sub_tr, subspace_val_per_pivot=per_pivot,
              least_squares_val=ls_val, zero_baseline_val=zero, n_rows_train=len(Htr), n_rows_val=len(Hva),
-             layers=layers, r=a.r, epochs=a.epochs, lr=a.lr)
+             layers=layers, r=a.r, epochs=a.epochs, lr=a.lr, loss=a.loss)
     (out_dir / "metrics.json").write_text(json.dumps(m, indent=2))
     logger.info(f"subspace (val): {sub_val} | least squares (val): {ls_val} | zero: {zero}")
     logger.info(f"per pivot (val): {per_pivot}")
@@ -193,7 +204,9 @@ def train(a, out_dir: Path):
 
 def main():
     a = args_()
-    tag = a.tag or f"L{a.read_lo}-{a.read_hi}"
+    tag = a.tag or (f"L{'-'.join(map(str, a.cache_layers))}" if a.cache_layers and len(a.cache_layers) <= 3
+                    else f"L{a.cache_layers[0]}-{a.cache_layers[-1]}e{a.cache_layers[1] - a.cache_layers[0]}"
+                    if a.cache_layers else f"L{a.read_lo}-{a.read_hi}")
     out_dir = Path(DEFAULT_RESULTS_DIR) / "subspace_mse" / a.model.split("/")[-1] / tag
     out_dir.mkdir(parents=True, exist_ok=True)
     (cache if a.stage == "cache" else train)(a, out_dir)
