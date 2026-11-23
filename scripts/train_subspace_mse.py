@@ -52,6 +52,10 @@ def args_():
     ap.add_argument("--train_batch", type=int, default=256)
     ap.add_argument("--ridge", type=float, default=1e-2, help="ridge for the least-squares reference (× mean diag)")
     ap.add_argument("--tag", default=None, help="default: L<lo>-<hi>")
+    ap.add_argument("--use_layers", type=int, nargs="+", default=None,
+                    help="train stage: fit only these cached read layers (e.g. one layer); outputs go to "
+                         "<tag>/fit_L<layers>_r<r>/")
+    ap.add_argument("--no_export", action="store_true", help="train stage: skip writing probe.pt")
     ap.add_argument("--cuda_train", default="0", help="device for the (model-free) fit")
     return ap.parse_args()
 
@@ -120,6 +124,11 @@ def train(a, out_dir: Path):
     dev = torch.device(f"cuda:{a.cuda_train}" if torch.cuda.is_available() else "cpu")
     c = torch.load(out_dir / "cache.pt", map_location="cpu", weights_only=False)
     H, V, layers = c["H"].float(), c["V"].float(), c["layers"]          # (N,4,L,d), (N,4,d)
+    if a.use_layers:
+        sel = [layers.index(l) for l in a.use_layers]
+        H, layers = H[:, :, sel], list(a.use_layers)
+        out_dir = out_dir / f"fit_L{'-'.join(map(str, layers))}_r{a.r}"
+        out_dir.mkdir(parents=True, exist_ok=True)
     N = H.shape[0]
     g = torch.Generator().manual_seed(0)
     perm = torch.randperm(N, generator=g)
@@ -170,8 +179,9 @@ def train(a, out_dir: Path):
     torch.save(dict(W=W, layers=layers, r=a.r, metrics=dict(val=sub_val, train=sub_tr)), out_dir / "subspace.pt")
     cfg = SubspaceV2Config(d_model=d, r=a.r, read_layer=layers[-1], read_layers=layers,
                            steer_layers=list(range(35, 46)), alpha=0.1)
-    torch.save(dict(W=W, config=cfg, epoch=a.epochs, read_layer=layers[-1], read_layers=layers,
-                    steer_layers=cfg.steer_layers, model=c["model"], source="subspace_mse"), out_dir / "probe.pt")
+    if not a.no_export:
+        torch.save(dict(W=W, config=cfg, epoch=a.epochs, read_layer=layers[-1], read_layers=layers,
+                        steer_layers=cfg.steer_layers, model=c["model"], source="subspace_mse"), out_dir / "probe.pt")
     m = dict(subspace_val=sub_val, subspace_train=sub_tr, subspace_val_per_pivot=per_pivot,
              least_squares_val=ls_val, zero_baseline_val=zero, n_rows_train=len(Htr), n_rows_val=len(Hva),
              layers=layers, r=a.r, epochs=a.epochs, lr=a.lr)
