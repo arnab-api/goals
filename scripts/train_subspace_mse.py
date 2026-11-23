@@ -73,7 +73,7 @@ def cache(a, out_dir: Path):
     layers = list(range(a.read_lo, a.read_hi))
     key = lambda inst: (inst.meta["datatype"], tuple(p.id for p in inst.task.predicates), tuple(inst.src_progress),
                         inst.expected_next)
-    corpus = {key(inst) for _, inst in load_locked_datapoints(DEFAULT_DATASET, ALL_DATATYPES)}
+    corpus = {key(inst) for _, inst in load_locked_datapoints(DEFAULT_DATASET, ALL_DATATYPES)[0]}
     insts = []
     for dt in ALL_DATATYPES:
         pool = [x for x in sample_datapoints(dt, [2, 3, 4], a.n_per_datatype, "python", a.seed) if key(x) not in corpus]
