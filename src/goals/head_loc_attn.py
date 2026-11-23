@@ -95,14 +95,38 @@ class HeadMask(nn.Module):
     each optimizer step (no sigmoid — raw values used as interpolation weights).
     """
 
-    def __init__(self, n_layers_tested: int, n_heads: int) -> None:
+    def __init__(self, n_layers_tested: int, n_heads: int, valid: Optional[torch.Tensor] = None) -> None:
+        """``n_heads`` = the mask width (the largest per-layer head count). ``valid`` (n_layers_tested, n_heads) bool
+        marks the heads that exist: in hybrid models (Qwen3.5: 24 attention heads, 48 DeltaNet heads) a layer with
+        fewer heads leaves the rest of its row invalid. Invalid entries are held at 0 and never selected or priced."""
         super().__init__()
         self.values = nn.Parameter(torch.ones(n_layers_tested, n_heads))
+        if valid is None:
+            valid = torch.ones(n_layers_tested, n_heads, dtype=torch.bool)
+        self.register_buffer("valid", valid.bool().clone())
+        with torch.no_grad():
+            self.values.mul_(self.valid)
+
+    @classmethod
+    def for_layers(cls, mt, layers: list[int]) -> "HeadMask":
+        """A mask over ``layers`` sized by each layer's own head count (``mt.head_spec``)."""
+        counts = [mt.head_spec(l).n_heads for l in layers]
+        width = max(counts)
+        valid = torch.zeros(len(layers), width, dtype=torch.bool)
+        for i, n in enumerate(counts):
+            valid[i, :n] = True
+        return cls(len(layers), width, valid=valid)
 
     def clamp_(self) -> None:
-        """Enforce [0, 1] box constraint. Call after every optimizer.step()."""
+        """Enforce [0, 1] box constraint (and keep non-existent heads at 0). Call after every optimizer.step()."""
         with torch.no_grad():
             self.values.clamp_(0.0, 1.0)
+            self.values.mul_(self.valid.to(self.values.device))
+
+    def sparsity(self) -> torch.Tensor:
+        """Mean mask value over the heads that exist (= ``values.mean()`` for homogeneous models)."""
+        v = self.valid.to(self.values.device)
+        return (self.values * v).sum() / v.sum()
 
 
     def selected_heads(
@@ -114,11 +138,11 @@ class HeadMask(nn.Module):
             (layers[li], h)
             for li in range(vals.shape[0])
             for h in range(vals.shape[1])
-            if vals[li, h].item() > threshold
+            if self.valid[li, h] and vals[li, h].item() > threshold
         ]
 
     def n_active(self, threshold: float = 0.5) -> int:
-        return int((self.values.detach() > threshold).sum().item())
+        return int(((self.values.detach() > threshold) & self.valid.to(self.values.device)).sum().item())
 
 
 # ---------------------------------------------------------------------------
@@ -179,21 +203,20 @@ def get_o_proj_inputs_batch(
         saves: dict[int, Any] = {}
         with mt.trace(inputs, scan=False, validate=False):
             for layer in layers:
-                attn_name = mt.attn_module_name_format.format(layer)
-                o_proj = get_module_nnsight(mt, attn_name + ".o_proj")
+                o_proj = get_module_nnsight(mt, mt.head_spec(layer).proj)   # o_proj, or a DeltaNet layer's out_proj
                 if token_positions is None:
                     saves[layer] = o_proj.input[:, -1, :].save()  # (batch, n_embd)
                 else:
                     saves[layer] = o_proj.input[
                         :, token_positions, :
                     ].save()  # (batch, n_pos, n_embd)
-        return {layer: saves[layer].float().cpu() for layer in layers}
+        return _pad_widths({layer: saves[layer].float().cpu() for layer in layers})
 
     # Patched extraction — run the forward UNDER `patch_interface` (e.g. a boundary-head transplant)
     # and capture each o_proj's input with baukit ``retain_input``.  A forward hook stores the input
     # AFTER any forward-pre-hook the interface registered, so the captured activations already carry
     # the intervention's effect on this layer's input.
-    o_names = {layer: mt.attn_module_name_format.format(layer) + ".o_proj" for layer in layers}
+    o_names = {layer: mt.head_spec(layer).proj for layer in layers}
     with torch.no_grad(), baukit.TraceDict(
         mt._model, list(o_names.values()), retain_input=True, retain_output=False
     ) as td:
@@ -203,7 +226,15 @@ def get_o_proj_inputs_batch(
         inp = td[o_names[layer]].input  # (batch, seq, n_embd), post-intervention
         sel = inp[:, -1, :] if token_positions is None else inp[:, token_positions, :]
         out[layer] = sel.float().cpu()
-    return out
+    return _pad_widths(out)
+
+
+def _pad_widths(per_layer: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
+    """Zero-pad every layer's head-projection input to the widest one, so callers can stack across layers. A no-op
+    when all layers share one width (every homogeneous model; also Qwen3.8, 24x256 = 48x128 = 6144); the padding
+    sits beyond the last real head and is never read (heads are sliced by each layer's own ``HeadSpec``)."""
+    w = max(t.shape[-1] for t in per_layer.values())
+    return {l: (t if t.shape[-1] == w else torch.nn.functional.pad(t, (0, w - t.shape[-1]))) for l, t in per_layer.items()}
 
 
 @torch.inference_mode()
@@ -237,11 +268,6 @@ def collect_head_steering_vecs(
     from collections import defaultdict
 
     n_embd = mt.n_embd
-    n_heads = mt.n_heads
-    head_dim = (
-        mt.head_dim
-    )  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
-
     batch_size = src_tokenized["input_ids"].shape[0]
 
     # Group heads by layer to minimise forward passes
@@ -263,8 +289,9 @@ def collect_head_steering_vecs(
     steering_vecs = torch.zeros(batch_size, n_pos, n_embd, dtype=torch.float32)
 
     for layer, heads in heads_per_layer.items():
-        attn_name = mt.attn_module_name_format.format(layer)
-        o_proj = baukit.get_module(mt._model, attn_name + ".o_proj")
+        spec = mt.head_spec(layer)          # attention o_proj, or a DeltaNet layer's out_proj
+        head_dim = spec.head_dim            # NOT n_embd // n_heads (decoupled in Qwen3; per layer type in Qwen3.5)
+        o_proj = baukit.get_module(mt._model, spec.proj)
         W_o = o_proj.weight.detach()  # (n_embd, n_embd), on the layer's device — only the selected
         dev = W_o.device              # heads' columns are cast to float32 (no full-matrix CPU copy)
 
@@ -732,11 +759,6 @@ def src_replacement_hooks(
     if patch_positions is None:
         patch_positions = [-1]
 
-    n_heads = mt.n_heads
-    head_dim = (
-        mt.head_dim
-    )  # NOT n_embd // n_heads (Qwen3 decouples head_dim from hidden_size)
-    attn_inner = mt.attn_inner_size  # == n_heads*head_dim: the o_proj INPUT width
     mask_vals = mask.values  # (n_layers_tested, n_heads) requires_grad
     src_batch = src_head_inps  # (batch, L, n_heads*head_dim) float32 CPU
     pos_arg = list(patch_positions)
@@ -744,10 +766,11 @@ def src_replacement_hooks(
     handles = []
     try:
         for li, layer in enumerate(mask_layers):
-            attn_name = mt.attn_module_name_format.format(layer)
-            o_proj = get_module_nnsight(mt._model, attn_name + ".o_proj")
+            spec = mt.head_spec(layer)   # attention o_proj or DeltaNet out_proj; heads / head_dim per layer
+            o_proj = get_module_nnsight(mt._model, spec.proj)
 
-            def make_hook(li_: int):
+            def make_hook(li_: int, n_heads: int = spec.n_heads, head_dim: int = spec.head_dim,
+                          attn_inner: int = spec.width):
                 def pre_hook(module, args):
                     x = args[
                         0
@@ -768,11 +791,11 @@ def src_replacement_hooks(
                         return None  # no patching, pass through unchanged
 
                     # Source vals for this layer — float32 for gradient precision
-                    src = src_batch[:, li_].to(dev)  # (batch, n_heads*head_dim) float32
+                    src = src_batch[:, li_, :attn_inner].to(dev)  # (batch, n_heads*head_dim) float32 (drop padding)
                     src_3d = src.view(B_, n_heads, head_dim)
 
                     # Per-head interpolation weight; requires_grad via mask_vals
-                    m = mask_vals[li_].to(dev).view(1, n_heads, 1)
+                    m = mask_vals[li_, :n_heads].to(dev).view(1, n_heads, 1)
 
                     # Splice: alternating untouched slices + per-position patched chunks.
                     # Each untouched slice is a bare view of x (no gradient).  Each
@@ -1022,7 +1045,6 @@ def train_head_mask(
         (trained HeadMask, MaskTrainingHistory)
     """
     n_layers_tested = len(layers)
-    n_heads = mt.n_heads  # via ModelandTokenizer abstraction (nested-VLM safe)
 
     if augment:
         _aug_rng = random.Random(augment_seed)
@@ -1039,7 +1061,7 @@ def train_head_mask(
 
     N = train_size  # training set size
 
-    mask = HeadMask(n_layers_tested, n_heads)
+    mask = HeadMask.for_layers(mt, layers)   # sized per layer (hybrid models: attention + DeltaNet heads)
     optimizer = AdamW(mask.parameters(), lr=lr)
     history = MaskTrainingHistory()
 
@@ -1068,8 +1090,8 @@ def train_head_mask(
 
     _path_desc = "lazy+augment" if augment else "precomputed"
     logger.info(
-        f"train_head_mask: {n_layers_tested}L × {n_heads}H = "
-        f"{n_layers_tested * n_heads} mask params | "
+        f"train_head_mask: {n_layers_tested}L × ≤{mask.values.shape[1]}H = "
+        f"{int(mask.valid.sum())} mask params (heads that exist) | "
         f"train={N} val={val_size} | batch_size={batch_size} ({len(batch_groups)} batches/epoch) | "
         f"{n_epochs} epochs | lr={lr} λ={lambda_sparse} | "
         f"path={_path_desc} | augment={augment}"
@@ -1138,7 +1160,7 @@ def train_head_mask(
                 log_target=True,
             )
 
-            loss_sparse = lambda_sparse * mask.values.mean()
+            loss_sparse = lambda_sparse * mask.sparsity()   # = values.mean() on homogeneous models
             loss = loss_kl + loss_sparse
 
             loss.backward()

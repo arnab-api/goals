@@ -83,7 +83,7 @@ def cache(a, out_dir: Path):
 
     mt = ModelandTokenizer(model_key=a.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="eager")
     torch.set_grad_enabled(False)
-    heads = load_json_heads(a.goal_heads, mt.n_layer, mt.n_heads)
+    heads = load_json_heads(a.goal_heads, mt.n_layer, lambda l: mt.head_spec(l).n_heads)
     layers = list(a.cache_layers) if a.cache_layers else list(range(a.read_lo, a.read_hi))
     key = lambda inst: (inst.meta["datatype"], tuple(p.id for p in inst.task.predicates), tuple(inst.src_progress),
                         inst.expected_next)

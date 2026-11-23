@@ -642,7 +642,7 @@ def main():
         device_map="auto",
         attn_implementation="eager",
     )
-    n_heads = mt.model.config.num_attention_heads
+    n_heads = lambda l: mt.head_spec(l).n_heads   # per layer (hybrid models: attention or DeltaNet heads)
 
     heads = load_head_set(
         args.heads,

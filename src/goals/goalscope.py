@@ -625,10 +625,7 @@ def apply_goalscope(
     else:  # strategy == "replace"
         # Layers come from selected_heads; build a HeadMask over them.
         layers_replace = sorted({layer for (layer, _) in selected_heads})
-        n_heads_model = mt.n_heads
-        mask_module = HeadMask(
-            n_layers_tested=len(layers_replace), n_heads=n_heads_model
-        )
+        mask_module = HeadMask.for_layers(mt, layers_replace)   # per-layer head counts (hybrid: attention + DeltaNet)
         with torch.no_grad():
             mask_module.values.zero_()
             for layer, h in selected_heads:

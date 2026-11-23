@@ -82,7 +82,8 @@ def resolve_heads_name(spec: str) -> str:
 
 
 def load_json_heads(spec, n_layer, n_heads):
-    """Read + validate a ``[[layer, head], ...]`` json head set.
+    """Read + validate a ``[[layer, head], ...]`` json head set. ``n_heads``: an int, or ``layer -> head count``
+    (hybrid models, e.g. ``lambda l: mt.head_spec(l).n_heads``).
 
     A hand-supplied head set is the one code path with no schema behind it, so everything is
     checked here rather than failing deep inside the patching hooks (where an out-of-range head
@@ -109,8 +110,9 @@ def load_json_heads(spec, n_layer, n_heads):
             raise SystemExit(f"--heads {spec!r}: entry {i} = {item!r} is not a pair of ints") from None
         if not (0 <= l < n_layer):
             raise SystemExit(f"--heads {spec!r}: entry {i} has layer {l}, outside [0, {n_layer}) for this model")
-        if not (0 <= h < n_heads):
-            raise SystemExit(f"--heads {spec!r}: entry {i} has head {h}, outside [0, {n_heads}) for this model")
+        nh = n_heads(l) if callable(n_heads) else n_heads   # hybrid models: the head count depends on the layer
+        if not (0 <= h < nh):
+            raise SystemExit(f"--heads {spec!r}: entry {i} has head {h}, outside [0, {nh}) for layer {l} of this model")
         heads.append((l, h))
     dupes = {x for x in heads if heads.count(x) > 1}
     if dupes:

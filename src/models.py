@@ -1,5 +1,6 @@
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import baukit
@@ -115,6 +116,21 @@ class ModelandTokenizer(LanguageModel):
         """Decoder layers with full attention (``self_attn`` / ``o_proj``). A sparse subset of ``range(n_layer)`` for
         hybrid models (Qwen3.5), every layer otherwise."""
         return determine_attention_layers(self)
+
+    def head_spec(self, layer: int) -> "HeadSpec":
+        """Where layer ``layer``'s per-head outputs enter the residual stream (see :class:`HeadSpec`)."""
+        return determine_head_spec(self, layer)
+
+    @property
+    def head_layers(self) -> tuple[int, ...]:
+        """Every layer whose token mixer splits into heads: all layers (full attention AND, in hybrid models,
+        the linear-attention / DeltaNet layers)."""
+        return tuple(range(self.n_layer))
+
+    @property
+    def max_heads(self) -> int:
+        """The largest per-layer head count (the width of a full-depth head mask)."""
+        return max(self.head_spec(l).n_heads for l in self.head_layers)
 
     def parse_config(self) -> None:
         if not is_supported_variant(self):
@@ -257,6 +273,40 @@ def _decoder_config(model: ModelandTokenizer | Model):
     ``num_hidden_layers`` / ``num_attention_heads`` / ``hidden_size`` / ``head_dim``), else the config itself."""
     cfg = unwrap_model(model).config
     return getattr(cfg, "text_config", None) or cfg
+
+
+@dataclass(frozen=True)
+class HeadSpec:
+    """One layer's head decomposition. The layer's token-mixer output is ``proj(concat_h y_h)`` with a bias-free
+    linear ``proj``, so head ``h``'s residual write is ``proj.weight[:, h*head_dim:(h+1)*head_dim] @ y_h``, and the
+    per-head quantity to read or patch is the ``h``-th ``head_dim`` slice of ``proj``'s INPUT.
+
+    kind = "attn": full attention, ``proj`` = ``self_attn.o_proj`` (Qwen3.5: the output gate is applied before it,
+    per head). kind = "linear": Gated DeltaNet (Qwen3.5), ``proj`` = ``linear_attn.out_proj``; its input is the
+    per-value-head recurrent output after the per-head gated RMSNorm, so no mixing across heads before ``proj``."""
+
+    layer: int
+    kind: str          # "attn" | "linear"
+    proj: str          # module path of the head-mixing projection
+    n_heads: int
+    head_dim: int
+
+    @property
+    def width(self) -> int:
+        """The projection's input width (= n_heads * head_dim)."""
+        return self.n_heads * self.head_dim
+
+
+def determine_head_spec(model: ModelandTokenizer | Model, layer: int) -> HeadSpec:
+    """:class:`HeadSpec` of ``layer``. Homogeneous models: every layer is attention (``self_attn.o_proj``)."""
+    m = unwrap_model(model)
+    base = f"{_decoder_prefix(m)}.layers.{layer}"
+    cfg = _decoder_config(m)
+    lt = getattr(cfg, "layer_types", None)
+    if lt is not None and lt[layer] == "linear_attention":
+        return HeadSpec(layer, "linear", f"{base}.linear_attn.out_proj",
+                        int(cfg.linear_num_value_heads), int(cfg.linear_value_head_dim))
+    return HeadSpec(layer, "attn", f"{base}.self_attn.o_proj", determine_n_heads(m), determine_head_dim(m))
 
 
 def determine_attention_layers(model: ModelandTokenizer | Model) -> tuple[int, ...]:

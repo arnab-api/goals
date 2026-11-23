@@ -316,7 +316,8 @@ def get_hs(
 
 
 def free_gpu_cache():
-    torch.cuda.synchronize()
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
