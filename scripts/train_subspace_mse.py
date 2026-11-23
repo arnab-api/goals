@@ -62,6 +62,10 @@ def args_():
                     help="train stage: fit only these cached read layers (e.g. one layer); outputs go to "
                          "<tag>/fit_L<layers>_r<r>/")
     ap.add_argument("--no_export", action="store_true", help="train stage: skip writing probe.pt")
+    ap.add_argument("--init", default="target", choices=["target", "random"],
+                    help="target (default): every W_l starts as the top-r right singular vectors of the training targets "
+                         "(the span the read-out must hit; nested across r); random: a random orthonormal basis")
+    ap.add_argument("--fit_tag", default="", help="suffix for the fit directory (keeps earlier fits)")
     ap.add_argument("--cuda_train", default="0", help="device for the (model-free) fit")
     return ap.parse_args()
 
@@ -133,7 +137,7 @@ def train(a, out_dir: Path):
     if a.use_layers:
         sel = [layers.index(l) for l in a.use_layers]
         H, layers = H[:, :, sel], list(a.use_layers)
-        out_dir = out_dir / f"fit_L{'-'.join(map(str, layers))}_r{a.r}_{a.loss}"
+        out_dir = out_dir / f"fit_L{'-'.join(map(str, layers))}_r{a.r}_{a.loss}{a.fit_tag}"
         out_dir.mkdir(parents=True, exist_ok=True)
     N = H.shape[0]
     g = torch.Generator().manual_seed(0)
@@ -164,7 +168,12 @@ def train(a, out_dir: Path):
     del X, Xc, A
 
     # subspace: o = Σ_l W_lᵀ W_l h_l, MSE(o, v)
-    W = torch.stack([torch.linalg.qr(torch.randn(d, a.r, generator=g))[0].T for _ in range(L)]).to(dev).requires_grad_()
+    if a.init == "target":   # the read-out lives in span(W): start W on the principal directions of the targets
+        _, _, Vh = torch.linalg.svd(Vtr, full_matrices=False)
+        W0 = Vh[: a.r]                                                    # (r, d), orthonormal rows
+        W = W0.unsqueeze(0).repeat(L, 1, 1).contiguous().requires_grad_()
+    else:
+        W = torch.stack([torch.linalg.qr(torch.randn(d, a.r, generator=g))[0].T for _ in range(L)]).to(dev).requires_grad_()
     opt = torch.optim.Adam([W], lr=a.lr)
     readout = lambda Hb: torch.einsum("bkr,krd->bd", torch.einsum("bkd,krd->bkr", Hb, W), W)
     for ep in range(a.epochs):
@@ -195,7 +204,7 @@ def train(a, out_dir: Path):
                         steer_layers=cfg.steer_layers, model=c["model"], source="subspace_mse"), out_dir / "probe.pt")
     m = dict(subspace_val=sub_val, subspace_train=sub_tr, subspace_val_per_pivot=per_pivot,
              least_squares_val=ls_val, zero_baseline_val=zero, n_rows_train=len(Htr), n_rows_val=len(Hva),
-             layers=layers, r=a.r, epochs=a.epochs, lr=a.lr, loss=a.loss)
+             layers=layers, r=a.r, epochs=a.epochs, lr=a.lr, loss=a.loss, init=a.init)
     (out_dir / "metrics.json").write_text(json.dumps(m, indent=2))
     logger.info(f"subspace (val): {sub_val} | least squares (val): {ls_val} | zero: {zero}")
     logger.info(f"per pivot (val): {per_pivot}")
