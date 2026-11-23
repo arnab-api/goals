@@ -86,7 +86,7 @@ def _build_dest_prompt(
             add_generation_prompt=False,
             continue_final_message=True,
             tokenize=False,
-            chat_template_kwargs={"enable_thinking": False},
+            enable_thinking=False,
         )
     except TypeError:
         return mt.tokenizer.apply_chat_template(

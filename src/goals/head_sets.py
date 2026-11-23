@@ -29,6 +29,7 @@ GOAL_BANDS = {
     "Llama-3.3-70B-Instruct": (18, 45),
     "Olmo-3.1-32B-Instruct": (10, 36),
     "Olmo-3.1-32B-Instruct-SFT": (10, 36),  # RL axis: matched to Olmo Instruct
+    "Qwen3.8-27B": (25, 56),  # hybrid (attention + DeltaNet heads); matched to Coder-32B by depth (both 64 layers)
 }
 
 

@@ -58,7 +58,7 @@ def chat_prompt(tokenizer, prompt):
          {'role': 'user', 'content': prompt['question']},
          {'role': 'assistant', 'content': code}],
         add_generation_prompt=False, continue_final_message=True, tokenize=False,
-        chat_template_kwargs={'enable_thinking': False})
+        enable_thinking=False)
     # Some HF releases rstrip the final assistant content. Restore only its
     # original trailing whitespace, never strip the informative expression.
     if not text.endswith(code):

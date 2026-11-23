@@ -157,7 +157,7 @@ def make_goalscope_style_prompt_builder(mode: str):
         kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
         try:
             return tokenizer.apply_chat_template(
-                messages, chat_template_kwargs={"enable_thinking": False}, **kw
+                messages, enable_thinking=False, **kw
             )
         except TypeError:
             return tokenizer.apply_chat_template(messages, **kw)

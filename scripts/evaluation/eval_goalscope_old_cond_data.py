@@ -426,7 +426,7 @@ def build_causality_prompt(mt) -> str:
     kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
     try:
         return mt.tokenizer.apply_chat_template(
-            messages, chat_template_kwargs={"enable_thinking": False}, **kw
+            messages, enable_thinking=False, **kw
         )
     except TypeError:
         return mt.tokenizer.apply_chat_template(messages, **kw)

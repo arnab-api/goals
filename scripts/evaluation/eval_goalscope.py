@@ -186,7 +186,7 @@ def _chat_prompt(mt, question, prefill):
             add_generation_prompt=False,
             continue_final_message=True,
             tokenize=False,
-            chat_template_kwargs={"enable_thinking": False},
+            enable_thinking=False,
         )
     except TypeError:
         return mt.tokenizer.apply_chat_template(
@@ -340,6 +340,16 @@ _TRIVIAL_READOUT_TOKENS = (
 _UNINJECTED_CAUSAL_DEFAULTS = {
     "auto func (auto value){": ("return value * 2; }",),
 }
+# Per-model uninjected completions (greedy, no injection) of the v2 stub, added by set_uninjected_defaults(model).
+# The Coder-32B entry above stays global so the paper's verdicts are unchanged.
+_UNINJECTED_CAUSAL_DEFAULTS_BY_MODEL = {
+    "Qwen3.8-27B": {"auto func (auto value){": ("return value; }",)},
+}
+
+
+def set_uninjected_defaults(model: str) -> None:
+    for stub, bodies in _UNINJECTED_CAUSAL_DEFAULTS_BY_MODEL.get(model.split("/")[-1], {}).items():
+        _UNINJECTED_CAUSAL_DEFAULTS[stub] = tuple(dict.fromkeys(_UNINJECTED_CAUSAL_DEFAULTS.get(stub, ()) + bodies))
 
 
 def _is_uninjected_default(readout: str) -> bool:
@@ -543,6 +553,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    set_uninjected_defaults(args.model)
     GS.set_causal_stub(args.causal_stub)
     logging_utils.configure(args)  # -v => DEBUG: every oracle prompt/verdict logged
     experiment_utils.set_seed(args.seed)

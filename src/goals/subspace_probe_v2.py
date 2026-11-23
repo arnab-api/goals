@@ -171,7 +171,7 @@ def build_causal_chat(mt: ModelandTokenizer, stub: dict, goal_desc: Optional[str
     kw = dict(tokenize=False, add_generation_prompt=False, continue_final_message=True)
     try:
         return mt.tokenizer.apply_chat_template(
-            msgs, chat_template_kwargs={"enable_thinking": False}, **kw
+            msgs, enable_thinking=False, **kw
         )
     except TypeError:
         return mt.tokenizer.apply_chat_template(msgs, **kw)

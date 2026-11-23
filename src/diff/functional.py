@@ -351,7 +351,7 @@ def get_prompt(question, prefill, ctx=None, system_extra=""):
         add_generation_prompt=False,
         continue_final_message=True,
         tokenize=False,
-        chat_template_kwargs={"enable_thinking": False},
+        enable_thinking=False,
     )
 
 
@@ -1100,7 +1100,7 @@ def _cl_chat(mt, user, assistant):
             {"role": "assistant", "content": assistant}]
     kw = dict(add_generation_prompt=False, continue_final_message=True, tokenize=False)
     try:
-        text = mt.tokenizer.apply_chat_template(msgs, chat_template_kwargs={"enable_thinking": False}, **kw)
+        text = mt.tokenizer.apply_chat_template(msgs, enable_thinking=False, **kw)
     except TypeError:
         text = mt.tokenizer.apply_chat_template(msgs, **kw)
     if not text.endswith(assistant) and text.endswith(assistant.rstrip()):   # templates that rstrip the turn

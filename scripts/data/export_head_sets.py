@@ -33,6 +33,7 @@ MODEL_BANDS = {
     "Qwen/Qwen2.5-Coder-14B-Instruct": (0, 48),   # no GOAL_BANDS entry; model-axis passes 0-48
     "allenai/Olmo-3.1-32B-Instruct": (10, 36),
     "allenai/Olmo-3.1-32B-Instruct-SFT": (10, 36),
+    "Qwen/Qwen3.8-27B": (25, 56),
 }
 
 

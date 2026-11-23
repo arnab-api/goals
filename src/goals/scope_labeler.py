@@ -158,7 +158,7 @@ def _format_prompt_for_lm(prompt: str, mt) -> str:
             messages,
             add_generation_prompt=True,
             tokenize=False,
-            chat_template_kwargs={"enable_thinking": False},
+            enable_thinking=False,
         )
     except TypeError:
         return mt.tokenizer.apply_chat_template(
